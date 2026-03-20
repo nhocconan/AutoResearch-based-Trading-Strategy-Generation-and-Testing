@@ -1,0 +1,97 @@
+# =============================================================================
+# LLM Trading Research - Configuration
+# =============================================================================
+
+# --- Data Settings ---
+data:
+  base_dir: "./data"
+  raw_dir: "./data/raw"
+  processed_dir: "./data/processed"
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+  timeframes:
+    - 1m
+    - 5m
+    - 15m
+    - 1h
+    - 4h
+    - 1d
+  # Training period: 2021-01-01 to 2024-12-31
+  train_start: "2021-01-01"
+  train_end: "2024-12-31"
+  # Testing period: 2025-01-01 to now
+  test_start: "2025-01-01"
+  test_end: "2026-03-20"
+
+# --- Backtesting Settings ---
+backtest:
+  # Trading costs
+  taker_fee_pct: 0.04        # Binance futures taker fee (%)
+  slippage_pct: 0.01         # Estimated slippage (%)
+  total_cost_pct: 0.05       # taker_fee + slippage per side
+  # Execution model
+  fill_delay_bars: 1         # Signal at bar t, fill at bar t+1
+  # Position sizing defaults
+  default_leverage: 1        # No leverage by default
+  max_leverage: 20           # Hard cap
+  initial_capital: 10000     # USD
+  # Include funding rate costs
+  include_funding: true
+
+# --- Research Settings ---
+research:
+  # Time budget per experiment (seconds)
+  time_budget: 300           # 5 minutes per strategy backtest
+  # Results tracking
+  results_file: "results.tsv"
+  # Strategy file (the mutable file the agent edits)
+  strategy_file: "strategy.py"
+  # Max experiments per run
+  max_experiments: 1000
+  # Baseline strategy name
+  baseline: "sma_crossover"
+
+# --- LLM API Settings ---
+# Supports OpenAI-compatible, Anthropic, and Google Gemini
+# Set via environment variables or override here
+llm:
+  # Default provider: openai | anthropic | gemini
+  default_provider: "anthropic"
+
+  providers:
+    openai:
+      api_key_env: "OPENAI_API_KEY"
+      base_url_env: "OPENAI_BASE_URL"     # For custom endpoints
+      base_url: null                        # Override: "http://localhost:8000/v1"
+      model: "gpt-4o"
+      max_tokens: 4096
+      temperature: 0.7
+
+    anthropic:
+      api_key_env: "ANTHROPIC_API_KEY"
+      base_url_env: "ANTHROPIC_BASE_URL"
+      base_url: null
+      model: "claude-sonnet-4-20250514"
+      max_tokens: 4096
+      temperature: 0.7
+
+    gemini:
+      api_key_env: "GEMINI_API_KEY"
+      base_url_env: "GEMINI_BASE_URL"
+      base_url: null
+      model: "gemini-2.5-pro-preview-06-05"
+      max_tokens: 4096
+      temperature: 0.7
+
+# --- Evaluation Metrics ---
+evaluation:
+  # Primary metric for comparing strategies (higher is better)
+  primary_metric: "sharpe_ratio"
+  # Minimum thresholds to consider a strategy viable
+  min_sharpe: 0.5
+  min_win_rate: 0.40
+  max_drawdown: -0.30        # -30%
+  # Risk-free rate for Sharpe calculation (annualized)
+  risk_free_rate: 0.05       # 5% (T-bill proxy)
