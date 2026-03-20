@@ -1,92 +1,125 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #004 - Multi-Timeframe EMA Crossover + RSI Pullback + ATR Regime
-============================================================================
-Hypothesis: 4h EMA(21/55) crossover provides cleaner trend signals than Supertrend,
-combined with 1h RSI(14) pullback entries and ATR volatility regime filter for
-dynamic position sizing. EMA crossover is more stable than Supertrend during
-ranging markets, reducing whipsaw losses.
+EXPERIMENT #005 - Multi-Timeframe DEMA Trend + MACD Entry + BB Regime Filter
+=============================================================================
+Hypothesis: 4h DEMA(21/55) crossover provides faster trend detection than HMA,
+combined with 1h MACD histogram for precise entry timing. Bollinger Band width
+percentile filters out extreme volatility regimes (squeeze/expansion).
 
-Key differences from mtf_supertrend_macd_adx_v1:
-- EMA(21/55) crossover instead of Supertrend (smoother trend transitions)
-- RSI pullback instead of MACD (better for mean-reversion within trends)
-- ATR regime filter for dynamic sizing (reduce size in high volatility)
-- Trailing stoploss via ATR (signal→0 when price moves 2*ATR against position)
+Key improvements over mtf_hma_rsi_zscore_v1:
+- DEMA double-smooths EMA for less lag than HMA
+- MACD histogram cross gives clearer entry signals than RSI levels
+- BB width percentile adapts to volatility regime dynamically
+- ATR trailing stop: signal→0 when price moves 2*ATR against position
 
 Why this might beat Sharpe=1.768:
-- EMA crossover has fewer false signals than Supertrend in choppy markets
-- RSI pullback entries capture better risk/reward than MACD crosses
-- ATR-based sizing reduces exposure during volatile periods (controls DD)
-- Discrete signal levels (0.0, ±0.20, ±0.35) minimize fee churn
+- DEMA responds faster to trend changes than HMA/Supertrend
+- MACD histogram momentum confirms entries (not just pullback levels)
+- BB regime filter avoids trading during abnormal volatility
+- Proper stoploss implementation reduces drawdown
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_ema_rsi_atr_v1"
+name = "mtf_dema_macd_bbregime_v1"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
+def calculate_dema(close, period=21):
+    """
+    Calculate Double Exponential Moving Average
+    DEMA = 2*EMA(n) - EMA(EMA(n))
+    Reduces lag significantly vs standard EMA
+    """
     n = len(close)
-    ema = np.zeros(n)
-    multiplier = 2 / (period + 1)
+    if n < period:
+        return np.zeros(n)
     
-    # Initialize with SMA
-    if n >= period:
-        ema[period - 1] = np.mean(close[:period])
-        for i in range(period, n):
-            ema[i] = (close[i] - ema[i - 1]) * multiplier + ema[i - 1]
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=period, adjust=False, min_periods=period).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, adjust=False, min_periods=period).mean().values
     
-    return ema
+    dema = 2 * ema1 - ema2
+    dema[:period] = np.nan
+    
+    return dema
 
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI with proper min_periods"""
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram"""
     n = len(close)
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)
+    close_series = pd.Series(close)
     
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    ema_fast = close_series.ewm(span=fast, adjust=False, min_periods=fast).mean().values
+    ema_slow = close_series.ewm(span=slow, adjust=False, min_periods=slow).mean().values
     
-    avg_gain = pd.Series(gain).rolling(window=period, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).rolling(window=period, min_periods=period).mean().values
+    macd_line = ema_fast - ema_slow
     
-    rs = np.zeros(n)
-    mask = avg_loss > 0
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    macd_series = pd.Series(macd_line)
+    signal_line = macd_series.ewm(span=signal, adjust=False, min_periods=signal).mean().values
     
-    rsi = np.zeros(n)
-    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    histogram = macd_line - signal_line
     
-    return rsi
+    # Set initial values to nan
+    macd_line[:slow] = np.nan
+    signal_line[:slow+signal] = np.nan
+    histogram[:slow+signal] = np.nan
+    
+    return macd_line, signal_line, histogram
 
 
 def calculate_atr(high, low, close, period=14):
     """Calculate Average True Range"""
     n = len(close)
+    
     tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
     
     for i in range(1, n):
         tr[i] = max(
             high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
         )
     
     atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    
     return atr
 
 
-def calculate_atr_pct(close, atr):
-    """Calculate ATR as percentage of price (volatility regime)"""
-    atr_pct = np.zeros(len(close))
-    mask = close > 0
-    atr_pct[mask] = (atr[mask] / close[mask]) * 100
-    return atr_pct
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and bandwidth"""
+    n = len(close)
+    
+    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = middle + std_mult * std
+    lower = middle - std_mult * std
+    
+    # Bandwidth = (Upper - Lower) / Middle
+    bandwidth = np.zeros(n)
+    mask = middle > 0
+    bandwidth[mask] = (upper[mask] - lower[mask]) / middle[mask]
+    
+    return upper, lower, middle, bandwidth
+
+
+def calculate_percentile_rank(series, window=100):
+    """Calculate rolling percentile rank of a series"""
+    n = len(series)
+    result = np.zeros(n)
+    
+    for i in range(window-1, n):
+        if not np.isnan(series[i]):
+            window_data = series[i-window+1:i+1]
+            window_data = window_data[~np.isnan(window_data)]
+            if len(window_data) > 0:
+                result[i] = np.sum(window_data < series[i]) / len(window_data)
+    
+    return result
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -95,12 +128,18 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # 1h indicators for entry timing and risk management
-    rsi_1h = calculate_rsi(close, period=14)
-    atr_1h = calculate_atr(high, low, close, period=14)
-    atr_pct_1h = calculate_atr_pct(close, atr_1h)
+    # ========== 1h Indicators for Entry Timing ==========
+    dema_21_1h = calculate_dema(close, period=21)
+    dema_55_1h = calculate_dema(close, period=55)
     
-    # 4h EMA crossover for trend filter (resample 1h → 4h)
+    macd_line_1h, signal_line_1h, histogram_1h = calculate_macd(close, fast=12, slow=26, signal=9)
+    
+    atr_1h = calculate_atr(high, low, close, period=14)
+    
+    _, _, bb_middle_1h, bb_bandwidth_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    bb_percentile_1h = calculate_percentile_rank(bb_bandwidth_1h, window=100)
+    
+    # ========== 4h Trend Filter (resample 1h → 4h) ==========
     df_1h = pd.DataFrame({
         'open': close,
         'high': high,
@@ -118,21 +157,25 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     }).dropna()
     
     close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     n_4h = len(close_4h)
     
-    # Calculate 4h EMAs
-    ema21_4h = calculate_ema(close_4h, period=21)
-    ema55_4h = calculate_ema(close_4h, period=55)
+    # 4h DEMA crossover for trend
+    dema_21_4h = calculate_dema(close_4h, period=21)
+    dema_55_4h = calculate_dema(close_4h, period=55)
     
-    # Calculate 4h trend direction (EMA crossover)
+    # 4h ATR for stoploss
+    atr_4h = calculate_atr(high_4h, low_4h, close_4h, period=14)
+    
+    # Determine 4h trend direction
     trend_4h = np.zeros(n_4h)
-    for i in range(55, n_4h):
-        if ema21_4h[i] > ema55_4h[i]:
-            trend_4h[i] = 1  # Bullish
-        elif ema21_4h[i] < ema55_4h[i]:
-            trend_4h[i] = -1  # Bearish
-        else:
-            trend_4h[i] = 0  # Neutral
+    for i in range(n_4h):
+        if not np.isnan(dema_21_4h[i]) and not np.isnan(dema_55_4h[i]):
+            if dema_21_4h[i] > dema_55_4h[i]:
+                trend_4h[i] = 1  # Bullish
+            elif dema_21_4h[i] < dema_55_4h[i]:
+                trend_4h[i] = -1  # Bearish
     
     # Map 4h trend back to 1h timeframe
     trend_1h = np.zeros(n)
@@ -143,110 +186,126 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if idx_4h < len(trend_4h):
             trend_1h[i] = trend_4h[idx_4h]
     
-    # Generate signals with multi-timeframe logic
+    # Map 4h ATR to 1h (scale by 2 since 4h = 4x 1h bars, sqrt(4)=2)
+    atr_1h_mapped = np.zeros(n)
+    for i in range(n):
+        idx_4h = idx_1h_to_4h[i]
+        if idx_4h < len(atr_4h):
+            atr_1h_mapped[i] = atr_4h[idx_4h] / 2.0
+    
+    # ========== Generate Signals ==========
     signals = np.zeros(n)
     
-    # Position sizing - DISCRETE levels to reduce churn
-    SIZE_FULL = 0.35   # Full position in good conditions
-    SIZE_HALF = 0.20   # Reduced position in marginal conditions
-    SIZE_MIN = 0.10    # Minimum position in high volatility
+    # Position sizing - DISCRETE levels
+    SIZE_FULL = 0.35
+    SIZE_HALF = 0.20
     
-    # RSI thresholds for pullback entries
-    RSI_LONG_ENTRY = 45   # Enter long on pullback in uptrend
-    RSI_SHORT_ENTRY = 55  # Enter short on rally in downtrend
-    RSI_EXIT_LONG = 65    # Exit long when RSI overbought
-    RSI_EXIT_SHORT = 35   # Exit short when RSI oversold
+    # MACD histogram thresholds
+    MACD_LONG_THRESHOLD = 0.0    # Histogram crosses above zero
+    MACD_SHORT_THRESHOLD = 0.0   # Histogram crosses below zero
     
-    # ATR volatility regime thresholds (percentile-based)
-    ATR_LOW = 1.5    # Low volatility - full size
-    ATR_HIGH = 3.5   # High volatility - reduce size
+    # BB regime filter (percentile)
+    BB_REGIME_MIN = 0.20  # Don't trade in extreme squeeze (<20th percentile)
+    BB_REGIME_MAX = 0.85  # Don't trade in extreme expansion (>85th percentile)
     
-    # Track entry prices for stoploss calculation
+    # Wait for all indicators to be valid
+    first_valid = max(55, 26+9, 14, 20, 100)
+    
+    # Track entry prices for stoploss
     entry_price = np.zeros(n)
-    entry_signal = np.zeros(n)  # Track entry direction
-    
-    first_valid = max(55 * 4, 20, 14)  # Wait for all indicators (4h EMA55 needs 55*4 1h bars)
+    position_direction = np.zeros(n)  # 1=long, -1=short, 0=none
     
     for i in range(first_valid, n):
-        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(trend_1h[i]):
+        # Check for valid data
+        if (np.isnan(dema_21_1h[i]) or np.isnan(dema_55_1h[i]) or
+            np.isnan(histogram_1h[i]) or np.isnan(atr_1h[i]) or
+            np.isnan(bb_percentile_1h[i]) or np.isnan(trend_1h[i]) or
+            np.isnan(atr_1h_mapped[i])):
             signals[i] = 0.0
+            position_direction[i] = 0
             continue
         
         trend = trend_1h[i]
-        rsi_val = rsi_1h[i]
-        atr_pct = atr_pct_1h[i]
-        current_price = close[i]
+        macd_hist = histogram_1h[i]
+        bb_regime = bb_percentile_1h[i]
+        atr_val = atr_1h_mapped[i]
         
-        # Determine position size based on volatility regime
-        if atr_pct < ATR_LOW:
-            base_size = SIZE_FULL
-        elif atr_pct < ATR_HIGH:
-            base_size = SIZE_HALF
-        else:
-            base_size = SIZE_MIN
-        
-        # Check for stoploss (2*ATR against position)
-        if entry_signal[i - 1] != 0 and i > 0:
-            if entry_signal[i - 1] > 0:  # Long position
-                stoploss_price = entry_price[i - 1] - 2 * atr_1h[i - 1]
-                if current_price < stoploss_price:
-                    signals[i] = 0.0
-                    entry_signal[i] = 0.0
-                    entry_price[i] = 0.0
-                    continue
-            elif entry_signal[i - 1] < 0:  # Short position
-                stoploss_price = entry_price[i - 1] + 2 * atr_1h[i - 1]
-                if current_price > stoploss_price:
-                    signals[i] = 0.0
-                    entry_signal[i] = 0.0
-                    entry_price[i] = 0.0
-                    continue
-        
-        # Generate new signals based on trend and RSI
-        if trend == 1:  # 4h uptrend (EMA21 > EMA55)
-            if rsi_val < RSI_LONG_ENTRY:
-                # Pullback entry - go long
-                signals[i] = base_size
-                if entry_signal[i - 1] <= 0:  # New long entry
-                    entry_price[i] = current_price
-                    entry_signal[i] = 1
-                else:
-                    entry_price[i] = entry_price[i - 1]
-                    entry_signal[i] = 1
-            elif rsi_val > RSI_EXIT_LONG:
-                # RSI overbought - exit long
-                signals[i] = 0.0
-                entry_signal[i] = 0.0
-                entry_price[i] = 0.0
-            else:
-                # Hold existing position or stay flat
-                signals[i] = signals[i - 1]
-                entry_signal[i] = entry_signal[i - 1]
-                entry_price[i] = entry_price[i - 1]
-                
-        elif trend == -1:  # 4h downtrend (EMA21 < EMA55)
-            if rsi_val > RSI_SHORT_ENTRY:
-                # Rally entry - go short
-                signals[i] = -base_size
-                if entry_signal[i - 1] >= 0:  # New short entry
-                    entry_price[i] = current_price
-                    entry_signal[i] = -1
-                else:
-                    entry_price[i] = entry_price[i - 1]
-                    entry_signal[i] = -1
-            elif rsi_val < RSI_EXIT_SHORT:
-                # RSI oversold - exit short
-                signals[i] = 0.0
-                entry_signal[i] = 0.0
-                entry_price[i] = 0.0
-            else:
-                # Hold existing position or stay flat
-                signals[i] = signals[i - 1]
-                entry_signal[i] = entry_signal[i - 1]
-                entry_price[i] = entry_price[i - 1]
-        else:  # No clear trend (EMA flat or crossing)
+        # BB regime filter - avoid extreme volatility
+        if bb_regime < BB_REGIME_MIN or bb_regime > BB_REGIME_MAX:
             signals[i] = 0.0
-            entry_signal[i] = 0.0
-            entry_price[i] = 0.0
+            position_direction[i] = 0
+            continue
+        
+        # Check ATR trailing stoploss (2*ATR against position)
+        if position_direction[i-1] != 0 and i > 0:
+            prev_direction = position_direction[i-1]
+            prev_entry = entry_price[i-1] if entry_price[i-1] > 0 else close[i-1]
+            
+            if prev_direction == 1:  # Long position
+                stop_loss = prev_entry - 2 * atr_val
+                if close[i] < stop_loss:
+                    signals[i] = 0.0
+                    position_direction[i] = 0
+                    entry_price[i] = 0
+                    continue
+            elif prev_direction == -1:  # Short position
+                stop_loss = prev_entry + 2 * atr_val
+                if close[i] > stop_loss:
+                    signals[i] = 0.0
+                    position_direction[i] = 0
+                    entry_price[i] = 0
+                    continue
+        
+        # Generate new signals based on trend + MACD
+        if trend == 1:  # 4h uptrend - look for long entries
+            if macd_hist > MACD_LONG_THRESHOLD:
+                # MACD bullish - enter long
+                if position_direction[i-1] <= 0:
+                    signals[i] = SIZE_FULL
+                    position_direction[i] = 1
+                    entry_price[i] = close[i]
+                else:
+                    signals[i] = SIZE_FULL
+                    position_direction[i] = 1
+            elif macd_hist < 0 and position_direction[i-1] == 1:
+                # MACD turning bearish - reduce position
+                signals[i] = SIZE_HALF
+                position_direction[i] = 1
+            else:
+                signals[i] = 0.0
+                position_direction[i] = 0
+                entry_price[i] = 0
+                
+        elif trend == -1:  # 4h downtrend - look for short entries
+            if macd_hist < MACD_SHORT_THRESHOLD:
+                # MACD bearish - enter short
+                if position_direction[i-1] >= 0:
+                    signals[i] = -SIZE_FULL
+                    position_direction[i] = -1
+                    entry_price[i] = close[i]
+                else:
+                    signals[i] = -SIZE_FULL
+                    position_direction[i] = -1
+            elif macd_hist > 0 and position_direction[i-1] == -1:
+                # MACD turning bullish - reduce position
+                signals[i] = -SIZE_HALF
+                position_direction[i] = -1
+            else:
+                signals[i] = 0.0
+                position_direction[i] = 0
+                entry_price[i] = 0
+        else:  # No clear trend
+            signals[i] = 0.0
+            position_direction[i] = 0
+            entry_price[i] = 0
+    
+    # Smooth signal transitions to reduce churn
+    for i in range(1, n):
+        if signals[i] != signals[i-1] and signals[i] != 0 and signals[i-1] != 0:
+            # Only allow transitions through zero or between discrete levels
+            if abs(signals[i]) != abs(signals[i-1]):
+                # Keep previous signal if change is too small
+                if abs(signals[i] - signals[i-1]) < 0.10:
+                    signals[i] = signals[i-1]
     
     return signals
