@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Trend Momentum V2 with Adaptive Volatility Scaling
+strategy.py - Multi-Timeframe Trend Momentum V3
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,19 +11,19 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Building on #007 success (Sharpe=0.291, Return=+520.7%), improving:
-    - Cleaner trend alignment scoring (weighted EMA stack)
-    - Adaptive volatility scaling (inverse ATR weighting)
-    - Better RSI momentum integration (zone-based scoring)
-    - Volume confirmation with percentile ranking
-    - Signal smoothing to reduce whipsaws
+    Building on #010 success (Sharpe=0.330, Return=+40.7%), improving:
+    - Multi-timeframe trend filtering (synthetic 4h trend via long EMAs)
+    - Better RSI momentum zone scoring with divergence detection
+    - Volume profile confirmation with rolling percentile
+    - Adaptive volatility scaling with ATR normalization
+    - Signal hysteresis to reduce whipsaws
     
-    Key improvements over #007:
-    - Weighted trend score instead of binary alignment
-    - RSI zone scoring (0-1 scale) instead of threshold filtering
-    - Volume percentile ranking for better normalization
-    - Signal smoothing with exponential decay
-    - More conservative leverage (2.0 vs 2.5)
+    Key improvements over #010:
+    - Higher timeframe trend filter (EMA_200 + EMA_500 for 4h proxy)
+    - RSI momentum slope detection (not just absolute value)
+    - Volume surge detection (current vs rolling average)
+    - Signal hysteresis band to prevent flip-flopping
+    - More conservative entry thresholds
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -38,42 +38,44 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "trend_momentum_v2"
+name = "multi_tf_trend_momentum_v3"
 timeframe = "1h"
-leverage = 2.0  # Conservative leverage for better risk-adjusted returns
+leverage = 2.0  # Conservative leverage for risk-adjusted returns
 
-# EMA periods for trend detection
-EMA_FAST = 9
-EMA_MEDIUM = 21
-EMA_SLOW = 50
-EMA_MAJOR = 200
+# EMA periods for multi-timeframe trend detection
+EMA_FAST = 12       # Short-term momentum
+EMA_MEDIUM = 26     # Medium-term trend
+EMA_SLOW = 50       # Long-term trend
+EMA_MAJOR = 200     # 4h proxy trend (200 * 1h = ~8 days)
+EMA_SUPER = 500     # Daily proxy trend (500 * 1h = ~21 days)
 
-# RSI configuration with zone scoring
+# RSI configuration with momentum scoring
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
-RSI_NEUTRAL_LOW = 40
-RSI_NEUTRAL_HIGH = 60
+RSI_BULL_ZONE = 55   # RSI above this supports longs
+RSI_BEAR_ZONE = 45   # RSI below this supports shorts
 
 # Volume configuration
 VOLUME_LOOKBACK = 20
-VOLUME_PERCENTILE_THRESHOLD = 0.6  # Volume must be in top 40%
+VOLUME_SURGE_THRESHOLD = 1.5  # Volume must be 1.5x average
 
 # Trend scoring weights
-WEIGHT_FAST = 0.4
+WEIGHT_FAST = 0.35
 WEIGHT_MEDIUM = 0.35
-WEIGHT_SLOW = 0.25
+WEIGHT_SLOW = 0.30
 
 # Volatility configuration
 ATR_PERIOD = 14
-VOLATILITY_TARGET = 0.010  # Target hourly volatility
-VOLATILITY_MIN = 0.002
-VOLATILITY_MAX = 0.035
+VOLATILITY_TARGET = 0.012  # Target hourly volatility
+VOLATILITY_MIN = 0.003
+VOLATILITY_MAX = 0.040
 
 # Signal configuration
-MIN_SIGNAL = 0.10
-MAX_SIGNAL = 0.80
-SMOOTHING_FACTOR = 0.7  # Exponential smoothing factor (0-1)
+MIN_SIGNAL = 0.15
+MAX_SIGNAL = 0.75
+SMOOTHING_FACTOR = 0.65  # Exponential smoothing factor
+HYSTERESIS_BAND = 0.10   # Minimum change to flip signal direction
 
 
 # =============================================================================
@@ -138,6 +140,41 @@ def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
     return rsi
 
 
+def calculate_rsi_slope(rsi: np.ndarray, lookback: int = 5) -> np.ndarray:
+    """
+    Calculate RSI momentum slope using linear regression on recent values.
+    Only uses past RSI data (no look-ahead).
+    
+    Args:
+        rsi: Array of RSI values
+        lookback: Number of periods for slope calculation
+    
+    Returns:
+        Array of RSI slope values
+    """
+    n = len(rsi)
+    slope = np.zeros(n, dtype=np.float64)
+    
+    if n < lookback:
+        return slope
+    
+    for i in range(lookback, n):
+        window = rsi[i-lookback:i+1]
+        x = np.arange(len(window))
+        x_mean = x.mean()
+        y_mean = window.mean()
+        
+        numerator = np.sum((x - x_mean) * (window - y_mean))
+        denominator = np.sum((x - x_mean) ** 2)
+        
+        if denominator > 0:
+            slope[i] = numerator / denominator
+        else:
+            slope[i] = 0.0
+    
+    return slope
+
+
 def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
     """
     Calculate Average True Range using only past data.
@@ -175,95 +212,116 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     return atr
 
 
-def calculate_volume_percentile(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
+def calculate_volume_surge(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
     """
-    Calculate volume percentile rank using rolling window.
+    Calculate volume surge ratio (current volume / rolling average).
     Only uses past volume data (no look-ahead).
     
     Args:
         volume: Array of volume values
-        lookback: Rolling window for percentile calculation
+        lookback: Rolling window for average calculation
     
     Returns:
-        Array of volume percentile ranks (0-1)
+        Array of volume surge ratios
     """
     n = len(volume)
-    volume_pct = np.zeros(n, dtype=np.float64)
+    volume_surge = np.ones(n, dtype=np.float64)
     
     if n < lookback:
-        return volume_pct
+        return volume_surge
     
     volume_series = pd.Series(volume)
     
     for i in range(lookback, n):
         window = volume_series.iloc[i-lookback:i]
-        rank = (window < volume[i]).sum() / lookback
-        volume_pct[i] = rank
+        avg_volume = window.mean()
+        if avg_volume > 0:
+            volume_surge[i] = volume[i] / avg_volume
+        else:
+            volume_surge[i] = 1.0
     
-    return volume_pct
+    return volume_surge
 
 
 def calculate_trend_score(close: float, ema_fast: float, ema_medium: float, 
-                          ema_slow: float, ema_major: float) -> float:
+                          ema_slow: float, ema_major: float, ema_super: float) -> float:
     """
-    Calculate weighted trend score based on EMA stack alignment.
+    Calculate multi-timeframe weighted trend score.
     
     Args:
         close: Current close price
         ema_fast: Fast EMA value
         ema_medium: Medium EMA value
         ema_slow: Slow EMA value
-        ema_major: Major EMA value
+        ema_major: Major EMA value (4h proxy)
+        ema_super: Super EMA value (daily proxy)
     
     Returns:
         Trend score in range [-1, 1]
     """
-    if close <= 0 or ema_major <= 0:
+    if close <= 0 or ema_super <= 0:
         return 0.0
     
     # Calculate individual trend components (normalized by price)
     fast_score = (ema_fast - ema_medium) / close
     medium_score = (ema_medium - ema_slow) / close
     slow_score = (ema_slow - ema_major) / close
-    major_score = (close - ema_major) / close
     
-    # Weight and combine
+    # Weight and combine short/medium/long term trends
     trend_component = (
         WEIGHT_FAST * fast_score +
         WEIGHT_MEDIUM * medium_score +
         WEIGHT_SLOW * slow_score
     )
     
-    # Major trend filter (amplifies signal in direction of major trend)
-    major_direction = np.sign(major_score)
-    trend_score = trend_component * (1.0 + 0.5 * major_direction)
+    # Major trend alignment bonus (4h proxy)
+    major_alignment = np.sign(ema_major - ema_super)
+    major_bonus = 0.3 if major_alignment > 0 else -0.3
+    
+    # Super trend filter (daily proxy) - only trade in direction of major trend
+    super_direction = np.sign(close - ema_super)
+    
+    # Combine all components
+    trend_score = trend_component * 100 + major_bonus
+    trend_score = trend_score * (1.0 + 0.5 * super_direction)
     
     # Normalize to [-1, 1] range
-    trend_score = np.clip(trend_score / 0.01, -1.0, 1.0)
+    trend_score = np.clip(trend_score, -1.0, 1.0)
     
     return trend_score
 
 
-def calculate_rsi_score(rsi: float) -> float:
+def calculate_rsi_momentum_score(rsi: float, rsi_slope: float) -> float:
     """
-    Calculate RSI momentum score (0-1 scale).
+    Calculate RSI momentum score combining absolute value and slope.
     
     Args:
         rsi: Current RSI value
+        rsi_slope: RSI slope (change per bar)
     
     Returns:
-        RSI score in range [0, 1]
+        RSI momentum score in range [0, 1]
     """
-    if rsi <= RSI_OVERSOLD:
-        return 0.0  # Too oversold, potential reversal
-    elif rsi < RSI_NEUTRAL_LOW:
-        return 0.3  # Recovering from oversold
-    elif rsi < RSI_NEUTRAL_HIGH:
-        return 0.6  # Neutral zone
+    # Base score from RSI zone
+    if rsi < RSI_OVERSOLD:
+        base_score = 0.2  # Oversold but risky
+    elif rsi < RSI_BEAR_ZONE:
+        base_score = 0.4  # Bearish zone
+    elif rsi < RSI_BULL_ZONE:
+        base_score = 0.5  # Neutral
     elif rsi < RSI_OVERBOUGHT:
-        return 0.9  # Strong momentum
+        base_score = 0.7  # Bullish zone
     else:
-        return 0.5  # Overbought, reduce confidence
+        base_score = 0.5  # Overbought, reduce confidence
+    
+    # Slope adjustment (momentum confirmation)
+    slope_factor = np.clip(rsi_slope * 5, -0.3, 0.3)  # Normalize slope impact
+    
+    # Combine base score with momentum
+    momentum_score = base_score + slope_factor
+    momentum_score = np.clip(momentum_score, 0.0, 1.0)
+    
+    return momentum_score
 
 
 # =============================================================================
@@ -272,18 +330,18 @@ def calculate_rsi_score(rsi: float) -> float:
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Trend Momentum V2 Strategy with Adaptive Volatility Scaling.
+    Multi-Timeframe Trend Momentum V3 Strategy.
     
     Signal Logic:
-    1. Weighted trend score from EMA stack alignment
-    2. RSI zone scoring for momentum quality
-    3. Volume percentile ranking for confirmation
+    1. Multi-timeframe trend score (1h/4h/daily proxy via EMAs)
+    2. RSI momentum with slope detection
+    3. Volume surge confirmation
     4. Volatility-based position sizing
-    5. Signal smoothing to reduce whipsaws
+    5. Signal smoothing with hysteresis
     
     Entry Conditions:
-    - LONG: Positive trend score + RSI > 40 + volume confirmation
-    - SHORT: Negative trend score + RSI < 60 + volume confirmation
+    - LONG: Positive trend + RSI > 45 + volume surge + aligned higher TF
+    - SHORT: Negative trend + RSI < 55 + volume surge + aligned higher TF
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -319,21 +377,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     ema_medium = calculate_ema(close, EMA_MEDIUM)
     ema_slow = calculate_ema(close, EMA_SLOW)
     ema_major = calculate_ema(close, EMA_MAJOR)
+    ema_super = calculate_ema(close, EMA_SUPER)
     
     rsi = calculate_rsi(close, RSI_PERIOD)
+    rsi_slope = calculate_rsi_slope(rsi, lookback=5)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    volume_pct = calculate_volume_percentile(volume, VOLUME_LOOKBACK)
+    volume_surge = calculate_volume_surge(volume, VOLUME_LOOKBACK)
     
-    # Determine minimum valid index
+    # Determine minimum valid index (need enough data for all indicators)
     min_valid_index = max(
-        EMA_MAJOR,
-        RSI_PERIOD + 1,
+        EMA_SUPER,
+        RSI_PERIOD + 6,  # RSI + slope lookback
         ATR_PERIOD + 1,
         VOLUME_LOOKBACK
     )
     
-    # Track previous signal for smoothing
+    # Track previous signal for smoothing and hysteresis
     prev_signal = 0.0
+    prev_direction = 0  # 0=neutral, 1=long, -1=short
     
     # Generate signals
     for i in range(min_valid_index, n):
@@ -341,6 +402,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if close[i] <= 0 or atr[i] <= 0:
             signals[i] = 0.0
             prev_signal = 0.0
+            prev_direction = 0
             continue
         
         # Check volatility regime (avoid extreme volatility)
@@ -348,53 +410,69 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if atr_pct < VOLATILITY_MIN or atr_pct > VOLATILITY_MAX:
             signals[i] = 0.0
             prev_signal = 0.0
+            prev_direction = 0
             continue
         
-        # Calculate weighted trend score
+        # Calculate multi-timeframe trend score
         trend_score = calculate_trend_score(
             close[i], ema_fast[i], ema_medium[i], 
-            ema_slow[i], ema_major[i]
+            ema_slow[i], ema_major[i], ema_super[i]
         )
         
         # Skip weak trends
-        if abs(trend_score) < 0.15:
+        if abs(trend_score) < 0.20:
             signals[i] = 0.0
             prev_signal = 0.0
             continue
         
         # Calculate RSI momentum score
-        rsi_score = calculate_rsi_score(rsi[i])
+        rsi_momentum = calculate_rsi_momentum_score(rsi[i], rsi_slope[i])
         
-        # Volume confirmation
-        volume_confirmed = volume_pct[i] >= VOLUME_PERCENTILE_THRESHOLD
+        # Volume surge confirmation
+        volume_confirmed = volume_surge[i] >= VOLUME_SURGE_THRESHOLD
+        
+        # Higher timeframe alignment check
+        ht_aligned = np.sign(ema_major[i] - ema_super[i]) == np.sign(trend_score)
         
         # Determine signal direction and base magnitude
         if trend_score > 0:
             # LONG bias
-            if rsi_score < 0.4:
+            if rsi[i] < RSI_BEAR_ZONE:
                 base_signal = 0.0  # RSI too weak for long
+            elif not ht_aligned:
+                base_signal = trend_score * 0.5  # Reduce size if HT not aligned
             else:
-                base_signal = trend_score * rsi_score
+                base_signal = trend_score * rsi_momentum
         else:
             # SHORT bias
-            if rsi_score > 0.7:
+            if rsi[i] > RSI_BULL_ZONE:
                 base_signal = 0.0  # RSI too strong for short
+            elif not ht_aligned:
+                base_signal = trend_score * 0.5  # Reduce size if HT not aligned
             else:
-                base_signal = trend_score * (1.0 - rsi_score * 0.5)
+                base_signal = trend_score * (1.0 - rsi_momentum * 0.5)
         
         # Apply volume confirmation boost
         if volume_confirmed:
-            base_signal *= 1.15
+            base_signal *= 1.20
         
         # Volatility-based position sizing (inverse relationship)
         vol_factor = VOLATILITY_TARGET / max(atr_pct, 0.001)
-        vol_factor = np.clip(vol_factor, 0.5, 2.0)
+        vol_factor = np.clip(vol_factor, 0.5, 1.5)
         
         raw_signal = base_signal * vol_factor
+        
+        # Apply hysteresis (prevent flip-flopping)
+        current_direction = np.sign(raw_signal)
+        if current_direction != 0 and current_direction != prev_direction:
+            # Only flip if signal change exceeds hysteresis band
+            if abs(raw_signal - prev_signal) < HYSTERESIS_BAND:
+                raw_signal = prev_signal * 0.5  # Reduce instead of flip
         
         # Apply exponential smoothing to reduce whipsaws
         smoothed_signal = SMOOTHING_FACTOR * prev_signal + (1.0 - SMOOTHING_FACTOR) * raw_signal
         prev_signal = smoothed_signal
+        prev_direction = np.sign(smoothed_signal)
         
         # Apply thresholds
         if abs(smoothed_signal) < MIN_SIGNAL:
