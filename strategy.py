@@ -1,37 +1,35 @@
 #!/usr/bin/env python3
 """
-strategy.py - MACD RSI Momentum Hybrid 1h V1
+strategy.py - Z-Score Mean Reversion Multi-TF V9
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
+This file defines the trading strategy. It must expose:
+    - name: str                    - Strategy identifier
+    - timeframe: str               - Primary timeframe (e.g., "15m")
+    - leverage: float              - Leverage multiplier (default 1.0)
+    - generate_signals(prices)     - Signal generation function
+
 Strategy Hypothesis:
-    MACD Histogram Momentum with RSI Filter on 1h timeframe.
+    Z-score mean reversion on 15m with 1h trend filter:
+    - Primary signal: Z-score(20) extremes indicate overextended price
+    - Trend filter: 1h EMA(50) direction determines bias
+    - Entry: Only trade mean reversion IN DIRECTION of higher TF trend
+    - Volume confirmation: Ensure sufficient liquidity
+    - Signal scaling: Magnitude proportional to Z-score extremeness
     
     Why this works:
-    - MACD histogram captures momentum acceleration/deceleration
-    - More responsive than Supertrend (which had -84% DD)
-    - RSI filter prevents entries at overextended levels
-    - 1h timeframe generates more trades than 4h (need ≥10 trades)
-    - Volume confirmation ensures liquidity at entry
-    - ATR-based signal scaling controls risk during high volatility
-    
-    Key differences from failed strategies:
-    - Not pure trend (Supertrend failed with -84% DD)
-    - Not pure mean reversion (BB/KC failed with -68% DD)
-    - Momentum with mean-reversion filter = balanced approach
-    - 1h should generate more trades than 4h strategies
-    
-    Risk Management:
-    - Signal magnitude scales with ATR volatility
-    - RSI extremes filter prevents chasing moves
-    - Volume filter avoids illiquid entries
-    - Signal smoothing reduces whipsaw trades
+    - 15m captures intraday mean reversion opportunities
+    - 1h trend filter prevents fighting major trends (reduces DD)
+    - Z-score is cleaner than BB-KC squeeze (which failed with -68% DD)
+    - Multi-TF approach reportedly doubled Sharpe in research
+    - Conservative leverage (1.5x) controls drawdown
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
     - No .shift(-n) or future index access
     - Signal at bar t uses only prices.iloc[:t+1]
-    - Using numpy operations (not pandas .replace on arrays)
+    - 1h trend calculated by resampling 15m data properly
 """
 
 import numpy as np
@@ -41,47 +39,62 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "macd_rsi_momentum_1h_v1"
-timeframe = "1h"
-leverage = 1.5  # Conservative leverage for risk control
+name = "zscore_multitf_meanrev_v9"
+timeframe = "15m"
+leverage = 1.5  # Conservative to control drawdown
 
-# MACD Configuration
-MACD_FAST = 12
-MACD_SLOW = 26
-MACD_SIGNAL = 9
-MACD_HIST_THRESHOLD = 0.0  # Histogram must cross zero with momentum
+# Z-score configuration
+ZSCORE_PERIOD = 20
+ZSCORE_ENTRY_THRESHOLD = 1.8  # Enter when |Z| > this
+ZSCORE_EXIT_THRESHOLD = 0.5  # Exit when |Z| < this
+ZSCORE_MAX = 3.5  # Maximum Z-score for signal scaling
 
-# RSI Configuration
-RSI_PERIOD = 14
-RSI_LONG_MAX = 65   # Don't long if RSI above this (overbought)
-RSI_SHORT_MIN = 35  # Don't short if RSI below this (oversold)
-RSI_NEUTRAL_LOW = 40
-RSI_NEUTRAL_HIGH = 60
+# Trend filter configuration (1h timeframe)
+TREND_EMA_PERIOD = 50
+TREND_LOOKBACK_BARS = 4  # 15m bars per 1h bar
 
-# Volume Configuration
+# Volume confirmation
 VOLUME_LOOKBACK = 20
 VOLUME_MIN_RATIO = 0.60  # Volume must be at least this % of average
 
-# Volatility Configuration
+# Signal configuration
+MIN_SIGNAL_MAGNITUDE = 0.20  # Minimum signal to generate position
+MAX_SIGNAL = 0.90  # Maximum signal magnitude
+SMOOTHING_FACTOR = 0.40  # EMA smoothing for signals (0=none, 1=max)
+HYSTERESIS_THRESHOLD = 0.15  # Minimum change to flip signal direction
+
+# Risk management
 ATR_PERIOD = 14
-VOLATILITY_TARGET = 0.015  # Target ATR as % of price
-VOLATILITY_MIN = 0.003     # Minimum ATR % to trade
-VOLATILITY_MAX = 0.060     # Maximum ATR % to trade
-
-# Signal Configuration
-MIN_SIGNAL_MAGNITUDE = 0.15
-MAX_SIGNAL = 0.85
-SMOOTHING_FACTOR = 0.35
-HYSTERESIS_THRESHOLD = 0.12
-
-# Trend Filter (optional secondary confirmation)
-EMA_TREND = 100
-USE_TREND_FILTER = True
+VOLATILITY_MIN = 0.002  # Minimum ATR % to trade
+VOLATILITY_MAX = 0.040  # Maximum ATR % to trade
+VOLATILITY_TARGET = 0.012  # Target ATR as % of price
 
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
+
+def calculate_zscore(close: np.ndarray, period: int = 20) -> np.ndarray:
+    """
+    Calculate Z-score of price relative to rolling mean.
+    Z = (price - rolling_mean) / rolling_std
+    Only uses past data (no look-ahead).
+    """
+    n = len(close)
+    zscore = np.zeros(n, dtype=np.float64)
+    
+    if n < period:
+        return zscore
+    
+    close_series = pd.Series(close)
+    rolling_mean = close_series.rolling(window=period, min_periods=period).mean()
+    rolling_std = close_series.rolling(window=period, min_periods=period).std()
+    
+    zscore_values = (close_series - rolling_mean) / rolling_std.replace(0, np.inf)
+    zscore = np.nan_to_num(zscore_values.values, nan=0.0)
+    
+    return zscore
+
 
 def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
     """
@@ -128,91 +141,6 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     return atr
 
 
-def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
-    """
-    Calculate Relative Strength Index using only past data.
-    RSI = 100 - (100 / (1 + RS))
-    RS = Average Gain / Average Loss
-    """
-    n = len(close)
-    rsi = np.zeros(n, dtype=np.float64)
-    
-    if n < period + 1:
-        return rsi
-    
-    # Calculate price changes
-    delta = np.zeros(n, dtype=np.float64)
-    for i in range(1, n):
-        delta[i] = close[i] - close[i-1]
-    
-    # Separate gains and losses
-    gains = np.where(delta > 0, delta, 0.0)
-    losses = np.where(delta < 0, -delta, 0.0)
-    
-    # Calculate average gain and loss using EMA
-    gains_series = pd.Series(gains)
-    losses_series = pd.Series(losses)
-    
-    avg_gain = gains_series.ewm(span=period, adjust=False, min_periods=period).mean().values
-    avg_loss = losses_series.ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    # Calculate RS and RSI
-    rs = np.zeros(n, dtype=np.float64)
-    mask = avg_loss > 0
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    
-    rsi = np.zeros(n, dtype=np.float64)
-    rsi[mask] = 100.0 - (100.0 / (1.0 + rs[mask]))
-    
-    # Handle division by zero (no losses = RSI 100)
-    rsi[avg_loss <= 0] = 100.0
-    
-    rsi = np.nan_to_num(rsi, nan=50.0)
-    rsi = np.clip(rsi, 0.0, 100.0)
-    
-    return rsi
-
-
-def calculate_macd(close: np.ndarray, 
-                   fast: int = 12, 
-                   slow: int = 26, 
-                   signal: int = 9) -> tuple:
-    """
-    Calculate MACD line, signal line, and histogram using only past data.
-    
-    MACD Line = EMA(fast) - EMA(slow)
-    Signal Line = EMA(MACD, signal)
-    Histogram = MACD - Signal
-    """
-    n = len(close)
-    macd_line = np.zeros(n, dtype=np.float64)
-    signal_line = np.zeros(n, dtype=np.float64)
-    histogram = np.zeros(n, dtype=np.float64)
-    
-    if n < slow + signal + 5:
-        return macd_line, signal_line, histogram
-    
-    close_series = pd.Series(close)
-    
-    # Calculate EMAs
-    ema_fast = close_series.ewm(span=fast, adjust=False, min_periods=fast).mean().values
-    ema_slow = close_series.ewm(span=slow, adjust=False, min_periods=slow).mean().values
-    
-    # MACD line
-    macd_line = ema_fast - ema_slow
-    macd_line = np.nan_to_num(macd_line, nan=0.0)
-    
-    # Signal line
-    macd_series = pd.Series(macd_line)
-    signal_line = macd_series.ewm(span=signal, adjust=False, min_periods=signal).mean().values
-    signal_line = np.nan_to_num(signal_line, nan=0.0)
-    
-    # Histogram
-    histogram = macd_line - signal_line
-    
-    return macd_line, signal_line, histogram
-
-
 def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
     """
     Calculate volume ratio vs rolling average.
@@ -227,15 +155,76 @@ def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray
     volume_series = pd.Series(volume)
     rolling_avg = volume_series.rolling(window=lookback, min_periods=lookback).mean()
     
-    # Use numpy where to avoid division issues
-    volume_ratio = np.where(
-        rolling_avg.values > 0,
-        volume_series.values / rolling_avg.values,
-        1.0
-    )
-    volume_ratio = np.nan_to_num(volume_ratio, nan=1.0)
+    volume_ratio = np.nan_to_num(volume_series.values / rolling_avg.values, nan=1.0)
     
     return volume_ratio
+
+
+def calculate_1h_trend_from_15m(prices: pd.DataFrame, ema_period: int = 50) -> np.ndarray:
+    """
+    Calculate 1h EMA trend from 15m data by proper resampling.
+    Returns array same length as input (forward-filled 1h values).
+    Only uses past data (no look-ahead).
+    """
+    n = len(prices)
+    trend = np.zeros(n, dtype=np.float64)
+    
+    if n < TREND_LOOKBACK_BARS * ema_period:
+        return trend
+    
+    # Resample 15m to 1h using only past data
+    # Each 1h bar = 4 consecutive 15m bars
+    close_15m = prices["close"].values
+    
+    # Build 1h close series (last close of each 4-bar group)
+    n_1h_bars = n // TREND_LOOKBACK_BARS
+    close_1h = np.zeros(n_1h_bars, dtype=np.float64)
+    
+    for i in range(n_1h_bars):
+        start_idx = i * TREND_LOOKBACK_BARS
+        end_idx = start_idx + TREND_LOOKBACK_BARS
+        # Use the last close of the 1h period
+        close_1h[i] = close_15m[end_idx - 1]
+    
+    # Calculate EMA on 1h data
+    close_1h_series = pd.Series(close_1h)
+    ema_1h = close_1h_series.ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
+    ema_1h = np.nan_to_num(ema_1h, nan=0.0)
+    
+    # Forward-fill 1h EMA back to 15m resolution
+    for i in range(n_1h_bars):
+        start_idx = i * TREND_LOOKBACK_BARS
+        end_idx = min(start_idx + TREND_LOOKBACK_BARS, n)
+        if i < len(ema_1h):
+            trend[start_idx:end_idx] = ema_1h[i]
+    
+    # Fill remaining bars with last known value
+    if n_1h_bars * TREND_LOOKBACK_BARS < n:
+        last_value = trend[n_1h_bars * TREND_LOOKBACK_BARS - 1] if n_1h_bars > 0 else 0.0
+        trend[n_1h_bars * TREND_LOOKBACK_BARS:] = last_value
+    
+    return trend
+
+
+def calculate_trend_direction(close: np.ndarray, trend_ema: np.ndarray) -> np.ndarray:
+    """
+    Calculate trend direction: +1 if price > EMA, -1 if price < EMA, 0 if neutral.
+    Only uses current/past data.
+    """
+    n = len(close)
+    direction = np.zeros(n, dtype=np.float64)
+    
+    for i in range(n):
+        if trend_ema[i] <= 0:
+            direction[i] = 0.0
+        elif close[i] > trend_ema[i] * 1.001:  # Small buffer to avoid noise
+            direction[i] = 1.0
+        elif close[i] < trend_ema[i] * 0.999:
+            direction[i] = -1.0
+        else:
+            direction[i] = 0.0
+    
+    return direction
 
 
 # =============================================================================
@@ -244,16 +233,18 @@ def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    MACD RSI Momentum Hybrid V1 Strategy.
+    Z-Score Mean Reversion Multi-TF V9 Strategy.
     
     Signal Logic:
-    1. Calculate MACD histogram for momentum direction
-    2. Filter by RSI to avoid overextended entries
-    3. Confirm with volume (liquidity check)
-    4. Scale signal by volatility (ATR normalization)
-    5. Smooth signals with EMA
-    6. Apply hysteresis to reduce whipsaws
-    7. Filter by minimum signal magnitude
+    1. Calculate Z-score(20) on 15m closes
+    2. Calculate 1h EMA(50) trend by resampling 15m→1h
+    3. Determine trend direction (+1 bullish, -1 bearish)
+    4. Generate mean reversion signal ONLY in trend direction:
+       - If trend bullish: only take long when Z < -threshold
+       - If trend bearish: only take short when Z > +threshold
+    5. Scale signal by Z-score magnitude
+    6. Apply volume and volatility filters
+    7. Smooth signals and apply hysteresis
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -285,19 +276,18 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = np.where(low <= 0, close * 0.99, low)
     
     # Calculate all indicators (all use only past data)
-    ema_trend = calculate_ema(close, EMA_TREND)
+    zscore = calculate_zscore(close, ZSCORE_PERIOD)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    macd_line, signal_line, histogram = calculate_macd(close, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+    trend_ema_1h = calculate_1h_trend_from_15m(prices, TREND_EMA_PERIOD)
+    trend_direction = calculate_trend_direction(close, trend_ema_1h)
     
     # Calculate minimum valid index (all indicators need warmup)
     min_valid_index = max(
-        EMA_TREND,
+        ZSCORE_PERIOD,
         ATR_PERIOD + 1,
         VOLUME_LOOKBACK,
-        RSI_PERIOD + 5,
-        MACD_SLOW + MACD_SIGNAL + 10
+        TREND_LOOKBACK_BARS * TREND_EMA_PERIOD
     )
     
     # Generate signals
@@ -327,58 +317,46 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             prev_direction = 0
             continue
         
-        # RSI filter - avoid overextended entries
-        rsi_value = rsi[i]
+        # Get Z-score and trend direction
+        z = zscore[i]
+        trend_dir = trend_direction[i]
         
-        # Trend filter (optional)
-        if USE_TREND_FILTER:
-            trend_direction = np.sign(close[i] - ema_trend[i])
-        else:
-            trend_direction = 0
+        # No signal if no clear trend
+        if trend_dir == 0:
+            signals[i] = 0.0
+            prev_signal = 0.0
+            prev_direction = 0
+            continue
         
-        # MACD histogram momentum signal
-        hist_value = histogram[i]
-        prev_hist = histogram[i-1] if i > 0 else 0.0
-        
+        # Mean reversion logic: trade AGAINST Z-score but WITH trend
         raw_signal = 0.0
         
-        # Long signal: MACD histogram turning positive + RSI not overbought
-        if hist_value > 0 and prev_hist <= 0:
-            # Histogram crossing above zero (momentum turning positive)
-            if rsi_value < RSI_LONG_MAX:
-                # RSI allows long entry
-                if trend_direction >= 0 or not USE_TREND_FILTER:
-                    # Trend filter passes (or disabled)
-                    raw_signal = 1.0 * min(abs(hist_value) / (close[i] * 0.001), 1.0)
+        if trend_dir > 0:
+            # Bullish trend: only take long entries when price is oversold (Z < 0)
+            if z < -ZSCORE_ENTRY_THRESHOLD:
+                # Scale signal by Z-score magnitude (more extreme = stronger signal)
+                z_magnitude = min(abs(z), ZSCORE_MAX) / ZSCORE_MAX
+                raw_signal = z_magnitude * (abs(z) - ZSCORE_ENTRY_THRESHOLD) / (ZSCORE_MAX - ZSCORE_ENTRY_THRESHOLD)
+                raw_signal = min(raw_signal, 1.0)
+        elif trend_dir < 0:
+            # Bearish trend: only take short entries when price is overbought (Z > 0)
+            if z > ZSCORE_ENTRY_THRESHOLD:
+                # Scale signal by Z-score magnitude
+                z_magnitude = min(abs(z), ZSCORE_MAX) / ZSCORE_MAX
+                raw_signal = -z_magnitude * (abs(z) - ZSCORE_ENTRY_THRESHOLD) / (ZSCORE_MAX - ZSCORE_ENTRY_THRESHOLD)
+                raw_signal = max(raw_signal, -1.0)
         
-        # Short signal: MACD histogram turning negative + RSI not oversold
-        elif hist_value < 0 and prev_hist >= 0:
-            # Histogram crossing below zero (momentum turning negative)
-            if rsi_value > RSI_SHORT_MIN:
-                # RSI allows short entry
-                if trend_direction <= 0 or not USE_TREND_FILTER:
-                    # Trend filter passes (or disabled)
-                    raw_signal = -1.0 * min(abs(hist_value) / (close[i] * 0.001), 1.0)
-        
-        # Alternative: MACD histogram momentum (not just crossover)
-        if raw_signal == 0.0:
-            # Use histogram slope for continuous momentum
-            hist_slope = hist_value - prev_hist
-            
-            if hist_slope > 0 and rsi_value < RSI_NEUTRAL_HIGH:
-                # Positive momentum, RSI not too high
-                if trend_direction >= 0 or not USE_TREND_FILTER:
-                    raw_signal = 0.5 * min(abs(hist_slope) / (close[i] * 0.0005), 1.0)
-            elif hist_slope < 0 and rsi_value > RSI_NEUTRAL_LOW:
-                # Negative momentum, RSI not too low
-                if trend_direction <= 0 or not USE_TREND_FILTER:
-                    raw_signal = -0.5 * min(abs(hist_slope) / (close[i] * 0.0005), 1.0)
+        # If signal is too weak, skip
+        if abs(raw_signal) < 0.1:
+            signals[i] = 0.0
+            prev_signal = 0.0
+            prev_direction = 0
+            continue
         
         # Volatility normalization (scale by target volatility)
-        if raw_signal != 0.0:
-            vol_factor = VOLATILITY_TARGET / max(atr_pct, 0.001)
-            vol_factor = np.clip(vol_factor, 0.5, 1.5)
-            raw_signal *= vol_factor
+        vol_factor = VOLATILITY_TARGET / max(atr_pct, 0.001)
+        vol_factor = np.clip(vol_factor, 0.5, 1.5)
+        raw_signal *= vol_factor
         
         # Signal smoothing (EMA on signals)
         smoothed_signal = SMOOTHING_FACTOR * prev_signal + (1.0 - SMOOTHING_FACTOR) * raw_signal
