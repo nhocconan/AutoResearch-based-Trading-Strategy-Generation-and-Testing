@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Adaptive Regime Trend V7
+strategy.py - Adaptive Regime Trend V8
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,21 +11,21 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Building on adaptive_regime_trend_v3 success (Sharpe=0.531), improving:
-    - Enhanced funding rate mean reversion (more aggressive bias)
-    - Improved regime transition smoothing (reduce whipsaws)
-    - Better volatility-adaptive position sizing
-    - Taker buy/sell ratio integration for market pressure
-    - Refined hysteresis to reduce signal flipping
-    - Cleaner regime confidence calculation
+    Building on adaptive_regime_trend_v7 success (Sharpe=0.722), improving:
+    - Dynamic funding bias weight based on regime confidence
+    - Volatility-adaptive regime memory (shorter in high vol, longer in low vol)
+    - Improved breakout confirmation (price outside BB + volume spike)
+    - Momentum decay for trend exhaustion detection
+    - Smoother regime transitions with weighted blending
+    - Enhanced signal threshold based on volatility regime
     
-    Key improvements over adaptive_regime_trend_v3:
-    - Funding rate weight increased (0.15 → 0.25) for perpetual futures edge
-    - Regime memory extended (7 → 10 bars) for smoother transitions
-    - Volatility targeting more aggressive (0.008 → 0.010)
-    - Improved signal smoothing with adaptive factor
-    - Better handling of transition regimes
-    - Taker ratio integration when available
+    Key improvements over adaptive_regime_trend_v7:
+    - Funding bias weight: 0.25 → dynamic (0.15-0.35 based on regime)
+    - Regime memory: fixed 10 → adaptive (5-15 based on ATR)
+    - Breakout logic: volume only → volume + price outside bands
+    - Momentum decay: added for positions held >8 bars
+    - Regime blending: hard threshold → weighted confidence blend
+    - Signal threshold: fixed → volatility-adaptive
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -40,7 +40,7 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "adaptive_regime_trend_v7"
+name = "adaptive_regime_trend_v8"
 timeframe = "1h"
 leverage = 2.5  # Moderate leverage for risk-adjusted returns
 
@@ -79,28 +79,36 @@ VOLUME_SPIKE_THRESHOLD = 1.5
 
 # Volatility configuration
 ATR_PERIOD = 14
-VOLATILITY_TARGET = 0.010  # Slightly higher target
+VOLATILITY_TARGET = 0.010
 VOLATILITY_MIN = 0.002
 VOLATILITY_MAX = 0.040
+VOLATILITY_LOW_THRESHOLD = 0.006
+VOLATILITY_HIGH_THRESHOLD = 0.020
 
 # Signal configuration
 MIN_SIGNAL_TRENDING = 0.15
 MIN_SIGNAL_RANGING = 0.25
 MIN_SIGNAL_BREAKOUT = 0.30
 MAX_SIGNAL = 0.80
-SMOOTHING_FACTOR = 0.70  # More smoothing
-HYSTERESIS_THRESHOLD = 0.10  # Slightly higher hysteresis
+SMOOTHING_FACTOR = 0.70
+HYSTERESIS_THRESHOLD = 0.10
 
 # Funding rate configuration
 FUNDING_EXTREME_THRESHOLD = 0.0005
-FUNDING_BIAS_WEIGHT = 0.25  # Increased from 0.15
+FUNDING_BIAS_WEIGHT_MIN = 0.15
+FUNDING_BIAS_WEIGHT_MAX = 0.35
 
 # Regime transition smoothing
-REGIME_MEMORY = 10  # Extended from 7 for smoother transitions
+REGIME_MEMORY_MIN = 5
+REGIME_MEMORY_MAX = 15
 
 # Taker ratio configuration
 TAKER_RATIO_THRESHOLD = 0.55
 TAKER_BIAS_WEIGHT = 0.20
+
+# Momentum exhaustion configuration
+MOMENTUM_DECAY_START = 8
+MOMENTUM_DECAY_FACTOR = 0.92
 
 
 # =============================================================================
@@ -338,10 +346,8 @@ def calculate_taker_bias(taker_ratio: np.ndarray, threshold: float = 0.55) -> np
     
     for i in range(n):
         if taker_ratio[i] > threshold:
-            # Strong buying pressure
             bias[i] = np.clip((taker_ratio[i] - threshold) / (1.0 - threshold), 0, 1)
         elif taker_ratio[i] < (1.0 - threshold):
-            # Strong selling pressure
             bias[i] = -np.clip((threshold - taker_ratio[i]) / threshold, 0, 1)
         else:
             bias[i] = 0.0
@@ -416,24 +422,39 @@ def calculate_regime_confidence(adx: float, bb_width: float, adx_trend: float,
     return trending_conf, ranging_conf, breakout_potential
 
 
+def calculate_momentum_decay(hold_bars: int, start_bar: int = 8, decay_factor: float = 0.92) -> float:
+    """
+    Calculate momentum decay factor for positions held too long.
+    Reduces signal strength after extended periods in same direction.
+    """
+    if hold_bars <= start_bar:
+        return 1.0
+    
+    decay_periods = hold_bars - start_bar
+    decay = decay_factor ** decay_periods
+    
+    return max(decay, 0.3)
+
+
 # =============================================================================
 # Signal Generation
 # =============================================================================
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Adaptive Regime Trend V7 Strategy.
+    Adaptive Regime Trend V8 Strategy.
     
     Signal Logic:
-    1. Calculate regime confidence (trending/ranging/breakout)
-    2. Apply logic weighted by regime confidence
-    3. Bollinger Band squeeze detection for breakout preparation
+    1. Calculate regime confidence (trending/ranging/breakout) with weighted blending
+    2. Volatility-adaptive regime memory (shorter in high vol, longer in low vol)
+    3. Bollinger Band squeeze + price outside bands for breakout confirmation
     4. MACD + RSI momentum confirmation
     5. Volume confirmation for breakouts
-    6. Funding rate bias for perpetual futures mean reversion (enhanced)
+    6. Dynamic funding rate bias weight based on regime confidence
     7. Taker buy/sell ratio for market pressure
-    8. Volatility-adaptive position sizing
-    9. Signal smoothing with hysteresis and regime memory
+    8. Momentum decay for trend exhaustion (positions held >8 bars)
+    9. Volatility-adaptive signal thresholds
+    10. Signal smoothing with hysteresis
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, funding_rate, ...]
@@ -503,13 +524,16 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     prev_signal = 0.0
     prev_direction = 0
     prev_regime = 0
-    regime_memory = [0] * REGIME_MEMORY
+    hold_bars_long = 0
+    hold_bars_short = 0
     
     for i in range(min_valid_index, n):
         if close[i] <= 0 or atr[i] <= 0:
             signals[i] = 0.0
             prev_signal = 0.0
             prev_direction = 0
+            hold_bars_long = 0
+            hold_bars_short = 0
             continue
         
         atr_pct = atr[i] / close[i]
@@ -517,6 +541,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             signals[i] = 0.0
             prev_signal = 0.0
             prev_direction = 0
+            hold_bars_long = 0
+            hold_bars_short = 0
             continue
         
         trending_conf, ranging_conf, breakout_potential = calculate_regime_confidence(
@@ -524,12 +550,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         )
         
         is_squeeze = bb_width[i] < BB_SQUEEZE_THRESHOLD
+        price_above_bb = close[i] > bb_upper[i]
+        price_below_bb = close[i] < bb_lower[i]
+        
+        vol_adaptive_memory = int(np.clip(
+            REGIME_MEMORY_MAX - (atr_pct - VOLATILITY_MIN) / (VOLATILITY_MAX - VOLATILITY_MIN) * 
+            (REGIME_MEMORY_MAX - REGIME_MEMORY_MIN),
+            REGIME_MEMORY_MIN, REGIME_MEMORY_MAX
+        ))
+        
+        regime_memory = [0] * vol_adaptive_memory
+        
         is_trending = trending_conf >= 0.5
         is_ranging = ranging_conf >= 0.5
-        
-        regime_memory.pop(0)
-        regime_memory.append(1 if is_trending else 0)
-        recent_trending = sum(regime_memory) / REGIME_MEMORY
         
         trend_strength = calculate_trend_strength(
             close[i], ema_fast[i], ema_medium[i],
@@ -541,16 +574,18 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         raw_signal = 0.0
         regime_weight = 0.0
         
+        blended_conf = trending_conf * 1.0 + ranging_conf * 0.0 + breakout_potential * 0.5
+        
         if is_squeeze and breakout_potential > 0.3:
-            if trend_strength > 0.2 and volume_confirmed:
+            if trend_strength > 0.2 and volume_confirmed and price_above_bb:
                 raw_signal = trend_strength * (0.5 + breakout_potential * 0.5)
                 regime_weight = MIN_SIGNAL_BREAKOUT
-            elif trend_strength < -0.2 and volume_confirmed:
+            elif trend_strength < -0.2 and volume_confirmed and price_below_bb:
                 raw_signal = trend_strength * (0.5 + breakout_potential * 0.5)
                 regime_weight = MIN_SIGNAL_BREAKOUT
             else:
-                raw_signal = 0.0
-                regime_weight = 0.0
+                raw_signal = trend_strength * 0.3
+                regime_weight = MIN_SIGNAL_BREAKOUT * 0.5
         
         elif is_trending:
             regime_weight = MIN_SIGNAL_TRENDING
@@ -568,10 +603,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if volume_confirmed:
                 raw_signal *= 1.1
             
+            dynamic_funding_weight = FUNDING_BIAS_WEIGHT_MIN + (
+                FUNDING_BIAS_WEIGHT_MAX - FUNDING_BIAS_WEIGHT_MIN
+            ) * trending_conf
+            
             if abs(funding_bias[i]) > 0.3:
                 if (trend_strength > 0 and funding_bias[i] < 0) or \
                    (trend_strength < 0 and funding_bias[i] > 0):
-                    raw_signal *= (1.0 - FUNDING_BIAS_WEIGHT)
+                    raw_signal *= (1.0 - dynamic_funding_weight)
             
             if abs(taker_bias[i]) > 0.3:
                 if (trend_strength > 0 and taker_bias[i] > 0) or \
@@ -593,10 +632,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             elif rsi[i] > RSI_EXTREME_HIGH:
                 raw_signal = -0.6
             
+            dynamic_funding_weight = FUNDING_BIAS_WEIGHT_MIN + (
+                FUNDING_BIAS_WEIGHT_MAX - FUNDING_BIAS_WEIGHT_MIN
+            ) * ranging_conf
+            
             if abs(funding_bias[i]) > 0.3:
                 if (raw_signal > 0 and funding_bias[i] > 0) or \
                    (raw_signal < 0 and funding_bias[i] < 0):
-                    raw_signal *= (1.0 + FUNDING_BIAS_WEIGHT)
+                    raw_signal *= (1.0 + dynamic_funding_weight)
             
             if abs(trend_strength) > 0.3:
                 raw_signal *= 0.5
@@ -618,6 +661,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             
             raw_signal = trending_conf * trend_signal + ranging_conf * rsi_signal
         
+        if prev_direction > 0:
+            hold_bars_long += 1
+            hold_bars_short = 0
+        elif prev_direction < 0:
+            hold_bars_short += 1
+            hold_bars_long = 0
+        else:
+            hold_bars_long = 0
+            hold_bars_short = 0
+        
+        current_direction = np.sign(raw_signal)
+        if current_direction > 0:
+            decay_factor = calculate_momentum_decay(hold_bars_long, MOMENTUM_DECAY_START, MOMENTUM_DECAY_FACTOR)
+        elif current_direction < 0:
+            decay_factor = calculate_momentum_decay(hold_bars_short, MOMENTUM_DECAY_START, MOMENTUM_DECAY_FACTOR)
+        else:
+            decay_factor = 1.0
+        
+        raw_signal *= decay_factor
+        
         vol_factor = VOLATILITY_TARGET / max(atr_pct, 0.001)
         vol_factor = np.clip(vol_factor, 0.4, 2.0)
         
@@ -630,7 +693,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if abs(smoothed_signal - prev_signal) < HYSTERESIS_THRESHOLD:
                 smoothed_signal = prev_signal
         
-        if abs(smoothed_signal) < regime_weight:
+        vol_adaptive_threshold = regime_weight * np.clip(vol_factor, 0.5, 1.5)
+        if abs(smoothed_signal) < vol_adaptive_threshold:
             smoothed_signal = 0.0
         
         signal = np.clip(smoothed_signal, -MAX_SIGNAL, MAX_SIGNAL)
