@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Multi-Timeframe Trend with Momentum Confirmation
+strategy.py - Enhanced Multi-Timeframe Trend with Squeeze & Divergence
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,24 +11,25 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Building on #004 success (Sharpe=0.208), adding multi-timeframe trend filter.
-    - Primary signal: EMA stack alignment (9/21/50/200)
-    - Higher timeframe filter: 200 EMA defines major trend direction
-    - Momentum: RSI with dynamic thresholds based on trend strength
-    - Volume: Breakout confirmation with volume spike
-    - Volatility: ATR-based position sizing with regime adjustment
+    Building on #007 success (Sharpe=0.291, Return=+520.7%), adding:
+    - Bollinger Band squeeze detection for breakout timing
+    - RSI divergence detection for early trend reversal signals
+    - Adaptive EMA periods based on volatility regime
+    - Signal smoothing to reduce whipsaws
+    - Better volatility-adjusted position sizing
     
-    Key improvements over #004:
-    - 200 EMA major trend filter (avoid counter-trend trades)
-    - Dynamic RSI thresholds (wider in strong trends)
-    - Volume spike detection for breakouts
-    - Better volatility regime detection
-    - Cleaner signal scaling
+    Key improvements over #007:
+    - BB squeeze filter (wait for compression before expansion)
+    - RSI divergence (2-bar lookback, no look-ahead)
+    - Volatility-adaptive EMA periods
+    - Signal smoothing with 3-bar EMA
+    - Improved trend strength calculation
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
     - No .shift(-n) or future index access
     - Signal at bar t uses only prices.iloc[:t+1]
+    - RSI divergence uses only past 2 bars (i-2, i-1, i)
 """
 
 import numpy as np
@@ -38,41 +39,52 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "multi_tf_trend_momentum"
+name = "enhanced_trend_squeeze_divergence"
 timeframe = "1h"
 leverage = 2.5  # Conservative leverage given crypto volatility
 
 # EMA periods for multi-timeframe trend detection
-EMA_FAST = 9                    # Short-term momentum
-EMA_MEDIUM = 21                 # Medium-term trend
-EMA_SLOW = 50                   # Long-term trend
-EMA_MAJOR = 200                 # Major trend filter (multi-timeframe proxy)
+EMA_FAST_BASE = 9                   # Short-term momentum
+EMA_MEDIUM_BASE = 21                # Medium-term trend
+EMA_SLOW_BASE = 50                  # Long-term trend
+EMA_MAJOR = 200                     # Major trend filter
 
-# RSI configuration with dynamic thresholds
+# Volatility adaptation for EMA periods
+VOL_ADAPTATION_FACTOR = 0.5         # How much to adjust EMA periods by vol
+
+# Bollinger Band configuration
+BB_PERIOD = 20
+BB_STD_DEV = 2.0
+BB_SQUEEZE_THRESHOLD = 0.015        # BB width below this = squeeze
+BB_EXPANSION_THRESHOLD = 0.025      # BB width above this = expansion
+
+# RSI configuration with divergence detection
 RSI_PERIOD = 14
-RSI_BASE_LONG_MIN = 45          # Base minimum RSI for longs
-RSI_BASE_LONG_MAX = 75          # Base maximum RSI for longs
-RSI_BASE_SHORT_MIN = 25         # Base minimum RSI for shorts
-RSI_BASE_SHORT_MAX = 55         # Base maximum RSI for shorts
+RSI_BASE_LONG_MIN = 45
+RSI_BASE_LONG_MAX = 75
+RSI_BASE_SHORT_MIN = 25
+RSI_BASE_SHORT_MAX = 55
+RSI_DIVERGENCE_LOOKBACK = 2         # Bars to look back for divergence
 
 # Volume configuration
 VOLUME_LOOKBACK = 20
-VOLUME_SPIKE_THRESHOLD = 1.5    # Volume must be 1.5x average for breakout confirmation
-VOLUME_BASE_THRESHOLD = 1.0     # Base volume threshold
+VOLUME_SPIKE_THRESHOLD = 1.5
+VOLUME_BASE_THRESHOLD = 1.0
 
 # Trend strength thresholds
-TREND_STRENGTH_MIN = 0.001      # Minimum EMA spread ratio
-TREND_ALIGNMENT_MIN = 0.0005    # Minimum alignment between EMAs
+TREND_STRENGTH_MIN = 0.001
+TREND_ALIGNMENT_MIN = 0.0005
 
 # Volatility configuration
 ATR_PERIOD = 14
-VOLATILITY_TARGET = 0.012       # Target hourly volatility
-VOLATILITY_MIN = 0.003          # Minimum volatility to trade
-VOLATILITY_MAX = 0.040          # Maximum volatility (avoid extreme moves)
+VOLATILITY_TARGET = 0.012
+VOLATILITY_MIN = 0.003
+VOLATILITY_MAX = 0.040
 
 # Signal configuration
-MIN_SIGNAL = 0.12               # Minimum signal magnitude to trade
-MAX_SIGNAL = 0.85               # Maximum signal magnitude
+MIN_SIGNAL = 0.10
+MAX_SIGNAL = 0.85
+SIGNAL_SMOOTHING_PERIOD = 3         # EMA period for signal smoothing
 
 
 # =============================================================================
@@ -101,6 +113,30 @@ def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
     ema = np.nan_to_num(ema_values, nan=0.0)
     
     return ema
+
+
+def calculate_sma(close: np.ndarray, period: int) -> np.ndarray:
+    """
+    Calculate Simple Moving Average using only past data.
+    
+    Args:
+        close: Array of close prices
+        period: SMA period
+    
+    Returns:
+        Array of SMA values
+    """
+    n = len(close)
+    sma = np.zeros(n, dtype=np.float64)
+    
+    if n < period:
+        return sma
+    
+    close_series = pd.Series(close)
+    sma_values = close_series.rolling(window=period, min_periods=period).mean().values
+    sma = np.nan_to_num(sma_values, nan=0.0)
+    
+    return sma
 
 
 def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
@@ -174,6 +210,41 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     return atr
 
 
+def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_dev: float = 2.0) -> tuple:
+    """
+    Calculate Bollinger Bands using only past data.
+    
+    Args:
+        close: Array of close prices
+        period: BB period
+        std_dev: Standard deviation multiplier
+    
+    Returns:
+        Tuple of (upper, middle, lower, width) arrays
+    """
+    n = len(close)
+    upper = np.zeros(n, dtype=np.float64)
+    middle = np.zeros(n, dtype=np.float64)
+    lower = np.zeros(n, dtype=np.float64)
+    width = np.zeros(n, dtype=np.float64)
+    
+    if n < period:
+        return upper, middle, lower, width
+    
+    close_series = pd.Series(close)
+    middle_series = close_series.rolling(window=period, min_periods=period).mean()
+    std_series = close_series.rolling(window=period, min_periods=period).std()
+    
+    middle = np.nan_to_num(middle_series.values, nan=0.0)
+    std = np.nan_to_num(std_series.values, nan=0.0)
+    
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
+    width = (upper - lower) / np.where(middle > 0, middle, 1.0)
+    
+    return upper, middle, lower, width
+
+
 def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
     """
     Calculate volume ratio relative to rolling average.
@@ -199,6 +270,47 @@ def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray
     volume_ratio[mask] = volume[mask] / rolling_avg[mask]
     
     return volume_ratio
+
+
+def detect_rsi_divergence(close: np.ndarray, rsi: np.ndarray, lookback: int = 2) -> np.ndarray:
+    """
+    Detect RSI divergence using only past data.
+    
+    Bullish divergence: Price makes lower low, RSI makes higher low
+    Bearish divergence: Price makes higher high, RSI makes lower high
+    
+    Args:
+        close: Array of close prices
+        rsi: Array of RSI values
+        lookback: Number of bars to look back for divergence
+    
+    Returns:
+        Array of divergence signals (1=bullish, -1=bearish, 0=none)
+    """
+    n = len(close)
+    divergence = np.zeros(n, dtype=np.float64)
+    
+    if n < lookback + 2:
+        return divergence
+    
+    for i in range(lookback + 1, n):
+        # Get prices and RSI for lookback period
+        closes = close[i-lookback-1:i+1]
+        rsis = rsi[i-lookback-1:i+1]
+        
+        # Check for bullish divergence (price lower low, RSI higher low)
+        if closes[-1] < closes[0] and rsis[-1] > rsis[0]:
+            # Verify it's actually a local minimum
+            if closes[-1] <= min(closes[1:-1]) if len(closes) > 2 else True:
+                divergence[i] = 1.0
+        
+        # Check for bearish divergence (price higher high, RSI lower high)
+        elif closes[-1] > closes[0] and rsis[-1] < rsis[0]:
+            # Verify it's actually a local maximum
+            if closes[-1] >= max(closes[1:-1]) if len(closes) > 2 else True:
+                divergence[i] = -1.0
+    
+    return divergence
 
 
 def calculate_volatility_regime(atr: np.ndarray, close: np.ndarray, lookback: int = 50) -> np.ndarray:
@@ -237,24 +349,51 @@ def calculate_volatility_regime(atr: np.ndarray, close: np.ndarray, lookback: in
     return regime
 
 
+def smooth_signal(signals: np.ndarray, period: int = 3) -> np.ndarray:
+    """
+    Smooth signals using EMA to reduce whipsaws.
+    Only uses past signal data (no look-ahead).
+    
+    Args:
+        signals: Array of raw signals
+        period: Smoothing period
+    
+    Returns:
+        Array of smoothed signals
+    """
+    n = len(signals)
+    smoothed = np.zeros(n, dtype=np.float64)
+    
+    if n < period:
+        return signals.copy()
+    
+    signal_series = pd.Series(signals)
+    smoothed_series = signal_series.ewm(span=period, adjust=False, min_periods=period).mean()
+    smoothed = np.nan_to_num(smoothed_series.values, nan=0.0)
+    
+    return smoothed
+
+
 # =============================================================================
 # Signal Generation
 # =============================================================================
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Multi-Timeframe Trend Following Strategy with Momentum Confirmation.
+    Enhanced Multi-Timeframe Trend Strategy with Squeeze & Divergence.
     
     Signal Logic:
     1. Major trend: Price relative to 200 EMA defines overall direction
-    2. Trend alignment: 9 > 21 > 50 > 200 (bullish) or reverse (bearish)
-    3. Momentum filter: RSI in reasonable range (dynamic thresholds)
-    4. Volume confirmation: Volume spike for breakout validation
-    5. Volatility scaling: ATR-based position sizing with regime adjustment
+    2. Trend alignment: EMA stack alignment (9/21/50/200)
+    3. Bollinger squeeze: Wait for compression before expansion
+    4. RSI divergence: Early reversal signals
+    5. Momentum filter: RSI in reasonable range
+    6. Volume confirmation: Volume spike for breakout validation
+    7. Volatility scaling: ATR-based position sizing with regime adjustment
     
     Entry Conditions:
-    - LONG: Price > EMA200 + EMA9>21>50 + RSI 45-75 + volume confirmation
-    - SHORT: Price < EMA200 + EMA9<21<50 + RSI 25-55 + volume confirmation
+    - LONG: Price > EMA200 + EMA stack bullish + BB expanding + (RSI ok OR bullish divergence)
+    - SHORT: Price < EMA200 + EMA stack bearish + BB expanding + (RSI ok OR bearish divergence)
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -285,24 +424,45 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     high = np.where(high <= 0, close, high)
     low = np.where(low <= 0, close * 0.99, low)
     
+    # Calculate volatility for adaptive EMA periods
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    atr_pct = atr / np.where(close > 0, close, 1.0)
+    
+    # Adaptive EMA periods based on volatility
+    vol_factor = np.clip(atr_pct / VOLATILITY_TARGET, 0.5, 2.0)
+    ema_fast = int(EMA_FAST_BASE * vol_factor)
+    ema_medium = int(EMA_MEDIUM_BASE * vol_factor)
+    ema_slow = int(EMA_SLOW_BASE * vol_factor)
+    
+    # Ensure minimum periods
+    ema_fast = max(ema_fast, 5)
+    ema_medium = max(ema_medium, 10)
+    ema_slow = max(ema_slow, 20)
+    
     # Calculate all indicators
-    ema_fast = calculate_ema(close, EMA_FAST)
-    ema_medium = calculate_ema(close, EMA_MEDIUM)
-    ema_slow = calculate_ema(close, EMA_SLOW)
-    ema_major = calculate_ema(close, EMA_MAJOR)
+    ema_fast_arr = calculate_ema(close, ema_fast)
+    ema_medium_arr = calculate_ema(close, ema_medium)
+    ema_slow_arr = calculate_ema(close, ema_slow)
+    ema_major_arr = calculate_ema(close, EMA_MAJOR)
     
     rsi = calculate_rsi(close, RSI_PERIOD)
     
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    bb_upper, bb_middle, bb_lower, bb_width = calculate_bollinger_bands(
+        close, BB_PERIOD, BB_STD_DEV
+    )
+    
     volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
     vol_regime = calculate_volatility_regime(atr, close, 50)
+    rsi_divergence = detect_rsi_divergence(close, rsi, RSI_DIVERGENCE_LOOKBACK)
     
     # Determine minimum valid index
     min_valid_index = max(
         EMA_MAJOR,
+        ema_slow + 10,
         RSI_PERIOD + 1,
         ATR_PERIOD + 1,
         VOLUME_LOOKBACK,
+        BB_PERIOD,
         50  # For volatility regime
     )
     
@@ -314,30 +474,42 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             continue
         
         # Check volatility regime (avoid extreme volatility)
-        atr_pct = atr[i] / close[i]
-        if atr_pct < VOLATILITY_MIN or atr_pct > VOLATILITY_MAX:
+        current_atr_pct = atr[i] / close[i]
+        if current_atr_pct < VOLATILITY_MIN or current_atr_pct > VOLATILITY_MAX:
             signals[i] = 0.0
             continue
         
         # Major trend filter (200 EMA)
-        price_vs_major = (close[i] - ema_major[i]) / close[i]
+        price_vs_major = (close[i] - ema_major_arr[i]) / close[i]
         major_trend_bullish = price_vs_major > TREND_ALIGNMENT_MIN
         major_trend_bearish = price_vs_major < -TREND_ALIGNMENT_MIN
         
         # EMA stack alignment
-        ema_stack_bullish = (ema_fast[i] > ema_medium[i] > ema_slow[i] > ema_major[i])
-        ema_stack_bearish = (ema_fast[i] < ema_medium[i] < ema_slow[i] < ema_major[i])
+        ema_stack_bullish = (
+            ema_fast_arr[i] > ema_medium_arr[i] and
+            ema_medium_arr[i] > ema_slow_arr[i] and
+            ema_slow_arr[i] > ema_major_arr[i]
+        )
+        ema_stack_bearish = (
+            ema_fast_arr[i] < ema_medium_arr[i] and
+            ema_medium_arr[i] < ema_slow_arr[i] and
+            ema_slow_arr[i] < ema_major_arr[i]
+        )
         
         # Calculate trend strength
-        trend_strength_fast = abs(ema_fast[i] - ema_medium[i]) / close[i]
-        trend_strength_medium = abs(ema_medium[i] - ema_slow[i]) / close[i]
-        trend_strength_slow = abs(ema_slow[i] - ema_major[i]) / close[i]
+        trend_strength_fast = abs(ema_fast_arr[i] - ema_medium_arr[i]) / close[i]
+        trend_strength_medium = abs(ema_medium_arr[i] - ema_slow_arr[i]) / close[i]
+        trend_strength_slow = abs(ema_slow_arr[i] - ema_major_arr[i]) / close[i]
         trend_strength = min(trend_strength_fast, trend_strength_medium, trend_strength_slow)
         
-        # Filter: trend must be strong enough and aligned
+        # Filter: trend must be strong enough
         if trend_strength < TREND_STRENGTH_MIN:
             signals[i] = 0.0
             continue
+        
+        # Bollinger Band squeeze/expansion filter
+        bb_expanding = bb_width[i] > BB_SQUEEZE_THRESHOLD
+        bb_not_extreme = bb_width[i] < BB_EXPANSION_THRESHOLD * 2
         
         # Dynamic RSI thresholds based on trend strength
         rsi_adjustment = min(trend_strength / 0.005, 0.5)
@@ -350,6 +522,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         rsi_long_ok = rsi_long_min <= rsi[i] <= rsi_long_max
         rsi_short_ok = rsi_short_min <= rsi[i] <= rsi_short_max
         
+        # RSI divergence signals
+        bullish_div = rsi_divergence[i] == 1.0
+        bearish_div = rsi_divergence[i] == -1.0
+        
         # Volume confirmation
         volume_base_ok = volume_ratio[i] >= VOLUME_BASE_THRESHOLD
         volume_spike = volume_ratio[i] >= VOLUME_SPIKE_THRESHOLD
@@ -359,69 +535,81 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         signal_confidence = 0.0
         
         # LONG signal
-        if major_trend_bullish and ema_stack_bullish and rsi_long_ok:
-            base_confidence = 0.5
-            
-            # Trend strength factor
-            trend_factor = min(trend_strength / 0.006, 1.0)
-            base_confidence += trend_factor * 0.3
-            
-            # Volume boost
-            if volume_spike:
-                base_confidence *= 1.2
-            elif volume_base_ok:
-                base_confidence *= 1.05
-            
-            # RSI quality (prefer momentum in trending market)
-            rsi_quality = 1.0
-            if 50 <= rsi[i] <= 65:
+        if major_trend_bullish and ema_stack_bullish and bb_expanding and bb_not_extreme:
+            # Need either RSI ok OR bullish divergence
+            if rsi_long_ok or bullish_div:
+                base_confidence = 0.5
+                
+                # Trend strength factor
+                trend_factor = min(trend_strength / 0.006, 1.0)
+                base_confidence += trend_factor * 0.3
+                
+                # Divergence boost
+                if bullish_div:
+                    base_confidence += 0.15
+                
+                # Volume boost
+                if volume_spike:
+                    base_confidence *= 1.2
+                elif volume_base_ok:
+                    base_confidence *= 1.05
+                
+                # RSI quality (prefer momentum in trending market)
                 rsi_quality = 1.0
-            elif rsi_long_min <= rsi[i] < 50 or 65 < rsi[i] <= rsi_long_max:
-                rsi_quality = 0.85
-            
-            # Volatility regime adjustment
-            regime_factor = 1.0
-            if vol_regime[i] == 0:
-                regime_factor = 1.1  # Low vol = more confidence
-            elif vol_regime[i] == 2:
-                regime_factor = 0.8  # High vol = less confidence
-            
-            signal_confidence = base_confidence * rsi_quality * regime_factor
-            raw_signal = signal_confidence
+                if 50 <= rsi[i] <= 65:
+                    rsi_quality = 1.0
+                elif rsi_long_min <= rsi[i] < 50 or 65 < rsi[i] <= rsi_long_max:
+                    rsi_quality = 0.85
+                
+                # Volatility regime adjustment
+                regime_factor = 1.0
+                if vol_regime[i] == 0:
+                    regime_factor = 1.1  # Low vol = more confidence
+                elif vol_regime[i] == 2:
+                    regime_factor = 0.8  # High vol = less confidence
+                
+                signal_confidence = base_confidence * rsi_quality * regime_factor
+                raw_signal = signal_confidence
         
         # SHORT signal
-        elif major_trend_bearish and ema_stack_bearish and rsi_short_ok:
-            base_confidence = 0.5
-            
-            trend_factor = min(trend_strength / 0.006, 1.0)
-            base_confidence += trend_factor * 0.3
-            
-            if volume_spike:
-                base_confidence *= 1.2
-            elif volume_base_ok:
-                base_confidence *= 1.05
-            
-            # RSI quality
-            rsi_quality = 1.0
-            if 35 <= rsi[i] <= 50:
+        elif major_trend_bearish and ema_stack_bearish and bb_expanding and bb_not_extreme:
+            # Need either RSI ok OR bearish divergence
+            if rsi_short_ok or bearish_div:
+                base_confidence = 0.5
+                
+                trend_factor = min(trend_strength / 0.006, 1.0)
+                base_confidence += trend_factor * 0.3
+                
+                # Divergence boost
+                if bearish_div:
+                    base_confidence += 0.15
+                
+                if volume_spike:
+                    base_confidence *= 1.2
+                elif volume_base_ok:
+                    base_confidence *= 1.05
+                
+                # RSI quality
                 rsi_quality = 1.0
-            elif rsi_short_min <= rsi[i] < 35 or 50 < rsi[i] <= rsi_short_max:
-                rsi_quality = 0.85
-            
-            # Volatility regime adjustment
-            regime_factor = 1.0
-            if vol_regime[i] == 0:
-                regime_factor = 1.1
-            elif vol_regime[i] == 2:
-                regime_factor = 0.8
-            
-            signal_confidence = base_confidence * rsi_quality * regime_factor
-            raw_signal = -signal_confidence
+                if 35 <= rsi[i] <= 50:
+                    rsi_quality = 1.0
+                elif rsi_short_min <= rsi[i] < 35 or 50 < rsi[i] <= rsi_short_max:
+                    rsi_quality = 0.85
+                
+                # Volatility regime adjustment
+                regime_factor = 1.0
+                if vol_regime[i] == 0:
+                    regime_factor = 1.1
+                elif vol_regime[i] == 2:
+                    regime_factor = 0.8
+                
+                signal_confidence = base_confidence * rsi_quality * regime_factor
+                raw_signal = -signal_confidence
         
         # Apply volatility adjustment for position sizing
         vol_factor = 1.0
-        if atr_pct > 0:
-            vol_factor = min(1.5, VOLATILITY_TARGET / max(atr_pct, 0.001))
+        if current_atr_pct > 0:
+            vol_factor = min(1.5, VOLATILITY_TARGET / max(current_atr_pct, 0.001))
         
         signal = raw_signal * vol_factor
         
@@ -432,5 +620,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         signal = np.clip(signal, -MAX_SIGNAL, MAX_SIGNAL)
         
         signals[i] = signal
+    
+    # Smooth signals to reduce whipsaws
+    signals = smooth_signal(signals, SIGNAL_SMOOTHING_PERIOD)
+    
+    # Final clip to ensure valid range
+    signals = np.clip(signals, -1.0, 1.0)
     
     return signals
