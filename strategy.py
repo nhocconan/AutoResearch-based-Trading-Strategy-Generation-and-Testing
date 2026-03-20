@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Simplified Trend Following with Momentum Confirmation
+strategy.py - Adaptive Trend-Mean Reversion Hybrid
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,18 +11,17 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Simpler trend-following approach after #002 was too restrictive (Sharpe=0.000).
-    - Primary signal: EMA crossover for trend direction
-    - Confirmation: RSI momentum (relaxed thresholds)
-    - Volume: Secondary confirmation only
-    - Removed: BB position filter (was too restrictive)
+    Building on #004's success (Sharpe=0.208), this strategy adds:
+    - Bollinger Band position for volatility context
+    - Adaptive RSI thresholds based on trend strength
+    - Better volatility regime detection
+    - Volume momentum confirmation
     
-    Key improvement over #002:
-    - Fewer filters = more trade opportunities
-    - Relaxed RSI thresholds
-    - Lower trend strength requirement
-    - Simpler signal calculation
-    - Slightly higher leverage (2.5 vs 2.0)
+    Key improvements over #004:
+    - BB position helps distinguish trend vs mean-reversion regimes
+    - Dynamic RSI thresholds (tighter in strong trends, looser in weak)
+    - Volatility regime filter (avoid trading in extreme volatility)
+    - Smoother signal transitions
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -37,26 +36,39 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "simplified_trend_momentum"
+name = "adaptive_trend_mean_reversion"
 timeframe = "1h"
-leverage = 2.5  # Moderate leverage for better capture of trends
+leverage = 2.0  # Conservative leverage for better risk management
 
-# Strategy parameters - simpler and less restrictive than #002
-EMA_FAST = 9                  # Faster EMA for quicker trend detection
-EMA_SLOW = 21                 # Slower EMA for trend baseline
-EMA_CONFIRM = 50              # Longer EMA for trend confirmation
-RSI_PERIOD = 14               # RSI calculation period
-RSI_LONG_MIN = 40             # Relaxed minimum RSI for long entries
-RSI_LONG_MAX = 75             # Relaxed maximum RSI for long entries
-RSI_SHORT_MIN = 25            # Relaxed minimum RSI for short entries
-RSI_SHORT_MAX = 60            # Relaxed maximum RSI for short entries
-VOLUME_LOOKBACK = 20          # Lookback for volume average
-VOLUME_THRESHOLD = 1.0        # Volume threshold (relaxed from 1.2)
-ATR_PERIOD = 14               # ATR calculation period
-VOLATILITY_TARGET = 0.015     # Target hourly volatility for position sizing
-MIN_SIGNAL = 0.15             # Lower minimum signal magnitude to trade
-MAX_SIGNAL = 0.80             # Maximum signal magnitude
-TREND_STRENGTH_MIN = 0.0015   # Lower minimum EMA spread ratio for valid trend
+# Trend parameters
+EMA_FAST = 12
+EMA_SLOW = 26
+EMA_CONFIRM = 50
+
+# Bollinger Band parameters
+BB_PERIOD = 20
+BB_STD = 2.0
+
+# RSI parameters
+RSI_PERIOD = 14
+RSI_LONG_MIN = 35
+RSI_LONG_MAX = 70
+RSI_SHORT_MIN = 30
+RSI_SHORT_MAX = 65
+
+# Volume parameters
+VOLUME_LOOKBACK = 20
+VOLUME_THRESHOLD = 1.1
+
+# Volatility parameters
+ATR_PERIOD = 14
+VOLATILITY_TARGET = 0.012
+VOLATILITY_MAX = 0.03  # Avoid trading in extreme volatility
+
+# Signal parameters
+MIN_SIGNAL = 0.12
+MAX_SIGNAL = 0.75
+TREND_STRENGTH_MIN = 0.0012
 
 
 # =============================================================================
@@ -66,13 +78,6 @@ TREND_STRENGTH_MIN = 0.0015   # Lower minimum EMA spread ratio for valid trend
 def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
     """
     Calculate Exponential Moving Average using only past data.
-    
-    Args:
-        close: Array of close prices
-        period: EMA period
-    
-    Returns:
-        Array of EMA values
     """
     n = len(close)
     ema = np.zeros(n, dtype=np.float64)
@@ -90,13 +95,6 @@ def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
 def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
     """
     Calculate Relative Strength Index using only past data.
-    
-    Args:
-        close: Array of close prices
-        period: RSI period
-    
-    Returns:
-        Array of RSI values (0-100)
     """
     n = len(close)
     rsi = np.full(n, 50.0, dtype=np.float64)
@@ -124,15 +122,6 @@ def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
 def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
     """
     Calculate Average True Range using only past data.
-    
-    Args:
-        high: Array of high prices
-        low: Array of low prices
-        close: Array of close prices
-        period: ATR period
-    
-    Returns:
-        Array of ATR values
     """
     n = len(close)
     atr = np.zeros(n, dtype=np.float64)
@@ -158,17 +147,36 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     return atr
 
 
+def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_dev: float = 2.0) -> tuple:
+    """
+    Calculate Bollinger Bands using only past data.
+    Returns: (upper_band, middle_band, lower_band)
+    """
+    n = len(close)
+    upper = np.zeros(n, dtype=np.float64)
+    middle = np.zeros(n, dtype=np.float64)
+    lower = np.zeros(n, dtype=np.float64)
+    
+    if n < period:
+        return upper, middle, lower
+    
+    close_series = pd.Series(close)
+    rolling_mean = close_series.rolling(window=period, min_periods=period).mean()
+    rolling_std = close_series.rolling(window=period, min_periods=period).std()
+    
+    middle = np.nan_to_num(rolling_mean.values, nan=0.0)
+    std_values = np.nan_to_num(rolling_std.values, nan=0.0)
+    
+    upper = middle + (std_dev * std_values)
+    lower = middle - (std_dev * std_values)
+    
+    return upper, middle, lower
+
+
 def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
     """
     Calculate volume ratio relative to rolling average.
     Only uses past volume data (no look-ahead).
-    
-    Args:
-        volume: Array of volume values
-        lookback: Rolling window for average calculation
-    
-    Returns:
-        Array of volume ratios
     """
     n = len(volume)
     volume_ratio = np.ones(n, dtype=np.float64)
@@ -185,24 +193,41 @@ def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray
     return volume_ratio
 
 
+def calculate_bb_position(close: np.ndarray, upper: np.ndarray, lower: np.ndarray) -> np.ndarray:
+    """
+    Calculate position within Bollinger Bands.
+    0 = at lower band, 0.5 = at middle, 1 = at upper band
+    """
+    n = len(close)
+    bb_pos = np.full(n, 0.5, dtype=np.float64)
+    
+    for i in range(n):
+        if upper[i] > lower[i]:
+            bb_pos[i] = (close[i] - lower[i]) / (upper[i] - lower[i])
+        else:
+            bb_pos[i] = 0.5
+    
+    return bb_pos
+
+
 # =============================================================================
 # Signal Generation
 # =============================================================================
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Simplified Trend Following Strategy with Momentum Confirmation.
+    Adaptive Trend-Mean Reversion Hybrid Strategy.
     
     Signal Logic:
-    1. Primary trend: EMA fast > EMA slow (bullish) or < (bearish)
-    2. Trend confirmation: Price above/below EMA confirm
-    3. Momentum filter: RSI in reasonable range (relaxed thresholds)
-    4. Volume confirmation: Optional boost (not required)
-    5. Volatility scaling: ATR-based position sizing
+    1. Primary trend: EMA crossover for direction
+    2. Volatility context: Bollinger Band position
+    3. Momentum: RSI with adaptive thresholds
+    4. Volume: Confirmation for breakouts
+    5. Volatility filter: Avoid extreme volatility regimes
     
     Entry Conditions:
-    - LONG: EMA_fast > EMA_slow > EMA_confirm + RSI 40-75
-    - SHORT: EMA_fast < EMA_slow < EMA_confirm + RSI 25-60
+    - LONG: EMA_fast > EMA_slow > EMA_confirm + RSI 35-70 + BB position < 0.8
+    - SHORT: EMA_fast < EMA_slow < EMA_confirm + RSI 30-65 + BB position > 0.2
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -243,9 +268,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
     
+    bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(close, BB_PERIOD, BB_STD)
+    bb_position = calculate_bb_position(close, bb_upper, bb_lower)
+    
     # Determine minimum valid index
     min_valid_index = max(
         EMA_CONFIRM,
+        BB_PERIOD,
         RSI_PERIOD + 1,
         ATR_PERIOD + 1,
         VOLUME_LOOKBACK
@@ -268,73 +297,107 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         trend_strength = min(abs(ema_spread_fast_slow), abs(ema_spread_slow_confirm))
         
-        # Filter: trend must be strong enough (relaxed from #002)
+        # Filter: trend must be strong enough
         if trend_strength < TREND_STRENGTH_MIN:
             signals[i] = 0.0
             continue
         
-        # RSI momentum filter (relaxed thresholds)
-        rsi_long_ok = RSI_LONG_MIN <= rsi[i] <= RSI_LONG_MAX
-        rsi_short_ok = RSI_SHORT_MIN <= rsi[i] <= RSI_SHORT_MAX
+        # Volatility regime filter - avoid extreme volatility
+        atr_pct = atr[i] / close[i]
+        if atr_pct > VOLATILITY_MAX:
+            signals[i] = 0.0
+            continue
         
-        # Volume confirmation (optional boost, not required)
+        # Adaptive RSI thresholds based on trend strength
+        # Stronger trend = wider RSI range allowed
+        rsi_range_expansion = min(trend_strength / 0.005, 0.15)
+        
+        rsi_long_min_adj = RSI_LONG_MIN - (rsi_range_expansion * 10)
+        rsi_long_max_adj = RSI_LONG_MAX + (rsi_range_expansion * 10)
+        rsi_short_min_adj = RSI_SHORT_MIN - (rsi_range_expansion * 10)
+        rsi_short_max_adj = RSI_SHORT_MAX + (rsi_range_expansion * 10)
+        
+        # RSI momentum filter with adaptive thresholds
+        rsi_long_ok = rsi_long_min_adj <= rsi[i] <= rsi_long_max_adj
+        rsi_short_ok = rsi_short_min_adj <= rsi[i] <= rsi_short_max_adj
+        
+        # Bollinger Band position filter
+        # For longs: prefer not at upper band (overbought)
+        # For shorts: prefer not at lower band (oversold)
+        bb_long_ok = bb_position[i] < 0.85
+        bb_short_ok = bb_position[i] > 0.15
+        
+        # Volume confirmation (optional boost)
         volume_confirmed = volume_ratio[i] >= VOLUME_THRESHOLD
         
         # Calculate signal
         raw_signal = 0.0
         signal_confidence = 0.0
         
-        if trend_bullish and rsi_long_ok:
+        if trend_bullish and rsi_long_ok and bb_long_ok:
             # Long signal
             base_confidence = 0.5
             
             # Add confidence for stronger trend
-            trend_factor = min(trend_strength / 0.008, 1.0)
+            trend_factor = min(trend_strength / 0.006, 1.0)
             base_confidence += trend_factor * 0.3
             
-            # Volume boost (optional)
+            # Volume boost
             if volume_confirmed:
-                base_confidence *= 1.15
+                base_confidence *= 1.12
             
-            # RSI quality (prefer momentum but not overextended)
-            rsi_quality = 1.0
-            if 50 <= rsi[i] <= 65:
-                rsi_quality = 1.0
-            elif 40 <= rsi[i] < 50 or 65 < rsi[i] <= 75:
-                rsi_quality = 0.9
-            
-            signal_confidence = base_confidence * rsi_quality
-            raw_signal = signal_confidence
-            
-        elif trend_bearish and rsi_short_ok:
-            # Short signal
-            base_confidence = 0.5
-            
-            trend_factor = min(trend_strength / 0.008, 1.0)
-            base_confidence += trend_factor * 0.3
-            
-            if volume_confirmed:
-                base_confidence *= 1.15
+            # BB position quality (prefer middle to lower half)
+            bb_quality = 1.0
+            if 0.3 <= bb_position[i] <= 0.6:
+                bb_quality = 1.0
+            elif 0.15 <= bb_position[i] < 0.3 or 0.6 < bb_position[i] <= 0.85:
+                bb_quality = 0.92
             
             # RSI quality
             rsi_quality = 1.0
-            if 35 <= rsi[i] <= 50:
+            if 45 <= rsi[i] <= 60:
                 rsi_quality = 1.0
-            elif 25 <= rsi[i] < 35 or 50 < rsi[i] <= 60:
-                rsi_quality = 0.9
+            elif 35 <= rsi[i] < 45 or 60 < rsi[i] <= 70:
+                rsi_quality = 0.93
             
-            signal_confidence = base_confidence * rsi_quality
+            signal_confidence = base_confidence * bb_quality * rsi_quality
+            raw_signal = signal_confidence
+            
+        elif trend_bearish and rsi_short_ok and bb_short_ok:
+            # Short signal
+            base_confidence = 0.5
+            
+            trend_factor = min(trend_strength / 0.006, 1.0)
+            base_confidence += trend_factor * 0.3
+            
+            if volume_confirmed:
+                base_confidence *= 1.12
+            
+            # BB position quality (prefer middle to upper half)
+            bb_quality = 1.0
+            if 0.4 <= bb_position[i] <= 0.7:
+                bb_quality = 1.0
+            elif 0.15 <= bb_position[i] < 0.4 or 0.7 < bb_position[i] <= 0.85:
+                bb_quality = 0.92
+            
+            # RSI quality
+            rsi_quality = 1.0
+            if 40 <= rsi[i] <= 55:
+                rsi_quality = 1.0
+            elif 30 <= rsi[i] < 40 or 55 < rsi[i] <= 65:
+                rsi_quality = 0.93
+            
+            signal_confidence = base_confidence * bb_quality * rsi_quality
             raw_signal = -signal_confidence
         
         # Apply volatility adjustment
-        atr_pct = atr[i] / close[i]
         vol_factor = 1.0
         if atr_pct > 0:
-            vol_factor = min(1.5, VOLATILITY_TARGET / max(atr_pct, 0.001))
+            vol_factor = min(1.4, VOLATILITY_TARGET / max(atr_pct, 0.001))
         
         signal = raw_signal * vol_factor
         
-        # Apply thresholds (relaxed from #002)
+        # Apply thresholds
         if abs(signal) < MIN_SIGNAL:
             signal = 0.0
         
