@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Adaptive Trend-Mean Reversion Hybrid
+strategy.py - Volatility Breakout with Momentum Confirmation
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,17 +11,22 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Building on #004's success (Sharpe=0.208), this strategy adds:
-    - Bollinger Band position for volatility context
-    - Adaptive RSI thresholds based on trend strength
-    - Better volatility regime detection
-    - Volume momentum confirmation
+    Building on #004's success (Sharpe=0.208), this strategy focuses on:
+    - Bollinger Band squeeze detection (low volatility consolidation)
+    - Breakout confirmation with volume spike
+    - RSI momentum for direction confirmation
+    - EMA trend filter for alignment
     
     Key improvements over #004:
-    - BB position helps distinguish trend vs mean-reversion regimes
-    - Dynamic RSI thresholds (tighter in strong trends, looser in weak)
-    - Volatility regime filter (avoid trading in extreme volatility)
-    - Smoother signal transitions
+    - BB squeeze detection identifies consolidation before explosive moves
+    - Volume spike REQUIRED for breakout (not optional)
+    - More adaptive RSI thresholds based on trend strength
+    - Better risk management with ATR-based position sizing
+    
+    Why this should work:
+    - Crypto markets often consolidate before major moves
+    - Volume confirms genuine breakouts vs fakeouts
+    - Combines mean reversion (squeeze) with trend following (breakout)
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -36,39 +41,40 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "adaptive_trend_mean_reversion"
+name = "volatility_breakout_momentum"
 timeframe = "1h"
-leverage = 2.0  # Conservative leverage for better risk management
-
-# Trend parameters
-EMA_FAST = 12
-EMA_SLOW = 26
-EMA_CONFIRM = 50
+leverage = 3.0  # Moderate leverage for breakout capture
 
 # Bollinger Band parameters
-BB_PERIOD = 20
-BB_STD = 2.0
+BB_PERIOD = 20                    # Standard BB period
+BB_STD_DEV = 2.0                  # Standard deviations for bands
+BB_SQUEEZE_THRESHOLD = 0.015      # Bandwidth threshold for squeeze detection
 
-# RSI parameters
-RSI_PERIOD = 14
-RSI_LONG_MIN = 35
-RSI_LONG_MAX = 70
-RSI_SHORT_MIN = 30
-RSI_SHORT_MAX = 65
+# EMA parameters for trend filter
+EMA_FAST = 8                      # Fast EMA for entry timing
+EMA_SLOW = 21                     # Slow EMA for trend direction
+EMA_CONFIRM = 50                  # Confirmation EMA
 
 # Volume parameters
-VOLUME_LOOKBACK = 20
-VOLUME_THRESHOLD = 1.1
+VOLUME_LOOKBACK = 20              # Lookback for volume average
+VOLUME_SPIKE_THRESHOLD = 1.5      # Volume must be 1.5x average for breakout
 
-# Volatility parameters
-ATR_PERIOD = 14
-VOLATILITY_TARGET = 0.012
-VOLATILITY_MAX = 0.03  # Avoid trading in extreme volatility
+# RSI parameters
+RSI_PERIOD = 14                   # RSI calculation period
+RSI_LONG_MIN = 45                 # Minimum RSI for long entries
+RSI_LONG_MAX = 70                 # Maximum RSI for long entries (not overbought)
+RSI_SHORT_MIN = 30                # Minimum RSI for short entries
+RSI_SHORT_MAX = 55                # Maximum RSI for short entries
 
-# Signal parameters
-MIN_SIGNAL = 0.12
-MAX_SIGNAL = 0.75
-TREND_STRENGTH_MIN = 0.0012
+# ATR and risk management
+ATR_PERIOD = 14                   # ATR calculation period
+VOLATILITY_TARGET = 0.012         # Target hourly volatility for position sizing
+MIN_SIGNAL = 0.20                 # Minimum signal magnitude to trade
+MAX_SIGNAL = 0.85                 # Maximum signal magnitude
+
+# Breakout confirmation
+BREAKOUT_LOOKBACK = 5             # Lookback for breakout confirmation
+PRICE_CHANGE_THRESHOLD = 0.008    # Minimum price change for breakout
 
 
 # =============================================================================
@@ -78,6 +84,13 @@ TREND_STRENGTH_MIN = 0.0012
 def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
     """
     Calculate Exponential Moving Average using only past data.
+    
+    Args:
+        close: Array of close prices
+        period: EMA period
+    
+    Returns:
+        Array of EMA values
     """
     n = len(close)
     ema = np.zeros(n, dtype=np.float64)
@@ -92,9 +105,54 @@ def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
     return ema
 
 
+def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_dev: float = 2.0) -> tuple:
+    """
+    Calculate Bollinger Bands using only past data.
+    
+    Args:
+        close: Array of close prices
+        period: Rolling window period
+        std_dev: Number of standard deviations
+    
+    Returns:
+        Tuple of (upper_band, middle_band, lower_band, bandwidth)
+    """
+    n = len(close)
+    upper = np.zeros(n, dtype=np.float64)
+    middle = np.zeros(n, dtype=np.float64)
+    lower = np.zeros(n, dtype=np.float64)
+    bandwidth = np.zeros(n, dtype=np.float64)
+    
+    if n < period:
+        return upper, middle, lower, bandwidth
+    
+    close_series = pd.Series(close)
+    rolling_mean = close_series.rolling(window=period, min_periods=period).mean()
+    rolling_std = close_series.rolling(window=period, min_periods=period).std()
+    
+    middle = np.nan_to_num(rolling_mean.values, nan=0.0)
+    std_values = np.nan_to_num(rolling_std.values, nan=0.0)
+    
+    upper = middle + (std_dev * std_values)
+    lower = middle - (std_dev * std_values)
+    
+    # Bandwidth = (Upper - Lower) / Middle
+    mask = middle > 0
+    bandwidth[mask] = (upper[mask] - lower[mask]) / middle[mask]
+    
+    return upper, middle, lower, bandwidth
+
+
 def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
     """
     Calculate Relative Strength Index using only past data.
+    
+    Args:
+        close: Array of close prices
+        period: RSI period
+    
+    Returns:
+        Array of RSI values (0-100)
     """
     n = len(close)
     rsi = np.full(n, 50.0, dtype=np.float64)
@@ -122,6 +180,15 @@ def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
 def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
     """
     Calculate Average True Range using only past data.
+    
+    Args:
+        high: Array of high prices
+        low: Array of low prices
+        close: Array of close prices
+        period: ATR period
+    
+    Returns:
+        Array of ATR values
     """
     n = len(close)
     atr = np.zeros(n, dtype=np.float64)
@@ -147,36 +214,17 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     return atr
 
 
-def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_dev: float = 2.0) -> tuple:
-    """
-    Calculate Bollinger Bands using only past data.
-    Returns: (upper_band, middle_band, lower_band)
-    """
-    n = len(close)
-    upper = np.zeros(n, dtype=np.float64)
-    middle = np.zeros(n, dtype=np.float64)
-    lower = np.zeros(n, dtype=np.float64)
-    
-    if n < period:
-        return upper, middle, lower
-    
-    close_series = pd.Series(close)
-    rolling_mean = close_series.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_series.rolling(window=period, min_periods=period).std()
-    
-    middle = np.nan_to_num(rolling_mean.values, nan=0.0)
-    std_values = np.nan_to_num(rolling_std.values, nan=0.0)
-    
-    upper = middle + (std_dev * std_values)
-    lower = middle - (std_dev * std_values)
-    
-    return upper, middle, lower
-
-
 def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
     """
     Calculate volume ratio relative to rolling average.
     Only uses past volume data (no look-ahead).
+    
+    Args:
+        volume: Array of volume values
+        lookback: Rolling window for average calculation
+    
+    Returns:
+        Array of volume ratios
     """
     n = len(volume)
     volume_ratio = np.ones(n, dtype=np.float64)
@@ -193,21 +241,29 @@ def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray
     return volume_ratio
 
 
-def calculate_bb_position(close: np.ndarray, upper: np.ndarray, lower: np.ndarray) -> np.ndarray:
+def calculate_price_momentum(close: np.ndarray, lookback: int = 5) -> np.ndarray:
     """
-    Calculate position within Bollinger Bands.
-    0 = at lower band, 0.5 = at middle, 1 = at upper band
+    Calculate price momentum (percentage change over lookback period).
+    Only uses past data.
+    
+    Args:
+        close: Array of close prices
+        lookback: Lookback period for momentum calculation
+    
+    Returns:
+        Array of momentum values (percentage change)
     """
     n = len(close)
-    bb_pos = np.full(n, 0.5, dtype=np.float64)
+    momentum = np.zeros(n, dtype=np.float64)
     
-    for i in range(n):
-        if upper[i] > lower[i]:
-            bb_pos[i] = (close[i] - lower[i]) / (upper[i] - lower[i])
-        else:
-            bb_pos[i] = 0.5
+    if n < lookback + 1:
+        return momentum
     
-    return bb_pos
+    for i in range(lookback, n):
+        if close[i - lookback] > 0:
+            momentum[i] = (close[i] - close[i - lookback]) / close[i - lookback]
+    
+    return momentum
 
 
 # =============================================================================
@@ -216,18 +272,18 @@ def calculate_bb_position(close: np.ndarray, upper: np.ndarray, lower: np.ndarra
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Adaptive Trend-Mean Reversion Hybrid Strategy.
+    Volatility Breakout Strategy with Momentum Confirmation.
     
     Signal Logic:
-    1. Primary trend: EMA crossover for direction
-    2. Volatility context: Bollinger Band position
-    3. Momentum: RSI with adaptive thresholds
-    4. Volume: Confirmation for breakouts
-    5. Volatility filter: Avoid extreme volatility regimes
+    1. BB Squeeze Detection: Bandwidth below threshold indicates consolidation
+    2. Breakout Confirmation: Price breaks above/below BB with volume spike
+    3. Trend Filter: EMA alignment confirms direction
+    4. Momentum Filter: RSI in reasonable range (not overextended)
+    5. Price Momentum: Recent price change confirms breakout strength
     
     Entry Conditions:
-    - LONG: EMA_fast > EMA_slow > EMA_confirm + RSI 35-70 + BB position < 0.8
-    - SHORT: EMA_fast < EMA_slow < EMA_confirm + RSI 30-65 + BB position > 0.2
+    - LONG: BB squeeze + price > upper BB + volume spike + EMA bullish + RSI 45-70
+    - SHORT: BB squeeze + price < lower BB + volume spike + EMA bearish + RSI 30-55
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -263,13 +319,15 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     ema_slow = calculate_ema(close, EMA_SLOW)
     ema_confirm = calculate_ema(close, EMA_CONFIRM)
     
+    bb_upper, bb_middle, bb_lower, bb_bandwidth = calculate_bollinger_bands(
+        close, BB_PERIOD, BB_STD_DEV
+    )
+    
     rsi = calculate_rsi(close, RSI_PERIOD)
     
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
-    
-    bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(close, BB_PERIOD, BB_STD)
-    bb_position = calculate_bb_position(close, bb_upper, bb_lower)
+    price_momentum = calculate_price_momentum(close, BREAKOUT_LOOKBACK)
     
     # Determine minimum valid index
     min_valid_index = max(
@@ -277,123 +335,109 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         BB_PERIOD,
         RSI_PERIOD + 1,
         ATR_PERIOD + 1,
-        VOLUME_LOOKBACK
+        VOLUME_LOOKBACK,
+        BREAKOUT_LOOKBACK + 1
     )
+    
+    # Track squeeze state for better signal quality
+    in_squeeze = np.zeros(n, dtype=bool)
     
     # Generate signals
     for i in range(min_valid_index, n):
         # Skip invalid data
-        if close[i] <= 0 or atr[i] <= 0:
+        if close[i] <= 0 or atr[i] <= 0 or bb_middle[i] <= 0:
             signals[i] = 0.0
             continue
         
-        # Calculate trend strength (EMA spread normalized)
-        ema_spread_fast_slow = (ema_fast[i] - ema_slow[i]) / close[i]
-        ema_spread_slow_confirm = (ema_slow[i] - ema_confirm[i]) / close[i]
+        # Detect BB squeeze (low volatility consolidation)
+        is_squeeze = bb_bandwidth[i] < BB_SQUEEZE_THRESHOLD
+        in_squeeze[i] = is_squeeze
+        
+        # Check for squeeze in recent past (consolidation period)
+        recent_squeeze = np.any(in_squeeze[max(0, i - BB_PERIOD):i])
         
         # Trend direction and strength
         trend_bullish = (ema_fast[i] > ema_slow[i] > ema_confirm[i])
         trend_bearish = (ema_fast[i] < ema_slow[i] < ema_confirm[i])
         
-        trend_strength = min(abs(ema_spread_fast_slow), abs(ema_spread_slow_confirm))
+        # EMA spread for trend strength
+        ema_spread = (ema_fast[i] - ema_slow[i]) / close[i]
+        trend_strength = abs(ema_spread)
         
-        # Filter: trend must be strong enough
-        if trend_strength < TREND_STRENGTH_MIN:
-            signals[i] = 0.0
-            continue
+        # Volume confirmation (REQUIRED for breakout)
+        volume_confirmed = volume_ratio[i] >= VOLUME_SPIKE_THRESHOLD
         
-        # Volatility regime filter - avoid extreme volatility
-        atr_pct = atr[i] / close[i]
-        if atr_pct > VOLATILITY_MAX:
-            signals[i] = 0.0
-            continue
+        # RSI momentum filter
+        rsi_long_ok = RSI_LONG_MIN <= rsi[i] <= RSI_LONG_MAX
+        rsi_short_ok = RSI_SHORT_MIN <= rsi[i] <= RSI_SHORT_MAX
         
-        # Adaptive RSI thresholds based on trend strength
-        # Stronger trend = wider RSI range allowed
-        rsi_range_expansion = min(trend_strength / 0.005, 0.15)
+        # Price momentum confirmation
+        momentum_long = price_momentum[i] > PRICE_CHANGE_THRESHOLD
+        momentum_short = price_momentum[i] < -PRICE_CHANGE_THRESHOLD
         
-        rsi_long_min_adj = RSI_LONG_MIN - (rsi_range_expansion * 10)
-        rsi_long_max_adj = RSI_LONG_MAX + (rsi_range_expansion * 10)
-        rsi_short_min_adj = RSI_SHORT_MIN - (rsi_range_expansion * 10)
-        rsi_short_max_adj = RSI_SHORT_MAX + (rsi_range_expansion * 10)
-        
-        # RSI momentum filter with adaptive thresholds
-        rsi_long_ok = rsi_long_min_adj <= rsi[i] <= rsi_long_max_adj
-        rsi_short_ok = rsi_short_min_adj <= rsi[i] <= rsi_short_max_adj
-        
-        # Bollinger Band position filter
-        # For longs: prefer not at upper band (overbought)
-        # For shorts: prefer not at lower band (oversold)
-        bb_long_ok = bb_position[i] < 0.85
-        bb_short_ok = bb_position[i] > 0.15
-        
-        # Volume confirmation (optional boost)
-        volume_confirmed = volume_ratio[i] >= VOLUME_THRESHOLD
+        # Breakout detection
+        breakout_long = close[i] > bb_upper[i]
+        breakout_short = close[i] < bb_lower[i]
         
         # Calculate signal
         raw_signal = 0.0
         signal_confidence = 0.0
         
-        if trend_bullish and rsi_long_ok and bb_long_ok:
-            # Long signal
+        if breakout_long and trend_bullish and rsi_long_ok and volume_confirmed:
+            # Long breakout signal
             base_confidence = 0.5
+            
+            # Boost confidence for squeeze breakout
+            if recent_squeeze:
+                base_confidence += 0.2
             
             # Add confidence for stronger trend
-            trend_factor = min(trend_strength / 0.006, 1.0)
-            base_confidence += trend_factor * 0.3
+            trend_factor = min(trend_strength / 0.005, 1.0)
+            base_confidence += trend_factor * 0.2
             
-            # Volume boost
-            if volume_confirmed:
-                base_confidence *= 1.12
+            # Momentum quality
+            momentum_factor = min(abs(price_momentum[i]) / 0.02, 1.0)
+            base_confidence += momentum_factor * 0.1
             
-            # BB position quality (prefer middle to lower half)
-            bb_quality = 1.0
-            if 0.3 <= bb_position[i] <= 0.6:
-                bb_quality = 1.0
-            elif 0.15 <= bb_position[i] < 0.3 or 0.6 < bb_position[i] <= 0.85:
-                bb_quality = 0.92
-            
-            # RSI quality
+            # RSI quality (prefer mid-range momentum)
             rsi_quality = 1.0
-            if 45 <= rsi[i] <= 60:
+            if 50 <= rsi[i] <= 65:
                 rsi_quality = 1.0
-            elif 35 <= rsi[i] < 45 or 60 < rsi[i] <= 70:
-                rsi_quality = 0.93
+            elif 45 <= rsi[i] < 50 or 65 < rsi[i] <= 70:
+                rsi_quality = 0.85
             
-            signal_confidence = base_confidence * bb_quality * rsi_quality
+            signal_confidence = base_confidence * rsi_quality
             raw_signal = signal_confidence
             
-        elif trend_bearish and rsi_short_ok and bb_short_ok:
-            # Short signal
+        elif breakout_short and trend_bearish and rsi_short_ok and volume_confirmed:
+            # Short breakout signal
             base_confidence = 0.5
             
-            trend_factor = min(trend_strength / 0.006, 1.0)
-            base_confidence += trend_factor * 0.3
+            # Boost confidence for squeeze breakout
+            if recent_squeeze:
+                base_confidence += 0.2
             
-            if volume_confirmed:
-                base_confidence *= 1.12
+            trend_factor = min(trend_strength / 0.005, 1.0)
+            base_confidence += trend_factor * 0.2
             
-            # BB position quality (prefer middle to upper half)
-            bb_quality = 1.0
-            if 0.4 <= bb_position[i] <= 0.7:
-                bb_quality = 1.0
-            elif 0.15 <= bb_position[i] < 0.4 or 0.7 < bb_position[i] <= 0.85:
-                bb_quality = 0.92
+            momentum_factor = min(abs(price_momentum[i]) / 0.02, 1.0)
+            base_confidence += momentum_factor * 0.1
             
             # RSI quality
             rsi_quality = 1.0
-            if 40 <= rsi[i] <= 55:
+            if 35 <= rsi[i] <= 50:
                 rsi_quality = 1.0
-            elif 30 <= rsi[i] < 40 or 55 < rsi[i] <= 65:
-                rsi_quality = 0.93
+            elif 30 <= rsi[i] < 35 or 50 < rsi[i] <= 55:
+                rsi_quality = 0.85
             
-            signal_confidence = base_confidence * bb_quality * rsi_quality
+            signal_confidence = base_confidence * rsi_quality
             raw_signal = -signal_confidence
         
         # Apply volatility adjustment
+        atr_pct = atr[i] / close[i]
         vol_factor = 1.0
         if atr_pct > 0:
-            vol_factor = min(1.4, VOLATILITY_TARGET / max(atr_pct, 0.001))
+            vol_factor = min(1.5, VOLATILITY_TARGET / max(atr_pct, 0.001))
         
         signal = raw_signal * vol_factor
         
