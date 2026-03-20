@@ -12,19 +12,19 @@ This file defines the trading strategy. It must expose:
 
 Strategy Hypothesis:
     Building on adaptive_regime_trend_v2 success (Sharpe=0.500), improving:
-    - Simplified regime detection (less overfitting risk)
-    - Better signal smoothing to reduce whipsaws
-    - More robust volatility-based position sizing
+    - Simplified regime detection (reduce overfitting from v3-v8 failures)
+    - Better volatility-adaptive position sizing
     - Cleaner trend confirmation with EMA stack
-    - Improved handling of regime transitions
-    - Volume spike detection for breakout confirmation
+    - Improved RSI mean-reversion in ranging markets
+    - Reduced parameter count for better generalization
+    - More robust signal smoothing with adaptive hysteresis
     
     Key improvements over adaptive_regime_trend_v2:
-    - Reduced parameter complexity (fewer thresholds to tune)
-    - Better signal persistence (reduce flip-flopping)
-    - More conservative in uncertain regimes
-    - Cleaner separation of trending vs ranging logic
-    - Improved volatility normalization
+    - Simplified regime logic (fewer thresholds to tune)
+    - Volatility-targeted position sizing (more consistent risk)
+    - Better EMA stack alignment scoring
+    - Reduced signal flipping with adaptive hysteresis
+    - Cleaner code structure for maintainability
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -41,22 +41,22 @@ import pandas as pd
 
 name = "adaptive_regime_trend_v3"
 timeframe = "1h"
-leverage = 2.0  # Conservative leverage for better risk-adjusted returns
+leverage = 2.5  # Conservative leverage for crypto futures
 
 # EMA periods for trend detection (simplified from v2)
-EMA_FAST = 12
-EMA_MEDIUM = 26
-EMA_SLOW = 50
+EMA_FAST = 8
+EMA_MEDIUM = 21
+EMA_SLOW = 55
 EMA_MAJOR = 200
 
-# RSI configuration (simplified thresholds)
+# RSI configuration (slightly adjusted thresholds)
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 65
 RSI_OVERSOLD = 35
 RSI_EXTREME_HIGH = 75
 RSI_EXTREME_LOW = 25
 
-# ADX regime detection (simplified)
+# ADX regime detection (simplified thresholds)
 ADX_PERIOD = 14
 ADX_TREND_THRESHOLD = 25
 ADX_WEAK_THRESHOLD = 20
@@ -64,27 +64,31 @@ ADX_WEAK_THRESHOLD = 20
 # Bollinger Band configuration
 BB_PERIOD = 20
 BB_STD = 2.0
-BB_SQUEEZE_THRESHOLD = 0.012  # Slightly tighter than v2
+BB_SQUEEZE_THRESHOLD = 0.012  # Slightly tighter squeeze detection
+
+# MACD configuration
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
 
 # Volume configuration
 VOLUME_LOOKBACK = 20
-VOLUME_SPIKE_THRESHOLD = 1.5  # Volume > 1.5x average = spike
+VOLUME_PERCENTILE_THRESHOLD = 0.65
 
-# Volatility configuration
+# Volatility configuration (target-based sizing)
 ATR_PERIOD = 14
-VOLATILITY_TARGET = 0.008  # Slightly lower target for conservative sizing
-VOLATILITY_MIN = 0.001
+VOLATILITY_TARGET = 0.008  # Target ATR % for position sizing
+VOLATILITY_MIN = 0.002
 VOLATILITY_MAX = 0.040
 
-# Signal configuration
-MIN_SIGNAL_TRENDING = 0.15
-MIN_SIGNAL_RANGING = 0.18
-MAX_SIGNAL = 0.75  # Slightly reduced from v2
-SMOOTHING_FACTOR = 0.75  # More smoothing than v2 (0.7)
-HYSTERESIS_THRESHOLD = 0.08  # Slightly higher to reduce flips
+# Signal configuration (simplified)
+MIN_SIGNAL_STRENGTH = 0.15
+MAX_SIGNAL = 0.75
+SMOOTHING_FACTOR = 0.65
+HYSTERESIS_BASE = 0.05
 
 # Regime transition smoothing
-REGIME_MEMORY = 7  # More bars for regime memory (was 5)
+REGIME_MEMORY = 3  # Reduced from 5 for faster adaptation
 
 
 # =============================================================================
@@ -166,7 +170,6 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
 def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
     """
     Calculate Average Directional Index using only past data.
-    ADX measures trend strength (not direction).
     """
     n = len(close)
     adx = np.zeros(n, dtype=np.float64)
@@ -174,7 +177,6 @@ def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     if n < period * 2 + 1:
         return adx
     
-    # Calculate True Range and Directional Movement
     tr = np.zeros(n, dtype=np.float64)
     plus_dm = np.zeros(n, dtype=np.float64)
     minus_dm = np.zeros(n, dtype=np.float64)
@@ -191,13 +193,11 @@ def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
         plus_dm[i] = max(high[i] - high[i-1], 0.0)
         minus_dm[i] = max(low[i-1] - low[i], 0.0)
         
-        # True DM rules
         if plus_dm[i] > minus_dm[i]:
             minus_dm[i] = 0.0
         elif minus_dm[i] > plus_dm[i]:
             plus_dm[i] = 0.0
     
-    # Smooth with EMA
     tr_series = pd.Series(tr)
     plus_dm_series = pd.Series(plus_dm)
     minus_dm_series = pd.Series(minus_dm)
@@ -208,7 +208,6 @@ def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     minus_di_series = (minus_dm_series.ewm(span=period, adjust=False, min_periods=period).mean() / 
                        atr_series * 100)
     
-    # Calculate DX and ADX
     dx = 100 * np.abs(plus_di_series - minus_di_series) / (plus_di_series + minus_di_series).replace(0, np.inf)
     adx_series = dx.ewm(span=period, adjust=False, min_periods=period).mean()
     
@@ -220,7 +219,6 @@ def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
 def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_dev: float = 2.0) -> tuple:
     """
     Calculate Bollinger Bands using only past data.
-    Returns: (upper, middle, lower, bandwidth)
     """
     n = len(close)
     upper = np.zeros(n, dtype=np.float64)
@@ -243,88 +241,108 @@ def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_dev: floa
     return upper, middle, lower, bandwidth
 
 
-def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
+def calculate_macd(close: np.ndarray, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple:
     """
-    Calculate volume ratio vs rolling average using only past data.
-    Returns ratio (1.0 = average volume).
+    Calculate MACD indicator using only past data.
+    """
+    n = len(close)
+    macd_line = np.zeros(n, dtype=np.float64)
+    signal_line = np.zeros(n, dtype=np.float64)
+    histogram = np.zeros(n, dtype=np.float64)
+    
+    if n < slow + signal:
+        return macd_line, signal_line, histogram
+    
+    close_series = pd.Series(close)
+    ema_fast = close_series.ewm(span=fast, adjust=False, min_periods=fast).mean()
+    ema_slow = close_series.ewm(span=slow, adjust=False, min_periods=slow).mean()
+    
+    macd_series = ema_fast - ema_slow
+    signal_series = macd_series.ewm(span=signal, adjust=False, min_periods=signal).mean()
+    hist_series = macd_series - signal_series
+    
+    macd_line = np.nan_to_num(macd_series.values, nan=0.0)
+    signal_line = np.nan_to_num(signal_series.values, nan=0.0)
+    histogram = np.nan_to_num(hist_series.values, nan=0.0)
+    
+    return macd_line, signal_line, histogram
+
+
+def calculate_volume_percentile(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
+    """
+    Calculate volume percentile rank using rolling window.
     """
     n = len(volume)
-    volume_ratio = np.ones(n, dtype=np.float64)
+    volume_pct = np.zeros(n, dtype=np.float64)
     
     if n < lookback:
-        return volume_ratio
+        return volume_pct
     
     volume_series = pd.Series(volume)
-    avg_volume = volume_series.rolling(window=lookback, min_periods=lookback).mean()
     
-    volume_ratio = np.nan_to_num(volume_series.values / avg_volume.values, nan=1.0)
+    for i in range(lookback, n):
+        window = volume_series.iloc[i-lookback:i]
+        current_vol = volume[i]
+        rank = (window < current_vol).sum() / lookback
+        volume_pct[i] = rank
     
-    return volume_ratio
+    return volume_pct
 
 
 def calculate_ema_stack_score(ema_fast: float, ema_medium: float, 
-                               ema_slow: float, ema_major: float,
+                               ema_slow: float, ema_major: float, 
                                close: float) -> float:
     """
-    Calculate trend direction and strength from EMA stack alignment.
-    Returns value in [-1, 1] where sign = direction, magnitude = strength.
+    Calculate EMA stack alignment score.
+    Returns value in [-1, 1] where magnitude indicates trend strength.
     """
     if close <= 0 or ema_major <= 0:
         return 0.0
     
-    # Determine major trend direction
-    major_trend = np.sign(close - ema_major)
+    # Check bullish alignment: close > fast > medium > slow > major
+    bullish = (close > ema_fast > ema_medium > ema_slow > ema_major)
+    bearish = (close < ema_fast < ema_medium < ema_slow < ema_major)
     
-    if major_trend == 0:
-        return 0.0
-    
-    # Check EMA stack alignment
-    if major_trend > 0:
-        # Bullish: expect fast > medium > slow > major
-        alignment_score = 0.0
-        if ema_fast > ema_medium:
-            alignment_score += 0.35
-        if ema_medium > ema_slow:
-            alignment_score += 0.35
-        if ema_slow > ema_major:
-            alignment_score += 0.30
-        trend_score = alignment_score
+    if bullish:
+        # Calculate alignment strength
+        spread1 = (ema_fast - ema_medium) / close
+        spread2 = (ema_medium - ema_slow) / close
+        spread3 = (ema_slow - ema_major) / close
+        avg_spread = (spread1 + spread2 + spread3) / 3
+        score = 0.5 + np.clip(avg_spread * 50, 0, 0.5)
+    elif bearish:
+        spread1 = (ema_medium - ema_fast) / close
+        spread2 = (ema_slow - ema_medium) / close
+        spread3 = (ema_major - ema_slow) / close
+        avg_spread = (spread1 + spread2 + spread3) / 3
+        score = -0.5 - np.clip(avg_spread * 50, 0, 0.5)
     else:
-        # Bearish: expect fast < medium < slow < major
-        alignment_score = 0.0
-        if ema_fast < ema_medium:
-            alignment_score += 0.35
-        if ema_medium < ema_slow:
-            alignment_score += 0.35
-        if ema_slow < ema_major:
-            alignment_score += 0.30
-        trend_score = -alignment_score
+        # Mixed alignment - use major trend direction
+        major_trend = np.sign(close - ema_major)
+        # Partial alignment score
+        alignment_count = 0
+        if (close - ema_major) * (ema_fast - ema_medium) > 0:
+            alignment_count += 1
+        if (close - ema_major) * (ema_medium - ema_slow) > 0:
+            alignment_count += 1
+        score = major_trend * (0.2 + 0.1 * alignment_count)
     
-    # Scale by price deviation from major EMA
-    deviation = abs(close - ema_major) / ema_major
-    deviation_factor = np.clip(deviation * 50, 0.5, 2.0)
-    
-    return np.clip(trend_score * deviation_factor * major_trend, -1.0, 1.0)
+    return np.clip(score, -1.0, 1.0)
 
 
-def determine_regime(adx: float, bb_width: float, adx_trend: float, 
-                     adx_weak: float, bb_squeeze: float) -> str:
+def detect_regime(adx: float, bb_width: float, adx_trend: float, 
+                  adx_weak: float, bb_squeeze: float) -> str:
     """
-    Determine market regime based on ADX and Bollinger Band width.
-    Returns: 'trending', 'ranging', 'breakout', or 'transition'
+    Detect market regime based on ADX and Bollinger Band width.
+    Returns: 'trending', 'ranging', 'squeeze', or 'transition'
     """
     is_squeeze = bb_width < bb_squeeze
-    is_strong_trend = adx >= adx_trend
-    is_weak = adx < adx_weak
     
-    if is_squeeze:
-        if is_strong_trend:
-            return 'breakout'  # Squeeze with strong trend = potential breakout
-        else:
-            return 'transition'  # Squeeze without clear trend
-    elif is_strong_trend:
+    if is_squeeze and adx < adx_weak:
+        return 'squeeze'
+    elif adx >= adx_trend:
         return 'trending'
-    elif is_weak:
+    elif adx < adx_weak:
         return 'ranging'
     else:
         return 'transition'
@@ -339,13 +357,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     Adaptive Regime Trend V3 Strategy.
     
     Signal Logic:
-    1. Calculate regime (trending/ranging/breakout/transition)
-    2. Apply regime-specific signal logic
-    3. Volume confirmation for breakouts
-    4. EMA stack for trend direction and strength
-    5. RSI for mean reversion in ranging markets
-    6. Volatility-adaptive position sizing
-    7. Signal smoothing with hysteresis and regime memory
+    1. Detect market regime (trending/ranging/squeeze/transition)
+    2. Apply regime-specific signal generation
+    3. Use EMA stack for trend confirmation
+    4. RSI for mean-reversion in ranging markets
+    5. Volume confirmation for breakouts
+    6. Volatility-targeted position sizing
+    7. Signal smoothing with adaptive hysteresis
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -387,22 +405,25 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     adx = calculate_adx(high, low, close, ADX_PERIOD)
     
     bb_upper, bb_middle, bb_lower, bb_width = calculate_bollinger_bands(close, BB_PERIOD, BB_STD)
-    volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+    
+    volume_pct = calculate_volume_percentile(volume, VOLUME_LOOKBACK)
     
     # Determine minimum valid index
     min_valid_index = max(
-        EMA_MAJOR + 10,  # Extra buffer for major EMA stabilization
-        RSI_PERIOD + 5,
-        ATR_PERIOD + 5,
-        ADX_PERIOD * 2 + 5,
-        VOLUME_LOOKBACK + 5,
-        BB_PERIOD + 5
+        EMA_MAJOR,
+        RSI_PERIOD + 1,
+        ATR_PERIOD + 1,
+        ADX_PERIOD * 2 + 1,
+        VOLUME_LOOKBACK,
+        BB_PERIOD,
+        MACD_SLOW + MACD_SIGNAL
     )
     
-    # Track state for smoothing and hysteresis
+    # Track state for smoothing
     prev_signal = 0.0
     prev_direction = 0  # 0=neutral, 1=long, -1=short
-    regime_memory = [0] * REGIME_MEMORY  # 1=trending, 0=ranging
+    regime_memory = [0] * REGIME_MEMORY  # 0=ranging, 1=trending
     
     # Generate signals
     for i in range(min_valid_index, n):
@@ -413,7 +434,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             prev_direction = 0
             continue
         
-        # Check volatility regime (skip extremely low or high volatility)
+        # Check volatility regime
         atr_pct = atr[i] / close[i]
         if atr_pct < VOLATILITY_MIN or atr_pct > VOLATILITY_MAX:
             signals[i] = 0.0
@@ -421,135 +442,112 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             prev_direction = 0
             continue
         
-        # Determine current regime
-        regime = determine_regime(
-            adx[i], bb_width[i], ADX_TREND_THRESHOLD, 
-            ADX_WEAK_THRESHOLD, BB_SQUEEZE_THRESHOLD
+        # Detect current regime
+        regime = detect_regime(
+            adx[i], bb_width[i], 
+            ADX_TREND_THRESHOLD, ADX_WEAK_THRESHOLD, 
+            BB_SQUEEZE_THRESHOLD
         )
         
         # Update regime memory
         regime_memory.pop(0)
         regime_memory.append(1 if regime == 'trending' else 0)
-        recent_trending_ratio = sum(regime_memory) / REGIME_MEMORY
+        recent_trending = sum(regime_memory) / REGIME_MEMORY
         
-        # Calculate EMA stack trend score
-        trend_score = calculate_ema_stack_score(
-            ema_fast[i], ema_medium[i], ema_slow[i], ema_major[i], close[i]
+        # Calculate EMA stack score (trend strength and direction)
+        ema_score = calculate_ema_stack_score(
+            ema_fast[i], ema_medium[i], 
+            ema_slow[i], ema_major[i], 
+            close[i]
         )
         
         # Volume confirmation
-        volume_spike = volume_ratio[i] >= VOLUME_SPIKE_THRESHOLD
+        volume_confirmed = volume_pct[i] >= VOLUME_PERCENTILE_THRESHOLD
         
-        # Initialize raw signal
+        # Initialize raw signal based on regime
         raw_signal = 0.0
-        regime_weight = 0.0
         
-        # =========================================================
-        # TRENDING REGIME: Follow the trend with EMA confirmation
-        # =========================================================
+        # TRENDING REGIME
         if regime == 'trending':
-            regime_weight = MIN_SIGNAL_TRENDING
+            # Follow the trend with EMA stack confirmation
+            raw_signal = ema_score
             
-            # Base signal from trend score
-            raw_signal = trend_score
-            
-            # Amplify strong trends (ADX > threshold)
-            if adx[i] >= ADX_TREND_THRESHOLD:
+            # Amplify strong trends
+            if adx[i] > 35:
                 raw_signal *= 1.15
             
-            # Volume confirmation boost
-            if volume_spike:
+            # Volume boost for confirmation
+            if volume_confirmed:
                 raw_signal *= 1.1
             
-            # RSI filter: reduce signal if RSI suggests exhaustion
-            if trend_score > 0 and rsi[i] > RSI_OVERBOUGHT:
-                raw_signal *= 0.7
-            elif trend_score < 0 and rsi[i] < RSI_OVERSOLD:
-                raw_signal *= 0.7
+            # MACD confirmation
+            macd_conf = np.sign(macd_hist[i])
+            if np.sign(raw_signal) == macd_conf:
+                raw_signal *= 1.05
         
-        # =========================================================
-        # RANGING REGIME: Mean reversion with RSI
-        # =========================================================
+        # RANGING REGIME
         elif regime == 'ranging':
-            regime_weight = MIN_SIGNAL_RANGING
-            
-            # RSI-based mean reversion
-            if rsi[i] < RSI_EXTREME_LOW:
-                raw_signal = 0.5  # Strong long signal
-            elif rsi[i] < RSI_OVERSOLD:
-                raw_signal = 0.3  # Moderate long signal
-            elif rsi[i] > RSI_EXTREME_HIGH:
-                raw_signal = -0.5  # Strong short signal
+            # Mean reversion with RSI
+            if rsi[i] < RSI_OVERSOLD:
+                raw_signal = 0.35
             elif rsi[i] > RSI_OVERBOUGHT:
-                raw_signal = -0.3  # Moderate short signal
+                raw_signal = -0.35
             else:
-                raw_signal = 0.0  # No signal in neutral RSI
-            
-            # Reduce signal if fighting the major trend
-            if abs(trend_score) > 0.3:
-                if np.sign(raw_signal) != np.sign(trend_score):
-                    raw_signal *= 0.5  # Reduce counter-trend trades
-        
-        # =========================================================
-        # BREAKOUT REGIME: Squeeze with potential expansion
-        # =========================================================
-        elif regime == 'breakout':
-            regime_weight = MIN_SIGNAL_TRENDING * 1.2  # Higher weight for breakouts
-            
-            # Need both trend direction AND volume confirmation
-            if abs(trend_score) > 0.2 and volume_spike:
-                raw_signal = trend_score * 1.2  # Amplify breakout signals
-            else:
-                # Squeeze without clear direction = wait
                 raw_signal = 0.0
-                regime_weight = 0.0
-        
-        # =========================================================
-        # TRANSITION REGIME: Conservative, blend signals
-        # =========================================================
-        else:  # transition
-            regime_weight = MIN_SIGNAL_RANGING * 0.7  # Lower weight in uncertainty
             
-            # Blend trend and mean reversion based on recent regime history
-            if recent_trending_ratio > 0.6:
-                # Recently trending, favor trend signals
-                raw_signal = trend_score * 0.6
-            elif recent_trending_ratio < 0.4:
-                # Recently ranging, favor RSI signals
-                if rsi[i] < RSI_OVERSOLD:
-                    raw_signal = 0.25
-                elif rsi[i] > RSI_OVERBOUGHT:
-                    raw_signal = -0.25
-                else:
-                    raw_signal = 0.0
+            # Amplify at extremes
+            if rsi[i] < RSI_EXTREME_LOW:
+                raw_signal = 0.5
+            elif rsi[i] > RSI_EXTREME_HIGH:
+                raw_signal = -0.5
+            
+            # Reduce if fighting major trend
+            if abs(ema_score) > 0.3 and np.sign(raw_signal) != np.sign(ema_score):
+                raw_signal *= 0.5
+        
+        # SQUEEZE REGIME (low volatility, potential breakout)
+        elif regime == 'squeeze':
+            # Wait for directional bias from EMA stack
+            if abs(ema_score) > 0.15:
+                raw_signal = ema_score * 0.6
+                # Require volume confirmation for breakout
+                if not volume_confirmed:
+                    raw_signal *= 0.7
             else:
-                # Mixed regime, very conservative
-                raw_signal = trend_score * 0.3
+                raw_signal = 0.0
         
-        # =========================================================
-        # VOLATILITY-BASED POSITION SIZING
-        # =========================================================
-        # Reduce position size in high volatility, increase in low volatility
+        # TRANSITION REGIME
+        else:  # transition
+            # Blend trend and mean-reversion signals
+            trend_component = ema_score * 0.5
+            rsi_component = 0.0
+            if rsi[i] < RSI_OVERSOLD:
+                rsi_component = 0.2
+            elif rsi[i] > RSI_OVERBOUGHT:
+                rsi_component = -0.2
+            
+            # Weight by recent regime tendency
+            raw_signal = recent_trending * trend_component + (1 - recent_trending) * rsi_component
+        
+        # Volatility-targeted position sizing
+        # Higher volatility = smaller position to maintain consistent risk
         vol_factor = VOLATILITY_TARGET / max(atr_pct, 0.001)
-        vol_factor = np.clip(vol_factor, 0.5, 2.0)  # Tighter bounds than v2
-        
+        vol_factor = np.clip(vol_factor, 0.5, 2.0)
         raw_signal *= vol_factor
         
-        # =========================================================
-        # SIGNAL SMOOTHING WITH HYSTERESIS
-        # =========================================================
-        # Exponential smoothing
+        # Apply exponential smoothing
         smoothed_signal = SMOOTHING_FACTOR * prev_signal + (1.0 - SMOOTHING_FACTOR) * raw_signal
         
-        # Hysteresis: prevent rapid direction flips
+        # Adaptive hysteresis to reduce flipping
         current_direction = np.sign(smoothed_signal)
         if current_direction != 0 and current_direction != prev_direction:
-            # Only allow flip if signal change is significant
-            if abs(smoothed_signal - prev_signal) < HYSTERESIS_THRESHOLD:
-                smoothed_signal = prev_signal  # Keep previous direction
+            # Higher hysteresis when switching direction
+            hysteresis = HYSTERESIS_BASE * 1.5
+            if abs(smoothed_signal - prev_signal) < hysteresis:
+                smoothed_signal = prev_signal
         
-        # Apply minimum signal threshold based on regime
-        if abs(smoothed_signal) < regime_weight:
+        # Apply minimum signal threshold
+        if abs(smoothed_signal) < MIN_SIGNAL_STRENGTH:
             smoothed_signal = 0.0
         
         # Clip to valid range
