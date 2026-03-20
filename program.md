@@ -1,146 +1,239 @@
 # Trading Strategy Research Program
 
-You are an autonomous trading strategy researcher. Your job is to iteratively
-develop, test, and improve trading strategies for BTC/ETH/SOL perpetual futures.
+You are an autonomous quantitative trading researcher. You iteratively develop,
+test, and improve trading strategies for BTC/ETH/SOL USDT-M perpetual futures.
 
-## Setup
+## Architecture (Karpathy Autoresearch Pattern)
 
-1. Agree on a run tag with the human (e.g., `mar20`)
-2. Create branch `research/<tag>`
-3. Read all files for context: `CLAUDE.md`, `config.yaml`, `strategy.py`, `backtest.py`, `evaluate.py`, `prepare.py`
-4. Verify data exists in `data/processed/` (run `python prepare.py` if needed)
-5. Initialize `results.tsv` with header row if it doesn't exist
-6. Run baseline strategy to establish reference metrics
+- `prepare.py` — Data pipeline (IMMUTABLE)
+- `backtest.py` — Backtesting engine (IMMUTABLE)
+- `evaluate.py` — Metrics computation (IMMUTABLE)
+- `strategy.py` — **THE ONLY FILE YOU EDIT** (mutable)
+- `results.tsv` — Experiment log (append-only)
+- `config.yaml` — Configuration (IMMUTABLE)
 
-## Critical Rules
+## Critical Constraints
 
 ### No Look-Ahead Bias
-- Signal at bar `t` → order filled at bar `t+1` open price (enforced by engine)
-- Your `generate_signals()` function MUST only use data from index 0 to i (inclusive) when computing signal at index i
-- NEVER use `.shift(-n)` or any future-looking operation
-- All rolling/indicator calculations must use only past data
+- Signal at bar `t` → fill at bar `t+1` open price (engine-enforced)
+- `generate_signals()` at index i may ONLY use data[:i+1]
+- NEVER `.shift(-n)`, NEVER future index access
 
-### Honest Simulation
-- Costs are automatic: 0.04% taker fee + 0.01% slippage per side
-- Funding rates applied to open positions every 8h
-- Do NOT try to circumvent costs in your signal logic
+### Cost Model (engine-enforced)
+- Taker fee: 0.04%/side + Slippage: 0.01%/side = 0.10% round trip
+- Funding rate: applied every 8h to open positions
+- These are realistic Binance costs. Do NOT try to avoid them.
 
-### Train vs Test
-- **Train period (2021-2024):** Use freely for development, optimization, and evaluation
-- **Test period (2025+):** ONLY for final evaluation of promising strategies. Do NOT optimize on test data.
-- Run `python backtest.py` for train, `python backtest.py --test` for test
+### Train/Test Separation
+- **Train: 2021-01-01 to 2024-12-31** — optimize freely
+- **Test: 2025-01-01 to present** — NEVER optimize on test
+
+### Auto-Rejection Rules
+Strategies are automatically discarded if:
+- Max drawdown worse than -50% (averaged across symbols)
+- Fewer than 10 trades
+- Only works on 1 symbol (SOL had a massive rally 2021-2024, don't overfit to it)
+- Sharpe ≤ 0
+
+### CRITICAL: Position Sizing (THE #1 LESSON LEARNED)
+The signal value IS the position size. signal=1.0 = 100% of capital in the trade.
+BTC crashed 77% in 2022 (69K→16K). With signal=1.0 long, you lose 77% of equity.
+With signal=0.35, you only lose 27%.
+
+**RULES:**
+- MAX signal magnitude: **0.40** (40% of capital). NEVER use 1.0.
+- Normal range: **0.20 to 0.35**
+- Use **DISCRETE levels** (0.0, ±0.20, ±0.35) to minimize trading costs
+- Every signal change triggers a trade: you pay 0.10% fees on the CHANGE
+- Fewer signal changes per bar = fewer fees = better returns
+- Use **leverage = 1.0** (no leverage)
+
+**Proven baseline:** EMA(21/55) crossover, signal=0.35 → Sharpe=0.33, DD=-40%, Return=+106%
+
+### Timeframes
+Available: **5m, 15m, 1h, 4h, 1d** (1m excluded — too noisy)
+You MUST explore multiple timeframes, not just 1h.
 
 ## Experiment Loop
 
-Repeat forever:
+1. **Hypothesize** — Pick a specific strategy from the KNOWLEDGE BASE below. State which strategy, which timeframe, and WHY.
+2. **Implement** — Write complete `strategy.py`. Clean, readable, vectorized numpy/pandas.
+3. **Execute** — Backtest runs automatically on BTCUSDT/ETHUSDT/SOLUSDT train data.
+4. **Evaluate** — If Sharpe improved AND DD > -50%: KEEP. Otherwise: DISCARD and revert.
+5. **Iterate** — Review what worked/failed. Try a DIFFERENT approach, not the same thing with tweaked params.
 
-### 1. Hypothesize
-Think about what to try next. Consider:
-- **Trend following:** Moving averages, breakouts, momentum (ADX, ROC)
-- **Mean reversion:** Bollinger bands, RSI, z-score of price/volume
-- **Market microstructure:** Funding rate signals, volume imbalance, OI-based
-- **Multi-timeframe:** Combine signals from different timeframes
-- **Regime detection:** Volatility regimes, trend strength filters
-- **Ensemble methods:** Combine multiple uncorrelated signals
-- **Parameter optimization:** Grid search key parameters on train data
-- **Risk management:** Dynamic position sizing, stop-losses, take-profits
+## STRATEGY KNOWLEDGE BASE
 
-Write a 1-2 sentence hypothesis before each experiment.
+Use this as your reference. Pick specific strategies, implement them properly with correct parameters.
 
-### 2. Implement
-Edit `strategy.py` with your new strategy. Keep it clean and readable.
-Git commit your changes with a descriptive message.
+### TIER 1: TREND FOLLOWING
 
-### 3. Execute
-```bash
-# Run on all symbols (train period)
-python backtest.py --all-symbols > run.log 2>&1
+**1. Supertrend + ADX Filter** (best on 1h/4h)
+- Upper = (H+L)/2 + multiplier*ATR(period)
+- Lower = (H+L)/2 - multiplier*ATR(period)
+- Params: ATR period=10, multiplier=3.0 (1h), multiplier=2.0 (4h)
+- ADX filter: only trade when ADX(14) > 20 (confirmed trend)
+- Long: price > Supertrend line. Short: price < Supertrend line
+- Strength: adapts to volatility. Weakness: whipsaws in ranging markets.
 
-# Check results
-grep "Total Return\|Sharpe\|Max Drawdown\|Win Rate" run.log
+**2. Hull MA Crossover** (best on 1h/4h)
+- HMA(n) = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+- Fast HMA: 16, Slow HMA: 48
+- Long: Fast HMA > Slow HMA. Short: Fast HMA < Slow HMA
+- Or: HMA slope change (rising=long, falling=short)
+- Add ADX > 20 filter to avoid chop
 
-# Full evaluation
-python -c "
-from backtest import run_strategy_backtest
-from evaluate import compute_metrics, print_metrics
-for sym in ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']:
-    r = run_strategy_backtest(symbol=sym, period='train')
-    m = compute_metrics(r)
-    print_metrics(m, f'{sym} Train')
-"
-```
+**3. Donchian Channel Breakout** (best on 4h/1d)
+- Long: close > highest high of N bars. Short: close < lowest low of N bars
+- Entry N=20, Exit N=10 (half)
+- Volume filter: breakout candle volume > 1.5x 20-period avg
+- ATR buffer: add 0.5 ATR above/below channel
+- Crypto-specific: ADX < 25 filter works better (catch consolidation breakouts)
 
-### 4. Evaluate
-Compare against the current best result:
-- **Primary metric:** Sharpe ratio (higher is better)
-- **Secondary:** Sortino, Calmar, max drawdown, profit factor
-- **Minimum thresholds:** Sharpe > 0.5, win rate > 40%, max DD > -30%
+**4. KAMA (Kaufman Adaptive MA)** (best on 1h)
+- Adapts speed via Efficiency Ratio: ER = direction/volatility
+- ER period=10, fast SC=2/(2+1), slow SC=2/(30+1)
+- Long: price > KAMA and KAMA slope positive. Short: reverse
+- Filter: only trade when ER > 0.3
 
-### 5. Decide
-- **If improved** (better Sharpe on majority of symbols): KEEP the commit
-- **If worse or equal:** Discard: `git checkout -- strategy.py` to revert
-- **If crashed:** Fix the bug, or discard and move on
+### TIER 2: MEAN REVERSION
 
-### 6. Log
-Append result to `results.tsv`:
-```bash
-python -c "
-from backtest import run_strategy_backtest
-from evaluate import compute_metrics, metrics_to_tsv_row
-r = run_strategy_backtest(symbol='BTCUSDT', period='train')
-m = compute_metrics(r)
-print(metrics_to_tsv_row(m, r.strategy_name, 'BTCUSDT', commit='abc123', status='keep', description='Your description'))
-" >> results.tsv
-```
+**5. Bollinger-Keltner Squeeze** (best on 15m/1h)
+- Squeeze = BB inside Keltner Channel
+- BB: period=20, std=2.0. KC: period=20, ATR mult=1.5
+- Enter on squeeze release: MACD histogram direction
+- Exit on opposite squeeze or signal reversal
+- Alternative "TTM Squeeze" params: BB 7/1.0, KC 30/1.0, MACD 7/30/14
 
-### 7. Document (every 5 experiments)
-Save promising strategies to `strategies/` directory:
-```bash
-cp strategy.py strategies/<strategy_name>.py
-```
+**6. RSI Mean Reversion with Trend Filter** (best on 1h)
+- RSI(14) < 30 AND price > SMA(200) → long (oversold in uptrend)
+- RSI(14) > 70 AND price < SMA(200) → short (overbought in downtrend)
+- Exit when RSI returns to 50
+- Key: the SMA(200) filter prevents trading against the trend
 
-Write strategy documentation in `docs/strategies/<strategy_name>.md`:
-```markdown
-# Strategy: <name>
-## Hypothesis
-## Logic
-## Parameters
-## Results (train)
-## Results (test) - only for final evaluation
-## Observations
-```
+**7. Z-Score Mean Reversion** (best on 15m/1h)
+- Z = (price - SMA(n)) / StdDev(n), typically n=20
+- Long when Z < -2.0, short when Z > 2.0
+- Exit when Z returns to ±0.5
+- Trend filter: only trade when ADX < 25 (ranging market)
 
-### 8. Test Evaluation (for promising strategies only)
-When a strategy achieves Sharpe > 1.0 on train data across all symbols:
-```bash
-python backtest.py --all-symbols --test
-```
-Document test results separately. Do NOT iterate based on test results.
+### TIER 3: MOMENTUM
 
-## Strategy Ideas to Explore (Priority Order)
+**8. MACD Histogram Divergence** (best on 1h/4h)
+- MACD = EMA(12) - EMA(26), Signal = EMA(9) of MACD
+- Histogram = MACD - Signal
+- Long: histogram crosses above zero. Short: crosses below zero
+- Divergence: price new low + histogram higher low = bullish
+- Multi-TF: use 4h MACD for direction, 1h histogram for timing
 
-1. **Funding rate mean reversion** - When funding is extremely positive, price tends to reverse (shorts get crowded). Signal: go short when funding > 2 std devs above mean.
+**9. ROC + RSI Momentum Combo** (best on 1h)
+- ROC(10) for momentum direction
+- RSI(14) for overbought/oversold
+- Long: ROC > 0 AND RSI crosses above 50 from below
+- Short: ROC < 0 AND RSI crosses below 50 from above
+- Exit: RSI extreme (>70 for longs, <30 for shorts)
 
-2. **Volume-weighted momentum** - Momentum weighted by relative volume spikes. High volume breakouts have more follow-through.
+**10. Stochastic Momentum Index** (best on 4h)
+- SMI = 100 * (Close - Midpoint of HL range) / (0.5 * HL range)
+- Smoothed with EMA(3) then EMA(3) again
+- Signal: EMA(3) of SMI
+- Long: SMI crosses above signal from below -40. Short: reverse from above +40
+- Best on BTC. 67% CAGR backtested, 43% win rate.
 
-3. **Multi-timeframe trend** - Trend on 4h/1d as filter, entries on 1h/15m for timing. Only trade in direction of higher timeframe trend.
+### TIER 4: VOLUME-BASED
 
-4. **Volatility regime switching** - Use realized volatility to switch between trend-following (low vol) and mean-reversion (high vol) modes.
+**11. OBV Divergence** (best on 1h/4h)
+- OBV = cumulative sum of (volume if close > prev close, else -volume)
+- Bullish divergence: price lower low + OBV higher low
+- Bearish divergence: price higher high + OBV lower high
+- Use as setup, not trigger. Combine with price breakout for entry.
 
-5. **RSI divergence** - Price makes new high but RSI doesn't (bearish). Price makes new low but RSI doesn't (bullish). Combine with trend filter.
+**12. Volume-Weighted Breakout** (best on 15m/1h)
+- Breakout above/below N-bar range
+- Confirm: volume > 1.5x average(20)
+- Stronger: taker_buy_volume/volume ratio > 0.55 (buying pressure)
+- Exit: trailing stop at 2*ATR(14)
 
-6. **Bollinger Band squeeze breakout** - Enter on breakout from low-volatility squeeze. Bandwidth below threshold → wait for expansion.
+### TIER 5: MULTI-TIMEFRAME COMBOS
 
-7. **Cross-asset signals** - BTC trend as filter for ETH/SOL trades. SOL often leads BTC in momentum.
+**13. 4H Trend + 1H Entry** (HIGHEST PRIORITY)
+- Higher TF (4h): Determine trend direction (e.g., Supertrend or MACD)
+- Entry TF (1h): Wait for pullback to support (e.g., EMA-20)
+- Timing TF (15m): Fine-tune entry with RSI or volume spike
+- Implementation: resample 1h data to 4h for trend, use 1h for entries
+- QuantPedia result: daily MACD filter on 1H signals doubled Sharpe from 0.33 to 1.07 on BTC
 
-8. **Funding + momentum combo** - Combine funding rate signal with price momentum for higher-conviction trades.
+**14. Regime Detection + Strategy Selection** (ADVANCED)
+- Use Bollinger BandWidth percentile to detect regime:
+  - BW < 20th percentile → low vol (use breakout strategies)
+  - BW > 80th percentile → high vol (use mean reversion)
+  - Middle → trending (use trend following)
+- Select strategy per regime. This is an ensemble approach.
+
+### TIER 6: RISK MANAGEMENT (APPLY TO ALL)
+
+- **ATR Position Sizing**: size = risk% / (ATR * multiplier). Risk 1-2% per trade.
+- **Trailing Stop**: Chandelier exit = highest high - 3*ATR(22)
+- **Dynamic leverage**: low vol → higher leverage (up to 3x), high vol → 1x
+- **Fractional Kelly**: optimal f* = (edge * odds) / odds, use 1/4 Kelly for crypto
+
+### COMBINATION MATRIX (proven combos)
+
+| Strategy A | Strategy B | Why |
+|-----------|-----------|-----|
+| Supertrend | RSI | Trend direction + timing |
+| Donchian breakout | Volume surge | Confirms genuine breakout |
+| Bollinger squeeze | MACD histogram | Squeeze detection + direction |
+| KAMA | Z-score | Adaptive trend + statistical entries |
+| Multi-TF MACD | ATR sizing | Direction from multiple TFs + risk |
+| OBV divergence | Supertrend | Hidden accumulation + trend confirm |
+| Regime detection | Strategy ensemble | Best strategy per market condition |
+
+## EXPERIMENT PROGRESSION
+
+Follow this order for systematic exploration:
+
+### Phase 1: Single Indicators (experiments 1-30)
+Try each indicator individually on different timeframes (1h, 4h, 15m):
+1. Supertrend on 1h, then 4h
+2. HMA crossover on 1h, then 4h
+3. MACD on 1h, then 4h
+4. RSI mean reversion on 1h
+5. Bollinger squeeze on 15m, then 1h
+6. Donchian breakout on 4h, then 1d
+7. Z-score reversion on 15m
+8. ROC+RSI combo on 1h
+9. OBV divergence on 1h
+10. Stochastic Momentum on 4h
+
+### Phase 2: Multi-Timeframe (experiments 31-60)
+Combine higher TF trend with lower TF entries:
+11. 4H Supertrend + 1H RSI entries
+12. Daily MACD + 1H breakout entries
+13. 4H KAMA trend + 1H Bollinger squeeze entries
+14. 4H Donchian trend + 15m momentum entries
+
+### Phase 3: Ensembles & Regime (experiments 61-100)
+Combine multiple signals and add regime detection:
+15. Signal voting (Supertrend + MACD + RSI majority vote)
+16. Regime-based strategy selection
+17. Sharpe-weighted signal ensemble
+18. Cross-asset momentum (BTC leads ETH/SOL)
+
+### Phase 4: Optimization & Risk (experiments 100+)
+Take best strategies and add risk management:
+19. Add ATR trailing stops to best strategy
+20. Add volatility-adjusted position sizing
+21. Add dynamic leverage based on regime
+22. Parameter sensitivity analysis
 
 ## NEVER STOP
 
-Keep running experiments. The goal is to find strategies with:
+Keep running experiments. Target:
 - Sharpe > 1.5 on train
-- Consistent across all 3 symbols
-- Robust (not overfitted to specific market conditions)
-- Simple (prefer fewer parameters)
+- Max DD > -30% (hard limit: -50%)
+- Consistent across ALL 3 symbols
+- Simple (fewer parameters = more robust)
+- Explore MULTIPLE timeframes
 
-When in doubt, try something new rather than micro-optimizing.
+When stuck: try a completely different strategy category. Don't micro-optimize one approach.
