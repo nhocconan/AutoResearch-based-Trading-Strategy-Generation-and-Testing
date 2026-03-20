@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Trend Funding Hybrid V13
+strategy.py - Trend Funding Hybrid V14
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,21 +11,19 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Enhanced trend-following with improved funding rate mean reversion:
+    Simplified trend-following with funding rate mean reversion:
     - Primary signal: EMA crossover trend direction (20/50 EMA)
     - Confirmation: Price above/below 200 EMA for trend validation
-    - Filter: Extreme funding rates provide strong contrarian overlay
-    - Entry timing: RSI divergence + volume spike confirmation
-    - Volatility regime: Bollinger squeeze detection for breakout potential
-    - Adaptive sizing: Scale signals by confidence metrics
+    - Filter: Extreme funding rates provide contrarian overlay
+    - Entry timing: RSI momentum confirmation
+    - Volatility filter: ATR-based position sizing
     
-    Improvements over V12:
-    - More aggressive funding signal at extremes (0.0015 threshold)
-    - RSI divergence detection for better entry timing
-    - Volume spike confirmation on trend entries
-    - Bollinger Band squeeze for volatility regime detection
-    - Reduced signal smoothing (0.3 vs 0.5) for faster response
-    - Better signal combination logic with confidence weighting
+    Improvements over V13:
+    - Fixed parameter ordering bug (lookback before i in divergence function)
+    - Simplified signal combination logic
+    - More conservative leverage (2.0 vs 2.5)
+    - Reduced complexity to avoid overfitting
+    - Better edge case handling
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -40,46 +38,43 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "trend_funding_hybrid_v13"
+name = "trend_funding_hybrid_v14"
 timeframe = "1h"
-leverage = 2.5  # Slightly higher leverage with better signal quality
+leverage = 2.0  # More conservative after V13 crash
 
 # EMA configuration for trend detection
 EMA_FAST = 20
 EMA_SLOW = 50
 EMA_MAJOR = 200
 
-# RSI configuration for entry timing and divergence
+# RSI configuration for momentum
 RSI_PERIOD = 14
 RSI_LONG_THRESHOLD = 45
 RSI_SHORT_THRESHOLD = 55
-RSI_DIVERGENCE_LOOKBACK = 5  # Bars to check for divergence
 
 # Funding rate configuration
 FUNDING_EXTREME_THRESHOLD = 0.0015  # 0.15% per 8hr = very extreme
 FUNDING_MODERATE_THRESHOLD = 0.0005  # 0.05% per 8hr = moderate
 FUNDING_LOOKBACK = 100
-FUNDING_WEIGHT = 0.50  # Increased funding influence
+FUNDING_WEIGHT = 0.40  # Funding influence weight
 
 # Volatility configuration
 ATR_PERIOD = 14
 BOLLINGER_PERIOD = 20
 BOLLINGER_STD = 2.0
-VOLATILITY_TARGET = 0.018
+VOLATILITY_TARGET = 0.015
 VOLATILITY_MIN = 0.002
-VOLATILITY_MAX = 0.060
+VOLATILITY_MAX = 0.050
 
 # Volume configuration
 VOLUME_LOOKBACK = 20
-VOLUME_SPIKE_THRESHOLD = 1.5  # Volume must be 1.5x average for confirmation
-VOLUME_MIN_RATIO = 0.60
+VOLUME_MIN_RATIO = 0.50
 
 # Signal configuration
-MIN_SIGNAL_MAGNITUDE = 0.12
-MAX_SIGNAL = 0.90
-SMOOTHING_FACTOR = 0.30  # Reduced for faster response
-HYSTERESIS_THRESHOLD = 0.08
-CONFIDENCE_WEIGHT = 0.40  # Weight for confidence-based scaling
+MIN_SIGNAL_MAGNITUDE = 0.15
+MAX_SIGNAL = 0.85
+SMOOTHING_FACTOR = 0.35
+HYSTERESIS_THRESHOLD = 0.10
 
 
 # =============================================================================
@@ -101,23 +96,6 @@ def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
     ema = np.nan_to_num(ema_values, nan=0.0)
     
     return ema
-
-
-def calculate_sma(close: np.ndarray, period: int) -> np.ndarray:
-    """
-    Calculate Simple Moving Average using only past data.
-    """
-    n = len(close)
-    sma = np.zeros(n, dtype=np.float64)
-    
-    if n < period:
-        return sma
-    
-    close_series = pd.Series(close)
-    sma_values = close_series.rolling(window=period, min_periods=period).mean().values
-    sma = np.nan_to_num(sma_values, nan=0.0)
-    
-    return sma
 
 
 def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
@@ -198,7 +176,7 @@ def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_dev: floa
     
     upper = middle + (std_dev * std)
     lower = middle - (std_dev * std)
-    bandwidth = (upper - lower) / middle
+    bandwidth = (upper - lower) / np.where(middle > 0, middle, 1.0)
     bandwidth = np.nan_to_num(bandwidth, nan=0.0)
     
     return upper, middle, lower, bandwidth
@@ -219,6 +197,7 @@ def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray
     rolling_avg = volume_series.rolling(window=lookback, min_periods=lookback).mean()
     
     volume_ratio = np.nan_to_num(volume_series.values / rolling_avg.values, nan=1.0)
+    volume_ratio = np.where(volume_ratio <= 0, 1.0, volume_ratio)
     
     return volume_ratio
 
@@ -251,7 +230,7 @@ def calculate_funding_signal(funding_rate: np.ndarray,
                              funding_low: np.ndarray,
                              extreme_threshold: float = 0.0015,
                              moderate_threshold: float = 0.0005,
-                             weight: float = 0.50) -> np.ndarray:
+                             weight: float = 0.40) -> np.ndarray:
     """
     Calculate funding rate contrarian signal.
     Extreme positive funding → short bias (negative signal)
@@ -274,42 +253,36 @@ def calculate_funding_signal(funding_rate: np.ndarray,
         is_moderate_low = fr < -moderate_threshold and not is_extreme_low
         
         if is_extreme_high:
-            # Strong short bias - more aggressive scaling
-            signal[i] = -weight * min(1.0, fr / extreme_threshold) * 1.2
+            signal[i] = -weight * min(1.0, fr / extreme_threshold)
         elif is_extreme_low:
-            # Strong long bias - more aggressive scaling
-            signal[i] = weight * min(1.0, abs(fr) / extreme_threshold) * 1.2
+            signal[i] = weight * min(1.0, abs(fr) / extreme_threshold)
         elif is_moderate_high:
-            # Mild short bias
-            signal[i] = -weight * 0.4 * (fr / moderate_threshold)
+            signal[i] = -weight * 0.3 * (fr / moderate_threshold)
         elif is_moderate_low:
-            # Mild long bias
-            signal[i] = weight * 0.4 * (abs(fr) / moderate_threshold)
+            signal[i] = weight * 0.3 * (abs(fr) / moderate_threshold)
         else:
             signal[i] = 0.0
     
-    return np.clip(signal, -weight * 1.5, weight * 1.5)
+    return np.clip(signal, -weight, weight)
 
 
-def detect_rsi_divergence(close: np.ndarray, rsi: np.ndarray, lookback: int = 5, i: int) -> float:
+def detect_rsi_divergence(close: np.ndarray, rsi: np.ndarray, lookback: int, i: int) -> float:
     """
     Detect RSI divergence at index i using only past data.
     Returns: divergence_score in [-1, 1]
     - Positive: bullish divergence (price lower lows, RSI higher lows)
     - Negative: bearish divergence (price higher highs, RSI lower highs)
+    
+    FIXED: lookback parameter now comes before i (no default after non-default)
     """
     if i < lookback + 1:
         return 0.0
     
-    # Find local extrema in price and RSI over lookback period
     price_window = close[i-lookback:i+1]
     rsi_window = rsi[i-lookback:i+1]
     
-    # Check for bullish divergence (price making lower lows, RSI making higher lows)
     price_min_idx = np.argmin(price_window)
     rsi_min_idx = np.argmin(rsi_window)
-    
-    # Check for bearish divergence (price making higher highs, RSI making lower highs)
     price_max_idx = np.argmax(price_window)
     rsi_max_idx = np.argmax(rsi_window)
     
@@ -317,17 +290,13 @@ def detect_rsi_divergence(close: np.ndarray, rsi: np.ndarray, lookback: int = 5,
     
     # Bullish divergence detection
     if price_min_idx > 0 and rsi_min_idx > 0:
-        # Price making lower low
         if price_window[price_min_idx] < price_window[0]:
-            # RSI making higher low
             if rsi_window[rsi_min_idx] > rsi_window[0]:
                 divergence_score = 0.5
     
     # Bearish divergence detection
     if price_max_idx > 0 and rsi_max_idx > 0:
-        # Price making higher high
         if price_window[price_max_idx] > price_window[0]:
-            # RSI making lower high
             if rsi_window[rsi_max_idx] < rsi_window[0]:
                 divergence_score = -0.5
     
@@ -339,8 +308,6 @@ def calculate_trend_signal(close: np.ndarray,
                            ema_slow: np.ndarray,
                            ema_major: np.ndarray,
                            rsi: np.ndarray,
-                           volume_ratio: np.ndarray,
-                           bandwidth: np.ndarray,
                            i: int) -> tuple:
     """
     Calculate trend-following signal at index i using only past data.
@@ -358,52 +325,26 @@ def calculate_trend_signal(close: np.ndarray,
     
     # Calculate trend strength
     if ema_direction != major_filter and abs(ema_direction) > 0:
-        # Conflicting signals → reduce strength
-        trend_strength = abs(ema_diff) * 60 * 0.4
+        trend_strength = abs(ema_diff) * 50 * 0.5
         confidence = 0.4
     else:
-        # Aligned signals → full strength
-        trend_strength = abs(ema_diff) * 60
-        confidence = 0.7
+        trend_strength = abs(ema_diff) * 50
+        confidence = 0.65
     
     # RSI momentum confirmation
     rsi_factor = 1.0
     if ema_direction > 0:
         if rsi[i] < RSI_LONG_THRESHOLD:
-            rsi_factor = 0.3
+            rsi_factor = 0.4
         elif rsi[i] > 70:
-            rsi_factor = 0.6
-        else:
-            rsi_factor = 1.0
+            rsi_factor = 0.7
     elif ema_direction < 0:
         if rsi[i] > RSI_SHORT_THRESHOLD:
-            rsi_factor = 0.3
+            rsi_factor = 0.4
         elif rsi[i] < 30:
-            rsi_factor = 0.6
-        else:
-            rsi_factor = 1.0
+            rsi_factor = 0.7
     
-    # Volume confirmation
-    volume_factor = 1.0
-    if volume_ratio[i] >= VOLUME_SPIKE_THRESHOLD:
-        volume_factor = 1.2
-        confidence = min(1.0, confidence + 0.15)
-    elif volume_ratio[i] < VOLUME_MIN_RATIO:
-        volume_factor = 0.7
-        confidence = max(0.3, confidence - 0.2)
-    
-    # Bollinger squeeze detection (low bandwidth = potential breakout)
-    squeeze_factor = 1.0
-    if bandwidth[i] > 0:
-        # Higher bandwidth = more volatile, lower confidence in trend continuation
-        if bandwidth[i] < 0.05:
-            squeeze_factor = 1.1
-            confidence = min(1.0, confidence + 0.1)
-        elif bandwidth[i] > 0.15:
-            squeeze_factor = 0.8
-            confidence = max(0.3, confidence - 0.15)
-    
-    signal = ema_direction * trend_strength * rsi_factor * volume_factor * squeeze_factor
+    signal = ema_direction * trend_strength * rsi_factor
     
     return signal, confidence
 
@@ -414,18 +355,17 @@ def calculate_trend_signal(close: np.ndarray,
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Trend Funding Hybrid V13 Strategy.
+    Trend Funding Hybrid V14 Strategy.
     
     Signal Logic:
     1. Calculate trend signal from EMA crossover (20/50) with 200 EMA filter
     2. Detect RSI divergence for entry timing enhancement
     3. Calculate funding contrarian signal from extreme funding rates
-    4. Detect Bollinger squeeze for volatility regime
-    5. Combine signals with confidence weighting
-    6. Apply volatility normalization
-    7. Smooth signals with reduced EMA
-    8. Apply hysteresis to reduce whipsaws
-    9. Filter by minimum signal magnitude
+    4. Combine signals with simplified weighting
+    5. Apply volatility normalization
+    6. Smooth signals with EMA
+    7. Apply hysteresis to reduce whipsaws
+    8. Filter by minimum signal magnitude
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, funding_rate, ...]
@@ -521,50 +461,48 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         # Calculate trend signal with confidence
         trend_sig, trend_confidence = calculate_trend_signal(
-            close, ema_fast, ema_slow, ema_major, rsi, volume_ratio, bandwidth, i
+            close, ema_fast, ema_slow, ema_major, rsi, i
         )
         
         # Detect RSI divergence
-        rsi_divergence = detect_rsi_divergence(close, rsi, RSI_DIVERGENCE_LOOKBACK, i)
+        rsi_divergence = detect_rsi_divergence(close, rsi, 5, i)
         
         # Get funding overlay
         fund_sig = funding_signal[i]
         
-        # Combine signals with confidence weighting
-        # Trend is primary, funding is contrarian overlay, divergence is timing enhancer
-        if abs(trend_sig) > 0.2:
-            if np.sign(trend_sig) != np.sign(fund_sig) and abs(fund_sig) > 0.15:
+        # Combine signals with simplified weighting
+        if abs(trend_sig) > 0.15:
+            # Trend is primary driver
+            if np.sign(trend_sig) != np.sign(fund_sig) and abs(fund_sig) > 0.10:
                 # Conflict between trend and funding - reduce signal
-                raw_signal = trend_sig * (1.0 - FUNDING_WEIGHT) + fund_sig
-                confidence = trend_confidence * 0.6
+                raw_signal = trend_sig * 0.65 + fund_sig * 0.35
+                confidence = trend_confidence * 0.7
             else:
                 # Aligned or weak funding - trend dominant
-                raw_signal = trend_sig * 0.75 + fund_sig * 0.25
+                raw_signal = trend_sig * 0.70 + fund_sig * 0.30
                 confidence = trend_confidence
         else:
             # Weak trend - funding can dominate
-            raw_signal = fund_sig * 0.6
-            confidence = 0.4
+            raw_signal = fund_sig * 0.55
+            confidence = 0.35
         
         # Apply RSI divergence enhancement
         if abs(rsi_divergence) > 0.3 and np.sign(rsi_divergence) == np.sign(raw_signal):
-            # Divergence confirms signal direction
-            raw_signal *= 1.15
-            confidence = min(1.0, confidence + 0.15)
+            raw_signal *= 1.10
+            confidence = min(1.0, confidence + 0.10)
         elif abs(rsi_divergence) > 0.3 and np.sign(rsi_divergence) != np.sign(raw_signal):
-            # Divergence conflicts - reduce signal
-            raw_signal *= 0.7
-            confidence = max(0.2, confidence - 0.2)
+            raw_signal *= 0.75
+            confidence = max(0.2, confidence - 0.15)
         
         # Confidence-based scaling
-        raw_signal *= (0.6 + CONFIDENCE_WEIGHT * confidence)
+        raw_signal *= (0.65 + 0.35 * confidence)
         
         # Volatility normalization
         vol_factor = VOLATILITY_TARGET / max(atr_pct, 0.001)
-        vol_factor = np.clip(vol_factor, 0.6, 1.8)
+        vol_factor = np.clip(vol_factor, 0.7, 1.5)
         raw_signal *= vol_factor
         
-        # Signal smoothing (reduced for faster response)
+        # Signal smoothing
         smoothed_signal = SMOOTHING_FACTOR * prev_signal + (1.0 - SMOOTHING_FACTOR) * raw_signal
         
         # Hysteresis: don't flip direction on small changes
