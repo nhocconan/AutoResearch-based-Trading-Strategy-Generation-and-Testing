@@ -1,113 +1,94 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #004 - MACD Histogram Momentum Strategy (4h)
-========================================================
-Hypothesis: MACD histogram captures momentum shifts more smoothly than Supertrend's
-binary flips. The histogram provides early warning of momentum decay before price
-reversal, allowing earlier exits. 4h timeframe filters noise while maintaining
-reasonable trade frequency.
+EXPERIMENT #005 - Donchian Channel Breakout (4h) Trend Following Strategy
+==========================================================================
+Hypothesis: Donchian(20) breakout on 4h timeframe will capture sustained trends
+with clearer entry/exit signals than Supertrend. The channel breakout method
+was proven by Turtle Traders and works well in crypto's trending markets.
 
-Key differences from baseline:
-- Momentum-based (MACD histogram) vs trend-following (Supertrend/EMA)
-- Gradual momentum decay detection vs hard stop flips
-- Same 4h timeframe as best performer (#001)
-- Discrete signal levels (0.0, ±0.25, ±0.35) to minimize churning costs
-- Histogram threshold filter to avoid whipsaws near zero line
+Key differences from Supertrend:
+- Entry on confirmed breakouts (20-period high/low) vs ATR-based stops
+- Exit on channel midpoint cross or opposite breakout
+- Fewer false signals in ranging markets (wait for confirmed breakout)
+- Same conservative position sizing (0.35) to control DD
+
+Why 4h Donchian should beat 4h Supertrend:
+- Cleaner breakout signals vs continuous trend following
+- Better risk/reward on entry (breakout confirmation)
+- Less whipsaw in consolidation periods
 """
 
 import numpy as np
 import pandas as pd
 
-name = "macd_histogram_4h_v1"
+name = "donchian_4h_v1"
 timeframe = "4h"
 leverage = 1.0
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
+    high = prices["high"].values
+    low = prices["low"].values
     n = len(close)
     
-    # MACD parameters
-    fast_period = 12
-    slow_period = 26
-    signal_period = 9
+    # Donchian channel parameters
+    period = 20
     
-    # Calculate EMAs using pandas for proper handling
-    close_series = pd.Series(close)
+    # Calculate 20-period high and low (rolling max/min)
+    # Use proper min_periods to avoid look-ahead
+    rolling_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    rolling_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
     
-    # EMA fast and slow
-    ema_fast = close_series.ewm(span=fast_period, adjust=False, min_periods=fast_period).mean().values
-    ema_slow = close_series.ewm(span=slow_period, adjust=False, min_periods=slow_period).mean().values
+    # Channel midpoint
+    midpoint = (rolling_high + rolling_low) / 2
     
-    # MACD line
-    macd_line = ema_fast - ema_slow
-    
-    # Signal line (EMA of MACD)
-    macd_series = pd.Series(macd_line)
-    signal_line = macd_series.ewm(span=signal_period, adjust=False, min_periods=signal_period).mean().values
-    
-    # Histogram
-    histogram = macd_line - signal_line
-    
-    # Calculate histogram momentum (rate of change of histogram)
-    hist_momentum = np.zeros(n)
-    hist_momentum[1:] = np.diff(histogram)
-    
-    # Generate signals with discrete position sizing
+    # Generate signals
     signals = np.zeros(n)
+    SIZE = 0.35  # 35% position size - critical for drawdown control
     
-    # Position size levels - discrete to minimize churning
-    SIZE_MEDIUM = 0.25  # 25% position
-    SIZE_LARGE = 0.35   # 35% position
+    # Track current position state
+    # 0 = flat, 1 = long, -1 = short
+    position = 0
     
-    # Threshold to avoid whipsaws near zero
-    HIST_THRESHOLD = 0.0
-    
-    # Track previous signal to avoid unnecessary flips
-    prev_signal = 0.0
-    
-    # Find first valid index (after all warmup periods)
-    first_valid = max(fast_period, slow_period, signal_period) + 1
+    # First valid index (after period warmup)
+    first_valid = period
     
     for i in range(first_valid, n):
-        if np.isnan(histogram[i]) or np.isnan(hist_momentum[i]):
-            signals[i] = 0.0
+        if np.isnan(rolling_high[i]) or np.isnan(rolling_low[i]):
+            signals[i] = 0
             continue
         
-        # Determine signal based on histogram position and momentum
-        if histogram[i] > HIST_THRESHOLD:
-            # Bullish territory
-            if hist_momentum[i] >= 0:
-                # Momentum increasing or stable - full position
-                signals[i] = SIZE_LARGE
-            else:
-                # Momentum decreasing but still positive - reduce position
-                signals[i] = SIZE_MEDIUM
-        elif histogram[i] < -HIST_THRESHOLD:
-            # Bearish territory
-            if hist_momentum[i] <= 0:
-                # Momentum decreasing or stable - full short
-                signals[i] = -SIZE_LARGE
-            else:
-                # Momentum increasing but still negative - reduce short
-                signals[i] = -SIZE_MEDIUM
+        prev_close = close[i-1] if i > 0 else close[i]
+        curr_close = close[i]
+        
+        # Long entry: price breaks above 20-period high
+        if position <= 0 and curr_close > rolling_high[i-1]:
+            position = 1
+            signals[i] = SIZE
+        
+        # Short entry: price breaks below 20-period low
+        elif position >= 0 and curr_close < rolling_low[i-1]:
+            position = -1
+            signals[i] = -SIZE
+        
+        # Long exit: price crosses below midpoint OR short breakout
+        elif position == 1 and curr_close < midpoint[i]:
+            position = 0
+            signals[i] = 0
+        
+        # Short exit: price crosses above midpoint OR long breakout
+        elif position == -1 and curr_close > midpoint[i]:
+            position = 0
+            signals[i] = 0
+        
+        # Hold current position
         else:
-            # Near zero - flat
-            signals[i] = 0.0
-        
-        # Apply hysteresis to reduce churning
-        # Only flip if signal magnitude changes significantly
-        if abs(prev_signal) > 0 and abs(signals[i]) > 0:
-            # Same direction - keep
-            if np.sign(prev_signal) == np.sign(signals[i]):
-                signals[i] = prev_signal  # Maintain previous to avoid churn
-        elif abs(signals[i]) < SIZE_MEDIUM and abs(prev_signal) >= SIZE_MEDIUM:
-            # Reducing position - allow it (momentum decay)
-            pass
-        elif abs(signals[i]) == 0 and abs(prev_signal) > 0:
-            # Going flat - allow it (exit signal)
-            pass
-        
-        prev_signal = signals[i]
+            if position == 1:
+                signals[i] = SIZE
+            elif position == -1:
+                signals[i] = -SIZE
+            else:
+                signals[i] = 0
     
     return signals
