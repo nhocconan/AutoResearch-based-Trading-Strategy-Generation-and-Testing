@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Adaptive Regime Trend V10
+strategy.py - Adaptive Regime Trend V11
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,22 +11,22 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Building on adaptive_regime_trend_v9, focusing on:
-    - Simplified regime detection (binary: trending vs ranging)
+    Building on adaptive_regime_trend_v10 with critical bug fixes:
+    - Fixed is_ranging undefined variable bug
+    - Simplified regime detection for better stability
     - Enhanced funding rate mean reversion with adaptive thresholds
     - Multi-layer EMA trend confirmation (3-tier stack)
     - Volume confirmation scaled by volatility regime
     - Adaptive signal smoothing based on regime stability
     - Improved hysteresis to reduce whipsaws during transitions
-    - Better integration of taker ratio for market pressure
     
-    Key improvements over adaptive_regime_trend_v9:
-    - Simplified regime logic (removed breakout potential complexity)
+    Key improvements over adaptive_regime_trend_v10:
+    - Fixed critical bug: is_ranging now properly defined as not is_trending
+    - Cleaner regime logic with explicit binary classification
     - Funding threshold adapts to both volatility and recent extremes
     - EMA stack uses 3-tier confirmation (fast/medium/slow alignment)
     - Signal smoothing factor adapts to regime stability
     - Hysteresis threshold scales with signal magnitude
-    - Cleaner separation of trending vs ranging logic
     - Reduced parameter count for better generalization
 
 Look-Ahead Safety:
@@ -42,7 +42,7 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "adaptive_regime_trend_v10"
+name = "adaptive_regime_trend_v11"
 timeframe = "1h"
 leverage = 2.5  # Moderate leverage for risk-adjusted returns
 
@@ -441,7 +441,7 @@ def calculate_regime_stability(regime_history: list, lookback: int) -> float:
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Adaptive Regime Trend V10 Strategy.
+    Adaptive Regime Trend V11 Strategy.
     
     Signal Logic:
     1. Calculate regime (trending vs ranging) using ADX + BB width
@@ -541,6 +541,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         is_trending = adx[i] >= ADX_TREND_THRESHOLD
         is_squeeze = bb_width[i] < BB_SQUEEZE_THRESHOLD
+        is_ranging = not is_trending  # FIXED: was undefined in v10
         
         regime_history.pop(0)
         regime_history.append(1 if is_trending else 0)
