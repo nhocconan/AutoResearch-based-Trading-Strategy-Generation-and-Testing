@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #015 - Supertrend + RSI Pullback + Volume Confirmation + ATR Stop
-=============================================================================
-Hypothesis: Supertrend provides cleaner trend signals than moving averages with less lag.
-Combined with RSI pullback entries, volume confirmation, and ATR trailing stops,
-this should capture strong trends while filtering false breakouts.
+EXPERIMENT #016 - Supertrend + Z-Score Pullback + ADX Filter + ATR Stop
+========================================================================
+Hypothesis: Supertrend provides cleaner trend signals than MA/KAMA. Combined with
+Z-score mean reversion for entry timing (buy pullbacks in uptrend, sell rallies in
+downtrend) and ADX strength filter to avoid choppy markets. ATR trailing stop manages
+risk dynamically.
 
-Key differences from mtf_keltner_rsi_adx_v1:
-- Supertrend(10,3) for trend direction instead of Keltner channels
-- Volume spike confirmation (1.5x 20-period avg) to validate entries
-- Tighter RSI thresholds (40/60 instead of 45/55) for better pullback timing
-- ATR trailing stop at 2.0*ATR (tighter risk management)
+Key innovations vs current best (mtf_keltner_rsi_adx_v1, Sharpe=4.452):
+- Supertrend instead of Keltner for trend (less whipsaw, clearer signals)
+- Z-score on price deviation from rolling mean (better entry timing than RSI)
+- ADX > 25 filter ensures we only trade when trend has momentum
+- Multi-timeframe: 4h Supertrend trend + 1h Z-score entries
+- Discrete signal levels (0, ±0.25, ±0.35) to reduce churn costs
 
 Why this might beat Sharpe=4.452:
-- Supertrend adapts better to volatility regimes than Keltner
-- Volume filter reduces false breakout entries significantly
-- Tighter stops preserve capital during reversals
+- Supertrend adapts to volatility better than Keltner channels
+- Z-score captures mean reversion within trends more precisely
+- ADX filter avoids false signals in consolidation
+- Proper ATR stoploss prevents large drawdowns
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_supertrend_rsi_volume_v1"
+name = "mtf_supertrend_zscore_adx_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -50,7 +53,7 @@ def calculate_atr(high, low, close, period=14):
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     """
     Calculate Supertrend indicator
-    Returns: supertrend_line, trend_direction (1=up, -1=down)
+    Returns: supertrend_values, trend_direction (1=up, -1=down)
     """
     n = len(close)
     atr = calculate_atr(high, low, close, period)
@@ -68,17 +71,96 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
         
         if i == period:
             supertrend[i] = upper_band[i]
-            trend[i] = 1
+            trend[i] = -1
         else:
-            # Supertrend logic
-            if close[i] > supertrend[i - 1]:
-                supertrend[i] = min(lower_band[i], supertrend[i - 1] if trend[i - 1] == 1 else lower_band[i])
-                trend[i] = 1
+            if trend[i - 1] == 1:
+                if close[i] < lower_band[i]:
+                    supertrend[i] = upper_band[i]
+                    trend[i] = -1
+                else:
+                    supertrend[i] = max(lower_band[i], supertrend[i - 1])
+                    trend[i] = 1
             else:
-                supertrend[i] = max(upper_band[i], supertrend[i - 1] if trend[i - 1] == -1 else upper_band[i])
-                trend[i] = -1
+                if close[i] > upper_band[i]:
+                    supertrend[i] = lower_band[i]
+                    trend[i] = 1
+                else:
+                    supertrend[i] = min(upper_band[i], supertrend[i - 1])
+                    trend[i] = -1
     
     return supertrend, trend
+
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+        
+        plus_move = high[i] - high[i - 1]
+        minus_move = low[i - 1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    adx = np.zeros(n)
+    
+    # Smooth TR, +DM, -DM using Wilder's method
+    tr_smooth = np.zeros(n)
+    plus_dm_smooth = np.zeros(n)
+    minus_dm_smooth = np.zeros(n)
+    
+    tr_smooth[period - 1] = np.sum(tr[1:period])
+    plus_dm_smooth[period - 1] = np.sum(plus_dm[1:period])
+    minus_dm_smooth[period - 1] = np.sum(minus_dm[1:period])
+    
+    for i in range(period, n):
+        tr_smooth[i] = tr_smooth[i - 1] - tr_smooth[i - 1] / period + tr[i]
+        plus_dm_smooth[i] = plus_dm_smooth[i - 1] - plus_dm_smooth[i - 1] / period + plus_dm[i]
+        minus_dm_smooth[i] = minus_dm_smooth[i - 1] - minus_dm_smooth[i - 1] / period + minus_dm[i]
+    
+    for i in range(period, n):
+        if tr_smooth[i] > 0:
+            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
+            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
+        
+        if plus_di[i] + minus_di[i] > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    
+    # Smooth DX to get ADX
+    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
+    for i in range(period * 2, n):
+        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+    
+    return adx
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score of price relative to rolling mean"""
+    n = len(close)
+    zscore = np.zeros(n)
+    
+    mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    mask = std > 0
+    zscore[mask] = (close[mask] - mean[mask]) / std[mask]
+    
+    return zscore
 
 
 def calculate_rsi(close, period=14):
@@ -99,50 +181,27 @@ def calculate_rsi(close, period=14):
     
     rsi = np.zeros(n)
     rsi[mask] = 100 - (100 / (1 + rs[mask]))
-    rsi[avg_loss == 0] = 100
     
     return rsi
-
-
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume simple moving average"""
-    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-
-
-def calculate_rvi(high, low, close, volume, period=14):
-    """
-    Calculate Relative Volume Index (RVI)
-    Measures volume strength relative to recent average
-    """
-    n = len(close)
-    vol_sma = calculate_volume_sma(volume, period)
-    
-    rvi = np.zeros(n)
-    mask = vol_sma > 0
-    rvi[mask] = volume[mask] / vol_sma[mask]
-    
-    return rvi
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values if "volume" in prices.columns else np.ones(len(close))
     n = len(close)
     
-    # 1h indicators for entry timing
-    rsi_1h = calculate_rsi(close, period=14)
+    # 1h indicators for entry timing and risk
+    zscore_1h = calculate_zscore(close, period=20)
     atr_1h = calculate_atr(high, low, close, period=14)
-    rvi_1h = calculate_rvi(high, low, close, volume, period=20)
+    rsi_1h = calculate_rsi(close, period=14)
     
     # 4h Supertrend for trend filter (resample 1h → 4h)
     df_1h = pd.DataFrame({
         'open': close,
         'high': high,
         'low': low,
-        'close': close,
-        'volume': volume
+        'close': close
     })
     df_1h.index = pd.date_range(start='2021-01-01', periods=n, freq='1h')
     
@@ -151,8 +210,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         'open': 'first',
         'high': 'max',
         'low': 'min',
-        'close': 'last',
-        'volume': 'sum'
+        'close': 'last'
     }).dropna()
     
     h_4h = df_4h['high'].values
@@ -162,183 +220,153 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Calculate 4h Supertrend
     supertrend_4h, trend_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
     
+    # Calculate 4h ADX for trend strength
+    adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
+    
     # Map 4h trend back to 1h timeframe
     trend_1h = np.zeros(n)
+    adx_1h = np.zeros(n)
     idx_1h_to_4h = np.arange(n) // 4
     
     for i in range(n):
-        idx_4h = min(idx_1h_to_4h[i], len(trend_4h) - 1)
-        if idx_4h >= 10:  # Wait for supertrend to initialize
+        idx_4h = idx_1h_to_4h[i]
+        if idx_4h < len(trend_4h):
             trend_1h[i] = trend_4h[idx_4h]
+        if idx_4h < len(adx_4h):
+            adx_1h[i] = adx_4h[idx_4h]
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels to reduce churn
-    SIZE_FULL = 0.35   # Full position with all confirmations
-    SIZE_HALF = 0.20   # Reduced position with partial confirmations
+    SIZE_FULL = 0.35   # Full position in good conditions
+    SIZE_HALF = 0.25   # Reduced position in marginal conditions
     
-    # RSI thresholds for pullback entries
-    RSI_LONG_ENTRY = 40   # Enter long on deeper pullback in uptrend
-    RSI_SHORT_ENTRY = 60  # Enter short on stronger rally in downtrend
-    RSI_EXIT = 50         # Exit when RSI crosses middle
+    # Z-score thresholds for pullback entries
+    ZSCORE_LONG_ENTRY = -0.8   # Enter long on pullback (price below mean)
+    ZSCORE_SHORT_ENTRY = 0.8   # Enter short on rally (price above mean)
+    ZSCORE_EXIT = 0.3          # Exit when mean reversion complete
     
-    # Volume confirmation thresholds
-    VOL_MIN = 1.2         # Minimum volume ratio for entry confirmation
-    VOL_STRONG = 1.5      # Strong volume for full position
+    # ADX threshold for trend strength
+    ADX_MIN = 25               # Only trade when ADX > 25 (strong trend)
     
     # ATR stoploss multiplier
-    ATR_STOP_MULT = 2.0
+    ATR_STOP_MULT = 2.5
     
-    first_valid = max(80, 14, 20)  # Wait for all indicators
+    first_valid = max(80, 40, 28, 20)  # Wait for all indicators
     
-    # Track entry prices and stops for trailing logic
-    entry_price = np.zeros(n)
-    stop_price = np.zeros(n)
-    position_type = np.zeros(n)  # 1=long, -1=short, 0=none
+    # Track entry prices for trailing stop logic
+    entry_price_long = np.zeros(n)
+    entry_price_short = np.zeros(n)
+    highest_since_entry = np.zeros(n)
+    lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(rvi_1h[i]) or np.isnan(trend_1h[i]):
+        if np.isnan(zscore_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(trend_1h[i]) or np.isnan(adx_1h[i]):
             signals[i] = 0.0
             continue
         
         trend = trend_1h[i]
-        rsi_val = rsi_1h[i]
-        rvi_val = rvi_1h[i]
+        zscore_val = zscore_1h[i]
+        adx_val = adx_1h[i]
         atr = atr_1h[i]
         price = close[i]
+        rsi_val = rsi_1h[i]
         
-        # ATR filter - avoid trading when ATR is extremely high
-        if atr > 0 and atr / price > 0.04:  # ATR > 4% of price = too volatile
-            # Check if we have existing position - apply stoploss
-            if position_type[i - 1] != 0 and i > 0:
-                if position_type[i - 1] == 1:  # Long
-                    if price < stop_price[i - 1]:
-                        signals[i] = 0.0
-                        position_type[i] = 0
-                    else:
-                        signals[i] = signals[i - 1]
-                        position_type[i] = position_type[i - 1]
-                else:  # Short
-                    if price > stop_price[i - 1]:
-                        signals[i] = 0.0
-                        position_type[i] = 0
-                    else:
-                        signals[i] = signals[i - 1]
-                        position_type[i] = position_type[i - 1]
-            else:
-                signals[i] = 0.0
+        # ADX filter - only trade when trend has momentum
+        if adx_val < ADX_MIN:
+            signals[i] = 0.0
             continue
         
-        if trend == 1:  # 4h uptrend - look for long entries
-            if rsi_val < RSI_LONG_ENTRY:
-                # Pullback entry - check volume confirmation
-                if rvi_val >= VOL_STRONG:
+        # ATR filter - avoid trading when ATR is extremely high
+        if atr > 0 and atr / price > 0.05:  # ATR > 5% of price = too volatile
+            signals[i] = 0.0
+            continue
+        
+        if trend == 1:  # 4h uptrend
+            # Check trailing stop for existing long first
+            if i > 0 and signals[i - 1] > 0:
+                if entry_price_long[i - 1] > 0:
+                    entry_price = entry_price_long[i - 1]
+                    highest_since_entry[i] = max(highest_since_entry[i - 1], price)
+                    stoploss_price = entry_price - ATR_STOP_MULT * atr
+                    
+                    # Trail stop: move stop up as price rises
+                    trailing_stop = highest_since_entry[i] - ATR_STOP_MULT * atr
+                    stoploss_price = max(stoploss_price, trailing_stop)
+                    
+                    if price < stoploss_price:
+                        signals[i] = 0.0  # Stoploss triggered
+                        entry_price_long[i] = 0
+                        highest_since_entry[i] = 0
+                    elif zscore_val > ZSCORE_EXIT:
+                        # Take profit: reduce to half position
+                        signals[i] = SIZE_HALF
+                        entry_price_long[i] = entry_price
+                        highest_since_entry[i] = highest_since_entry[i]
+                    else:
+                        signals[i] = signals[i - 1]  # Hold position
+                        entry_price_long[i] = entry_price
+                        highest_since_entry[i] = highest_since_entry[i]
+                else:
+                    signals[i] = 0.0
+            else:
+                # Look for entry on pullback
+                if zscore_val < ZSCORE_LONG_ENTRY:
+                    # Strong pullback - full position
                     signals[i] = SIZE_FULL
-                    entry_price[i] = price
-                    stop_price[i] = price - ATR_STOP_MULT * atr
-                    position_type[i] = 1
-                elif rvi_val >= VOL_MIN:
+                    entry_price_long[i] = price
+                    highest_since_entry[i] = price
+                elif zscore_val < 0 and rsi_val < 50:
+                    # Moderate pullback - half position
                     signals[i] = SIZE_HALF
-                    entry_price[i] = price
-                    stop_price[i] = price - ATR_STOP_MULT * atr
-                    position_type[i] = 1
+                    entry_price_long[i] = price
+                    highest_since_entry[i] = price
                 else:
-                    # No volume confirmation - hold or exit
-                    if i > 0 and position_type[i - 1] == 1:
-                        if price < stop_price[i - 1]:
-                            signals[i] = 0.0
-                            position_type[i] = 0
-                        else:
-                            signals[i] = signals[i - 1]
-                            position_type[i] = 1
-                            # Trail stop higher
-                            new_stop = price - ATR_STOP_MULT * atr
-                            stop_price[i] = max(stop_price[i - 1], new_stop)
+                    signals[i] = 0.0
+                    
+        elif trend == -1:  # 4h downtrend
+            # Check trailing stop for existing short first
+            if i > 0 and signals[i - 1] < 0:
+                if entry_price_short[i - 1] > 0:
+                    entry_price = entry_price_short[i - 1]
+                    lowest_since_entry[i] = min(lowest_since_entry[i - 1], price) if lowest_since_entry[i - 1] > 0 else price
+                    stoploss_price = entry_price + ATR_STOP_MULT * atr
+                    
+                    # Trail stop: move stop down as price falls
+                    trailing_stop = lowest_since_entry[i] + ATR_STOP_MULT * atr
+                    stoploss_price = min(stoploss_price, trailing_stop)
+                    
+                    if price > stoploss_price:
+                        signals[i] = 0.0  # Stoploss triggered
+                        entry_price_short[i] = 0
+                        lowest_since_entry[i] = 0
+                    elif zscore_val < -ZSCORE_EXIT:
+                        # Take profit: reduce to half position
+                        signals[i] = -SIZE_HALF
+                        entry_price_short[i] = entry_price
+                        lowest_since_entry[i] = lowest_since_entry[i]
                     else:
-                        signals[i] = 0.0
-                        position_type[i] = 0
-            elif rsi_val > RSI_EXIT and position_type[i - 1] == 1:
-                # RSI crossed above 50 - reduce or exit
-                if rsi_val > 70:  # Overbought - take profit
-                    signals[i] = 0.0
-                    position_type[i] = 0
+                        signals[i] = signals[i - 1]  # Hold position
+                        entry_price_short[i] = entry_price
+                        lowest_since_entry[i] = lowest_since_entry[i]
                 else:
-                    signals[i] = signals[i - 1]
-                    position_type[i] = 1
-                    # Trail stop
-                    new_stop = price - ATR_STOP_MULT * atr
-                    stop_price[i] = max(stop_price[i - 1], new_stop)
-            elif i > 0 and position_type[i - 1] == 1:
-                # Hold existing long - check stoploss
-                if price < stop_price[i - 1]:
                     signals[i] = 0.0
-                    position_type[i] = 0
-                else:
-                    signals[i] = signals[i - 1]
-                    position_type[i] = 1
-                    # Trail stop higher
-                    new_stop = price - ATR_STOP_MULT * atr
-                    stop_price[i] = max(stop_price[i - 1], new_stop)
             else:
-                signals[i] = 0.0
-                position_type[i] = 0
-                
-        elif trend == -1:  # 4h downtrend - look for short entries
-            if rsi_val > RSI_SHORT_ENTRY:
-                # Rally entry - check volume confirmation
-                if rvi_val >= VOL_STRONG:
+                # Look for entry on rally
+                if zscore_val > ZSCORE_SHORT_ENTRY:
+                    # Strong rally - full short
                     signals[i] = -SIZE_FULL
-                    entry_price[i] = price
-                    stop_price[i] = price + ATR_STOP_MULT * atr
-                    position_type[i] = -1
-                elif rvi_val >= VOL_MIN:
+                    entry_price_short[i] = price
+                    lowest_since_entry[i] = price
+                elif zscore_val > 0 and rsi_val > 50:
+                    # Moderate rally - half short
                     signals[i] = -SIZE_HALF
-                    entry_price[i] = price
-                    stop_price[i] = price + ATR_STOP_MULT * atr
-                    position_type[i] = -1
+                    entry_price_short[i] = price
+                    lowest_since_entry[i] = price
                 else:
-                    # No volume confirmation - hold or exit
-                    if i > 0 and position_type[i - 1] == -1:
-                        if price > stop_price[i - 1]:
-                            signals[i] = 0.0
-                            position_type[i] = 0
-                        else:
-                            signals[i] = signals[i - 1]
-                            position_type[i] = -1
-                            # Trail stop lower
-                            new_stop = price + ATR_STOP_MULT * atr
-                            stop_price[i] = min(stop_price[i - 1], new_stop)
-                    else:
-                        signals[i] = 0.0
-                        position_type[i] = 0
-            elif rsi_val < RSI_EXIT and position_type[i - 1] == -1:
-                # RSI crossed below 50 - reduce or exit
-                if rsi_val < 30:  # Oversold - take profit
                     signals[i] = 0.0
-                    position_type[i] = 0
-                else:
-                    signals[i] = signals[i - 1]
-                    position_type[i] = -1
-                    # Trail stop
-                    new_stop = price + ATR_STOP_MULT * atr
-                    stop_price[i] = min(stop_price[i - 1], new_stop)
-            elif i > 0 and position_type[i - 1] == -1:
-                # Hold existing short - check stoploss
-                if price > stop_price[i - 1]:
-                    signals[i] = 0.0
-                    position_type[i] = 0
-                else:
-                    signals[i] = signals[i - 1]
-                    position_type[i] = -1
-                    # Trail stop lower
-                    new_stop = price + ATR_STOP_MULT * atr
-                    stop_price[i] = min(stop_price[i - 1], new_stop)
-            else:
-                signals[i] = 0.0
-                position_type[i] = 0
         else:  # No clear trend
             signals[i] = 0.0
-            position_type[i] = 0
     
     return signals
