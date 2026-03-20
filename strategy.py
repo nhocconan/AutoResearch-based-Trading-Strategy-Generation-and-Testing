@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Trend Momentum V3 with Bollinger Squeeze Filter
+strategy.py - Trend Momentum V3 with ADX Filter and Pullback Entries
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -12,18 +12,18 @@ This file defines the trading strategy. It must expose:
 
 Strategy Hypothesis:
     Building on #010 success (Sharpe=0.330, Return=+40.7%), improving:
-    - Bollinger Band squeeze detection to avoid low-volatility chop
-    - RSI divergence detection for better entry timing
-    - Volume breakout confirmation with momentum
-    - Maintained EMA trend framework from #010
-    - Reduced signal smoothing for faster response
+    - ADX filter to distinguish trending vs ranging markets
+    - Pullback entry mechanism for better risk/reward
+    - Improved RSI directional scoring (bullish vs bearish momentum)
+    - Dynamic volatility thresholds based on recent ATR distribution
+    - Reduced signal whipsaws through stricter trend confirmation
     
-    Key improvements over #010:
-    - BB squeeze filter (BB width percentile < 30th)
-    - RSI divergence scoring (price vs RSI momentum)
-    - Volume momentum (volume vs volume MA)
-    - Lower smoothing factor (0.5 vs 0.7)
-    - Slightly higher leverage (2.5 vs 2.0) for better returns
+    Key improvements over trend_momentum_v2:
+    - ADX threshold (>=25) to filter low-trend environments
+    - Pullback detection using EMA distance for entry timing
+    - Asymmetric RSI scoring based on trend direction
+    - Adaptive volatility percentiles instead of fixed thresholds
+    - Stricter volume confirmation in trending markets
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -38,9 +38,9 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "trend_momentum_v3_bb_squeeze"
+name = "trend_momentum_v3_adx"
 timeframe = "1h"
-leverage = 2.5  # Moderate leverage for better risk-adjusted returns
+leverage = 2.0  # Conservative leverage for better risk-adjusted returns
 
 # EMA periods for trend detection
 EMA_FAST = 9
@@ -48,22 +48,21 @@ EMA_MEDIUM = 21
 EMA_SLOW = 50
 EMA_MAJOR = 200
 
-# RSI configuration
+# ADX configuration for trend strength
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25  # Minimum ADX for trending market
+ADX_STRONG = 40  # Strong trend threshold
+
+# RSI configuration with directional scoring
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
-RSI_NEUTRAL_LOW = 40
-RSI_NEUTRAL_HIGH = 60
-
-# Bollinger Band configuration
-BB_PERIOD = 20
-BB_STD = 2.0
-BB_SQUEEZE_PERCENTILE = 0.30  # Trade only when BB width > 30th percentile
+RSI_BULLISH_ZONE = 50  # Above this = bullish momentum
+RSI_BEARISH_ZONE = 50  # Below this = bearish momentum
 
 # Volume configuration
 VOLUME_LOOKBACK = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_BREAKOUT_THRESHOLD = 1.3  # Volume must be 1.3x average
+VOLUME_PERCENTILE_THRESHOLD = 0.5  # Volume must be in top 50%
 
 # Trend scoring weights
 WEIGHT_FAST = 0.4
@@ -72,14 +71,18 @@ WEIGHT_SLOW = 0.25
 
 # Volatility configuration
 ATR_PERIOD = 14
-VOLATILITY_TARGET = 0.012  # Target hourly volatility
-VOLATILITY_MIN = 0.002
-VOLATILITY_MAX = 0.040
+VOLATILITY_TARGET = 0.010  # Target hourly volatility
+VOLATILITY_MIN_PERCENTILE = 0.15  # Bottom 15% = too low
+VOLATILITY_MAX_PERCENTILE = 0.85  # Top 15% = too high
+
+# Pullback configuration
+PULLBACK_LOOKBACK = 5
+PULLBACK_THRESHOLD = 0.003  # 0.3% pullback from recent high/low
 
 # Signal configuration
 MIN_SIGNAL = 0.12
-MAX_SIGNAL = 0.85
-SMOOTHING_FACTOR = 0.5  # Reduced smoothing for faster response
+MAX_SIGNAL = 0.75
+SMOOTHING_FACTOR = 0.65  # Exponential smoothing factor (0-1)
 
 
 # =============================================================================
@@ -108,30 +111,6 @@ def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
     ema = np.nan_to_num(ema_values, nan=0.0)
     
     return ema
-
-
-def calculate_sma(close: np.ndarray, period: int) -> np.ndarray:
-    """
-    Calculate Simple Moving Average using only past data.
-    
-    Args:
-        close: Array of close prices
-        period: SMA period
-    
-    Returns:
-        Array of SMA values
-    """
-    n = len(close)
-    sma = np.zeros(n, dtype=np.float64)
-    
-    if n < period:
-        return sma
-    
-    close_series = pd.Series(close)
-    sma_values = close_series.rolling(window=period, min_periods=period).mean().values
-    sma = np.nan_to_num(sma_values, nan=0.0)
-    
-    return sma
 
 
 def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
@@ -205,64 +184,81 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     return atr
 
 
-def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_dev: float = 2.0) -> tuple:
+def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
     """
-    Calculate Bollinger Bands using only past data.
+    Calculate Average Directional Index using only past data.
     
     Args:
+        high: Array of high prices
+        low: Array of low prices
         close: Array of close prices
-        period: BB period
-        std_dev: Standard deviation multiplier
+        period: ADX period
     
     Returns:
-        Tuple of (upper, middle, lower, width) arrays
+        Array of ADX values (0-100)
     """
     n = len(close)
-    upper = np.zeros(n, dtype=np.float64)
-    middle = np.zeros(n, dtype=np.float64)
-    lower = np.zeros(n, dtype=np.float64)
-    width = np.zeros(n, dtype=np.float64)
+    adx = np.zeros(n, dtype=np.float64)
     
-    if n < period:
-        return upper, middle, lower, width
+    if n < period * 2 + 1:
+        return adx
     
-    close_series = pd.Series(close)
-    middle_series = close_series.rolling(window=period, min_periods=period).mean()
-    std_series = close_series.rolling(window=period, min_periods=period).std()
+    # Calculate True Range, +DM, -DM
+    tr = np.zeros(n, dtype=np.float64)
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
     
-    upper = np.nan_to_num((middle_series + std_dev * std_series).values, nan=0.0)
-    middle = np.nan_to_num(middle_series.values, nan=0.0)
-    lower = np.nan_to_num((middle_series - std_dev * std_series).values, nan=0.0)
-    width = np.nan_to_num((upper - lower) / middle, nan=0.0)
+    tr[0] = high[0] - low[0]
     
-    return upper, middle, lower, width
-
-
-def calculate_bb_width_percentile(bb_width: np.ndarray, lookback: int = 100) -> np.ndarray:
-    """
-    Calculate rolling percentile of BB width to detect squeeze/expansion.
-    Only uses past BB width data (no look-ahead).
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
+        
+        if high[i] - high[i-1] > low[i-1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+        else:
+            plus_dm[i] = 0
+            
+        if low[i-1] - low[i] > high[i] - high[i-1]:
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+        else:
+            minus_dm[i] = 0
     
-    Args:
-        bb_width: Array of BB width values
-        lookback: Rolling window for percentile calculation
+    # Smooth TR, +DM, -DM
+    tr_series = pd.Series(tr)
+    plus_dm_series = pd.Series(plus_dm)
+    minus_dm_series = pd.Series(minus_dm)
     
-    Returns:
-        Array of BB width percentile ranks (0-1)
-    """
-    n = len(bb_width)
-    bb_pct = np.zeros(n, dtype=np.float64)
+    atr = tr_series.ewm(span=period, adjust=False, min_periods=period).mean().values
+    smoothed_plus_dm = plus_dm_series.ewm(span=period, adjust=False, min_periods=period).mean().values
+    smoothed_minus_dm = minus_dm_series.ewm(span=period, adjust=False, min_periods=period).mean().values
     
-    if n < lookback:
-        return bb_pct
+    # Calculate +DI, -DI
+    plus_di = np.zeros(n, dtype=np.float64)
+    minus_di = np.zeros(n, dtype=np.float64)
     
-    for i in range(lookback, n):
-        window = bb_width[i-lookback:i]
-        valid_window = window[window > 0]
-        if len(valid_window) > 0:
-            bb_pct[i] = (valid_window < bb_width[i]).sum() / len(valid_window)
+    for i in range(period, n):
+        if atr[i] > 0:
+            plus_di[i] = 100 * smoothed_plus_dm[i] / atr[i]
+            minus_di[i] = 100 * smoothed_minus_dm[i] / atr[i]
     
-    return bb_pct
+    # Calculate DX
+    dx = np.zeros(n, dtype=np.float64)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    # Calculate ADX (smoothed DX)
+    dx_series = pd.Series(dx)
+    adx_series = dx_series.ewm(span=period, adjust=False, min_periods=period).mean()
+    
+    adx = np.nan_to_num(adx_series.values, nan=0.0)
+    
+    return adx
 
 
 def calculate_volume_percentile(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
@@ -293,46 +289,32 @@ def calculate_volume_percentile(volume: np.ndarray, lookback: int = 20) -> np.nd
     return volume_pct
 
 
-def calculate_rsi_divergence(close: np.ndarray, rsi: np.ndarray, lookback: int = 5) -> np.ndarray:
+def calculate_volatility_percentile(atr_pct: np.ndarray, lookback: int = 50) -> np.ndarray:
     """
-    Detect RSI divergence (price vs RSI momentum).
-    Only uses past data (no look-ahead).
-    
-    Positive divergence: price making lower lows, RSI making higher lows (bullish)
-    Negative divergence: price making higher highs, RSI making lower highs (bearish)
+    Calculate ATR percentile rank using rolling window.
+    Only uses past volatility data (no look-ahead).
     
     Args:
-        close: Array of close prices
-        rsi: Array of RSI values
-        lookback: Lookback period for divergence detection
+        atr_pct: Array of ATR percentage values
+        lookback: Rolling window for percentile calculation
     
     Returns:
-        Array of divergence scores (-1 to 1, positive = bullish divergence)
+        Array of volatility percentile ranks (0-1)
     """
-    n = len(close)
-    divergence = np.zeros(n, dtype=np.float64)
+    n = len(atr_pct)
+    vol_pct = np.zeros(n, dtype=np.float64)
     
-    if n < lookback * 2:
-        return divergence
+    if n < lookback:
+        return vol_pct
     
-    for i in range(lookback * 2, n):
-        # Price momentum (recent close vs lookback ago)
-        price_momentum = (close[i] - close[i - lookback]) / max(close[i - lookback], 1.0)
-        
-        # RSI momentum
-        rsi_momentum = rsi[i] - rsi[i - lookback]
-        
-        # Divergence score: when price and RSI move in opposite directions
-        if price_momentum > 0.001 and rsi_momentum < -2:
-            divergence[i] = -0.5  # Bearish divergence
-        elif price_momentum < -0.001 and rsi_momentum > 2:
-            divergence[i] = 0.5  # Bullish divergence
-        elif price_momentum > 0.002 and rsi_momentum > 0:
-            divergence[i] = 0.3  # Confirmed uptrend
-        elif price_momentum < -0.002 and rsi_momentum < 0:
-            divergence[i] = -0.3  # Confirmed downtrend
+    atr_series = pd.Series(atr_pct)
     
-    return divergence
+    for i in range(lookback, n):
+        window = atr_series.iloc[i-lookback:i]
+        rank = (window < atr_pct[i]).sum() / lookback
+        vol_pct[i] = rank
+    
+    return vol_pct
 
 
 def calculate_trend_score(close: float, ema_fast: float, ema_medium: float, 
@@ -376,26 +358,74 @@ def calculate_trend_score(close: float, ema_fast: float, ema_medium: float,
     return trend_score
 
 
-def calculate_rsi_score(rsi: float) -> float:
+def calculate_rsi_directional_score(rsi: float, trend_direction: int) -> float:
     """
-    Calculate RSI momentum score (0-1 scale).
+    Calculate RSI momentum score with directional bias.
     
     Args:
         rsi: Current RSI value
+        trend_direction: +1 for uptrend, -1 for downtrend
     
     Returns:
         RSI score in range [0, 1]
     """
-    if rsi <= RSI_OVERSOLD:
-        return 0.2  # Oversold, potential bounce
-    elif rsi < RSI_NEUTRAL_LOW:
-        return 0.4  # Recovering from oversold
-    elif rsi < RSI_NEUTRAL_HIGH:
-        return 0.6  # Neutral zone
-    elif rsi < RSI_OVERBOUGHT:
-        return 0.8  # Strong momentum
+    if trend_direction > 0:
+        # Bullish trend - favor higher RSI
+        if rsi < RSI_OVERSOLD:
+            return 0.1  # Too weak
+        elif rsi < RSI_BEARISH_ZONE:
+            return 0.3  # Weak momentum
+        elif rsi < RSI_BULLISH_ZONE:
+            return 0.5  # Neutral
+        elif rsi < RSI_OVERBOUGHT:
+            return 0.8  # Strong momentum
+        else:
+            return 0.6  # Overbought but trending
     else:
-        return 0.5  # Overbought, reduce confidence
+        # Bearish trend - favor lower RSI
+        if rsi > RSI_OVERBOUGHT:
+            return 0.1  # Too strong
+        elif rsi > RSI_BULLISH_ZONE:
+            return 0.3  # Weak momentum
+        elif rsi > RSI_BEARISH_ZONE:
+            return 0.5  # Neutral
+        elif rsi > RSI_OVERSOLD:
+            return 0.8  # Strong momentum
+        else:
+            return 0.6  # Oversold but trending
+
+
+def detect_pullback(close: np.ndarray, high: np.ndarray, low: np.ndarray, 
+                    i: int, lookback: int, threshold: float, direction: int) -> bool:
+    """
+    Detect if price is pulling back in the trend direction.
+    Only uses past data (no look-ahead).
+    
+    Args:
+        close: Array of close prices
+        high: Array of high prices
+        low: Array of low prices
+        i: Current index
+        lookback: Lookback period for recent high/low
+        threshold: Minimum pullback percentage
+        direction: +1 for long pullback, -1 for short pullback
+    
+    Returns:
+        True if pullback detected
+    """
+    if i < lookback + 1:
+        return False
+    
+    if direction > 0:
+        # Long: looking for pullback from recent high
+        recent_high = np.max(high[i-lookback:i])
+        pullback_pct = (recent_high - close[i]) / recent_high
+        return pullback_pct >= threshold
+    else:
+        # Short: looking for pullback from recent low
+        recent_low = np.min(low[i-lookback:i])
+        pullback_pct = (close[i] - recent_low) / recent_low
+        return pullback_pct >= threshold
 
 
 # =============================================================================
@@ -404,19 +434,20 @@ def calculate_rsi_score(rsi: float) -> float:
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Trend Momentum V3 Strategy with Bollinger Squeeze Filter.
+    Trend Momentum V3 Strategy with ADX Filter and Pullback Entries.
     
     Signal Logic:
-    1. Weighted trend score from EMA stack alignment
-    2. Bollinger Band squeeze filter (avoid low volatility)
-    3. RSI divergence detection for entry timing
-    4. Volume breakout confirmation
-    5. Volatility-based position sizing
-    6. Signal smoothing to reduce whipsaws
+    1. ADX filter to identify trending markets (ADX >= 25)
+    2. Weighted trend score from EMA stack alignment
+    3. Directional RSI scoring based on trend direction
+    4. Pullback detection for better entry timing
+    5. Volume percentile ranking for confirmation
+    6. Adaptive volatility-based position sizing
+    7. Signal smoothing to reduce whipsaws
     
     Entry Conditions:
-    - LONG: Positive trend + BB not squeezed + RSI confirmation + volume breakout
-    - SHORT: Negative trend + BB not squeezed + RSI confirmation + volume breakout
+    - LONG: ADX >= 25 + Positive trend + RSI bullish score + Pullback or breakout
+    - SHORT: ADX >= 25 + Negative trend + RSI bearish score + Pullback or breakout
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -455,28 +486,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     rsi = calculate_rsi(close, RSI_PERIOD)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Bollinger Bands
-    bb_upper, bb_middle, bb_lower, bb_width = calculate_bollinger_bands(close, BB_PERIOD, BB_STD)
-    bb_width_pct = calculate_bb_width_percentile(bb_width, 100)
-    
-    # Volume indicators
+    adx = calculate_adx(high, low, close, ADX_PERIOD)
     volume_pct = calculate_volume_percentile(volume, VOLUME_LOOKBACK)
-    volume_ma = calculate_sma(volume, VOLUME_MA_PERIOD)
-    volume_ratio = np.divide(volume, volume_ma, out=np.zeros_like(volume), where=volume_ma != 0)
     
-    # RSI divergence
-    rsi_div = calculate_rsi_divergence(close, rsi, 5)
+    # Calculate ATR percentage for volatility analysis
+    atr_pct = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        if close[i] > 0:
+            atr_pct[i] = atr[i] / close[i]
+    
+    # Calculate volatility percentile for adaptive thresholds
+    vol_percentile = calculate_volatility_percentile(atr_pct, 50)
     
     # Determine minimum valid index
     min_valid_index = max(
         EMA_MAJOR,
         RSI_PERIOD + 1,
         ATR_PERIOD + 1,
+        ADX_PERIOD * 2 + 1,
         VOLUME_LOOKBACK,
-        BB_PERIOD,
-        100,  # BB width percentile lookback
-        10    # RSI divergence lookback
+        50  # For volatility percentile
     )
     
     # Track previous signal for smoothing
@@ -485,20 +514,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Generate signals
     for i in range(min_valid_index, n):
         # Skip invalid data
-        if close[i] <= 0 or atr[i] <= 0 or bb_width[i] <= 0:
+        if close[i] <= 0 or atr[i] <= 0:
             signals[i] = 0.0
             prev_signal = 0.0
             continue
         
-        # Check volatility regime (avoid extreme volatility)
-        atr_pct = atr[i] / close[i]
-        if atr_pct < VOLATILITY_MIN or atr_pct > VOLATILITY_MAX:
+        # Check ADX filter - only trade in trending markets
+        if adx[i] < ADX_THRESHOLD:
             signals[i] = 0.0
             prev_signal = 0.0
             continue
         
-        # Bollinger Band squeeze filter - only trade when not in squeeze
-        if bb_width_pct[i] < BB_SQUEEZE_PERCENTILE:
+        # Check volatility regime using adaptive percentiles
+        if vol_percentile[i] < VOLATILITY_MIN_PERCENTILE or vol_percentile[i] > VOLATILITY_MAX_PERCENTILE:
             signals[i] = 0.0
             prev_signal = 0.0
             continue
@@ -510,43 +538,54 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         )
         
         # Skip weak trends
-        if abs(trend_score) < 0.12:
+        if abs(trend_score) < 0.15:
             signals[i] = 0.0
             prev_signal = 0.0
             continue
         
-        # Calculate RSI momentum score
-        rsi_score = calculate_rsi_score(rsi[i])
+        # Determine trend direction
+        trend_direction = 1 if trend_score > 0 else -1
         
-        # Volume breakout confirmation
-        volume_confirmed = volume_ratio[i] >= VOLUME_BREAKOUT_THRESHOLD
+        # Calculate directional RSI momentum score
+        rsi_score = calculate_rsi_directional_score(rsi[i], trend_direction)
         
-        # RSI divergence boost
-        divergence_boost = 1.0 + 0.3 * np.sign(trend_score) * rsi_div[i]
+        # Skip if RSI momentum is too weak
+        if rsi_score < 0.3:
+            signals[i] = 0.0
+            prev_signal = 0.0
+            continue
+        
+        # Volume confirmation
+        volume_confirmed = volume_pct[i] >= VOLUME_PERCENTILE_THRESHOLD
+        
+        # Pullback detection for better entry timing
+        pullback_detected = detect_pullback(
+            close, high, low, i, PULLBACK_LOOKBACK, 
+            PULLBACK_THRESHOLD, trend_direction
+        )
         
         # Determine signal direction and base magnitude
-        if trend_score > 0:
+        if trend_direction > 0:
             # LONG bias
-            if rsi_score < 0.3:
-                base_signal = 0.0  # RSI too weak for long
-            else:
-                base_signal = trend_score * rsi_score
+            base_signal = trend_score * rsi_score
         else:
             # SHORT bias
-            if rsi_score > 0.75:
-                base_signal = 0.0  # RSI too strong for short
-            else:
-                base_signal = trend_score * (1.0 - rsi_score * 0.5)
+            base_signal = trend_score * rsi_score
+        
+        # Apply pullback bonus (better risk/reward on pullbacks)
+        if pullback_detected:
+            base_signal *= 1.2
         
         # Apply volume confirmation boost
         if volume_confirmed:
-            base_signal *= 1.20
+            base_signal *= 1.1
         
-        # Apply divergence boost
-        base_signal *= divergence_boost
+        # ADX strength bonus
+        if adx[i] >= ADX_STRONG:
+            base_signal *= 1.15
         
         # Volatility-based position sizing (inverse relationship)
-        vol_factor = VOLATILITY_TARGET / max(atr_pct, 0.001)
+        vol_factor = VOLATILITY_TARGET / max(atr_pct[i], 0.001)
         vol_factor = np.clip(vol_factor, 0.5, 2.0)
         
         raw_signal = base_signal * vol_factor
