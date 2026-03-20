@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Simple Trend RSI V1
+strategy.py - Trend Momentum V3 with Funding Awareness
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,19 +11,19 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    After recent experiments showed complex multi-indicator strategies failing,
-    returning to simpler, proven concepts:
-    - Clean EMA trend filter (fast > medium > slow for long, reverse for short)
-    - RSI as momentum quality filter (not overbought for longs, not oversold for shorts)
-    - Volatility-based position sizing (reduce size in high volatility)
-    - Signal smoothing to reduce whipsaws
-    - Cooling period after signal changes to reduce overtrading
+    Building on #007/#002 success, simplifying and improving:
+    - Cleaner triple-EMA trend alignment (9/21/50)
+    - RSI momentum with asymmetric thresholds
+    - Optional funding rate sentiment filter (if available)
+    - Volatility-regime aware position sizing
+    - Reduced signal smoothing for better responsiveness
     
-    Key differences from trend_momentum_v2:
-    - Simpler trend scoring (binary EMA alignment + magnitude)
-    - RSI as filter not multiplier
-    - Cleaner volatility adjustment
-    - Added signal change cooldown
+    Key improvements over V2:
+    - Simpler EMA stack (3 vs 4 EMAs)
+    - Asymmetric RSI thresholds (longer bias in crypto)
+    - Funding rate as sentiment filter when available
+    - More conservative volatility scaling
+    - Cleaner entry/exit logic
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -38,34 +38,42 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "simple_trend_rsi_v1"
+name = "trend_momentum_v3"
 timeframe = "1h"
-leverage = 2.5  # Moderate leverage for better risk-adjusted returns
+leverage = 2.0  # Conservative leverage for risk-adjusted returns
 
-# EMA periods for trend detection
-EMA_FAST = 12
-EMA_MEDIUM = 26
+# EMA periods for trend detection (simplified stack)
+EMA_FAST = 9
+EMA_MEDIUM = 21
 EMA_SLOW = 50
 
-# RSI configuration
+# RSI configuration with asymmetric thresholds (crypto bias long)
 RSI_PERIOD = 14
-RSI_LONG_MIN = 45  # RSI must be above this for long entries
-RSI_SHORT_MAX = 55  # RSI must be below this for short entries
+RSI_LONG_ENTRY = 45  # Lower threshold for longs (crypto uptrend bias)
+RSI_SHORT_ENTRY = 65  # Higher threshold for shorts
+RSI_EXIT = 50  # Neutral exit zone
+
+# Volume configuration
+VOLUME_LOOKBACK = 20
+VOLUME_THRESHOLD = 0.5  # Volume must be above median
+
+# Trend scoring
+TREND_MIN_SCORE = 0.20  # Minimum trend strength to trade
 
 # Volatility configuration
 ATR_PERIOD = 14
-VOLATILITY_TARGET = 0.012  # Target hourly volatility
-VOLATILITY_MIN = 0.003
-VOLATILITY_MAX = 0.040
+VOLATILITY_TARGET = 0.008  # Target hourly volatility
+VOLATILITY_MIN = 0.0015
+VOLATILITY_MAX = 0.030
+
+# Funding rate configuration (if available)
+FUNDING_EXTREME = 0.0005  # 0.05% per 8h = extreme
+FUNDING_IMPACT = 0.3  # How much funding affects signal
 
 # Signal configuration
 MIN_SIGNAL = 0.15
-MAX_SIGNAL = 0.85
-SMOOTHING_FACTOR = 0.6  # Exponential smoothing factor (0-1)
-SIGNAL_COOLDOWN = 3  # Bars to wait after signal direction change
-
-# Trend strength threshold
-TREND_STRENGTH_MIN = 0.002  # Minimum EMA spread as % of price
+MAX_SIGNAL = 0.75
+SMOOTHING_FACTOR = 0.5  # Moderate smoothing
 
 
 # =============================================================================
@@ -167,10 +175,40 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     return atr
 
 
-def calculate_trend_strength(close: float, ema_fast: float, ema_medium: float, 
-                             ema_slow: float) -> tuple:
+def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
     """
-    Calculate trend direction and strength based on EMA stack.
+    Calculate volume ratio vs rolling median using only past data.
+    
+    Args:
+        volume: Array of volume values
+        lookback: Rolling window for median calculation
+    
+    Returns:
+        Array of volume ratios (current / median)
+    """
+    n = len(volume)
+    volume_ratio = np.ones(n, dtype=np.float64)
+    
+    if n < lookback:
+        return volume_ratio
+    
+    volume_series = pd.Series(volume)
+    
+    for i in range(lookback, n):
+        window = volume_series.iloc[i-lookback:i]
+        median_vol = window.median()
+        if median_vol > 0:
+            volume_ratio[i] = volume[i] / median_vol
+        else:
+            volume_ratio[i] = 1.0
+    
+    return volume_ratio
+
+
+def calculate_trend_score(close: float, ema_fast: float, ema_medium: float, 
+                          ema_slow: float) -> float:
+    """
+    Calculate trend score based on triple-EMA alignment.
     
     Args:
         close: Current close price
@@ -179,28 +217,89 @@ def calculate_trend_strength(close: float, ema_fast: float, ema_medium: float,
         ema_slow: Slow EMA value
     
     Returns:
-        Tuple of (direction: -1/0/1, strength: 0-1)
+        Trend score in range [-1, 1]
     """
     if close <= 0 or ema_slow <= 0:
-        return 0, 0.0
+        return 0.0
     
-    # Calculate EMA spreads as percentage of price
-    fast_medium_spread = (ema_fast - ema_medium) / close
-    medium_slow_spread = (ema_medium - ema_slow) / close
+    # Check EMA stack alignment
+    bullish_alignment = (ema_fast > ema_medium) and (ema_medium > ema_slow)
+    bearish_alignment = (ema_fast < ema_medium) and (ema_medium < ema_slow)
     
-    # Check for bullish alignment (fast > medium > slow)
-    if fast_medium_spread > TREND_STRENGTH_MIN and medium_slow_spread > TREND_STRENGTH_MIN:
-        direction = 1
-        strength = min((fast_medium_spread + medium_slow_spread) / 0.02, 1.0)
-    # Check for bearish alignment (fast < medium < slow)
-    elif fast_medium_spread < -TREND_STRENGTH_MIN and medium_slow_spread < -TREND_STRENGTH_MIN:
-        direction = -1
-        strength = min(abs(fast_medium_spread + medium_slow_spread) / 0.02, 1.0)
+    if not bullish_alignment and not bearish_alignment:
+        # Mixed alignment - calculate based on price position
+        mid_ema = (ema_fast + ema_medium + ema_slow) / 3.0
+        score = (close - mid_ema) / close
+        return np.clip(score * 10.0, -1.0, 1.0)
+    
+    # Calculate EMA spacing quality
+    if bullish_alignment:
+        spacing1 = (ema_fast - ema_medium) / ema_medium
+        spacing2 = (ema_medium - ema_slow) / ema_slow
+        base_score = 0.5 + 0.25 * np.tanh(spacing1 * 100) + 0.25 * np.tanh(spacing2 * 100)
+        return base_score
     else:
-        direction = 0
-        strength = 0.0
+        spacing1 = (ema_medium - ema_fast) / ema_fast
+        spacing2 = (ema_slow - ema_medium) / ema_medium
+        base_score = -0.5 - 0.25 * np.tanh(spacing1 * 100) - 0.25 * np.tanh(spacing2 * 100)
+        return base_score
+
+
+def calculate_rsi_signal(rsi: float, direction: int) -> float:
+    """
+    Calculate RSI momentum signal based on direction.
+    Asymmetric thresholds favor longs in crypto.
     
-    return direction, strength
+    Args:
+        rsi: Current RSI value
+        direction: 1 for long, -1 for short
+    
+    Returns:
+        RSI signal multiplier (0-1)
+    """
+    if direction > 0:
+        # Long bias - more lenient entry
+        if rsi < RSI_LONG_ENTRY:
+            return 0.3  # Weak momentum
+        elif rsi < RSI_EXIT:
+            return 0.6  # Building momentum
+        elif rsi < RSI_SHORT_ENTRY:
+            return 0.9  # Strong momentum
+        else:
+            return 0.5  # Overbought caution
+    else:
+        # Short bias - stricter entry
+        if rsi > RSI_SHORT_ENTRY:
+            return 0.3  # Weak for short
+        elif rsi > RSI_EXIT:
+            return 0.6  # Building downside
+        elif rsi > RSI_LONG_ENTRY:
+            return 0.9  # Strong downside momentum
+        else:
+            return 0.5  # Oversold caution
+
+
+def get_funding_rate(prices: pd.DataFrame, index: int) -> float:
+    """
+    Get funding rate if available in prices DataFrame.
+    Returns 0.0 if not available.
+    
+    Args:
+        prices: DataFrame with price data
+        index: Current bar index
+    
+    Returns:
+        Funding rate or 0.0
+    """
+    try:
+        if 'funding_rate' in prices.columns:
+            fr = prices['funding_rate'].iloc[index]
+            if pd.isna(fr):
+                return 0.0
+            return float(fr)
+    except (KeyError, IndexError, TypeError, ValueError):
+        pass
+    return 0.0
 
 
 # =============================================================================
@@ -209,17 +308,18 @@ def calculate_trend_strength(close: float, ema_fast: float, ema_medium: float,
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Simple Trend RSI V1 Strategy.
+    Trend Momentum V3 Strategy with Funding Awareness.
     
     Signal Logic:
-    1. EMA stack alignment for trend direction
-    2. RSI filter for momentum quality
-    3. Volatility-based position sizing
-    4. Signal smoothing with cooldown period
+    1. Triple-EMA trend alignment scoring
+    2. RSI momentum with asymmetric thresholds
+    3. Volume confirmation (above median)
+    4. Funding rate sentiment filter (if available)
+    5. Volatility-based position sizing
     
     Entry Conditions:
-    - LONG: Bullish EMA stack + RSI > 45 + acceptable volatility
-    - SHORT: Bearish EMA stack + RSI < 55 + acceptable volatility
+    - LONG: Bullish EMA stack + RSI > 45 + volume confirmed
+    - SHORT: Bearish EMA stack + RSI < 65 + volume confirmed
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -235,6 +335,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         close = prices["close"].values.astype(np.float64)
         high = prices["high"].values.astype(np.float64)
         low = prices["low"].values.astype(np.float64)
+        volume = prices["volume"].values.astype(np.float64)
     except (KeyError, TypeError, ValueError):
         return signals
     
@@ -242,6 +343,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = np.nan_to_num(close, nan=0.0)
     high = np.nan_to_num(high, nan=0.0)
     low = np.nan_to_num(low, nan=0.0)
+    volume = np.nan_to_num(volume, nan=0.0)
     
     # Ensure valid prices
     close = np.where(close <= 0, 1.0, close)
@@ -255,18 +357,18 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     rsi = calculate_rsi(close, RSI_PERIOD)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
     
     # Determine minimum valid index
     min_valid_index = max(
         EMA_SLOW,
         RSI_PERIOD + 1,
-        ATR_PERIOD + 1
+        ATR_PERIOD + 1,
+        VOLUME_LOOKBACK
     )
     
-    # Track previous signal for smoothing and cooldown
+    # Track previous signal for smoothing
     prev_signal = 0.0
-    prev_direction = 0  # 0=none, 1=long, -1=short
-    cooldown_counter = 0
     
     # Generate signals
     for i in range(min_valid_index, n):
@@ -274,8 +376,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if close[i] <= 0 or atr[i] <= 0:
             signals[i] = 0.0
             prev_signal = 0.0
-            prev_direction = 0
-            cooldown_counter = 0
             continue
         
         # Check volatility regime (avoid extreme volatility)
@@ -283,68 +383,53 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if atr_pct < VOLATILITY_MIN or atr_pct > VOLATILITY_MAX:
             signals[i] = 0.0
             prev_signal = 0.0
-            prev_direction = 0
-            cooldown_counter = 0
             continue
         
-        # Calculate trend direction and strength
-        trend_direction, trend_strength = calculate_trend_strength(
+        # Calculate trend score
+        trend_score = calculate_trend_score(
             close[i], ema_fast[i], ema_medium[i], ema_slow[i]
         )
         
-        # Skip weak or no trend
-        if trend_direction == 0 or trend_strength < 0.3:
+        # Skip weak trends
+        if abs(trend_score) < TREND_MIN_SCORE:
             signals[i] = 0.0
             prev_signal = 0.0
-            prev_direction = 0
-            cooldown_counter = 0
             continue
         
-        # RSI filter based on trend direction
-        rsi_ok = False
-        if trend_direction > 0:
-            # Long: RSI must not be too low (weak momentum)
-            rsi_ok = rsi[i] >= RSI_LONG_MIN
-        else:
-            # Short: RSI must not be too high (strong momentum against us)
-            rsi_ok = rsi[i] <= RSI_SHORT_MAX
+        # Determine direction
+        direction = 1 if trend_score > 0 else -1
         
-        if not rsi_ok:
-            signals[i] = 0.0
-            prev_signal = 0.0
-            prev_direction = 0
-            cooldown_counter = 0
-            continue
+        # Calculate RSI signal multiplier
+        rsi_signal = calculate_rsi_signal(rsi[i], direction)
         
-        # Calculate base signal magnitude
-        base_signal = trend_direction * trend_strength
+        # Volume confirmation
+        volume_confirmed = volume_ratio[i] >= VOLUME_THRESHOLD
+        volume_multiplier = 1.0 if volume_confirmed else 0.7
+        
+        # Base signal calculation
+        base_signal = trend_score * rsi_signal * volume_multiplier
+        
+        # Funding rate filter (if available)
+        funding_rate = get_funding_rate(prices, i)
+        if abs(funding_rate) > FUNDING_EXTREME:
+            # Extreme funding - reduce position in direction of funding
+            # (crowded trade warning)
+            if direction > 0 and funding_rate > FUNDING_EXTREME:
+                base_signal *= (1.0 - FUNDING_IMPACT)
+            elif direction < 0 and funding_rate < -FUNDING_EXTREME:
+                base_signal *= (1.0 - FUNDING_IMPACT)
         
         # Volatility-based position sizing (inverse relationship)
         vol_factor = VOLATILITY_TARGET / max(atr_pct, 0.001)
-        vol_factor = np.clip(vol_factor, 0.4, 2.5)
+        vol_factor = np.clip(vol_factor, 0.4, 1.8)
         
         raw_signal = base_signal * vol_factor
         
-        # Check for signal direction change (cooldown logic)
-        current_direction = 1 if raw_signal > 0 else (-1 if raw_signal < 0 else 0)
-        
-        if current_direction != 0 and current_direction != prev_direction and prev_direction != 0:
-            # Direction changed, apply cooldown
-            if cooldown_counter > 0:
-                cooldown_counter -= 1
-                # During cooldown, reduce signal magnitude
-                raw_signal *= 0.3
-            else:
-                # First bar of new direction after cooldown
-                cooldown_counter = SIGNAL_COOLDOWN
-        elif current_direction != 0:
-            # Same direction or new signal from flat
-            cooldown_counter = 0
-        
         # Apply exponential smoothing to reduce whipsaws
         smoothed_signal = SMOOTHING_FACTOR * prev_signal + (1.0 - SMOOTHING_FACTOR) * raw_signal
+        prev_signal = smoothed_signal
         
-        # Apply thresholds
+        # Apply minimum threshold
         if abs(smoothed_signal) < MIN_SIGNAL:
             smoothed_signal = 0.0
         
@@ -352,9 +437,5 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         signal = np.clip(smoothed_signal, -MAX_SIGNAL, MAX_SIGNAL)
         
         signals[i] = signal
-        
-        # Update tracking variables
-        prev_signal = signal
-        prev_direction = 1 if signal > 0 else (-1 if signal < 0 else 0)
     
     return signals
