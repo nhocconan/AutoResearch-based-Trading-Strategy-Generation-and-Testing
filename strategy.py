@@ -1,82 +1,64 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #010 - Multi-Timeframe Supertrend + RSI Entry
-=========================================================
-Hypothesis: Combining 4h Supertrend (trend filter) with 1h RSI (entry timing) 
-will reduce whipsaws while capturing pullbacks within the trend. This multi-TF 
-approach is proven to 2x Sharpe vs single timeframe.
+EXPERIMENT #011 - Multi-Timeframe HMA Trend + RSI/Z-Score Entry
+================================================================
+Hypothesis: Combining 4h HMA(48) trend filter with 1h RSI(14) + Z-score(20) 
+entry signals will capture trends while avoiding extreme volatility entries.
+HMA reduces lag vs EMA/SMA, Z-score filters prevent chasing momentum extremes.
 
-Key improvements over supertrend_4h_v1:
-- 4h Supertrend determines trend direction (keep what works)
-- 1h RSI filters entries - only enter on pullbacks within trend
-- Long: 4h ST bullish + 1h RSI < 45 (oversold in uptrend)
-- Short: 4h ST bearish + 1h RSI > 55 (overbought in downtrend)
-- Fewer trades, higher quality entries, better risk/reward
-- Same conservative sizing (0.35 max) to control drawdown
+Key differences from mtf_supertrend_rsi_v1:
+- HMA(48) instead of Supertrend for trend (smoother, less whipsaw)
+- Z-score(20) filter to avoid entries during extreme moves
+- Dynamic position sizing based on volatility regime
+- More conservative sizing (0.20-0.35) to control drawdown
+
+Why this might beat Sharpe=2.501:
+- HMA has less lag than EMA, better trend capture
+- Z-score filter reduces bad entries during volatility spikes
+- Multi-TF approach already proven to work (exp#010)
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_supertrend_rsi_v1"
+name = "mtf_hma_rsi_zscore_v1"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_atr(high, low, close, period=10):
-    """Calculate ATR with proper min_periods"""
+def calculate_hma(close, period=48):
+    """
+    Calculate Hull Moving Average
+    HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    Reduces lag while maintaining smoothness
+    """
     n = len(close)
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    return atr
-
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend with proper state tracking"""
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
+    if n < period:
+        return np.zeros(n)
     
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
+    half = period // 2
+    sqrt_n = int(np.sqrt(period))
     
-    supertrend = np.zeros(n)
-    trend_direction = np.zeros(n)
+    # WMA helper
+    def wma(series, window):
+        weights = np.arange(1, window + 1)
+        weights = weights / weights.sum()
+        result = np.zeros(len(series))
+        for i in range(window - 1, len(series)):
+            result[i] = np.sum(series[i - window + 1:i + 1] * weights)
+        return result
     
-    first_valid = period
-    if first_valid >= n:
-        return supertrend, trend_direction
+    close_series = np.array(close)
+    wma_half = wma(close_series, half)
+    wma_full = wma(close_series, period)
     
-    supertrend[first_valid] = upper_band[first_valid]
-    trend_direction[first_valid] = -1
+    # 2*WMA(n/2) - WMA(n)
+    diff = 2 * wma_half - wma_full
     
-    for i in range(first_valid + 1, n):
-        if np.isnan(atr[i]):
-            supertrend[i] = supertrend[i-1]
-            trend_direction[i] = trend_direction[i-1]
-            continue
-        
-        if trend_direction[i-1] == 1:
-            if close[i] > supertrend[i-1]:
-                supertrend[i] = max(lower_band[i], supertrend[i-1])
-                trend_direction[i] = 1
-            else:
-                supertrend[i] = upper_band[i]
-                trend_direction[i] = -1
-        else:
-            if close[i] < supertrend[i-1]:
-                supertrend[i] = min(upper_band[i], supertrend[i-1])
-                trend_direction[i] = -1
-            else:
-                supertrend[i] = lower_band[i]
-                trend_direction[i] = 1
+    # WMA of diff with sqrt(n) window
+    hma = wma(diff, sqrt_n)
     
-    return supertrend, trend_direction
+    return hma
 
 
 def calculate_rsi(close, period=14):
@@ -101,19 +83,32 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for volatility regime detection"""
+    n = len(close)
+    mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    zscore = np.zeros(n)
+    mask = std > 0
+    zscore[mask] = (close[mask] - mean[mask]) / std[mask]
+    
+    return zscore
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     n = len(close)
     
-    # 1h RSI for entry timing
+    # 1h indicators for entry timing
     rsi_1h = calculate_rsi(close, period=14)
+    zscore_1h = calculate_zscore(close, period=20)
     
-    # 4h Supertrend for trend filter (resample 1h → 4h)
-    # Create 4h OHLCV from 1h data
+    # 4h HMA for trend filter (resample 1h → 4h)
     df_1h = pd.DataFrame({
-        'open': close,  # Use close as proxy for open in resample
+        'open': close,
         'high': high,
         'low': low,
         'close': close
@@ -128,16 +123,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         'close': 'last'
     }).dropna()
     
-    # Calculate 4h Supertrend
-    st_4h, trend_4h = calculate_supertrend(
-        df_4h['high'].values,
-        df_4h['low'].values,
-        df_4h['close'].values,
-        period=10,
-        multiplier=3.0
-    )
+    # Calculate 4h HMA
+    hma_4h = calculate_hma(df_4h['close'].values, period=48)
     
-    # Map 4h trend back to 1h timeframe (each 4h bar = 4 1h bars)
+    # Calculate 4h trend direction (price vs HMA)
+    trend_4h = np.zeros(len(hma_4h))
+    for i in range(len(hma_4h)):
+        if hma_4h[i] > 0:
+            if df_4h['close'].values[i] > hma_4h[i]:
+                trend_4h[i] = 1  # Bullish
+            else:
+                trend_4h[i] = -1  # Bearish
+    
+    # Map 4h trend back to 1h timeframe
     trend_1h = np.zeros(n)
     idx_1h_to_4h = np.arange(n) // 4
     
@@ -145,47 +143,59 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         idx_4h = idx_1h_to_4h[i]
         if idx_4h < len(trend_4h):
             trend_1h[i] = trend_4h[idx_4h]
-        else:
-            trend_1h[i] = trend_4h[-1] if len(trend_4h) > 0 else 0
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
-    SIZE_LONG = 0.35
-    SIZE_SHORT = -0.35
-    SIZE_HOLD = 0.25  # Reduced size when trend weakens
+    
+    # Position sizing - DISCRETE levels to reduce churn
+    SIZE_FULL = 0.35   # Full position in good conditions
+    SIZE_HALF = 0.20   # Reduced position in marginal conditions
     
     # RSI thresholds for pullback entries
-    RSI_LONG_ENTRY = 45   # Enter long on pullback in uptrend
-    RSI_SHORT_ENTRY = 55  # Enter short on rally in downtrend
-    RSI_EXIT_LONG = 65    # Exit long when overbought
-    RSI_EXIT_SHORT = 35   # Exit short when oversold
+    RSI_LONG_ENTRY = 40   # Enter long on pullback in uptrend
+    RSI_SHORT_ENTRY = 60  # Enter short on rally in downtrend
+    RSI_EXIT = 50         # Neutral zone
     
-    first_valid = max(14, 40)  # Wait for both RSI and 4h ST to initialize
+    # Z-score thresholds for volatility filter
+    ZSCORE_MAX = 2.0      # Don't enter if price is >2 std from mean
+    
+    first_valid = max(48, 20, 14)  # Wait for all indicators
     
     for i in range(first_valid, n):
-        if np.isnan(rsi_1h[i]) or np.isnan(trend_1h[i]):
+        if np.isnan(rsi_1h[i]) or np.isnan(zscore_1h[i]) or np.isnan(trend_1h[i]):
             signals[i] = 0.0
             continue
         
-        # 4h Supertrend = 1 (bullish), -1 (bearish), 0 (neutral)
-        st_trend = trend_1h[i]
+        trend = trend_1h[i]
         rsi_val = rsi_1h[i]
+        zscore_val = zscore_1h[i]
         
-        if st_trend == 1:  # 4h uptrend
+        # Volatility filter - don't trade during extreme moves
+        if abs(zscore_val) > ZSCORE_MAX:
+            signals[i] = 0.0
+            continue
+        
+        if trend == 1:  # 4h uptrend
             if rsi_val < RSI_LONG_ENTRY:
-                signals[i] = SIZE_LONG  # Enter long on pullback
-            elif rsi_val > RSI_EXIT_LONG:
-                signals[i] = SIZE_HOLD  # Reduce position when overbought
+                # Strong pullback - full position
+                signals[i] = SIZE_FULL
+            elif rsi_val < RSI_EXIT:
+                # Moderate pullback - half position
+                signals[i] = SIZE_HALF
             else:
-                signals[i] = SIZE_LONG  # Hold long position
-        elif st_trend == -1:  # 4h downtrend
+                # No pullback - hold or exit
+                signals[i] = 0.0
+        elif trend == -1:  # 4h downtrend
             if rsi_val > RSI_SHORT_ENTRY:
-                signals[i] = SIZE_SHORT  # Enter short on rally
-            elif rsi_val < RSI_EXIT_SHORT:
-                signals[i] = -SIZE_HOLD  # Reduce position when oversold
+                # Strong rally - full short
+                signals[i] = -SIZE_FULL
+            elif rsi_val > RSI_EXIT:
+                # Moderate rally - half short
+                signals[i] = -SIZE_HALF
             else:
-                signals[i] = SIZE_SHORT  # Hold short position
-        else:  # Neutral/no trend
+                # No rally - hold or exit
+                signals[i] = 0.0
+        else:  # No clear trend
             signals[i] = 0.0
     
     return signals
