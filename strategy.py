@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
 """
-strategy.py - Adaptive Trend V3
+strategy.py - Volatility Trend V1
 ====================================================================
+MUTABLE FILE - The LLM agent edits this file during research.
+
+This file defines the trading strategy. It must expose:
+    - name: str                    - Strategy identifier
+    - timeframe: str               - Primary timeframe (e.g., "4h")
+    - leverage: float              - Leverage multiplier (default 1.0)
+    - generate_signals(prices)     - Signal generation function
+
 Strategy Hypothesis:
-    Clean trend-following on 4h timeframe with adaptive parameters:
-    - Primary: EMA crossover (20/50) for trend direction
-    - Filter: Price above/below 100 EMA for major trend confirmation
-    - Entry: RSI momentum (not overbought/oversold extremes)
-    - Volatility: ATR-based position sizing and filter
-    - No funding rate dependency (more robust across all symbols)
+    Simplified trend-following with volatility-based risk control:
+    - Primary signal: EMA crossover (12/26) for trend direction
+    - Filter: Price above/below 100 EMA for major trend validation
+    - Risk control: ATR-based position sizing (reduce exposure in high vol)
+    - Funding overlay: Only at extreme levels (contrarian signal)
+    - Smoothing: Signal EMA to reduce whipsaws
     
     Why 4h timeframe:
-    - Cleaner trends than 1h/15m (less noise)
-    - Sufficient trade frequency (unlike 1d)
-    - Better risk/reward for crypto trend following
-    - Lower transaction cost impact vs lower timeframes
+    - Cleaner trends than 1h (less noise)
+    - More trades than 1d (better statistics)
+    - Lower transaction cost impact than 5m/15m
+    - Works well across BTC/ETH/SOL volatility profiles
 
 Look-Ahead Safety:
-    - All indicators use only past data (min_periods respected)
+    - All rolling calculations use only past data (min_periods respected)
     - No .shift(-n) or future index access
     - Signal at bar t uses only prices.iloc[:t+1]
 """
@@ -29,33 +37,30 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "adaptive_trend_v3"
+name = "volatility_trend_v1"
 timeframe = "4h"
-leverage = 1.5  # Conservative for better Sharpe
+leverage = 1.5  # Conservative leverage for drawdown control
 
-# EMA Configuration
-EMA_FAST = 20
-EMA_MED = 50
-EMA_SLOW = 100
+# EMA configuration for trend detection
+EMA_FAST = 12
+EMA_SLOW = 26
+EMA_MAJOR = 100
 
-# RSI Configuration
-RSI_PERIOD = 14
-RSI_LONG_MIN = 40  # Minimum RSI for long entry
-RSI_SHORT_MAX = 60  # Maximum RSI for short entry
-
-# ATR Configuration
+# ATR configuration for volatility control
 ATR_PERIOD = 14
-ATR_MIN_PCT = 0.005  # Minimum volatility to trade
-ATR_MAX_PCT = 0.080  # Maximum volatility (avoid extreme moves)
+ATR_VOLATILITY_TARGET = 0.02  # Target ATR as % of price
+ATR_VOLATILITY_MIN = 0.005  # Minimum ATR % to trade
+ATR_VOLATILITY_MAX = 0.06  # Maximum ATR % to trade
 
-# Signal Configuration
-MIN_SIGNAL = 0.25  # Minimum signal magnitude to trade
-MAX_SIGNAL = 0.85  # Maximum signal magnitude
-SIGNAL_SMOOTHING = 0.4  # EMA smoothing factor for signals
-HYSTERESIS = 0.12  # Minimum change to flip direction
+# Funding rate configuration (simplified)
+FUNDING_EXTREME_THRESHOLD = 0.0015  # 0.15% per 8hr = very extreme
+FUNDING_WEIGHT = 0.25  # Reduced weight - trend is primary
 
-# Trend Strength
-TREND_MIN_STRENGTH = 0.002  # Minimum EMA diff % to consider trend
+# Signal configuration
+MIN_SIGNAL_MAGNITUDE = 0.20  # Minimum signal to generate position
+MAX_SIGNAL = 0.80  # Maximum signal magnitude
+SIGNAL_SMOOTHING = 0.40  # EMA smoothing factor for signals
+DIRECTION_CHANGE_MIN = 0.15  # Minimum change to flip direction
 
 
 # =============================================================================
@@ -63,40 +68,24 @@ TREND_MIN_STRENGTH = 0.002  # Minimum EMA diff % to consider trend
 # =============================================================================
 
 def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
-    """Calculate EMA using only past data."""
+    """
+    Calculate Exponential Moving Average using only past data.
+    """
     n = len(close)
     if n < period:
         return np.zeros(n, dtype=np.float64)
     
-    series = pd.Series(close)
-    ema = series.ewm(span=period, adjust=False, min_periods=period).mean()
-    return np.nan_to_num(ema.values, nan=0.0)
+    close_series = pd.Series(close)
+    ema_values = close_series.ewm(span=period, adjust=False, min_periods=period).mean().values
+    ema = np.nan_to_num(ema_values, nan=0.0)
+    
+    return ema
 
 
-def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
-    """Calculate RSI using only past data."""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, 50.0, dtype=np.float64)
-    
-    series = pd.Series(close)
-    delta = series.diff()
-    
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    
-    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
-    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
-    
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    
-    return np.nan_to_num(rsi.values, nan=50.0)
-
-
-def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, 
-                  period: int = 14) -> np.ndarray:
-    """Calculate ATR using only past data."""
+def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    """
+    Calculate Average True Range using only past data.
+    """
     n = len(close)
     if n < period + 1:
         return np.zeros(n, dtype=np.float64)
@@ -112,9 +101,36 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray,
         )
     
     tr_series = pd.Series(tr)
-    atr = tr_series.ewm(span=period, adjust=False, min_periods=period).mean()
+    atr_series = tr_series.ewm(span=period, adjust=False, min_periods=period).mean()
+    atr = np.nan_to_num(atr_series.values, nan=0.0)
     
-    return np.nan_to_num(atr.values, nan=0.0)
+    return atr
+
+
+def calculate_funding_signal(funding_rate: np.ndarray, 
+                             threshold: float = 0.0015,
+                             weight: float = 0.25) -> np.ndarray:
+    """
+    Calculate funding rate contrarian signal.
+    Only activates at extreme funding levels.
+    Returns value in [-weight, weight].
+    """
+    n = len(funding_rate)
+    signal = np.zeros(n, dtype=np.float64)
+    
+    for i in range(n):
+        fr = funding_rate[i]
+        
+        if fr > threshold:
+            # Extreme positive funding → short bias
+            signal[i] = -weight * min(1.0, fr / threshold)
+        elif fr < -threshold:
+            # Extreme negative funding → long bias
+            signal[i] = weight * min(1.0, abs(fr) / threshold)
+        else:
+            signal[i] = 0.0
+    
+    return signal
 
 
 # =============================================================================
@@ -123,18 +139,18 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray,
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Adaptive Trend V3 Strategy.
+    Volatility Trend V1 Strategy.
     
     Signal Logic:
-    1. Calculate EMAs (20, 50, 100) for trend detection
-    2. Determine trend direction from EMA relationship
-    3. Confirm with major trend (price vs 100 EMA)
-    4. Filter with RSI momentum
-    5. Apply volatility filter (ATR)
-    6. Smooth signals and apply hysteresis
+    1. Calculate EMA crossover signal (12/26)
+    2. Filter by major trend (100 EMA)
+    3. Scale by volatility (ATR)
+    4. Add funding overlay at extremes only
+    5. Smooth signals to reduce whipsaws
+    6. Apply minimum magnitude filter
     
     Args:
-        prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
+        prices: DataFrame with columns [open_time, open, high, low, close, volume, funding_rate, ...]
     
     Returns:
         np.ndarray of signals, same length as prices. Values in [-1, 1].
@@ -147,6 +163,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         close = prices["close"].values.astype(np.float64)
         high = prices["high"].values.astype(np.float64)
         low = prices["low"].values.astype(np.float64)
+        
+        try:
+            funding_rate = prices["funding_rate"].values.astype(np.float64)
+            funding_rate = np.nan_to_num(funding_rate, nan=0.0)
+        except (KeyError, TypeError, ValueError):
+            funding_rate = np.zeros(n, dtype=np.float64)
     except (KeyError, TypeError, ValueError):
         return signals
     
@@ -162,14 +184,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # Calculate all indicators (all use only past data)
     ema_fast = calculate_ema(close, EMA_FAST)
-    ema_med = calculate_ema(close, EMA_MED)
     ema_slow = calculate_ema(close, EMA_SLOW)
-    
-    rsi = calculate_rsi(close, RSI_PERIOD)
+    ema_major = calculate_ema(close, EMA_MAJOR)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    funding_signal = calculate_funding_signal(funding_rate, FUNDING_EXTREME_THRESHOLD, FUNDING_WEIGHT)
     
-    # Minimum warmup period (all indicators need data)
-    min_valid_index = max(EMA_SLOW, RSI_PERIOD + 1, ATR_PERIOD + 1)
+    # Calculate minimum valid index (all indicators need warmup)
+    min_valid_index = max(EMA_MAJOR, EMA_SLOW, ATR_PERIOD + 1)
     
     # Generate signals
     prev_signal = 0.0
@@ -185,68 +206,45 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         # Volatility filter (not too low, not too high)
         atr_pct = atr[i] / close[i]
-        if atr_pct < ATR_MIN_PCT or atr_pct > ATR_MAX_PCT:
+        if atr_pct < ATR_VOLATILITY_MIN or atr_pct > ATR_VOLATILITY_MAX:
             signals[i] = 0.0
             prev_signal = 0.0
             prev_direction = 0
             continue
         
-        # Calculate EMA differences (trend strength)
-        fast_med_diff = (ema_fast[i] - ema_med[i]) / close[i]
-        med_slow_diff = (ema_med[i] - ema_slow[i]) / close[i]
-        
-        # Determine trend direction
-        # Both EMA pairs should agree for strong trend
-        if fast_med_diff > TREND_MIN_STRENGTH and med_slow_diff > TREND_MIN_STRENGTH:
-            trend_dir = 1  # Bullish
-        elif fast_med_diff < -TREND_MIN_STRENGTH and med_slow_diff < -TREND_MIN_STRENGTH:
-            trend_dir = -1  # Bearish
-        else:
-            # No clear trend
-            signals[i] = 0.0
-            prev_signal = 0.0
-            prev_direction = 0
-            continue
+        # Calculate trend direction from EMA crossover
+        ema_diff = ema_fast[i] - ema_slow[i]
+        ema_direction = np.sign(ema_diff)
         
         # Major trend filter (price vs 100 EMA)
-        major_trend = np.sign(close[i] - ema_slow[i])
+        major_filter = np.sign(close[i] - ema_major[i])
         
         # Only trade in direction of major trend
-        if trend_dir != major_trend:
-            signals[i] = 0.0
-            prev_signal = 0.0
-            prev_direction = 0
-            continue
+        if ema_direction != major_filter and abs(ema_direction) > 0:
+            # Conflicting signals → reduce strength significantly
+            trend_strength = abs(ema_diff) / close[i] * 30 * 0.3
+        else:
+            # Aligned signals → full strength
+            trend_strength = abs(ema_diff) / close[i] * 30
         
-        # RSI momentum confirmation
-        rsi_factor = 1.0
-        if trend_dir > 0:  # Long
-            if rsi[i] < RSI_LONG_MIN:
-                # RSI too weak for long
-                signals[i] = 0.0
-                prev_signal = 0.0
-                prev_direction = 0
-                continue
-            elif rsi[i] > 75:
-                # Overbought - reduce strength
-                rsi_factor = 0.5
-        else:  # Short
-            if rsi[i] > RSI_SHORT_MAX:
-                # RSI too strong for short
-                signals[i] = 0.0
-                prev_signal = 0.0
-                prev_direction = 0
-                continue
-            elif rsi[i] < 25:
-                # Oversold - reduce strength
-                rsi_factor = 0.5
+        # Base signal from trend
+        raw_signal = ema_direction * trend_strength
         
-        # Calculate trend strength
-        trend_strength = (abs(fast_med_diff) + abs(med_slow_diff)) / 2
-        trend_strength = min(trend_strength * 200, 1.0)  # Scale to 0-1
+        # Add funding overlay (only at extremes)
+        fund_sig = funding_signal[i]
+        if abs(fund_sig) > 0.05:
+            # Funding at extreme - apply contrarian overlay
+            if np.sign(raw_signal) != np.sign(fund_sig):
+                # Conflict - reduce trend signal
+                raw_signal = raw_signal * 0.7 + fund_sig
+            else:
+                # Aligned - slight reinforcement
+                raw_signal = raw_signal * 0.85 + fund_sig * 0.15
         
-        # Calculate raw signal
-        raw_signal = trend_dir * trend_strength * rsi_factor
+        # Volatility normalization (reduce position size in high vol)
+        vol_factor = ATR_VOLATILITY_TARGET / max(atr_pct, 0.001)
+        vol_factor = np.clip(vol_factor, 0.4, 1.8)
+        raw_signal *= vol_factor
         
         # Signal smoothing (EMA on signals)
         smoothed_signal = SIGNAL_SMOOTHING * prev_signal + (1.0 - SIGNAL_SMOOTHING) * raw_signal
@@ -254,11 +252,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         # Hysteresis: don't flip direction on small changes
         current_direction = np.sign(smoothed_signal)
         if current_direction != 0 and current_direction != prev_direction:
-            if abs(smoothed_signal - prev_signal) < HYSTERESIS:
+            if abs(smoothed_signal - prev_signal) < DIRECTION_CHANGE_MIN:
                 smoothed_signal = prev_signal
         
         # Apply minimum magnitude filter
-        if abs(smoothed_signal) < MIN_SIGNAL:
+        if abs(smoothed_signal) < MIN_SIGNAL_MAGNITUDE:
             smoothed_signal = 0.0
         
         # Clip to max signal
