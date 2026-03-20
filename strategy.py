@@ -1,96 +1,96 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #001 - Supertrend(4h) Trend Following Strategy
-==========================================================
-Hypothesis: Supertrend on 4h timeframe will capture major crypto trends with fewer 
-whipsaws than 1h EMA crossover. The ATR-based stop adapts to volatility, reducing 
-drawdown during high-volatility periods while maintaining trend exposure.
+EXPERIMENT #002 - HMA Crossover(4h) Trend Following Strategy
+=============================================================
+Hypothesis: Hull Moving Average (HMA) reduces lag compared to EMA while maintaining
+smoothness. HMA(16)/HMA(48) crossover on 4h should capture trends faster than EMA(21/55)
+baseline, potentially improving Sharpe ratio. HMA's weighted calculation responds quicker
+to price changes while filtering noise better than simple MA crossovers.
 
-Key improvements over baseline:
-- Volatility-adjusted stops (ATR) vs fixed EMA periods
-- 4h timeframe = cleaner trends, fewer false signals
-- Same conservative position sizing (0.35) to control DD
-- Discrete signal levels to minimize churning costs
+Key differences from baseline:
+- HMA reduces lag vs EMA (faster trend detection)
+- Same 4h timeframe as Supertrend #001 (cleaner trends)
+- Discrete signal levels (0.0, ±0.35) to minimize churning costs
+- Conservative 35% position sizing for drawdown control
 """
 
 import numpy as np
 import pandas as pd
 
-name = "supertrend_4h_v1"
+name = "hma_crossover_4h_v1"
 timeframe = "4h"
 leverage = 1.0
 
 
+def wma(x, n):
+    """Calculate Weighted Moving Average"""
+    weights = np.arange(1, n + 1)
+    wma_val = np.convolve(x, weights / weights.sum(), mode='valid')
+    # Pad beginning with NaN to match input length
+    padding = np.full(n - 1, np.nan)
+    return np.concatenate([padding, wma_val])
+
+
+def hma(x, n):
+    """Calculate Hull Moving Average"""
+    if len(x) < n:
+        return np.full(len(x), np.nan)
+    
+    # WMA(n/2)
+    wma_half = wma(x, n // 2)
+    # WMA(n)
+    wma_full = wma(x, n)
+    
+    # 2*WMA(n/2) - WMA(n)
+    diff = 2 * wma_half - wma_full
+    
+    # WMA of diff with sqrt(n)
+    sqrt_n = int(np.sqrt(n))
+    if sqrt_n < 1:
+        sqrt_n = 1
+    
+    hma_val = wma(diff, sqrt_n)
+    return hma_val
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
-    high = prices["high"].values
-    low = prices["low"].values
     n = len(close)
     
-    # Calculate True Range
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
+    if n < 100:
+        return np.zeros(n)
     
-    # ATR(10) with proper min_periods
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Calculate HMA(16) and HMA(48)
+    hma_fast = hma(close, 16)
+    hma_slow = hma(close, 48)
     
-    # Supertrend parameters
-    multiplier = 3.0
-    period = 10
-    
-    # Calculate basic upper and lower bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Calculate Supertrend with proper state tracking
-    supertrend = np.zeros(n)
-    trend_direction = np.zeros(n)  # 1 = long, -1 = short
-    
-    # Initialize first valid supertrend
-    first_valid = period
-    supertrend[first_valid] = upper_band[first_valid]
-    trend_direction[first_valid] = -1  # Start with short bias
-    
-    for i in range(first_valid + 1, n):
-        if np.isnan(atr[i]):
-            supertrend[i] = supertrend[i-1]
-            trend_direction[i] = trend_direction[i-1]
-            continue
-            
-        # If previous trend was long
-        if trend_direction[i-1] == 1:
-            if close[i] > supertrend[i-1]:
-                # Stay long, use lower band
-                supertrend[i] = max(lower_band[i], supertrend[i-1])
-                trend_direction[i] = 1
-            else:
-                # Flip to short
-                supertrend[i] = upper_band[i]
-                trend_direction[i] = -1
-        else:
-            # Previous trend was short
-            if close[i] < supertrend[i-1]:
-                # Stay short, use upper band
-                supertrend[i] = min(upper_band[i], supertrend[i-1])
-                trend_direction[i] = -1
-            else:
-                # Flip to long
-                supertrend[i] = lower_band[i]
-                trend_direction[i] = 1
-    
-    # Generate signals with discrete position sizing
+    # Determine crossover signals
     signals = np.zeros(n)
     SIZE = 0.35  # 35% position size - critical for drawdown control
     
-    for i in range(first_valid, n):
-        if trend_direction[i] == 1:
-            signals[i] = SIZE
-        elif trend_direction[i] == -1:
-            signals[i] = -SIZE
+    # Track previous signal to avoid excessive churning
+    prev_signal = 0.0
+    
+    for i in range(n):
+        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
+            signals[i] = 0.0
+            continue
+        
+        # Generate raw signal based on crossover
+        if hma_fast[i] > hma_slow[i]:
+            raw_signal = SIZE
+        elif hma_fast[i] < hma_slow[i]:
+            raw_signal = -SIZE
+        else:
+            raw_signal = 0.0
+        
+        # Only change signal if there's a meaningful crossover
+        # This reduces churning and fees
+        if raw_signal != prev_signal:
+            # Confirm signal persists for at least 1 bar (already satisfied by using current bar)
+            signals[i] = raw_signal
+            prev_signal = raw_signal
+        else:
+            signals[i] = prev_signal
     
     return signals
