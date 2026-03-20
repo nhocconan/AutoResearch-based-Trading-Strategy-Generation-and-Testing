@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Multi-Timeframe Trend Breakout V1
+strategy.py - Volatility Trend V2
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,19 +11,24 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Multi-timeframe trend following with volatility breakout confirmation:
-    - Primary timeframe: 4h (cleaner trends, less noise than 1h)
-    - Trend filter: Price above/below 50 EMA for direction
-    - Entry trigger: 20/50 EMA crossover with momentum confirmation
-    - Volatility filter: ATR-based position sizing and regime detection
-    - Funding overlay: Only filter extreme funding (>0.05% per 8hr)
-    - Volume confirmation: Ensure sufficient liquidity
+    Simple trend-following with volatility-based position sizing:
+    - Primary signal: EMA 20/50 crossover for trend direction
+    - Filter: Price above/below 200 EMA for major trend alignment
+    - Momentum: RSI confirmation (avoid extreme overbought/oversold)
+    - Volatility scaling: ATR-based signal magnitude adjustment
+    - No funding rate dependency (more robust across symbols)
     
-    Why 4h timeframe:
-    - Less noise than 1h/15m, fewer false breakouts
-    - Still generates enough trades for statistical significance
-    - Lower transaction costs relative to signal frequency
-    - Better suited for trend-following in crypto
+    Why this works:
+    - Simpler logic = fewer failure points
+    - 4h timeframe captures multi-day trends with less noise than 1h
+    - Volatility scaling naturally reduces position size in choppy markets
+    - Conservative leverage (1.5x) keeps drawdown controlled
+    
+    Improvements over V12:
+    - Removed funding rate dependency (unreliable across symbols)
+    - Simpler signal combination (less overfitting)
+    - Better volatility normalization
+    - Reduced filtering to ensure sufficient trades
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -38,37 +43,33 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "mtf_trend_breakout_v1"
+name = "volatility_trend_v2"
 timeframe = "4h"
-leverage = 1.5  # Conservative leverage for better risk-adjusted returns
+leverage = 1.5  # Conservative leverage for controlled drawdown
 
 # EMA configuration for trend detection
 EMA_FAST = 20
 EMA_SLOW = 50
-EMA_MAJOR = 100
+EMA_MAJOR = 200
 
 # RSI configuration for momentum confirmation
 RSI_PERIOD = 14
-RSI_LONG_THRESHOLD = 50  # RSI must be above this for longs
-RSI_SHORT_THRESHOLD = 50  # RSI must be below this for shorts
-
-# Funding rate configuration (only filter extremes)
-FUNDING_EXTREME_THRESHOLD = 0.0005  # 0.05% per 8hr = extreme
-FUNDING_WEIGHT = 0.25  # How much funding affects signal
+RSI_LONG_MIN = 45  # Minimum RSI for long entries
+RSI_SHORT_MAX = 55  # Maximum RSI for short entries
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
 
 # Volatility configuration
 ATR_PERIOD = 14
-VOLATILITY_MIN = 0.002  # Minimum ATR % to trade
-VOLATILITY_MAX = 0.080  # Maximum ATR % to trade
+VOLATILITY_TARGET = 0.02  # Target ATR as % of price
+VOLATILITY_MIN = 0.005  # Minimum ATR % to trade
+VOLATILITY_MAX = 0.08  # Maximum ATR % to trade
 
 # Signal configuration
 MIN_SIGNAL_MAGNITUDE = 0.20  # Minimum signal to generate position
-MAX_SIGNAL = 0.90  # Maximum signal magnitude
-SMOOTHING_FACTOR = 0.30  # EMA smoothing for signals (0=none, 1=max)
-
-# Volume confirmation
-VOLUME_LOOKBACK = 20
-VOLUME_MIN_RATIO = 0.50  # Volume must be at least this % of average
+MAX_SIGNAL = 0.80  # Maximum signal magnitude
+SMOOTHING_WINDOW = 3  # Simple moving average on signals
+TREND_STRENGTH_SCALE = 40  # Scale factor for trend strength
 
 
 # =============================================================================
@@ -147,51 +148,48 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     return atr
 
 
-def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
+def calculate_trend_strength(ema_fast: np.ndarray, ema_slow: np.ndarray, close: np.ndarray) -> np.ndarray:
     """
-    Calculate volume ratio vs rolling average.
-    Only uses past volume data (no look-ahead).
+    Calculate trend strength from EMA separation.
+    Returns signed strength value.
+    Only uses current/past data (no look-ahead).
     """
-    n = len(volume)
-    volume_ratio = np.ones(n, dtype=np.float64)
-    
-    if n < lookback:
-        return volume_ratio
-    
-    volume_series = pd.Series(volume)
-    rolling_avg = volume_series.rolling(window=lookback, min_periods=lookback).mean()
-    
-    volume_ratio = np.nan_to_num(volume_series.values / rolling_avg.values, nan=1.0)
-    
-    return volume_ratio
-
-
-def calculate_funding_signal(funding_rate: np.ndarray, 
-                             extreme_threshold: float = 0.0005,
-                             weight: float = 0.25) -> np.ndarray:
-    """
-    Calculate funding rate contrarian signal.
-    Extreme positive funding → short bias (negative signal)
-    Extreme negative funding → long bias (positive signal)
-    Returns value in [-weight, weight].
-    Only uses current/past funding rate (no look-ahead).
-    """
-    n = len(funding_rate)
-    signal = np.zeros(n, dtype=np.float64)
+    n = len(close)
+    strength = np.zeros(n, dtype=np.float64)
     
     for i in range(n):
-        fr = funding_rate[i]
+        if close[i] <= 0:
+            strength[i] = 0.0
+            continue
         
-        if fr > extreme_threshold:
-            # Strong short bias
-            signal[i] = -weight * min(1.0, fr / extreme_threshold)
-        elif fr < -extreme_threshold:
-            # Strong long bias
-            signal[i] = weight * min(1.0, abs(fr) / extreme_threshold)
-        else:
-            signal[i] = 0.0
+        ema_diff = ema_fast[i] - ema_slow[i]
+        ema_diff_pct = ema_diff / close[i]
+        strength[i] = ema_diff_pct * TREND_STRENGTH_SCALE
     
-    return signal
+    return strength
+
+
+def calculate_rsi_factor(rsi: np.ndarray, direction: int) -> float:
+    """
+    Calculate RSI momentum factor based on position direction.
+    Returns factor in [0, 1].
+    """
+    if direction > 0:  # Long
+        if rsi < RSI_LONG_MIN:
+            return 0.0  # No long entry
+        elif rsi > RSI_OVERBOUGHT:
+            return 0.5  # Reduce strength if overbought
+        else:
+            return 1.0
+    elif direction < 0:  # Short
+        if rsi > RSI_SHORT_MAX:
+            return 0.0  # No short entry
+        elif rsi < RSI_OVERSOLD:
+            return 0.5  # Reduce strength if oversold
+        else:
+            return 1.0
+    else:
+        return 0.0
 
 
 # =============================================================================
@@ -200,18 +198,18 @@ def calculate_funding_signal(funding_rate: np.ndarray,
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Multi-Timeframe Trend Breakout V1 Strategy.
+    Volatility Trend V2 Strategy.
     
     Signal Logic:
-    1. Calculate EMA trend direction (20/50 crossover)
-    2. Filter by major trend (price vs 100 EMA)
+    1. Calculate trend direction from EMA 20/50 crossover
+    2. Filter by major trend (price vs 200 EMA)
     3. Confirm with RSI momentum
-    4. Apply funding rate overlay (only extremes)
-    5. Filter by volatility regime
-    6. Smooth signals and apply minimum magnitude
+    4. Scale signal by volatility (ATR)
+    5. Smooth signals to reduce whipsaws
+    6. Apply minimum magnitude filter
     
     Args:
-        prices: DataFrame with columns [open_time, open, high, low, close, volume, funding_rate, ...]
+        prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
     
     Returns:
         np.ndarray of signals, same length as prices. Values in [-1, 1].
@@ -224,13 +222,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         close = prices["close"].values.astype(np.float64)
         high = prices["high"].values.astype(np.float64)
         low = prices["low"].values.astype(np.float64)
-        volume = prices["volume"].values.astype(np.float64)
-        
-        try:
-            funding_rate = prices["funding_rate"].values.astype(np.float64)
-            funding_rate = np.nan_to_num(funding_rate, nan=0.0)
-        except (KeyError, TypeError, ValueError):
-            funding_rate = np.zeros(n, dtype=np.float64)
     except (KeyError, TypeError, ValueError):
         return signals
     
@@ -238,7 +229,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = np.nan_to_num(close, nan=0.0)
     high = np.nan_to_num(high, nan=0.0)
     low = np.nan_to_num(low, nan=0.0)
-    volume = np.nan_to_num(volume, nan=0.0)
     
     # Fix invalid prices
     close = np.where(close <= 0, 1.0, close)
@@ -252,101 +242,88 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     rsi = calculate_rsi(close, RSI_PERIOD)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
-    funding_signal = calculate_funding_signal(funding_rate, FUNDING_EXTREME_THRESHOLD, FUNDING_WEIGHT)
+    trend_strength = calculate_trend_strength(ema_fast, ema_slow, close)
     
     # Calculate minimum valid index (all indicators need warmup)
     min_valid_index = max(
         EMA_MAJOR,
-        EMA_SLOW,
+        EMA_SLOW + 5,  # Extra buffer for EMA convergence
         RSI_PERIOD + 1,
-        ATR_PERIOD + 1,
-        VOLUME_LOOKBACK
+        ATR_PERIOD + 1
     )
     
     # Generate signals
-    prev_signal = 0.0
+    signal_buffer = []
     
     for i in range(min_valid_index, n):
         # Skip invalid bars
         if close[i] <= 0 or atr[i] <= 0:
-            signals[i] = 0.0
-            prev_signal = 0.0
+            signal_buffer.append(0.0)
+            continue
+        
+        # Determine trend direction from EMA crossover
+        if ema_fast[i] > ema_slow[i]:
+            trend_direction = 1  # Bullish
+        elif ema_fast[i] < ema_slow[i]:
+            trend_direction = -1  # Bearish
+        else:
+            trend_direction = 0  # Neutral
+        
+        # Major trend filter (price vs 200 EMA)
+        if trend_direction != 0:
+            if trend_direction > 0 and close[i] < ema_major[i]:
+                trend_direction = 0  # Don't long in major downtrend
+            elif trend_direction < 0 and close[i] > ema_major[i]:
+                trend_direction = 0  # Don't short in major uptrend
+        
+        # Skip if no trend
+        if trend_direction == 0:
+            signal_buffer.append(0.0)
+            continue
+        
+        # RSI momentum confirmation
+        rsi_factor = calculate_rsi_factor(rsi[i], trend_direction)
+        if rsi_factor == 0.0:
+            signal_buffer.append(0.0)
             continue
         
         # Volatility filter (not too low, not too high)
         atr_pct = atr[i] / close[i]
         if atr_pct < VOLATILITY_MIN or atr_pct > VOLATILITY_MAX:
-            signals[i] = 0.0
-            prev_signal = 0.0
+            signal_buffer.append(0.0)
             continue
         
-        # Volume filter (ensure sufficient liquidity)
-        if volume_ratio[i] < VOLUME_MIN_RATIO:
-            signals[i] = 0.0
-            prev_signal = 0.0
-            continue
+        # Calculate raw signal
+        raw_signal = trend_direction * trend_strength[i] * rsi_factor
         
-        # Determine trend direction from EMA crossover
-        ema_diff = ema_fast[i] - ema_slow[i]
-        ema_direction = np.sign(ema_diff)
+        # Volatility normalization (scale by target volatility)
+        vol_factor = VOLATILITY_TARGET / max(atr_pct, 0.001)
+        vol_factor = np.clip(vol_factor, 0.5, 2.0)
+        raw_signal *= vol_factor
         
-        # Major trend filter (price vs 100 EMA)
-        major_filter = np.sign(close[i] - ema_major[i])
-        
-        # Only trade in direction of major trend
-        if ema_direction != major_filter and abs(ema_direction) > 0:
-            # Conflicting signals → skip trade
-            signals[i] = 0.0
-            prev_signal = 0.0
-            continue
-        
-        # RSI momentum confirmation
-        rsi_factor = 1.0
-        if ema_direction > 0:
-            # Long: want RSI above threshold
-            if rsi[i] < RSI_LONG_THRESHOLD:
-                rsi_factor = 0.0  # No long entry
-        elif ema_direction < 0:
-            # Short: want RSI below threshold
-            if rsi[i] > RSI_SHORT_THRESHOLD:
-                rsi_factor = 0.0  # No short entry
-        
-        if rsi_factor == 0.0:
-            signals[i] = 0.0
-            prev_signal = 0.0
-            continue
-        
-        # Calculate trend strength (normalized EMA difference)
-        trend_strength = abs(ema_diff) / close[i] * 100
-        trend_strength = np.clip(trend_strength, 0.0, 1.0)
-        
-        # Base signal from trend
-        raw_signal = ema_direction * trend_strength * rsi_factor
-        
-        # Apply funding overlay (contrarian on extremes)
-        fund_sig = funding_signal[i]
-        if abs(fund_sig) > 0.01:
-            # Funding acts as contrarian filter
-            if np.sign(raw_signal) != np.sign(fund_sig):
-                # Conflict: reduce signal strength
-                raw_signal = raw_signal * (1.0 - FUNDING_WEIGHT)
-            else:
-                # Aligned: slight reinforcement
-                raw_signal = raw_signal * 0.9 + fund_sig * 0.1
-        
-        # Signal smoothing (EMA on signals)
-        smoothed_signal = SMOOTHING_FACTOR * prev_signal + (1.0 - SMOOTHING_FACTOR) * raw_signal
-        
-        # Apply minimum magnitude filter
-        if abs(smoothed_signal) < MIN_SIGNAL_MAGNITUDE:
-            smoothed_signal = 0.0
-        
-        # Clip to max signal
-        signal = np.clip(smoothed_signal, -MAX_SIGNAL, MAX_SIGNAL)
-        
+        # Clip to reasonable range before smoothing
+        raw_signal = np.clip(raw_signal, -1.0, 1.0)
+        signal_buffer.append(raw_signal)
+    
+    # Pad signal buffer to match length
+    signal_buffer = [0.0] * min_valid_index + signal_buffer
+    signal_buffer = signal_buffer[:n]
+    
+    # Apply signal smoothing (simple moving average)
+    if len(signal_buffer) >= SMOOTHING_WINDOW:
+        smoothed = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            start_idx = max(0, i - SMOOTHING_WINDOW + 1)
+            smoothed[i] = np.mean(signal_buffer[start_idx:i+1])
+        signal_buffer = smoothed
+    
+    # Apply minimum magnitude filter and clip
+    for i in range(n):
+        signal = signal_buffer[i]
+        if abs(signal) < MIN_SIGNAL_MAGNITUDE:
+            signal = 0.0
+        else:
+            signal = np.clip(signal, -MAX_SIGNAL, MAX_SIGNAL)
         signals[i] = signal
-        prev_signal = signal
     
     return signals
