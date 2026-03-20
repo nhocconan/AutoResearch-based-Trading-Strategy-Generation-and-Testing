@@ -58,15 +58,16 @@ research:
 # Set via environment variables or override here
 llm:
   # Default provider: openai | anthropic | gemini
-  default_provider: "anthropic"
+  default_provider: "openai"
 
   providers:
     openai:
       api_key_env: "OPENAI_API_KEY"
-      base_url_env: "OPENAI_BASE_URL"     # For custom endpoints
-      base_url: null                        # Override: "http://localhost:8000/v1"
-      model: "gpt-4o"
-      max_tokens: 4096
+      base_url_env: "OPENAI_BASE_URL"     # For custom endpoints (e.g. DashScope, vLLM)
+      model_env: "OPENAI_MODEL"           # Override model via env var
+      base_url: null                        # Fallback if OPENAI_BASE_URL not set
+      model: "qwen3-235b-a22b"            # Default model (overridden by OPENAI_MODEL env)
+      max_tokens: 8192
       temperature: 0.7
 
     anthropic:

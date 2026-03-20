@@ -60,6 +60,15 @@ class LLMClient:
             return os.environ.get(env_var)
         return None
 
+    def _get_model(self) -> str:
+        # Env var override (e.g. OPENAI_MODEL=qwen3-235b-a22b)
+        model_env = self.provider_config.get("model_env")
+        if model_env:
+            env_val = os.environ.get(model_env)
+            if env_val:
+                return env_val
+        return self.provider_config["model"]
+
     def _init_client(self):
         if self.provider == "openai":
             self._init_openai()
@@ -89,7 +98,7 @@ class LLMClient:
     def _init_gemini(self):
         import google.generativeai as genai
         genai.configure(api_key=self._get_api_key())
-        self._client = genai.GenerativeModel(self.provider_config["model"])
+        self._client = genai.GenerativeModel(self._get_model())
 
     def chat(
         self,
@@ -116,7 +125,7 @@ class LLMClient:
         messages.append({"role": "user", "content": message})
 
         response = self._client.chat.completions.create(
-            model=self.provider_config["model"],
+            model=self._get_model(),
             messages=messages,
             temperature=temp,
             max_tokens=max_tokens,
@@ -125,7 +134,7 @@ class LLMClient:
 
     def _chat_anthropic(self, message: str, system: str, temp: float, max_tokens: int) -> str:
         kwargs = {
-            "model": self.provider_config["model"],
+            "model": self._get_model(),
             "max_tokens": max_tokens,
             "temperature": temp,
             "messages": [{"role": "user", "content": message}],

@@ -4,8 +4,11 @@ data/
 *.zip
 *.csv
 
-# Results (tracked separately)
-results.tsv
+# Logs (not needed on git, only local)
+research_loop.log
+run.log
+*.log
+*.bak
 
 # Python
 __pycache__/

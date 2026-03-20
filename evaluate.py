@@ -276,6 +276,7 @@ def metrics_to_tsv_row(
     commit: str = "",
     status: str = "keep",
     description: str = "",
+    period: str = "train",
 ) -> str:
     """Format metrics as a TSV row for results.tsv."""
     fields = [
@@ -293,6 +294,7 @@ def metrics_to_tsv_row(
         f"{metrics['calmar_ratio']:.4f}",
         status,
         description,
+        period,
     ]
     return "\t".join(fields)
 
@@ -300,5 +302,5 @@ def metrics_to_tsv_row(
 TSV_HEADER = "\t".join([
     "commit", "strategy", "symbol", "sharpe", "return_pct", "cagr_pct",
     "max_dd_pct", "win_rate", "profit_factor", "trades",
-    "sortino", "calmar", "status", "description"
+    "sortino", "calmar", "status", "description", "period"
 ])
