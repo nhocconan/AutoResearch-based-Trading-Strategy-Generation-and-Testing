@@ -471,12 +471,15 @@ def main():
         improved = avg_sharpe > best_sharpe
         status = "keep" if improved else "discard"
 
+        # Save ALL strategies that pass quality gates (for future reference)
+        if avg_sharpe > 0:
+            save_strategy(strategy_name)
+
         if improved:
             improvement = avg_sharpe - best_sharpe
             print(f"  [4/4] ✓ KEEP (Sharpe +{improvement:.3f} vs best {best_sharpe:.3f})")
             best_sharpe = avg_sharpe
             best_strategy_code = new_code
-            save_strategy(strategy_name)
 
             # Also run test backtest for kept strategies
             test_results = []
