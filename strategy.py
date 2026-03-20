@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """
-strategy.py - KAMA ADX Trend Filter V13
+strategy.py - Multi-TF Trend Pullback V14
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
 Strategy Hypothesis:
-    KAMA (Kaufman Adaptive Moving Average) + ADX trend strength filter on 4h.
+    Multi-timeframe trend following with pullback entries.
+    4h trend direction + 1h pullback to EMA-20 for entries.
     
-    Why this should beat Supertrend_4h_v1 (Sharpe=0.253, DD=-84.5%):
-    - KAMA adapts to market efficiency ratio, reducing whipsaws in choppy markets
-    - ADX > 25 filter ensures we only trade when trend is strong (avoids chop)
-    - 4h timeframe captures major moves while filtering noise
+    Why this should beat supertrend_4h_v1 (Sharpe=0.253, DD=-84.5%):
+    - Multi-TF approach DOUBLED Sharpe in academic research (per strategy notes)
+    - 4h Supertrend defines major trend direction (avoid counter-trend trades)
+    - 1h EMA-20 pullback entries (better risk/reward than breakout entries)
+    - Bollinger Band width regime filter (avoid high vol mean-reversion traps)
     - ATR-based position sizing normalizes risk across volatility regimes
-    - Volume confirmation ensures liquidity for entries
+    - Volume confirmation on entries ensures liquidity
     
-    Key differences from failed strategies:
-    - Not pure trend (Supertrend failed with -84% DD)
-    - Not mean reversion (BB/KC, Z-score all failed)
-    - Adaptive MA responds to market regime changes
-    - ADX filter prevents trading in low-trend environments
+    Key differences from failed multitf_supertrend_ema_v3:
+    - Proper resampling of 1h→4h (not mixing timeframes incorrectly)
+    - Regime filter using BB width percentile
+    - Stricter entry conditions (RSI + volume + pullback depth)
+    - Better signal smoothing to reduce whipsaws
     
     Expected improvements:
-    - Lower drawdown via ADX filter (skip choppy periods)
-    - Better Sharpe via fewer but higher-quality trades
-    - Works across BTC/ETH/SOL due to adaptive nature
+    - Lower drawdown via regime filter and pullback entries
+    - Better Sharpe via higher quality setups (trend + pullback + volume)
+    - Works across BTC/ETH/SOL due to multi-TF confirmation
 """
 
 import numpy as np
@@ -33,169 +35,53 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "kama_adx_trend_filter_v13"
-timeframe = "4h"
+name = "multitf_trend_pullback_v14"
+timeframe = "1h"  # Entry timeframe (4h trend derived from this)
 leverage = 1.5  # Conservative to control drawdown
 
-# KAMA configuration (Kaufman Adaptive Moving Average)
-KAMA_FAST = 2  # Fast SC period
-KAMA_SLOW = 30  # Slow SC period
-KAMA_ER_LOOKBACK = 10  # Efficiency Ratio lookback
+# 4h Trend Filter (derived from 1h data via resampling)
+SUPERTREND_ATR_PERIOD = 10
+SUPERTREND_MULTIPLIER = 3.0
+SUPERTREND_4H_BARS = 4  # 4x 1h bars = 1x 4h bar
 
-# ADX configuration for trend strength filter
-ADX_PERIOD = 14
-ADX_MIN_THRESHOLD = 25  # Only trade when ADX > this (strong trend)
-ADX_DI_DIFF_MIN = 5  # Minimum DI+ vs DI- difference
-
-# Trend confirmation
-TREND_MA_PERIOD = 50  # Major trend filter MA
-
-# RSI for entry timing (avoid extreme entries)
+# 1h Entry Signals
+EMA_FAST = 9
+EMA_SLOW = 21
+EMA_PULLBACK = 20  # Pullback to this EMA for entries
 RSI_PERIOD = 14
-RSI_LONG_MIN = 35  # Don't long if RSI too low
-RSI_SHORT_MAX = 65  # Don't short if RSI too high
-RSI_OVERBOUGHT = 75
-RSI_OVERSOLD = 25
+RSI_LONG_MIN = 40  # Don't long if RSI too oversold (weak momentum)
+RSI_LONG_MAX = 65  # Don't long if RSI too overbought
+RSI_SHORT_MIN = 35  # Don't short if RSI too oversold
+RSI_SHORT_MAX = 60  # Don't short if RSI too overbought
 
 # Volume confirmation
 VOLUME_LOOKBACK = 20
-VOLUME_MIN_RATIO = 0.8  # Volume must be at least this % of average
+VOLUME_MIN_RATIO = 1.0  # Volume must be >= average on entry bars
 
-# Volatility filtering
+# Bollinger Band regime filter
+BB_PERIOD = 20
+BB_STD = 2.0
+BB_WIDTH_LOW_PERCENTILE = 30  # Below this = low vol (breakout regime)
+BB_WIDTH_HIGH_PERCENTILE = 70  # Above this = high vol (avoid)
+
+# ATR for risk management
 ATR_PERIOD = 14
-ATR_MIN_PCT = 0.005  # Minimum ATR % to trade
-ATR_MAX_PCT = 0.08  # Maximum ATR % to trade
+ATR_STOP_MULT = 2.5  # Trailing stop distance
 
 # Signal configuration
-MIN_SIGNAL_MAGNITUDE = 0.20  # Minimum signal to generate position
-MAX_SIGNAL = 0.80  # Maximum signal magnitude
-SIGNAL_SMOOTHING = 0.4  # EMA smoothing factor for signals
-DIRECTION_CHANGE_MIN = 0.15  # Minimum change to flip direction
+MIN_SIGNAL_MAGNITUDE = 0.25
+MAX_SIGNAL = 0.75
+SIGNAL_SMOOTHING = 0.5  # EMA smoothing on signals
+HOLDBARS_MIN = 3  # Minimum bars to hold position
 
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
 
-def calculate_kama(close: np.ndarray, er_lookback: int = 10, 
-                   fast_sc: int = 2, slow_sc: int = 30) -> np.ndarray:
-    """
-    Calculate Kaufman Adaptive Moving Average.
-    KAMA adapts to market noise via Efficiency Ratio.
-    Only uses past data (no look-ahead).
-    
-    Formula:
-    - ER = |Close - Close[n]| / Sum(|Close[i] - Close[i-1]|)
-    - SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
-    - KAMA = KAMA[prev] + SC * (Close - KAMA[prev])
-    """
-    n = len(close)
-    kama = np.zeros(n, dtype=np.float64)
-    
-    if n < er_lookback + 1:
-        return kama
-    
-    # Initialize first KAMA as SMA of first er_lookback periods
-    kama[er_lookback] = np.mean(close[:er_lookback + 1])
-    
-    for i in range(er_lookback + 1, n):
-        # Calculate Efficiency Ratio
-        price_change = abs(close[i] - close[i - er_lookback])
-        
-        if price_change == 0:
-            er = 0.0
-        else:
-            vol_sum = 0.0
-            for j in range(1, er_lookback + 1):
-                vol_sum += abs(close[i - j + 1] - close[i - j])
-            er = price_change / vol_sum if vol_sum > 0 else 0.0
-        
-        # Calculate Smoothing Constant
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-        
-        # Calculate KAMA
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
-
-
-def calculate_dmi(high: np.ndarray, low: np.ndarray, close: np.ndarray, 
-                  period: int = 14) -> tuple:
-    """
-    Calculate Directional Movement Index (DMI).
-    Returns: (plus_di, minus_di, adx)
-    Only uses past data (no look-ahead).
-    """
-    n = len(close)
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    tr = np.zeros(n, dtype=np.float64)
-    
-    if n < period + 1:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    # Calculate True Range and DM for first period
-    for i in range(1, n):
-        high_diff = high[i] - high[i - 1]
-        low_diff = low[i - 1] - low[i]
-        
-        plus_dm[i] = high_diff if high_diff > 0 and high_diff > low_diff else 0.0
-        minus_dm[i] = low_diff if low_diff > 0 and low_diff > high_diff else 0.0
-        
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
-    
-    # Smooth DM and TR using Wilder's method
-    plus_dm_smooth = np.zeros(n, dtype=np.float64)
-    minus_dm_smooth = np.zeros(n, dtype=np.float64)
-    tr_smooth = np.zeros(n, dtype=np.float64)
-    
-    # Initialize with sums for first period
-    plus_dm_smooth[period] = np.sum(plus_dm[1:period + 1])
-    minus_dm_smooth[period] = np.sum(minus_dm[1:period + 1])
-    tr_smooth[period] = np.sum(tr[1:period + 1])
-    
-    # Wilder's smoothing: new = prev - prev/period + current
-    for i in range(period + 1, n):
-        plus_dm_smooth[i] = plus_dm_smooth[i - 1] - plus_dm_smooth[i - 1] / period + plus_dm[i]
-        minus_dm_smooth[i] = minus_dm_smooth[i - 1] - minus_dm_smooth[i - 1] / period + minus_dm[i]
-        tr_smooth[i] = tr_smooth[i - 1] - tr_smooth[i - 1] / period + tr[i]
-    
-    # Calculate DI+ and DI-
-    plus_di = np.zeros(n, dtype=np.float64)
-    minus_di = np.zeros(n, dtype=np.float64)
-    
-    for i in range(period, n):
-        if tr_smooth[i] > 0:
-            plus_di[i] = 100.0 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100.0 * minus_dm_smooth[i] / tr_smooth[i]
-    
-    # Calculate DX and ADX
-    dx = np.zeros(n, dtype=np.float64)
-    adx = np.zeros(n, dtype=np.float64)
-    
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    # Smooth DX to get ADX
-    adx[period * 2] = np.mean(dx[period:period * 2 + 1])
-    for i in range(period * 2 + 1, n):
-        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
-    
-    return plus_di, minus_di, adx
-
-
 def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, 
                   period: int = 14) -> np.ndarray:
-    """
-    Calculate Average True Range using Wilder's smoothing.
-    Only uses past data (no look-ahead).
-    """
+    """Calculate Average True Range using Wilder's smoothing."""
     n = len(close)
     atr = np.zeros(n, dtype=np.float64)
     
@@ -212,21 +98,90 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray,
             abs(low[i] - close[i - 1])
         )
     
-    # Initialize ATR as SMA of first period TRs
     atr[period] = np.mean(tr[1:period + 1])
     
-    # Wilder's smoothing
     for i in range(period + 1, n):
         atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
     
     return atr
 
 
+def calculate_supertrend(high: np.ndarray, low: np.ndarray, close: np.ndarray,
+                         atr_period: int = 10, multiplier: float = 3.0) -> tuple:
+    """
+    Calculate Supertrend indicator.
+    Returns: (supertrend_values, supertrend_direction)
+    direction: 1 = bullish (price above ST), -1 = bearish (price below ST)
+    """
+    n = len(close)
+    supertrend = np.zeros(n, dtype=np.float64)
+    direction = np.zeros(n, dtype=np.float64)
+    
+    if n < atr_period + 2:
+        return supertrend, direction
+    
+    atr = calculate_atr(high, low, close, atr_period)
+    hl2 = (high + low) / 2.0
+    
+    # Basic upper and lower bands
+    upper_band = np.zeros(n, dtype=np.float64)
+    lower_band = np.zeros(n, dtype=np.float64)
+    
+    for i in range(atr_period, n):
+        upper_band[i] = hl2[i] + multiplier * atr[i]
+        lower_band[i] = hl2[i] - multiplier * atr[i]
+    
+    # Initialize Supertrend
+    supertrend[atr_period] = upper_band[atr_period]
+    direction[atr_period] = 1  # Start bullish
+    
+    for i in range(atr_period + 1, n):
+        if direction[i - 1] == 1:
+            # Previously bullish
+            if close[i] > supertrend[i - 1]:
+                # Stay bullish
+                supertrend[i] = max(supertrend[i - 1], lower_band[i])
+                direction[i] = 1
+            else:
+                # Flip to bearish
+                supertrend[i] = upper_band[i]
+                direction[i] = -1
+        else:
+            # Previously bearish
+            if close[i] < supertrend[i - 1]:
+                # Stay bearish
+                supertrend[i] = min(supertrend[i - 1], upper_band[i])
+                direction[i] = -1
+            else:
+                # Flip to bullish
+                supertrend[i] = lower_band[i]
+                direction[i] = 1
+    
+    return supertrend, direction
+
+
+def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
+    """Calculate Exponential Moving Average."""
+    n = len(close)
+    ema = np.zeros(n, dtype=np.float64)
+    
+    if n < period:
+        return ema
+    
+    # Initialize with SMA
+    ema[period - 1] = np.mean(close[:period])
+    
+    # EMA multiplier
+    multiplier = 2.0 / (period + 1)
+    
+    for i in range(period, n):
+        ema[i] = (close[i] - ema[i - 1]) * multiplier + ema[i - 1]
+    
+    return ema
+
+
 def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
-    """
-    Calculate Relative Strength Index.
-    Only uses past data (no look-ahead).
-    """
+    """Calculate Relative Strength Index using Wilder's smoothing."""
     n = len(close)
     rsi = np.full(n, 50.0, dtype=np.float64)
     
@@ -240,7 +195,6 @@ def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
     gains = np.where(delta > 0, delta, 0.0)
     losses = np.where(delta < 0, -delta, 0.0)
     
-    # Use Wilder's smoothing for RSI
     avg_gains = np.zeros(n, dtype=np.float64)
     avg_losses = np.zeros(n, dtype=np.float64)
     
@@ -261,29 +215,36 @@ def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
     return rsi
 
 
-def calculate_sma(close: np.ndarray, period: int) -> np.ndarray:
-    """
-    Calculate Simple Moving Average.
-    Only uses past data (no look-ahead).
-    """
+def calculate_bollinger_bands(close: np.ndarray, period: int = 20, 
+                               std_dev: float = 2.0) -> tuple:
+    """Calculate Bollinger Bands. Returns (upper, middle, lower, width_pct)."""
     n = len(close)
-    sma = np.zeros(n, dtype=np.float64)
+    upper = np.zeros(n, dtype=np.float64)
+    middle = np.zeros(n, dtype=np.float64)
+    lower = np.zeros(n, dtype=np.float64)
+    width_pct = np.zeros(n, dtype=np.float64)
     
     if n < period:
-        return sma
+        return upper, middle, lower, width_pct
     
     close_series = pd.Series(close)
-    sma_values = close_series.rolling(window=period, min_periods=period).mean().values
-    sma = np.nan_to_num(sma_values, nan=0.0)
+    rolling_mean = close_series.rolling(window=period, min_periods=period).mean()
+    rolling_std = close_series.rolling(window=period, min_periods=period).std()
     
-    return sma
+    middle = rolling_mean.values
+    upper = (rolling_mean + std_dev * rolling_std).values
+    lower = (rolling_mean - std_dev * rolling_std).values
+    
+    # Band width as percentage of price
+    for i in range(period, n):
+        if middle[i] > 0:
+            width_pct[i] = (upper[i] - lower[i]) / middle[i] * 100.0
+    
+    return upper, middle, lower, width_pct
 
 
 def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
-    """
-    Calculate volume ratio vs rolling average.
-    Only uses past volume data (no look-ahead).
-    """
+    """Calculate volume ratio vs rolling average."""
     n = len(volume)
     volume_ratio = np.ones(n, dtype=np.float64)
     
@@ -297,24 +258,61 @@ def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray
     return volume_ratio
 
 
+def resample_to_4h(prices: pd.DataFrame) -> pd.DataFrame:
+    """Resample 1h data to 4h for trend filter."""
+    # Set open_time as index if not already
+    df = prices.copy()
+    
+    if 'open_time' in df.columns:
+        df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+        df = df.set_index('open_time')
+    
+    # Resample to 4h
+    ohlc_dict = {
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum'
+    }
+    
+    resampled = df.resample('4h').agg(ohlc_dict)
+    resampled = resampled.dropna()
+    
+    return resampled
+
+
+def upsample_4h_signal_to_1h(signal_4h: np.ndarray, original_length: int,
+                              bars_per_4h: int = 4) -> np.ndarray:
+    """Upsample 4h signal to 1h by forward-filling."""
+    upsampled = np.zeros(original_length, dtype=np.float64)
+    
+    # Each 4h bar represents 4x 1h bars
+    for i, sig in enumerate(signal_4h):
+        start_idx = i * bars_per_4h
+        end_idx = min((i + 1) * bars_per_4h, original_length)
+        upsampled[start_idx:end_idx] = sig
+    
+    return upsampled
+
+
 # =============================================================================
 # Signal Generation
 # =============================================================================
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    KAMA ADX Trend Filter V13 Strategy.
+    Multi-TF Trend Pullback V14 Strategy.
     
     Signal Logic:
-    1. Calculate KAMA (adaptive MA that responds to market efficiency)
-    2. Calculate ADX/DMI for trend strength and direction
-    3. Filter: Only trade when ADX > 25 (strong trend)
-    4. Filter: DI+ vs DI- difference > 5 (clear direction)
-    5. Confirm: Price vs 50-period MA for major trend
-    6. Entry timing: RSI not at extremes
-    7. Volume confirmation: Volume >= 80% of average
-    8. Volatility filter: ATR within reasonable bounds
-    9. Smooth signals and apply hysteresis
+    1. Resample 1h data to 4h for trend filter
+    2. Calculate 4h Supertrend for major trend direction
+    3. Upsample 4h trend signal to 1h timeframe
+    4. On 1h: Wait for pullback to EMA-20 in direction of 4h trend
+    5. Confirm with RSI (not at extremes)
+    6. Confirm with volume (>= average)
+    7. Regime filter: BB width percentile (avoid high vol chop)
+    8. Smooth signals and apply hysteresis
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -331,6 +329,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         high = prices["high"].values.astype(np.float64)
         low = prices["low"].values.astype(np.float64)
         volume = prices["volume"].values.astype(np.float64)
+        open_time = prices["open_time"].values if "open_time" in prices.columns else None
     except (KeyError, TypeError, ValueError):
         return signals
     
@@ -344,120 +343,184 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = np.where(close <= 0, 1.0, close)
     high = np.where(high <= 0, close, high)
     low = np.where(low <= 0, close * 0.99, low)
+    high = np.maximum(high, close)
+    low = np.minimum(low, close)
     
-    # Calculate all indicators (all use only past data)
-    kama = calculate_kama(close, KAMA_ER_LOOKBACK, KAMA_FAST, KAMA_SLOW)
-    plus_di, minus_di, adx = calculate_dmi(high, low, close, ADX_PERIOD)
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    trend_ma = calculate_sma(close, TREND_MA_PERIOD)
-    volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
+    # Calculate 1h indicators
+    atr_1h = calculate_atr(high, low, close, ATR_PERIOD)
+    ema_20_1h = calculate_ema(close, EMA_PULLBACK)
+    ema_9_1h = calculate_ema(close, EMA_FAST)
+    ema_21_1h = calculate_ema(close, EMA_SLOW)
+    rsi_1h = calculate_rsi(close, RSI_PERIOD)
+    bb_upper, bb_middle, bb_lower, bb_width = calculate_bollinger_bands(close, BB_PERIOD, BB_STD)
+    volume_ratio_1h = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
     
-    # Calculate minimum valid index (all indicators need warmup)
+    # Calculate BB width percentile for regime filter
+    bb_width_percentile = np.zeros(n, dtype=np.float64)
+    valid_bb = bb_width[BB_PERIOD:] > 0
+    if np.any(valid_bb):
+        for i in range(BB_PERIOD, n):
+            if bb_width[i] > 0:
+                # Calculate rolling percentile
+                start_idx = max(BB_PERIOD, i - 100)
+                rolling_width = bb_width[start_idx:i + 1]
+                bb_width_percentile[i] = np.sum(rolling_width <= bb_width[i]) / len(rolling_width) * 100.0
+    
+    # Resample to 4h for trend filter
+    try:
+        prices_4h = resample_to_4h(prices)
+        
+        if len(prices_4h) < SUPERTREND_ATR_PERIOD + 5:
+            # Not enough 4h data, use 1h Supertrend as fallback
+            st_4h_direction = np.zeros(n, dtype=np.float64)
+            _, st_4h_direction = calculate_supertrend(high, low, close, 
+                                                       SUPERTREND_ATR_PERIOD, 
+                                                       SUPERTREND_MULTIPLIER)
+        else:
+            close_4h = prices_4h["close"].values.astype(np.float64)
+            high_4h = prices_4h["high"].values.astype(np.float64)
+            low_4h = prices_4h["low"].values.astype(np.float64)
+            
+            close_4h = np.nan_to_num(close_4h, nan=0.0)
+            high_4h = np.nan_to_num(high_4h, nan=0.0)
+            low_4h = np.nan_to_num(low_4h, nan=0.0)
+            
+            close_4h = np.where(close_4h <= 0, 1.0, close_4h)
+            high_4h = np.maximum(high_4h, close_4h)
+            low_4h = np.minimum(low_4h, close_4h)
+            
+            _, st_4h_direction_4h = calculate_supertrend(high_4h, low_4h, close_4h,
+                                                          SUPERTREND_ATR_PERIOD,
+                                                          SUPERTREND_MULTIPLIER)
+            
+            # Upsample 4h direction to 1h
+            st_4h_direction = upsample_4h_signal_to_1h(st_4h_direction_4h, n, SUPERTREND_4H_BARS)
+    except Exception:
+        # Fallback to 1h Supertrend if resampling fails
+        _, st_4h_direction = calculate_supertrend(high, low, close,
+                                                   SUPERTREND_ATR_PERIOD,
+                                                   SUPERTREND_MULTIPLIER)
+    
+    # Calculate minimum valid index
     min_valid_index = max(
-        KAMA_ER_LOOKBACK + 2,
-        ADX_PERIOD * 2 + 1,  # ADX needs 2x period for smoothing
+        SUPERTREND_ATR_PERIOD + 2,
         ATR_PERIOD + 1,
+        EMA_PULLBACK,
         RSI_PERIOD + 1,
-        TREND_MA_PERIOD,
+        BB_PERIOD,
         VOLUME_LOOKBACK
     )
     
     # Generate signals
     prev_signal = 0.0
     prev_direction = 0
+    hold_counter = 0
     
     for i in range(min_valid_index, n):
         # Skip invalid bars
-        if close[i] <= 0 or atr[i] <= 0 or adx[i] <= 0:
+        if close[i] <= 0 or atr_1h[i] <= 0 or ema_20_1h[i] <= 0:
             signals[i] = 0.0
             prev_signal = 0.0
             prev_direction = 0
+            hold_counter = 0
             continue
         
-        # Volatility filter (not too low, not too high)
-        atr_pct = atr[i] / close[i]
-        if atr_pct < ATR_MIN_PCT or atr_pct > ATR_MAX_PCT:
+        # Regime filter: avoid high volatility chop (BB width > 70th percentile)
+        if bb_width_percentile[i] > BB_WIDTH_HIGH_PERCENTILE:
             signals[i] = 0.0
             prev_signal = 0.0
             prev_direction = 0
+            hold_counter = 0
             continue
         
-        # Volume filter (ensure sufficient liquidity)
-        if volume_ratio[i] < VOLUME_MIN_RATIO:
-            signals[i] = 0.0
-            prev_signal = 0.0
-            prev_direction = 0
+        # Volume filter
+        if volume_ratio_1h[i] < VOLUME_MIN_RATIO:
+            # Can still hold position, just don't enter new
+            if prev_direction != 0 and hold_counter >= HOLDBARS_MIN:
+                signals[i] = prev_signal
+                hold_counter += 1
+            else:
+                signals[i] = 0.0
+                prev_signal = 0.0
+                prev_direction = 0
+                hold_counter = 0
             continue
         
-        # ADX trend strength filter (CRITICAL - only trade strong trends)
-        if adx[i] < ADX_MIN_THRESHOLD:
-            signals[i] = 0.0
-            prev_signal = 0.0
-            prev_direction = 0
-            continue
+        # Get 4h trend direction
+        trend_4h = st_4h_direction[i]
         
-        # DMI direction filter
-        di_diff = plus_di[i] - minus_di[i]
-        
-        # Major trend filter (price vs 50 MA)
-        major_trend = np.sign(close[i] - trend_ma[i])
+        # Calculate pullback depth
+        pullback_long = (close[i] - ema_20_1h[i]) / close[i] if close[i] > 0 else 0
+        pullback_short = (ema_20_1h[i] - close[i]) / close[i] if close[i] > 0 else 0
         
         # Determine signal direction
         signal_direction = 0.0
         
-        if di_diff > ADX_DI_DIFF_MIN:
-            # DI+ > DI- → bullish
-            if major_trend >= 0:  # Confirm with major trend
-                # RSI entry timing
-                if rsi[i] > RSI_LONG_MIN and rsi[i] < RSI_OVERBOUGHT:
+        if trend_4h > 0:
+            # 4h bullish: look for long pullback entries
+            if pullback_long < 0.02 and pullback_long > -0.03:  # Pullback to EMA-20
+                if rsi_1h[i] > RSI_LONG_MIN and rsi_1h[i] < RSI_LONG_MAX:
                     signal_direction = 1.0
-        elif di_diff < -ADX_DI_DIFF_MIN:
-            # DI- > DI+ → bearish
-            if major_trend <= 0:  # Confirm with major trend
-                # RSI entry timing
-                if rsi[i] < RSI_SHORT_MAX and rsi[i] > RSI_OVERSOLD:
+        elif trend_4h < 0:
+            # 4h bearish: look for short pullback entries
+            if pullback_short < 0.02 and pullback_short > -0.03:  # Pullback to EMA-20
+                if rsi_1h[i] > RSI_SHORT_MIN and rsi_1h[i] < RSI_SHORT_MAX:
                     signal_direction = -1.0
         
         if signal_direction == 0:
-            signals[i] = 0.0
-            prev_signal = 0.0
-            prev_direction = 0
+            # No new signal, maintain position if holding
+            if prev_direction != 0 and hold_counter >= HOLDBARS_MIN:
+                # Check if trend still valid
+                if (prev_direction > 0 and trend_4h > 0) or (prev_direction < 0 and trend_4h < 0):
+                    signals[i] = prev_signal
+                    hold_counter += 1
+                else:
+                    signals[i] = 0.0
+                    prev_signal = 0.0
+                    prev_direction = 0
+                    hold_counter = 0
+            else:
+                signals[i] = 0.0
+                prev_signal = 0.0
+                prev_direction = 0
+                hold_counter = 0
             continue
         
-        # Calculate signal strength based on KAMA distance and ADX
-        kama_diff = (close[i] - kama[i]) / close[i]
+        # Calculate signal strength
+        atr_pct = atr_1h[i] / close[i]
+        rsi_strength = 1.0 - abs(rsi_1h[i] - 50) / 50  # Strongest at RSI=50
+        pullback_strength = 1.0 - abs(pullback_long if signal_direction > 0 else pullback_short) * 20
         
-        # Normalize KAMA distance (typical range is 0-5%)
-        kama_strength = np.clip(abs(kama_diff) * 20, 0.3, 1.0)
+        raw_signal = signal_direction * rsi_strength * pullback_strength
+        raw_signal = np.clip(raw_signal, -MAX_SIGNAL, MAX_SIGNAL)
         
-        # ADX strength (25-50 range normalized)
-        adx_strength = np.clip((adx[i] - 20) / 30, 0.3, 1.0)
-        
-        # DI difference strength
-        di_strength = np.clip(abs(di_diff) / 20, 0.3, 1.0)
-        
-        # Combine strengths
-        raw_signal = signal_direction * kama_strength * adx_strength * di_strength
-        
-        # Signal smoothing (EMA on signals)
+        # Signal smoothing
         smoothed_signal = SIGNAL_SMOOTHING * prev_signal + (1.0 - SIGNAL_SMOOTHING) * raw_signal
         
-        # Hysteresis: don't flip direction on small changes
-        current_direction = np.sign(smoothed_signal)
-        if current_direction != 0 and current_direction != prev_direction:
-            if abs(smoothed_signal - prev_signal) < DIRECTION_CHANGE_MIN:
-                smoothed_signal = prev_signal
-        
-        # Apply minimum magnitude filter
+        # Apply minimum magnitude
         if abs(smoothed_signal) < MIN_SIGNAL_MAGNITUDE:
             smoothed_signal = 0.0
         
-        # Clip to max signal
-        signal = np.clip(smoothed_signal, -MAX_SIGNAL, MAX_SIGNAL)
+        # Check for direction change
+        current_direction = np.sign(smoothed_signal)
+        if current_direction != 0 and current_direction != prev_direction and prev_direction != 0:
+            # Require stronger signal to flip
+            if abs(smoothed_signal) < 0.5:
+                smoothed_signal = prev_signal
         
-        signals[i] = signal
-        prev_signal = signal
-        prev_direction = np.sign(signal)
+        signals[i] = smoothed_signal
+        
+        if smoothed_signal != 0:
+            prev_signal = smoothed_signal
+            prev_direction = int(np.sign(smoothed_signal))
+            hold_counter = 1
+        else:
+            prev_signal = 0.0
+            prev_direction = 0
+            hold_counter = 0
+    
+    # Ensure no NaN or Inf
+    signals = np.nan_to_num(signals, nan=0.0, posinf=0.0, neginf=0.0)
+    signals = np.clip(signals, -1.0, 1.0)
     
     return signals
