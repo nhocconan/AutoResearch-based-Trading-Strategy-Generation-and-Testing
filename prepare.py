@@ -266,7 +266,20 @@ def process_klines(
                 if not csv_names:
                     continue
                 with z.open(csv_names[0]) as f:
-                    df = pd.read_csv(f, header=None, names=KLINE_COLUMNS)
+                    # Read first line to detect if there's a header
+                    first_line = f.readline().decode("utf-8").strip()
+                    f.seek(0)
+
+                    # If first field is not numeric, file has a header row
+                    first_field = first_line.split(",")[0]
+                    has_header = not first_field.replace(".", "").replace("-", "").isdigit()
+
+                    if has_header:
+                        df = pd.read_csv(f)
+                        # Rename columns to our standard names
+                        df.columns = KLINE_COLUMNS[:len(df.columns)]
+                    else:
+                        df = pd.read_csv(f, header=None, names=KLINE_COLUMNS)
                     dfs.append(df)
         except Exception as e:
             print(f"  Error processing {zf.name}: {e}")
@@ -278,14 +291,19 @@ def process_klines(
     # Concatenate and clean
     df = pd.concat(dfs, ignore_index=True)
 
+    # Ensure open_time is numeric before converting to datetime
+    df["open_time"] = pd.to_numeric(df["open_time"], errors="coerce")
+    df["close_time"] = pd.to_numeric(df["close_time"], errors="coerce")
+    df = df.dropna(subset=["open_time"])
+
     # Convert timestamps
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+    df["open_time"] = pd.to_datetime(df["open_time"].astype(np.int64), unit="ms", utc=True)
+    df["close_time"] = pd.to_datetime(df["close_time"].astype(np.int64), unit="ms", utc=True)
 
     # Apply dtypes
     for col, dtype in KLINE_DTYPES.items():
         if col in df.columns:
-            df[col] = df[col].astype(dtype)
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype(dtype)
 
     # Drop duplicates and sort
     df = df.drop_duplicates(subset=["open_time"]).sort_values("open_time").reset_index(drop=True)

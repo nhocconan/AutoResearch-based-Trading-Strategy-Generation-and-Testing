@@ -109,6 +109,34 @@ class BacktestResult:
 # Core Backtesting Engine
 # =============================================================================
 
+def _build_funding_per_bar(
+    open_times: np.ndarray,
+    funding_df: Optional[pd.DataFrame],
+) -> np.ndarray:
+    """Pre-compute funding rate for each bar using searchsorted (O(n+m))."""
+    n = len(open_times)
+    funding_per_bar = np.zeros(n, dtype=np.float64)
+
+    if funding_df is None or len(funding_df) == 0:
+        return funding_per_bar
+
+    # Convert funding times to numpy datetime64 for fast comparison
+    funding_times = funding_df["calc_time"].values.astype("datetime64[ns]")
+    funding_rates = funding_df["last_funding_rate"].values.astype(np.float64)
+
+    # For each funding event, find which bar it falls into
+    # searchsorted gives us the index where funding_time would be inserted
+    bar_times = open_times.astype("datetime64[ns]")
+    indices = np.searchsorted(bar_times, funding_times, side="right") - 1
+
+    # Assign funding rates to their respective bars
+    for idx, rate in zip(indices, funding_rates):
+        if 0 <= idx < n:
+            funding_per_bar[idx] += rate
+
+    return funding_per_bar
+
+
 def run_backtest(
     signals: np.ndarray,
     prices: pd.DataFrame,
@@ -117,13 +145,11 @@ def run_backtest(
     leverage: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, list[TradeRecord]]:
     """
-    Run vectorized backtest.
+    Run backtest with vectorized pre-computation and efficient loop.
 
     Args:
         signals: Array of position signals. Values:
-            +1.0 = full long
-            -1.0 = full short
-             0.0 = flat (no position)
+            +1.0 = full long, -1.0 = full short, 0.0 = flat
             Fractional values allowed (e.g., 0.5 = half position)
         prices: DataFrame with columns: open_time, open, high, low, close, volume
         funding_df: DataFrame with columns: calc_time, last_funding_rate
@@ -148,18 +174,15 @@ def run_backtest(
     open_times = prices["open_time"].values  # numpy datetime64
 
     # Shift signals by fill_delay_bars to enforce no look-ahead
-    # Signal generated at bar t -> position entered at bar t+1 open
     delayed_signals = np.zeros(n, dtype=np.float64)
     delay = bt_config.fill_delay_bars
     if delay > 0 and delay < n:
         delayed_signals[delay:] = signals[:-delay]
 
-    # Build funding rate lookup if needed
-    funding_map = {}
-    if bt_config.include_funding and funding_df is not None and len(funding_df) > 0:
-        for _, row in funding_df.iterrows():
-            ts = pd.Timestamp(row["calc_time"])
-            funding_map[ts] = row["last_funding_rate"]
+    # Pre-compute funding rates per bar (O(n+m) instead of O(n*m))
+    funding_per_bar = np.zeros(n, dtype=np.float64)
+    if bt_config.include_funding:
+        funding_per_bar = _build_funding_per_bar(open_times, funding_df)
 
     # Simulation
     equity = np.zeros(n, dtype=np.float64)
@@ -167,10 +190,9 @@ def run_backtest(
     returns_arr = np.zeros(n, dtype=np.float64)
     trades: list[TradeRecord] = []
 
-    current_position = 0.0  # current signal level
+    current_position = 0.0
     entry_price = 0.0
     entry_time = None
-    entry_idx = 0
     cumulative_funding = 0.0
 
     for i in range(1, n):
@@ -185,10 +207,8 @@ def run_backtest(
 
         # If closing or reversing a position, record the trade
         if current_position != 0.0 and position_change != 0.0:
-            # Fraction being closed
             close_fraction = min(abs(position_change), abs(current_position))
             if np.sign(position_change) != np.sign(current_position) or target_position == 0.0:
-                # Closing (fully or partially)
                 price_return = (bar_open - entry_price) / entry_price * np.sign(current_position)
                 pnl_pct = price_return * leverage * (close_fraction / abs(current_position))
                 pnl = prev_equity * pnl_pct * abs(current_position)
@@ -211,36 +231,24 @@ def run_backtest(
 
         # Update position
         if target_position != 0.0 and current_position == 0.0:
-            # New entry
             entry_price = bar_open
             entry_time = pd.Timestamp(open_times[i])
-            entry_idx = i
             cumulative_funding = 0.0
         elif target_position != 0.0 and np.sign(target_position) != np.sign(current_position):
-            # Reversal - new entry on opposite side
             entry_price = bar_open
             entry_time = pd.Timestamp(open_times[i])
-            entry_idx = i
             cumulative_funding = 0.0
 
         current_position = target_position
 
         # Mark-to-market PnL for the bar (open to close)
-        if current_position != 0.0:
-            bar_return = (bar_close - bar_open) / bar_open * current_position * leverage
-        else:
-            bar_return = 0.0
+        bar_return = (bar_close - bar_open) / bar_open * current_position * leverage if current_position != 0.0 else 0.0
 
-        # Funding cost (applied at the bar level, prorated)
+        # Funding cost (pre-computed per bar)
         funding_cost = 0.0
-        if current_position != 0.0 and bt_config.include_funding and funding_map:
-            bar_time = pd.Timestamp(open_times[i])
-            # Check if any funding event falls in this bar
-            for funding_time, rate in funding_map.items():
-                if open_times[i - 1] < funding_time.to_numpy() <= open_times[i]:
-                    # Long pays positive rate, short pays negative rate
-                    funding_cost += abs(current_position) * rate * leverage
-                    cumulative_funding += abs(prev_equity * abs(current_position) * rate * leverage)
+        if current_position != 0.0 and funding_per_bar[i] != 0.0:
+            funding_cost = abs(current_position) * funding_per_bar[i] * leverage
+            cumulative_funding += abs(prev_equity * funding_cost)
 
         # Update equity
         bar_pnl = bar_return - trade_cost - funding_cost
