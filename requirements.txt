@@ -1,0 +1,28 @@
+# Core
+numpy>=1.24.0
+pandas>=2.0.0
+pyarrow>=12.0.0          # Parquet support
+
+# Data download
+requests>=2.31.0
+tqdm>=4.65.0
+
+# Analysis & visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+jupyter>=1.0.0
+nbformat>=5.9.0
+
+# Technical indicators
+ta>=0.11.0               # Technical analysis library
+
+# LLM APIs
+openai>=1.0.0            # OpenAI + compatible endpoints
+anthropic>=0.34.0        # Anthropic Claude
+google-generativeai>=0.7.0  # Google Gemini
+
+# Configuration
+pyyaml>=6.0.0
+
+# Performance
+numba>=0.57.0            # JIT compilation for hot loops

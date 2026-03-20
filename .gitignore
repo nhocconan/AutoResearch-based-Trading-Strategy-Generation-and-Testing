@@ -1,0 +1,37 @@
+# Data
+data/
+*.parquet
+*.zip
+*.csv
+
+# Results (tracked separately)
+results.tsv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.key
+
+# Reports (generated)
+reports/*.html
+reports/*.png
+
+# Jupyter
+.ipynb_checkpoints/
