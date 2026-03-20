@@ -1,107 +1,167 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #013 - KAMA Trend + MACD Momentum + Z-Score Regime Filter
-======================================================================
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to volatility better than HMA,
-providing cleaner trend signals in choppy markets. Combined with MACD histogram for
-momentum confirmation and Z-score for regime detection, this should reduce false entries
-while maintaining trend exposure. ATR trailing stops protect against reversals.
+EXPERIMENT #014 - Keltner Channel Trend + RSI Pullback + ADX Strength Filter
+=============================================================================
+Hypothesis: Keltner Channels (ATR-based) adapt better to volatility regimes than 
+Bollinger Bands (std-based). Combined with ADX for trend strength confirmation 
+and RSI pullback entries, this should reduce false breakouts while capturing 
+strong trends. Multi-timeframe: 4h Keltner trend + 1h RSI entries.
 
-Key differences from mtf_hma_supertrend_rsi_v1:
-- KAMA(10,2,30) instead of HMA for trend (adaptive to market efficiency)
-- MACD histogram cross for entry timing (momentum confirmation vs RSI pullback)
-- Z-score(20) filter to avoid extreme deviations (mean reversion risk)
-- Multi-timeframe: 4h KAMA trend + 1h MACD entries
+Key differences from previous attempts:
+- Keltner Channels use ATR (volatility-adaptive) vs Bollinger (std-based)
+- ADX(14) > 25 filter ensures we only trade when trend has strength
+- ATR trailing stop with 2.0*ATR distance (tighter than Donchian's 2.5)
+- Discrete signal levels (0.0, ±0.20, ±0.35) to minimize churn costs
 
 Why this might beat Sharpe=2.931:
-- KAMA reduces whipsaw in ranging markets better than HMA
-- MACD histogram provides earlier momentum signals than RSI
-- Z-score filter avoids entering at extreme extensions
-- ATR stops adapt to volatility regime changes
+- Keltner breakout signals are cleaner in trending markets
+- ADX filter avoids choppy sideways periods (major drawdown source)
+- Tighter ATR stops preserve capital during reversals
+- Multi-timeframe reduces noise while maintaining entry precision
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_kama_macd_zscore_v3"
+name = "mtf_keltner_rsi_adx_v1"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+def calculate_keltner_channels(high, low, close, period=20, atr_period=10, mult=2.0):
     """
-    Calculate Kaufman Adaptive Moving Average (KAMA)
-    KAMA adapts to market efficiency - moves fast in trends, slow in ranges
+    Calculate Keltner Channels
+    Middle = EMA(close, period)
+    ATR = ATR(high, low, close, atr_period)
+    Upper = Middle + mult * ATR
+    Lower = Middle - mult * ATR
     """
     n = len(close)
-    kama = np.zeros(n)
     
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        change = abs(close[i] - close[i - er_period])
-        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        if volatility > 0:
-            er[i] = change / volatility
-    
-    # Calculate smoothing constant
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
-    
-    # Initialize KAMA
-    kama[er_period] = close[er_period]
-    
-    for i in range(er_period + 1, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
-
-
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram"""
-    n = len(close)
-    
-    # EMA calculation helper
-    def ema(data, period):
-        result = np.zeros(n)
-        multiplier = 2 / (period + 1)
-        result[period - 1] = np.mean(data[:period])
-        for i in range(period, n):
-            result[i] = (data[i] - result[i - 1]) * multiplier + result[i - 1]
-        return result
-    
-    ema_fast = ema(close, fast)
-    ema_slow = ema(close, slow)
-    
-    macd_line = ema_fast - ema_slow
-    
-    # Signal line (EMA of MACD)
-    signal_line = np.zeros(n)
-    multiplier = 2 / (signal + 1)
-    first_valid = fast + signal - 1
-    signal_line[first_valid] = np.mean(macd_line[fast:first_valid + 1])
-    for i in range(first_valid + 1, n):
-        signal_line[i] = (macd_line[i] - signal_line[i - 1]) * multiplier + signal_line[i - 1]
-    
-    histogram = macd_line - signal_line
-    
-    return macd_line, signal_line, histogram
-
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for regime detection"""
-    n = len(close)
-    zscore = np.zeros(n)
-    
+    # Calculate EMA for middle line
+    ema = np.zeros(n)
+    ema[period - 1] = np.mean(close[:period])
     for i in range(period, n):
-        window = close[i - period:i + 1]
-        mean = np.mean(window)
-        std = np.std(window)
-        if std > 0:
-            zscore[i] = (close[i] - mean) / std
+        ema[i] = ema[i - 1] + (2.0 / (period + 1)) * (close[i] - ema[i - 1])
     
-    return zscore
+    # Calculate ATR
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+    
+    atr = np.zeros(n)
+    atr[atr_period - 1] = np.mean(tr[1:atr_period])
+    for i in range(atr_period, n):
+        atr[i] = (atr[i - 1] * (atr_period - 1) + tr[i]) / atr_period
+    
+    upper = ema + mult * atr
+    lower = ema - mult * atr
+    
+    return upper, lower, ema, atr
+
+
+def calculate_adx(high, low, close, period=14):
+    """
+    Calculate ADX (Average Directional Index)
+    Measures trend strength (0-100), not direction
+    ADX > 25 indicates strong trend
+    """
+    n = len(close)
+    
+    # Calculate +DM and -DM
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i - 1]
+        low_diff = low[i - 1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+    
+    # Calculate TR
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+    
+    # Smooth with Wilder's method (EMA with alpha = 1/period)
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    adx = np.zeros(n)
+    
+    # Initialize at period
+    sum_tr = np.sum(tr[1:period + 1])
+    sum_plus_dm = np.sum(plus_dm[1:period + 1])
+    sum_minus_dm = np.sum(minus_dm[1:period + 1])
+    
+    if sum_tr > 0:
+        plus_di[period] = 100 * sum_plus_dm / sum_tr
+        minus_di[period] = 100 * sum_minus_dm / sum_tr
+    
+    if plus_di[period] + minus_di[period] > 0:
+        dx[period] = 100 * abs(plus_di[period] - minus_di[period]) / (plus_di[period] + minus_di[period])
+    
+    adx[period] = dx[period]
+    
+    # Smooth remaining values
+    for i in range(period + 1, n):
+        # Wilder's smoothing: new = (prev * (n-1) + current) / n
+        sum_tr = tr[i] + sum_tr * (period - 1) / period
+        sum_plus_dm = plus_dm[i] + sum_plus_dm * (period - 1) / period
+        sum_minus_dm = minus_dm[i] + sum_minus_dm * (period - 1) / period
+        
+        if sum_tr > 0:
+            plus_di[i] = 100 * sum_plus_dm / sum_tr
+            minus_di[i] = 100 * sum_minus_dm / sum_tr
+        
+        if plus_di[i] + minus_di[i] > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+    
+    return adx, plus_di, minus_di
+
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI with proper initialization"""
+    n = len(close)
+    delta = np.diff(close)
+    delta = np.insert(delta, 0, 0)
+    
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    
+    # Initialize with SMA
+    avg_gain[period] = np.mean(gain[1:period + 1])
+    avg_loss[period] = np.mean(loss[1:period + 1])
+    
+    # Wilder's smoothing
+    for i in range(period + 1, n):
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
+    
+    rsi = np.zeros(n)
+    mask = avg_loss > 0
+    rs = np.zeros(n)
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    rsi[~mask] = 100  # No losses = RSI 100
+    
+    return rsi
 
 
 def calculate_atr(high, low, close, period=14):
@@ -125,6 +185,21 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion filter"""
+    n = len(close)
+    zscore = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        window = close[i - period + 1:i + 1]
+        mean = np.mean(window)
+        std = np.std(window)
+        if std > 0:
+            zscore[i] = (close[i] - mean) / std
+    
+    return zscore
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
@@ -132,16 +207,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     n = len(close)
     
     # 1h indicators for entry timing and risk
-    macd_1h, signal_1h, hist_1h = calculate_macd(close, fast=12, slow=26, signal=9)
-    zscore_1h = calculate_zscore(close, period=20)
+    rsi_1h = calculate_rsi(close, period=14)
     atr_1h = calculate_atr(high, low, close, period=14)
+    zscore_1h = calculate_zscore(close, period=20)
     
-    # 4h KAMA for trend filter (resample 1h → 4h)
+    # 4h Keltner + ADX for trend filter (resample 1h → 4h)
     df_1h = pd.DataFrame({
         'open': close,
         'high': high,
         'low': low,
-        'close': close
+        'close': close,
+        'volume': np.ones(n)  # Dummy volume for resample
     })
     df_1h.index = pd.date_range(start='2021-01-01', periods=n, freq='1h')
     
@@ -150,35 +226,50 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         'open': 'first',
         'high': 'max',
         'low': 'min',
-        'close': 'last'
+        'close': 'last',
+        'volume': 'sum'
     }).dropna()
     
+    h_4h = df_4h['high'].values
+    l_4h = df_4h['low'].values
     c_4h = df_4h['close'].values
     
-    # Calculate 4h KAMA
-    kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
+    # Calculate 4h Keltner Channels
+    keltner_upper, keltner_lower, keltner_mid, atr_4h = calculate_keltner_channels(
+        h_4h, l_4h, c_4h, period=20, atr_period=10, mult=2.0
+    )
     
-    # 4h trend direction based on KAMA slope and price position
+    # Calculate 4h ADX for trend strength
+    adx_4h, plus_di_4h, minus_di_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
+    
+    # 4h trend direction based on Keltner position + ADX confirmation
     trend_4h = np.zeros(len(c_4h))
-    for i in range(40, len(c_4h)):
-        if kama_4h[i] > 0:
-            # Price above KAMA + KAMA sloping up = bullish
-            kama_slope = kama_4h[i] - kama_4h[i - 5]
-            price_above_kama = c_4h[i] > kama_4h[i]
+    for i in range(30, len(c_4h)):  # Need 30 bars for ADX to stabilize
+        if keltner_upper[i] > keltner_lower[i]:
+            price_position = (c_4h[i] - keltner_lower[i]) / (keltner_upper[i] - keltner_lower[i])
             
-            if price_above_kama and kama_slope > 0:
-                trend_4h[i] = 1  # Bullish
-            elif not price_above_kama and kama_slope < 0:
-                trend_4h[i] = -1  # Bearish
+            # Only trade if ADX shows strong trend
+            if adx_4h[i] > 25:
+                if price_position > 0.6 and plus_di_4h[i] > minus_di_4h[i]:
+                    trend_4h[i] = 1  # Bullish
+                elif price_position < 0.4 and minus_di_4h[i] > plus_di_4h[i]:
+                    trend_4h[i] = -1  # Bearish
     
     # Map 4h trend back to 1h timeframe
     trend_1h = np.zeros(n)
     idx_1h_to_4h = np.arange(n) // 4
     
     for i in range(n):
-        idx_4h = idx_1h_to_4h[i]
-        if idx_4h < len(trend_4h):
+        idx_4h = min(idx_1h_to_4h[i], len(trend_4h) - 1)
+        if idx_4h >= 0 and idx_4h < len(trend_4h):
             trend_1h[i] = trend_4h[idx_4h]
+    
+    # Map 4h ATR to 1h for stoploss
+    atr_4h_mapped = np.zeros(n)
+    for i in range(n):
+        idx_4h = min(idx_1h_to_4h[i], len(atr_4h) - 1)
+        if idx_4h >= 0 and idx_4h < len(atr_4h):
+            atr_4h_mapped[i] = atr_4h[idx_4h]
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
@@ -187,119 +278,123 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     SIZE_FULL = 0.35   # Full position in good conditions
     SIZE_HALF = 0.20   # Reduced position in marginal conditions
     
-    # MACD histogram thresholds for entry confirmation
-    MACD_HIST_THRESHOLD = 0.0  # Histogram must cross above/below zero
+    # RSI thresholds for pullback entries
+    RSI_LONG_ENTRY = 45   # Enter long on pullback in uptrend
+    RSI_SHORT_ENTRY = 55  # Enter short on rally in downtrend
+    RSI_EXIT = 50         # Exit when RSI crosses back through midpoint
     
-    # Z-score thresholds for regime filter
-    ZSCORE_MAX = 2.0     # Don't enter if price is > 2 std from mean
-    ZSCORE_MIN = -2.0
+    # Z-score filter to avoid extreme overbought/oversold
+    ZSCORE_MAX = 2.5      # Don't enter if price is > 2.5 std from mean
     
     # ATR stoploss multiplier
-    ATR_STOP_MULT = 2.5
+    ATR_STOP_MULT = 2.0   # Tighter stops than Donchian strategy
     
-    first_valid = max(80, 40, 26, 20, 14)  # Wait for all indicators
+    # ADX minimum for trend confirmation
+    ADX_MIN = 25
+    
+    first_valid = max(80, 30, 14, 20)  # Wait for all indicators
     
     # Track entry prices and stops for trailing stop logic
-    entry_prices = np.zeros(n)
-    stop_prices = np.zeros(n)
-    position_direction = np.zeros(n)  # 1 for long, -1 for short, 0 for flat
+    long_entry_price = np.full(n, np.nan)
+    short_entry_price = np.full(n, np.nan)
+    long_stop_price = np.full(n, np.nan)
+    short_stop_price = np.full(n, np.nan)
     
     for i in range(first_valid, n):
-        if np.isnan(macd_1h[i]) or np.isnan(hist_1h[i]) or np.isnan(zscore_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(trend_1h[i]):
+        # Check for NaN values
+        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(zscore_1h[i]) or np.isnan(trend_1h[i]):
             signals[i] = 0.0
             continue
         
+        # Carry forward previous state if no new signal
+        if i > 0:
+            signals[i] = signals[i - 1]
+            long_entry_price[i] = long_entry_price[i - 1]
+            short_entry_price[i] = short_entry_price[i - 1]
+            long_stop_price[i] = long_stop_price[i - 1]
+            short_stop_price[i] = short_stop_price[i - 1]
+        
         trend = trend_1h[i]
-        macd_hist = hist_1h[i]
-        macd_hist_prev = hist_1h[i - 1] if i > 0 else 0
-        zscore = zscore_1h[i]
+        rsi_val = rsi_1h[i]
+        zscore_val = zscore_1h[i]
         atr = atr_1h[i]
         price = close[i]
         
-        # Z-score filter - avoid extreme deviations (mean reversion risk)
-        if zscore > ZSCORE_MAX or zscore < ZSCORE_MIN:
-            # If we have an existing position, check stoploss
-            if position_direction[i - 1] != 0 and i > 0:
-                if position_direction[i - 1] == 1:
-                    stop_price = stop_prices[i - 1]
-                    if price < stop_price:
-                        signals[i] = 0.0
-                        position_direction[i] = 0
-                    else:
-                        signals[i] = signals[i - 1]
-                        position_direction[i] = position_direction[i - 1]
-                elif position_direction[i - 1] == -1:
-                    stop_price = stop_prices[i - 1]
-                    if price > stop_price:
-                        signals[i] = 0.0
-                        position_direction[i] = 0
-                    else:
-                        signals[i] = signals[i - 1]
-                        position_direction[i] = position_direction[i - 1]
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # ATR filter - avoid trading when ATR is extremely high
-        if atr > 0 and atr / price > 0.05:  # ATR > 5% of price = too volatile
+        # ATR filter - avoid trading when ATR is extremely high (> 5% of price)
+        if atr > 0 and atr / price > 0.05:
             signals[i] = 0.0
+            long_entry_price[i] = np.nan
+            short_entry_price[i] = np.nan
             continue
         
-        if trend == 1:  # 4h uptrend - look for long entries
-            # MACD histogram cross above zero (momentum confirmation)
-            if macd_hist > MACD_HIST_THRESHOLD and macd_hist_prev <= MACD_HIST_THRESHOLD:
-                # Fresh long entry
+        # Z-score filter - avoid extreme mean reversion setups
+        if abs(zscore_val) > ZSCORE_MAX:
+            signals[i] = 0.0
+            long_entry_price[i] = np.nan
+            short_entry_price[i] = np.nan
+            continue
+        
+        if trend == 1:  # 4h uptrend with ADX confirmation
+            # Check stoploss for existing long
+            if signals[i] > 0 and not np.isnan(long_stop_price[i]):
+                if price < long_stop_price[i]:
+                    signals[i] = 0.0
+                    long_entry_price[i] = np.nan
+                    long_stop_price[i] = np.nan
+                    continue
+            
+            # RSI pullback entry
+            if rsi_val < RSI_LONG_ENTRY:
                 signals[i] = SIZE_FULL
-                entry_prices[i] = price
-                stop_prices[i] = price - ATR_STOP_MULT * atr
-                position_direction[i] = 1
-            elif signals[i - 1] > 0 and i > 0:
-                # Hold existing long position with trailing stop
-                prev_stop = stop_prices[i - 1]
-                new_stop = price - ATR_STOP_MULT * atr
-                
-                # Trail stop up (never down)
-                trailing_stop = max(prev_stop, new_stop)
-                stop_prices[i] = trailing_stop
-                
-                if price < trailing_stop:
-                    signals[i] = 0.0  # Stoploss triggered
-                    position_direction[i] = 0
-                else:
-                    signals[i] = signals[i - 1]  # Hold position
-                    position_direction[i] = 1
-            else:
-                signals[i] = 0.0
-                position_direction[i] = 0
-                
-        elif trend == -1:  # 4h downtrend - look for short entries
-            # MACD histogram cross below zero (momentum confirmation)
-            if macd_hist < -MACD_HIST_THRESHOLD and macd_hist_prev >= -MACD_HIST_THRESHOLD:
-                # Fresh short entry
+                long_entry_price[i] = price
+                long_stop_price[i] = price - ATR_STOP_MULT * atr
+            elif rsi_val < RSI_EXIT and signals[i] == 0:
+                # Moderate pullback - half position if not already in
+                signals[i] = SIZE_HALF
+                long_entry_price[i] = price
+                long_stop_price[i] = price - ATR_STOP_MULT * atr
+            elif rsi_val > RSI_EXIT and signals[i] > 0:
+                # RSI crossed back above 50 - hold or reduce
+                if signals[i] == SIZE_HALF:
+                    signals[i] = SIZE_FULL  # Upgrade to full position
+                # Trail stop higher
+                if not np.isnan(long_stop_price[i]):
+                    new_stop = price - ATR_STOP_MULT * atr
+                    long_stop_price[i] = max(long_stop_price[i], new_stop)
+        
+        elif trend == -1:  # 4h downtrend with ADX confirmation
+            # Check stoploss for existing short
+            if signals[i] < 0 and not np.isnan(short_stop_price[i]):
+                if price > short_stop_price[i]:
+                    signals[i] = 0.0
+                    short_entry_price[i] = np.nan
+                    short_stop_price[i] = np.nan
+                    continue
+            
+            # RSI rally entry
+            if rsi_val > RSI_SHORT_ENTRY:
                 signals[i] = -SIZE_FULL
-                entry_prices[i] = price
-                stop_prices[i] = price + ATR_STOP_MULT * atr
-                position_direction[i] = -1
-            elif signals[i - 1] < 0 and i > 0:
-                # Hold existing short position with trailing stop
-                prev_stop = stop_prices[i - 1]
-                new_stop = price + ATR_STOP_MULT * atr
-                
-                # Trail stop down (never up)
-                trailing_stop = min(prev_stop, new_stop)
-                stop_prices[i] = trailing_stop
-                
-                if price > trailing_stop:
-                    signals[i] = 0.0  # Stoploss triggered
-                    position_direction[i] = 0
-                else:
-                    signals[i] = signals[i - 1]  # Hold position
-                    position_direction[i] = -1
-            else:
-                signals[i] = 0.0
-                position_direction[i] = 0
-        else:  # No clear trend
+                short_entry_price[i] = price
+                short_stop_price[i] = price + ATR_STOP_MULT * atr
+            elif rsi_val > RSI_EXIT and signals[i] == 0:
+                # Moderate rally - half short if not already in
+                signals[i] = -SIZE_HALF
+                short_entry_price[i] = price
+                short_stop_price[i] = price + ATR_STOP_MULT * atr
+            elif rsi_val < RSI_EXIT and signals[i] < 0:
+                # RSI crossed back below 50 - hold or reduce
+                if signals[i] == -SIZE_HALF:
+                    signals[i] = -SIZE_FULL  # Upgrade to full short
+                # Trail stop lower
+                if not np.isnan(short_stop_price[i]):
+                    new_stop = price + ATR_STOP_MULT * atr
+                    short_stop_price[i] = min(short_stop_price[i], new_stop)
+        
+        else:  # No clear trend or ADX too weak
             signals[i] = 0.0
-            position_direction[i] = 0
+            long_entry_price[i] = np.nan
+            short_entry_price[i] = np.nan
+            long_stop_price[i] = np.nan
+            short_stop_price[i] = np.nan
     
     return signals
