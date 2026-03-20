@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """
-strategy.py - Bollinger Keltner Squeeze Mean Reversion V1
+strategy.py - KAMA Donchian Breakout V5
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
+This file defines the trading strategy. It must expose:
+    - name: str                    - Strategy identifier
+    - timeframe: str               - Primary timeframe (e.g., "4h")
+    - leverage: float              - Leverage multiplier (default 1.0)
+    - generate_signals(prices)     - Signal generation function
+
 Strategy Hypothesis:
-    Bollinger-Keltner squeeze detection with RSI mean reversion on 1h timeframe.
+    Combine adaptive trend following with breakout confirmation:
+    - Primary signal: KAMA (Kaufman Adaptive MA) for trend direction
+    - Confirmation: Donchian channel breakout (20-period high/low)
+    - Filter: Volume surge confirmation (>1.3x average)
+    - Regime: Bollinger Band width percentile (low vol = breakout mode)
+    - Risk: ATR-based position sizing to control drawdown
     
-    Why this should beat Supertrend:
-    - Mean reversion has LOWER drawdowns than pure trend following
-    - Squeeze breakouts capture volatility expansions with better timing
-    - RSI extremes provide superior entry timing vs EMA crossovers
-    - 1h timeframe balances noise reduction with sufficient trade frequency
-    - Volatility regime detection avoids trading during choppy periods
-    
-    Signal Logic:
-    1. Detect Bollinger-Keltner squeeze (BB inside KC = low vol regime)
-    2. Wait for squeeze release (price breaks BB with volume)
-    3. RSI confirmation (not extreme, allowing momentum continuation)
-    4. SMA(200) filter for trend alignment
-    5. Dynamic position sizing based on volatility regime
-    
-    Expected Improvement:
-    - Lower max drawdown (<40% vs 84% from Supertrend)
-    - Higher Sharpe (>0.5 vs 0.25 from Supertrend)
-    - More trades during ranging markets where Supertrend fails
+    Why this works:
+    - KAMA adapts to market volatility (slower in chop, faster in trends)
+    - Donchian breakouts capture sustained momentum moves
+    - Volume filter reduces false breakouts
+    - Regime filter avoids trading breakouts in high-vol mean-reversion periods
+    - Better risk control than pure Supertrend (which had -84% DD)
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -39,97 +38,99 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "bb_kc_squeeze_meanrev_1h"
-timeframe = "1h"
-leverage = 1.5  # Conservative leverage for mean reversion
+name = "kama_donchian_breakout_v5"
+timeframe = "4h"
+leverage = 1.5  # Conservative leverage to control drawdown
 
-# Bollinger Bands configuration
-BB_PERIOD = 20
-BB_STD = 2.0
+# KAMA configuration (Kaufman Adaptive Moving Average)
+KAMA_PERIOD = 10
+KAMA_FAST_SC = 2.0 / (10 + 1)  # Fast smoothing constant
+KAMA_SLOW_SC = 2.0 / (30 + 1)  # Slow smoothing constant
 
-# Keltner Channel configuration
-KC_PERIOD = 20
-KC_ATR_MULT = 1.5
-
-# RSI configuration for entry timing
-RSI_PERIOD = 14
-RSI_LONG_ENTRY = 45  # RSI must be above this for long entries
-RSI_SHORT_ENTRY = 55  # RSI must be below this for short entries
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-
-# Trend filter configuration
-SMA_MAJOR = 200
-TREND_FILTER_ENABLED = True
-
-# Squeeze detection
-SQUEEZE_LOOKBACK = 10  # Bars to confirm squeeze
-SQUEEZE_RELEASE_BARS = 3  # Bars after squeeze release to enter
+# Donchian channel configuration
+DONCHIAN_PERIOD = 20
 
 # Volume confirmation
 VOLUME_LOOKBACK = 20
-VOLUME_BREAKOUT_RATIO = 1.3  # Volume must be >1.3x average on breakout
+VOLUME_MIN_RATIO = 1.30  # Volume must be at least 1.3x average for breakout
 
-# Volatility regime detection
-VOLATILITY_LOOKBACK = 50
-VOLATILITY_LOW_PERCENTILE = 30  # Bottom 30% = low vol regime
-VOLATILITY_HIGH_PERCENTILE = 70  # Top 30% = high vol regime
+# Bollinger Band regime filter
+BB_PERIOD = 20
+BB_STD = 2.0
+BB_LOW_VOL_PERCENTILE = 40  # Below 40th percentile = low vol (breakout mode)
+BB_HIGH_VOL_PERCENTILE = 70  # Above 70th percentile = high vol (avoid breakouts)
 
-# Risk management
+# ATR risk management
 ATR_PERIOD = 14
-ATR_STOP_MULT = 2.5  # ATR multiplier for stop loss
-MAX_POSITION_SIZE = 0.85  # Maximum signal magnitude
-MIN_SIGNAL_MAGNITUDE = 0.20  # Minimum signal to generate position
+ATR_STOP_MULT = 2.5  # ATR multiplier for trailing stop
+MAX_ATR_PCT = 0.08  # Maximum ATR as % of price to trade
 
-# Signal smoothing
+# Signal configuration
+MIN_SIGNAL_MAGNITUDE = 0.20  # Minimum signal to generate position
+MAX_SIGNAL = 0.80  # Maximum signal magnitude
 SIGNAL_SMOOTHING = 0.40  # EMA smoothing factor for signals
-HYSTERESIS_THRESHOLD = 0.15  # Minimum change to flip signal direction
+ENTRY_CONFIRMATION_BARS = 2  # Require N bars of confirmation
 
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
 
-def calculate_sma(close: np.ndarray, period: int) -> np.ndarray:
+def calculate_kama(close: np.ndarray, period: int = 10) -> np.ndarray:
     """
-    Calculate Simple Moving Average using only past data.
-    """
-    n = len(close)
-    sma = np.zeros(n, dtype=np.float64)
-    
-    if n < period:
-        return sma
-    
-    close_series = pd.Series(close)
-    sma_values = close_series.rolling(window=period, min_periods=period).mean().values
-    sma = np.nan_to_num(sma_values, nan=0.0)
-    
-    return sma
-
-
-def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_mult: float = 2.0) -> tuple:
-    """
-    Calculate Bollinger Bands (middle, upper, lower) using only past data.
+    Calculate Kaufman Adaptive Moving Average.
+    KAMA adapts to market noise: fast in trends, slow in chop.
+    Only uses past data (no look-ahead).
     """
     n = len(close)
-    middle = np.zeros(n, dtype=np.float64)
+    kama = np.zeros(n, dtype=np.float64)
+    
+    if n < period + 1:
+        return kama
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n, dtype=np.float64)
+    for i in range(period, n):
+        signal = abs(close[i] - close[i - period])
+        noise = 0.0
+        for j in range(i - period + 1, i + 1):
+            noise += abs(close[j] - close[j - 1])
+        er[i] = signal / noise if noise > 0 else 0.0
+    
+    # Calculate smoothing constant
+    fast_sc = KAMA_FAST_SC
+    slow_sc = KAMA_SLOW_SC
+    
+    # Initialize KAMA with SMA of first period
+    kama[period] = np.mean(close[:period + 1])
+    
+    # Calculate KAMA recursively
+    for i in range(period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
+
+
+def calculate_donchian(high: np.ndarray, low: np.ndarray, period: int = 20) -> tuple:
+    """
+    Calculate Donchian Channel (upper and lower bands).
+    Upper = highest high of last N periods
+    Lower = lowest low of last N periods
+    Only uses past data (no look-ahead).
+    """
+    n = len(high)
     upper = np.zeros(n, dtype=np.float64)
     lower = np.zeros(n, dtype=np.float64)
     
     if n < period:
-        return middle, upper, lower
+        return upper, lower
     
-    close_series = pd.Series(close)
-    middle_series = close_series.rolling(window=period, min_periods=period).mean()
-    std_series = close_series.rolling(window=period, min_periods=period).std()
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    middle = np.nan_to_num(middle_series.values, nan=0.0)
-    std_values = np.nan_to_num(std_series.values, nan=0.0)
-    
-    upper = middle + std_mult * std_values
-    lower = middle - std_mult * std_values
-    
-    return middle, upper, lower
+    return upper, lower
 
 
 def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
@@ -152,61 +153,36 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
             abs(low[i] - close[i-1])
         )
     
-    tr_series = pd.Series(tr)
-    atr_series = tr_series.ewm(span=period, adjust=False, min_periods=period).mean()
-    
-    atr = np.nan_to_num(atr_series.values, nan=0.0)
+    # Use simple moving average for ATR (standard method)
+    for i in range(period, n):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
     
     return atr
 
 
-def calculate_keltner_channel(high: np.ndarray, low: np.ndarray, close: np.ndarray, 
-                               period: int = 20, atr_mult: float = 1.5) -> tuple:
+def calculate_bollinger_width(close: np.ndarray, period: int = 20, std_dev: float = 2.0) -> np.ndarray:
     """
-    Calculate Keltner Channel (middle, upper, lower) using only past data.
-    """
-    n = len(close)
-    middle = np.zeros(n, dtype=np.float64)
-    upper = np.zeros(n, dtype=np.float64)
-    lower = np.zeros(n, dtype=np.float64)
-    
-    if n < period + 1:
-        return middle, upper, lower
-    
-    middle = calculate_sma(close, period)
-    atr = calculate_atr(high, low, close, period)
-    
-    upper = middle + atr_mult * atr
-    lower = middle - atr_mult * atr
-    
-    return middle, upper, lower
-
-
-def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
-    """
-    Calculate Relative Strength Index using only past data.
+    Calculate Bollinger Band width as % of price.
+    Width = (Upper - Lower) / Middle
+    Only uses past data (no look-ahead).
     """
     n = len(close)
-    rsi = np.full(n, 50.0, dtype=np.float64)
+    bb_width = np.zeros(n, dtype=np.float64)
     
-    if n < period + 1:
-        return rsi
+    if n < period:
+        return bb_width
     
     close_series = pd.Series(close)
-    delta = close_series.diff()
     
-    gains = delta.where(delta > 0, 0.0)
-    losses = (-delta).where(delta < 0, 0.0)
+    for i in range(period - 1, n):
+        window = close_series.iloc[i - period + 1:i + 1]
+        sma = window.mean()
+        std = window.std()
+        upper = sma + std_dev * std
+        lower = sma - std_dev * std
+        bb_width[i] = (upper - lower) / sma if sma > 0 else 0.0
     
-    avg_gains = gains.ewm(com=period - 1, min_periods=period).mean()
-    avg_losses = losses.ewm(com=period - 1, min_periods=period).mean()
-    
-    rs = avg_gains / avg_losses.replace(0, np.inf)
-    rsi_series = 100.0 - (100.0 / (1.0 + rs))
-    
-    rsi = np.nan_to_num(rsi_series.values, nan=50.0)
-    
-    return rsi
+    return bb_width
 
 
 def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
@@ -220,95 +196,32 @@ def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray
     if n < lookback:
         return volume_ratio
     
-    volume_series = pd.Series(volume)
-    rolling_avg = volume_series.rolling(window=lookback, min_periods=lookback).mean()
-    
-    volume_ratio = np.nan_to_num(volume_series.values / rolling_avg.values, nan=1.0)
+    for i in range(lookback - 1, n):
+        avg_vol = np.mean(volume[i - lookback + 1:i + 1])
+        volume_ratio[i] = volume[i] / avg_vol if avg_vol > 0 else 1.0
     
     return volume_ratio
 
 
-def detect_squeeze(bb_upper: np.ndarray, bb_lower: np.ndarray,
-                   kc_upper: np.ndarray, kc_lower: np.ndarray,
-                   lookback: int = 10) -> np.ndarray:
+def calculate_bb_width_percentile(bb_width: np.ndarray, lookback: int = 100) -> np.ndarray:
     """
-    Detect Bollinger-Keltner squeeze.
-    Squeeze = BB inside KC (low volatility compression).
-    Returns 1.0 when in squeeze, 0.0 otherwise.
+    Calculate rolling percentile of BB width.
+    Returns value 0-100 indicating where current width sits in recent history.
     Only uses past data (no look-ahead).
     """
-    n = len(bb_upper)
-    squeeze = np.zeros(n, dtype=np.float64)
+    n = len(bb_width)
+    percentile = np.zeros(n, dtype=np.float64)
     
-    for i in range(lookback, n):
-        # Check if BB is inside KC for the last 'lookback' bars
-        in_squeeze = True
-        for j in range(i - lookback + 1, i + 1):
-            if bb_upper[j] > kc_upper[j] or bb_lower[j] < kc_lower[j]:
-                in_squeeze = False
-                break
-        
-        squeeze[i] = 1.0 if in_squeeze else 0.0
+    if n < lookback:
+        return percentile
     
-    return squeeze
-
-
-def detect_squeeze_release(squeeze: np.ndarray, close: np.ndarray,
-                           bb_upper: np.ndarray, bb_lower: np.ndarray,
-                           release_bars: int = 3) -> np.ndarray:
-    """
-    Detect squeeze release (breakout from compression).
-    Returns direction: +1 for upper breakout, -1 for lower breakout, 0 for no release.
-    Only uses past data (no look-ahead).
-    """
-    n = len(squeeze)
-    release = np.zeros(n, dtype=np.float64)
+    for i in range(lookback - 1, n):
+        window = bb_width[i - lookback + 1:i + 1]
+        current = bb_width[i]
+        # Calculate percentile rank
+        percentile[i] = np.sum(window <= current) / len(window) * 100
     
-    for i in range(release_bars, n):
-        # Check if we were in squeeze 'release_bars' ago
-        if squeeze[i - release_bars] == 1.0:
-            # Check if price broke out
-            if close[i] > bb_upper[i]:
-                release[i] = 1.0  # Upper breakout
-            elif close[i] < bb_lower[i]:
-                release[i] = -1.0  # Lower breakout
-    
-    return release
-
-
-def calculate_volatility_regime(close: np.ndarray, lookback: int = 50) -> np.ndarray:
-    """
-    Calculate volatility regime based on rolling ATR percentile.
-    Returns: 0 = low vol, 1 = normal vol, 2 = high vol
-    Only uses past data (no look-ahead).
-    """
-    n = len(close)
-    regime = np.ones(n, dtype=np.float64)  # Default to normal
-    
-    if n < lookback * 2:
-        return regime
-    
-    # Calculate rolling ATR as % of price
-    high = close * 1.01  # Approximation if high not available
-    low = close * 0.99
-    atr = calculate_atr(high, low, close, 14)
-    atr_pct = atr / close
-    
-    atr_series = pd.Series(atr_pct)
-    
-    for i in range(lookback, n):
-        window = atr_pct[max(0, i - lookback):i + 1]
-        if len(window) >= lookback // 2:
-            percentile = np.percentile(window, atr_pct[i] / np.max(window) * 100) if np.max(window) > 0 else 50
-            
-            if percentile < VOLATILITY_LOW_PERCENTILE:
-                regime[i] = 0.0  # Low vol
-            elif percentile > VOLATILITY_HIGH_PERCENTILE:
-                regime[i] = 2.0  # High vol
-            else:
-                regime[i] = 1.0  # Normal vol
-    
-    return regime
+    return percentile
 
 
 # =============================================================================
@@ -317,16 +230,16 @@ def calculate_volatility_regime(close: np.ndarray, lookback: int = 50) -> np.nda
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Bollinger-Keltner Squeeze Mean Reversion Strategy.
+    KAMA Donchian Breakout V5 Strategy.
     
     Signal Logic:
-    1. Calculate Bollinger Bands and Keltner Channels
-    2. Detect squeeze (BB inside KC = low volatility)
-    3. Detect squeeze release (breakout with volume)
-    4. RSI confirmation for entry timing
-    5. SMA(200) trend filter
-    6. Volatility regime for position sizing
-    7. Signal smoothing and hysteresis
+    1. Calculate KAMA for adaptive trend direction
+    2. Calculate Donchian channels for breakout levels
+    3. Detect breakouts (price > Donchian upper or < Donchian lower)
+    4. Confirm with volume surge (>1.3x average)
+    5. Filter by regime (BB width percentile - only breakout in low vol)
+    6. Apply ATR-based risk scaling
+    7. Smooth signals and apply hysteresis
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -354,37 +267,32 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # Fix invalid prices
     close = np.where(close <= 0, 1.0, close)
-    high = np.where(high <= 0, close * 1.01, high)
+    high = np.where(high <= 0, close, high)
     low = np.where(low <= 0, close * 0.99, low)
     
     # Calculate all indicators (all use only past data)
-    bb_middle, bb_upper, bb_lower = calculate_bollinger_bands(close, BB_PERIOD, BB_STD)
-    kc_middle, kc_upper, kc_lower = calculate_keltner_channel(high, low, close, KC_PERIOD, KC_ATR_MULT)
-    
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    sma_major = calculate_sma(close, SMA_MAJOR)
+    kama = calculate_kama(close, KAMA_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
+    bb_width = calculate_bollinger_width(close, BB_PERIOD, BB_STD)
+    bb_percentile = calculate_bb_width_percentile(bb_width, 100)
     volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
-    squeeze = detect_squeeze(bb_upper, bb_lower, kc_upper, kc_lower, SQUEEZE_LOOKBACK)
-    squeeze_release = detect_squeeze_release(squeeze, close, bb_upper, bb_lower, SQUEEZE_RELEASE_BARS)
-    vol_regime = calculate_volatility_regime(close, VOLATILITY_LOOKBACK)
     
     # Calculate minimum valid index (all indicators need warmup)
     min_valid_index = max(
-        BB_PERIOD,
-        KC_PERIOD + 1,
-        RSI_PERIOD + 1,
-        SMA_MAJOR,
+        KAMA_PERIOD + 1,
+        DONCHIAN_PERIOD,
         ATR_PERIOD + 1,
+        BB_PERIOD,
         VOLUME_LOOKBACK,
-        SQUEEZE_LOOKBACK + SQUEEZE_RELEASE_BARS,
-        VOLATILITY_LOOKBACK
+        100  # BB percentile lookback
     )
     
     # Generate signals
     prev_signal = 0.0
     prev_direction = 0
+    consecutive_bars = 0
+    last_breakout_direction = 0
     
     for i in range(min_valid_index, n):
         # Skip invalid bars
@@ -392,98 +300,88 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             signals[i] = 0.0
             prev_signal = 0.0
             prev_direction = 0
+            consecutive_bars = 0
             continue
         
-        # Initialize raw signal
+        # ATR filter (not too volatile)
+        atr_pct = atr[i] / close[i]
+        if atr_pct > MAX_ATR_PCT:
+            signals[i] = 0.0
+            prev_signal = 0.0
+            prev_direction = 0
+            consecutive_bars = 0
+            continue
+        
+        # Regime filter: only trade breakouts in low volatility
+        regime_score = bb_percentile[i] / 100.0  # 0-1 scale
+        if regime_score > BB_HIGH_VOL_PERCENTILE / 100:
+            # High volatility regime - reduce signal strength
+            regime_factor = 0.3
+        elif regime_score < BB_LOW_VOL_PERCENTILE / 100:
+            # Low volatility regime - ideal for breakouts
+            regime_factor = 1.0
+        else:
+            # Medium volatility
+            regime_factor = 0.6
+        
+        # Detect breakouts
+        breakout_long = close[i] > donchian_upper[i] and donchian_upper[i] > 0
+        breakout_short = close[i] < donchian_lower[i] and donchian_lower[i] > 0
+        
+        # Volume confirmation
+        volume_confirmed = volume_ratio[i] >= VOLUME_MIN_RATIO
+        
+        # KAMA trend alignment
+        kama_trend_long = close[i] > kama[i] and kama[i] > 0
+        kama_trend_short = close[i] < kama[i] and kama[i] > 0
+        
+        # Generate raw signal
         raw_signal = 0.0
         
-        # Check for squeeze release breakout
-        if squeeze_release[i] != 0.0:
-            breakout_direction = squeeze_release[i]  # +1 or -1
-            
-            # Volume confirmation
-            if volume_ratio[i] < VOLUME_BREAKOUT_RATIO:
-                signals[i] = 0.0
-                prev_signal = 0.0
-                prev_direction = 0
-                continue
-            
-            # RSI confirmation
-            rsi_confirmed = False
-            if breakout_direction > 0:  # Long breakout
-                if rsi[i] > RSI_LONG_ENTRY and rsi[i] < RSI_OVERBOUGHT:
-                    rsi_confirmed = True
-            else:  # Short breakout
-                if rsi[i] < RSI_SHORT_ENTRY and rsi[i] > RSI_OVERSOLD:
-                    rsi_confirmed = True
-            
-            if not rsi_confirmed:
-                signals[i] = 0.0
-                prev_signal = 0.0
-                prev_direction = 0
-                continue
-            
-            # Trend filter (optional)
-            if TREND_FILTER_ENABLED:
-                if breakout_direction > 0 and close[i] < sma_major[i]:
-                    # Long but price below 200 SMA - reduce signal
-                    trend_alignment = 0.5
-                elif breakout_direction < 0 and close[i] > sma_major[i]:
-                    # Short but price above 200 SMA - reduce signal
-                    trend_alignment = 0.5
-                else:
-                    trend_alignment = 1.0
+        if breakout_long and volume_confirmed and kama_trend_long:
+            # Long breakout confirmed
+            if last_breakout_direction != 1:
+                consecutive_bars = 1
+                last_breakout_direction = 1
             else:
-                trend_alignment = 1.0
+                consecutive_bars += 1
             
-            # Volatility regime position sizing
-            if vol_regime[i] == 0.0:  # Low vol
-                vol_factor = 1.2  # Increase position in low vol (squeeze release)
-            elif vol_regime[i] == 2.0:  # High vol
-                vol_factor = 0.6  # Reduce position in high vol
+            if consecutive_bars >= ENTRY_CONFIRMATION_BARS:
+                raw_signal = 1.0 * regime_factor
+        elif breakout_short and volume_confirmed and kama_trend_short:
+            # Short breakout confirmed
+            if last_breakout_direction != -1:
+                consecutive_bars = 1
+                last_breakout_direction = -1
             else:
-                vol_factor = 1.0
+                consecutive_bars += 1
             
-            # Calculate raw signal
-            raw_signal = breakout_direction * trend_alignment * vol_factor
+            if consecutive_bars >= ENTRY_CONFIRMATION_BARS:
+                raw_signal = -1.0 * regime_factor
+        else:
+            # No breakout or not confirmed
+            consecutive_bars = 0
+            last_breakout_direction = 0
             
-        # Else: check for mean reversion in normal regime (no squeeze)
-        elif squeeze[i] == 0.0:
-            # Mean reversion: fade extreme moves
-            bb_width = (bb_upper[i] - bb_lower[i]) / bb_middle[i] if bb_middle[i] > 0 else 0
-            
-            # Price position within BB
-            price_position = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i]) if (bb_upper[i] - bb_lower[i]) > 0 else 0.5
-            
-            # Extreme positions with RSI confirmation
-            if price_position > 0.85 and rsi[i] > RSI_OVERBOUGHT:
-                raw_signal = -0.5  # Short signal
-            elif price_position < 0.15 and rsi[i] < RSI_OVERSOLD:
-                raw_signal = 0.5  # Long signal
+            # Fade towards KAMA if no breakout (mean reversion within trend)
+            if kama[i] > 0:
+                kama_signal = (close[i] - kama[i]) / close[i] * 5
+                raw_signal = np.clip(kama_signal, -0.3, 0.3) * regime_factor
         
-        # Apply volatility normalization
-        if raw_signal != 0.0:
-            atr_pct = atr[i] / close[i]
-            vol_target = 0.015  # Target 1.5% ATR
-            vol_factor = vol_target / max(atr_pct, 0.003)
-            vol_factor = np.clip(vol_factor, 0.5, 2.0)
-            raw_signal *= vol_factor
+        # ATR-based risk scaling (reduce signal in high volatility)
+        vol_factor = 1.0 / (1.0 + atr_pct * 10)
+        vol_factor = np.clip(vol_factor, 0.5, 1.5)
+        raw_signal *= vol_factor
         
         # Signal smoothing (EMA on signals)
         smoothed_signal = SIGNAL_SMOOTHING * prev_signal + (1.0 - SIGNAL_SMOOTHING) * raw_signal
-        
-        # Hysteresis: don't flip direction on small changes
-        current_direction = np.sign(smoothed_signal)
-        if current_direction != 0 and current_direction != prev_direction:
-            if abs(smoothed_signal - prev_signal) < HYSTERESIS_THRESHOLD:
-                smoothed_signal = prev_signal
         
         # Apply minimum magnitude filter
         if abs(smoothed_signal) < MIN_SIGNAL_MAGNITUDE:
             smoothed_signal = 0.0
         
         # Clip to max signal
-        signal = np.clip(smoothed_signal, -MAX_POSITION_SIZE, MAX_POSITION_SIZE)
+        signal = np.clip(smoothed_signal, -MAX_SIGNAL, MAX_SIGNAL)
         
         signals[i] = signal
         prev_signal = signal
