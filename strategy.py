@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Multi-Timeframe Trend with Volatility Filter
+strategy.py - Trend Momentum V2 with Adaptive Volatility Scaling
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,18 +11,19 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Simplified version of #008 that fixed the crash while keeping core concepts:
-    - Multi-timeframe EMA stack for trend direction
-    - Bollinger Band width for volatility regime detection
-    - RSI filter for momentum confirmation
-    - Cleaner array operations to avoid dimension errors
-    - Reduced parameter count for better robustness
+    Building on #007 success (Sharpe=0.291, Return=+520.7%), improving:
+    - Cleaner trend alignment scoring (weighted EMA stack)
+    - Adaptive volatility scaling (inverse ATR weighting)
+    - Better RSI momentum integration (zone-based scoring)
+    - Volume confirmation with percentile ranking
+    - Signal smoothing to reduce whipsaws
     
-    Key fixes from #008:
-    - Removed complex loops that caused array dimension errors
-    - Simplified volatility regime calculation
-    - Cleaner pandas-based indicator calculations
-    - Better NaN handling throughout
+    Key improvements over #007:
+    - Weighted trend score instead of binary alignment
+    - RSI zone scoring (0-1 scale) instead of threshold filtering
+    - Volume percentile ranking for better normalization
+    - Signal smoothing with exponential decay
+    - More conservative leverage (2.0 vs 2.5)
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -37,9 +38,9 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "multi_tf_trend_vol_filter"
+name = "trend_momentum_v2"
 timeframe = "1h"
-leverage = 2.0  # Conservative leverage
+leverage = 2.0  # Conservative leverage for better risk-adjusted returns
 
 # EMA periods for trend detection
 EMA_FAST = 9
@@ -47,32 +48,222 @@ EMA_MEDIUM = 21
 EMA_SLOW = 50
 EMA_MAJOR = 200
 
-# Bollinger Band configuration
-BB_PERIOD = 20
-BB_STD_DEV = 2.0
-BB_WIDTH_LOW = 0.02   # Squeeze threshold
-BB_WIDTH_HIGH = 0.08  # Expansion threshold
-
-# RSI configuration
+# RSI configuration with zone scoring
 RSI_PERIOD = 14
-RSI_LONG_MIN = 40
-RSI_LONG_MAX = 70
-RSI_SHORT_MIN = 30
-RSI_SHORT_MAX = 60
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+RSI_NEUTRAL_LOW = 40
+RSI_NEUTRAL_HIGH = 60
 
 # Volume configuration
 VOLUME_LOOKBACK = 20
-VOLUME_THRESHOLD = 1.2
+VOLUME_PERCENTILE_THRESHOLD = 0.6  # Volume must be in top 40%
+
+# Trend scoring weights
+WEIGHT_FAST = 0.4
+WEIGHT_MEDIUM = 0.35
+WEIGHT_SLOW = 0.25
+
+# Volatility configuration
+ATR_PERIOD = 14
+VOLATILITY_TARGET = 0.010  # Target hourly volatility
+VOLATILITY_MIN = 0.002
+VOLATILITY_MAX = 0.035
 
 # Signal configuration
-MIN_SIGNAL = 0.15
+MIN_SIGNAL = 0.10
 MAX_SIGNAL = 0.80
-SIGNAL_SMOOTHING = 3
+SMOOTHING_FACTOR = 0.7  # Exponential smoothing factor (0-1)
 
-# Volatility filter
-ATR_PERIOD = 14
-ATR_MIN_PCT = 0.003
-ATR_MAX_PCT = 0.035
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
+    """
+    Calculate Exponential Moving Average using only past data.
+    
+    Args:
+        close: Array of close prices
+        period: EMA period
+    
+    Returns:
+        Array of EMA values
+    """
+    n = len(close)
+    ema = np.zeros(n, dtype=np.float64)
+    
+    if n < period:
+        return ema
+    
+    close_series = pd.Series(close)
+    ema_values = close_series.ewm(span=period, adjust=False, min_periods=period).mean().values
+    ema = np.nan_to_num(ema_values, nan=0.0)
+    
+    return ema
+
+
+def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+    """
+    Calculate Relative Strength Index using only past data.
+    
+    Args:
+        close: Array of close prices
+        period: RSI period
+    
+    Returns:
+        Array of RSI values (0-100)
+    """
+    n = len(close)
+    rsi = np.full(n, 50.0, dtype=np.float64)
+    
+    if n < period + 1:
+        return rsi
+    
+    close_series = pd.Series(close)
+    delta = close_series.diff()
+    
+    gains = delta.where(delta > 0, 0.0)
+    losses = (-delta).where(delta < 0, 0.0)
+    
+    avg_gains = gains.ewm(com=period - 1, min_periods=period).mean()
+    avg_losses = losses.ewm(com=period - 1, min_periods=period).mean()
+    
+    rs = avg_gains / avg_losses.replace(0, np.inf)
+    rsi_series = 100.0 - (100.0 / (1.0 + rs))
+    
+    rsi = np.nan_to_num(rsi_series.values, nan=50.0)
+    
+    return rsi
+
+
+def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    """
+    Calculate Average True Range using only past data.
+    
+    Args:
+        high: Array of high prices
+        low: Array of low prices
+        close: Array of close prices
+        period: ATR period
+    
+    Returns:
+        Array of ATR values
+    """
+    n = len(close)
+    atr = np.zeros(n, dtype=np.float64)
+    
+    if n < period + 1:
+        return atr
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
+    
+    tr_series = pd.Series(tr)
+    atr_series = tr_series.ewm(span=period, adjust=False, min_periods=period).mean()
+    
+    atr = np.nan_to_num(atr_series.values, nan=0.0)
+    
+    return atr
+
+
+def calculate_volume_percentile(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
+    """
+    Calculate volume percentile rank using rolling window.
+    Only uses past volume data (no look-ahead).
+    
+    Args:
+        volume: Array of volume values
+        lookback: Rolling window for percentile calculation
+    
+    Returns:
+        Array of volume percentile ranks (0-1)
+    """
+    n = len(volume)
+    volume_pct = np.zeros(n, dtype=np.float64)
+    
+    if n < lookback:
+        return volume_pct
+    
+    volume_series = pd.Series(volume)
+    
+    for i in range(lookback, n):
+        window = volume_series.iloc[i-lookback:i]
+        rank = (window < volume[i]).sum() / lookback
+        volume_pct[i] = rank
+    
+    return volume_pct
+
+
+def calculate_trend_score(close: float, ema_fast: float, ema_medium: float, 
+                          ema_slow: float, ema_major: float) -> float:
+    """
+    Calculate weighted trend score based on EMA stack alignment.
+    
+    Args:
+        close: Current close price
+        ema_fast: Fast EMA value
+        ema_medium: Medium EMA value
+        ema_slow: Slow EMA value
+        ema_major: Major EMA value
+    
+    Returns:
+        Trend score in range [-1, 1]
+    """
+    if close <= 0 or ema_major <= 0:
+        return 0.0
+    
+    # Calculate individual trend components (normalized by price)
+    fast_score = (ema_fast - ema_medium) / close
+    medium_score = (ema_medium - ema_slow) / close
+    slow_score = (ema_slow - ema_major) / close
+    major_score = (close - ema_major) / close
+    
+    # Weight and combine
+    trend_component = (
+        WEIGHT_FAST * fast_score +
+        WEIGHT_MEDIUM * medium_score +
+        WEIGHT_SLOW * slow_score
+    )
+    
+    # Major trend filter (amplifies signal in direction of major trend)
+    major_direction = np.sign(major_score)
+    trend_score = trend_component * (1.0 + 0.5 * major_direction)
+    
+    # Normalize to [-1, 1] range
+    trend_score = np.clip(trend_score / 0.01, -1.0, 1.0)
+    
+    return trend_score
+
+
+def calculate_rsi_score(rsi: float) -> float:
+    """
+    Calculate RSI momentum score (0-1 scale).
+    
+    Args:
+        rsi: Current RSI value
+    
+    Returns:
+        RSI score in range [0, 1]
+    """
+    if rsi <= RSI_OVERSOLD:
+        return 0.0  # Too oversold, potential reversal
+    elif rsi < RSI_NEUTRAL_LOW:
+        return 0.3  # Recovering from oversold
+    elif rsi < RSI_NEUTRAL_HIGH:
+        return 0.6  # Neutral zone
+    elif rsi < RSI_OVERBOUGHT:
+        return 0.9  # Strong momentum
+    else:
+        return 0.5  # Overbought, reduce confidence
 
 
 # =============================================================================
@@ -81,19 +272,18 @@ ATR_MAX_PCT = 0.035
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Multi-Timeframe Trend Strategy with Volatility Filter.
+    Trend Momentum V2 Strategy with Adaptive Volatility Scaling.
     
     Signal Logic:
-    1. Major trend: Price relative to 200 EMA
-    2. Trend alignment: EMA stack (9/21/50/200)
-    3. Volatility filter: ATR percentage in reasonable range
-    4. BB width: Avoid extreme compression or expansion
-    5. RSI filter: Momentum confirmation
-    6. Volume: Basic confirmation
+    1. Weighted trend score from EMA stack alignment
+    2. RSI zone scoring for momentum quality
+    3. Volume percentile ranking for confirmation
+    4. Volatility-based position sizing
+    5. Signal smoothing to reduce whipsaws
     
     Entry Conditions:
-    - LONG: Price > EMA200 + EMA stack bullish + RSI ok + BB ok
-    - SHORT: Price < EMA200 + EMA stack bearish + RSI ok + BB ok
+    - LONG: Positive trend score + RSI > 40 + volume confirmation
+    - SHORT: Negative trend score + RSI < 60 + volume confirmation
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -106,10 +296,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # Extract required columns with safety checks
     try:
-        close = prices["close"].astype(np.float64).values
-        high = prices["high"].astype(np.float64).values
-        low = prices["low"].astype(np.float64).values
-        volume = prices["volume"].astype(np.float64).values
+        close = prices["close"].values.astype(np.float64)
+        high = prices["high"].values.astype(np.float64)
+        low = prices["low"].values.astype(np.float64)
+        volume = prices["volume"].values.astype(np.float64)
     except (KeyError, TypeError, ValueError):
         return signals
     
@@ -119,174 +309,100 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = np.nan_to_num(low, nan=0.0)
     volume = np.nan_to_num(volume, nan=0.0)
     
-    # Ensure valid prices (avoid division by zero)
+    # Ensure valid prices
     close = np.where(close <= 0, 1.0, close)
     high = np.where(high <= 0, close, high)
     low = np.where(low <= 0, close * 0.99, low)
     
-    # Create pandas series for easier calculations
-    close_series = pd.Series(close)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    volume_series = pd.Series(volume)
+    # Calculate all indicators
+    ema_fast = calculate_ema(close, EMA_FAST)
+    ema_medium = calculate_ema(close, EMA_MEDIUM)
+    ema_slow = calculate_ema(close, EMA_SLOW)
+    ema_major = calculate_ema(close, EMA_MAJOR)
     
-    # Calculate EMAs
-    ema_fast = close_series.ewm(span=EMA_FAST, adjust=False, min_periods=EMA_FAST).mean().values
-    ema_medium = close_series.ewm(span=EMA_MEDIUM, adjust=False, min_periods=EMA_MEDIUM).mean().values
-    ema_slow = close_series.ewm(span=EMA_SLOW, adjust=False, min_periods=EMA_SLOW).mean().values
-    ema_major = close_series.ewm(span=EMA_MAJOR, adjust=False, min_periods=EMA_MAJOR).mean().values
-    
-    # Calculate RSI
-    delta = close_series.diff()
-    gains = delta.where(delta > 0, 0.0)
-    losses = (-delta).where(delta < 0, 0.0)
-    avg_gains = gains.ewm(com=RSI_PERIOD - 1, min_periods=RSI_PERIOD).mean()
-    avg_losses = losses.ewm(com=RSI_PERIOD - 1, min_periods=RSI_PERIOD).mean()
-    rs = avg_gains / avg_losses.replace(0, np.inf)
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    rsi = rsi.fillna(50.0).values
-    
-    # Calculate Bollinger Bands
-    bb_middle = close_series.rolling(window=BB_PERIOD, min_periods=BB_PERIOD).mean()
-    bb_std = close_series.rolling(window=BB_PERIOD, min_periods=BB_PERIOD).std()
-    bb_upper = bb_middle + BB_STD_DEV * bb_std
-    bb_lower = bb_middle - BB_STD_DEV * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    bb_width = bb_width.fillna(0.0).values
-    
-    # Calculate ATR
-    tr1 = high_series - low_series
-    tr2 = (high_series - close_series.shift(1)).abs()
-    tr3 = (low_series - close_series.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
-    atr = atr.fillna(0.0).values
-    
-    # Calculate volume ratio
-    volume_avg = volume_series.rolling(window=VOLUME_LOOKBACK, min_periods=VOLUME_LOOKBACK).mean()
-    volume_ratio = volume / np.where(volume_avg > 0, volume_avg, 1.0)
-    volume_ratio = np.nan_to_num(volume_ratio, nan=1.0)
-    
-    # Calculate ATR percentage
-    atr_pct = atr / np.where(close > 0, close, 1.0)
+    rsi = calculate_rsi(close, RSI_PERIOD)
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    volume_pct = calculate_volume_percentile(volume, VOLUME_LOOKBACK)
     
     # Determine minimum valid index
     min_valid_index = max(
         EMA_MAJOR,
-        EMA_SLOW + 5,
         RSI_PERIOD + 1,
         ATR_PERIOD + 1,
-        VOLUME_LOOKBACK,
-        BB_PERIOD
+        VOLUME_LOOKBACK
     )
+    
+    # Track previous signal for smoothing
+    prev_signal = 0.0
     
     # Generate signals
     for i in range(min_valid_index, n):
         # Skip invalid data
         if close[i] <= 0 or atr[i] <= 0:
             signals[i] = 0.0
+            prev_signal = 0.0
             continue
         
-        # Volatility filter (avoid extreme ATR)
-        if atr_pct[i] < ATR_MIN_PCT or atr_pct[i] > ATR_MAX_PCT:
+        # Check volatility regime (avoid extreme volatility)
+        atr_pct = atr[i] / close[i]
+        if atr_pct < VOLATILITY_MIN or atr_pct > VOLATILITY_MAX:
             signals[i] = 0.0
+            prev_signal = 0.0
             continue
         
-        # Major trend filter
-        price_vs_major = (close[i] - ema_major[i]) / close[i]
-        major_bullish = price_vs_major > 0.001
-        major_bearish = price_vs_major < -0.001
-        
-        # EMA stack alignment
-        ema_bullish = (
-            ema_fast[i] > ema_medium[i] and
-            ema_medium[i] > ema_slow[i] and
-            ema_slow[i] > ema_major[i]
-        )
-        ema_bearish = (
-            ema_fast[i] < ema_medium[i] and
-            ema_medium[i] < ema_slow[i] and
-            ema_slow[i] < ema_major[i]
+        # Calculate weighted trend score
+        trend_score = calculate_trend_score(
+            close[i], ema_fast[i], ema_medium[i], 
+            ema_slow[i], ema_major[i]
         )
         
-        # Trend strength
-        trend_strength = (
-            abs(ema_fast[i] - ema_medium[i]) / close[i] +
-            abs(ema_medium[i] - ema_slow[i]) / close[i]
-        ) / 2.0
-        
-        if trend_strength < 0.001:
+        # Skip weak trends
+        if abs(trend_score) < 0.15:
             signals[i] = 0.0
+            prev_signal = 0.0
             continue
         
-        # Bollinger Band filter
-        bb_ok = BB_WIDTH_LOW < bb_width[i] < BB_WIDTH_HIGH
+        # Calculate RSI momentum score
+        rsi_score = calculate_rsi_score(rsi[i])
         
-        # Volume filter
-        volume_ok = volume_ratio[i] >= 0.8
+        # Volume confirmation
+        volume_confirmed = volume_pct[i] >= VOLUME_PERCENTILE_THRESHOLD
         
-        # Calculate signal
-        raw_signal = 0.0
+        # Determine signal direction and base magnitude
+        if trend_score > 0:
+            # LONG bias
+            if rsi_score < 0.4:
+                base_signal = 0.0  # RSI too weak for long
+            else:
+                base_signal = trend_score * rsi_score
+        else:
+            # SHORT bias
+            if rsi_score > 0.7:
+                base_signal = 0.0  # RSI too strong for short
+            else:
+                base_signal = trend_score * (1.0 - rsi_score * 0.5)
         
-        # LONG signal
-        if major_bullish and ema_bullish and bb_ok and volume_ok:
-            # RSI filter for long
-            if RSI_LONG_MIN <= rsi[i] <= RSI_LONG_MAX:
-                base_confidence = 0.5
-                
-                # Trend strength factor
-                trend_factor = min(trend_strength / 0.005, 1.0)
-                base_confidence += trend_factor * 0.3
-                
-                # RSI quality
-                if 50 <= rsi[i] <= 65:
-                    base_confidence *= 1.1
-                
-                # Volume boost
-                if volume_ratio[i] >= VOLUME_THRESHOLD:
-                    base_confidence *= 1.15
-                
-                raw_signal = base_confidence
+        # Apply volume confirmation boost
+        if volume_confirmed:
+            base_signal *= 1.15
         
-        # SHORT signal
-        elif major_bearish and ema_bearish and bb_ok and volume_ok:
-            # RSI filter for short
-            if RSI_SHORT_MIN <= rsi[i] <= RSI_SHORT_MAX:
-                base_confidence = 0.5
-                
-                trend_factor = min(trend_strength / 0.005, 1.0)
-                base_confidence += trend_factor * 0.3
-                
-                # RSI quality
-                if 35 <= rsi[i] <= 50:
-                    base_confidence *= 1.1
-                
-                # Volume boost
-                if volume_ratio[i] >= VOLUME_THRESHOLD:
-                    base_confidence *= 1.15
-                
-                raw_signal = -base_confidence
+        # Volatility-based position sizing (inverse relationship)
+        vol_factor = VOLATILITY_TARGET / max(atr_pct, 0.001)
+        vol_factor = np.clip(vol_factor, 0.5, 2.0)
         
-        # Apply volatility adjustment
-        if raw_signal != 0.0:
-            vol_adjust = min(1.5, 0.015 / max(atr_pct[i], 0.001))
-            signal = raw_signal * vol_adjust
-            
-            # Apply thresholds
-            if abs(signal) >= MIN_SIGNAL:
-                signals[i] = np.clip(signal, -MAX_SIGNAL, MAX_SIGNAL)
-    
-    # Smooth signals
-    if n >= SIGNAL_SMOOTHING:
-        signal_series = pd.Series(signals)
-        signals = signal_series.ewm(
-            span=SIGNAL_SMOOTHING, 
-            adjust=False, 
-            min_periods=SIGNAL_SMOOTHING
-        ).mean().values
-        signals = np.nan_to_num(signals, nan=0.0)
-    
-    # Final clip
-    signals = np.clip(signals, -1.0, 1.0)
+        raw_signal = base_signal * vol_factor
+        
+        # Apply exponential smoothing to reduce whipsaws
+        smoothed_signal = SMOOTHING_FACTOR * prev_signal + (1.0 - SMOOTHING_FACTOR) * raw_signal
+        prev_signal = smoothed_signal
+        
+        # Apply thresholds
+        if abs(smoothed_signal) < MIN_SIGNAL:
+            smoothed_signal = 0.0
+        
+        # Clip to valid range
+        signal = np.clip(smoothed_signal, -MAX_SIGNAL, MAX_SIGNAL)
+        
+        signals[i] = signal
     
     return signals
