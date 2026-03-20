@@ -1,32 +1,51 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #007 - Bollinger-Keltner Squeeze Breakout (1h)
+EXPERIMENT #008 - DEMA Crossover 4h with Volatility Filter
 ==========================================================
-Hypothesis: Volatility contraction (squeeze) followed by expansion creates high-probability
-breakout opportunities. BB inside KC indicates low volatility regime. When price breaks
-out of squeeze with trend filter (SMA200), captures explosive moves while avoiding
-counter-trend traps that killed RSI_SMA200 and KAMA strategies.
-
-Why this should beat Supertrend_4h (Sharpe=0.197):
-- Captures volatility explosions (crypto's main alpha source)
-- SMA200 filter prevents counter-trend trades (fixes RSI failure)
-- 1h timeframe = more opportunities than 4h, cleaner than 15m
-- Squeeze detection reduces whipsaws during choppy periods
-- Conservative sizing (0.30) controls drawdown better than failed strategies
+Hypothesis: DEMA (Double EMA) reduces lag compared to standard EMA, providing 
+earlier trend entries while maintaining smoothness. Combined with 4h timeframe 
+(proven in exp#001) and ATR volatility filter to avoid choppy markets.
 
 Key improvements over baseline:
-- Volatility regime detection (squeeze vs expansion)
-- Trend filter avoids 2022-style crash losses
-- Discrete signal levels (0, ±0.30) minimize churn costs
+- DEMA has less lag than EMA → earlier trend capture
+- ATR volatility filter → avoid trading in low-vol chop (reduces whipsaws)
+- Same conservative position sizing (0.35) to control DD
+- Discrete signal levels to minimize churning costs
 - Proper min_periods on all rolling calculations
+
+Why this might beat Supertrend 4h (Sharpe=0.197):
+- DEMA responds faster to trend changes than Supertrend's ATR-based stops
+- Volatility filter adds regime detection (don't trade when ATR too low)
+- 4h timeframe already proven to work well for crypto trends
 """
 
 import numpy as np
 import pandas as pd
 
-name = "bb_kc_squeeze_1h_v1"
-timeframe = "1h"
+name = "dema_4h_v1"
+timeframe = "4h"
 leverage = 1.0
+
+
+def calculate_dema(prices: np.ndarray, period: int) -> np.ndarray:
+    """Calculate Double Exponential Moving Average (DEMA)"""
+    ema1 = pd.Series(prices).ewm(span=period, adjust=False, min_periods=period).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, adjust=False, min_periods=period).mean().values
+    dema = 2 * ema1 - ema2
+    return dema
+
+
+def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
+    """Calculate Average True Range with proper state tracking"""
+    n = len(close)
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], 
+                    abs(high[i] - close[i-1]), 
+                    abs(low[i] - close[i-1]))
+    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    return atr
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -35,101 +54,47 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # === BOLLINGER BANDS (20, 2.0) ===
-    bb_period = 20
-    bb_mult = 2.0
+    # DEMA parameters (faster than EMA 21/55 baseline)
+    dema_fast_period = 8
+    dema_slow_period = 21
     
-    bb_sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = bb_sma + bb_mult * bb_std
-    bb_lower = bb_sma - bb_mult * bb_std
+    # Calculate DEMA lines
+    dema_fast = calculate_dema(close, dema_fast_period)
+    dema_slow = calculate_dema(close, dema_slow_period)
     
-    # === KELTNER CHANNELS (20, 1.5 ATR) ===
-    kc_period = 20
-    kc_mult = 1.5
+    # ATR for volatility filter
+    atr_period = 14
+    atr = calculate_atr(high, low, close, atr_period)
     
-    # True Range
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
+    # ATR percentile for volatility regime detection
+    # Only trade when ATR is above its 20-period median (avoid low-vol chop)
+    atr_median = pd.Series(atr).rolling(window=20, min_periods=20).median().values
     
-    kc_atr = pd.Series(tr).rolling(window=kc_period, min_periods=kc_period).mean().values
-    kc_sma = pd.Series(close).rolling(window=kc_period, min_periods=kc_period).mean().values
-    kc_upper = kc_sma + kc_mult * kc_atr
-    kc_lower = kc_sma - kc_mult * kc_atr
-    
-    # === SMA200 TREND FILTER ===
-    sma200_period = 200
-    sma200 = pd.Series(close).rolling(window=sma200_period, min_periods=sma200_period).mean().values
-    
-    # === SQUEEZE DETECTION ===
-    # Squeeze = BB inside KC (volatility contraction)
-    squeeze = np.zeros(n, dtype=bool)
-    for i in range(max(bb_period, kc_period, sma200_period), n):
-        if np.isnan(bb_upper[i]) or np.isnan(kc_upper[i]):
-            continue
-        # BB upper < KC upper AND BB lower > KC lower
-        squeeze[i] = (bb_upper[i] < kc_upper[i]) and (bb_lower[i] > kc_lower[i])
-    
-    # === SIGNAL GENERATION ===
+    # Generate signals with discrete position sizing
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size - conservative for drawdown control
+    SIZE = 0.35  # 35% position size - critical for drawdown control
     
-    # Track squeeze state for breakout detection
-    in_squeeze = False
-    squeeze_start_idx = -1
+    # Minimum period before we can generate signals
+    min_period = max(dema_slow_period, atr_period, 20)
     
-    for i in range(max(bb_period, kc_period, sma200_period), n):
-        if np.isnan(bb_upper[i]) or np.isnan(sma200[i]):
+    for i in range(min_period, n):
+        # Check if we have valid data
+        if np.isnan(dema_fast[i]) or np.isnan(dema_slow[i]) or np.isnan(atr[i]) or np.isnan(atr_median[i]):
+            signals[i] = 0.0
             continue
         
-        # Detect squeeze start
-        if squeeze[i] and not in_squeeze:
-            in_squeeze = True
-            squeeze_start_idx = i
+        # Volatility filter: only trade when ATR is above recent median
+        # This avoids choppy low-volatility periods where crossovers whipsaw
+        vol_filter = atr[i] >= atr_median[i]
         
-        # Detect squeeze end (breakout)
-        if in_squeeze and not squeeze[i]:
-            in_squeeze = False
-            
-            # Check breakout direction
-            breakout_long = close[i] > bb_upper[i]
-            breakout_short = close[i] < bb_lower[i]
-            
-            # Apply trend filter
-            above_sma200 = close[i] > sma200[i]
-            below_sma200 = close[i] < sma200[i]
-            
-            # Long signal: breakout up + above SMA200
-            if breakout_long and above_sma200:
-                signals[i] = SIZE
-            # Short signal: breakout down + below SMA200
-            elif breakout_short and below_sma200:
-                signals[i] = -SIZE
-            # No signal if counter-trend breakout
-            else:
-                signals[i] = 0.0
+        if not vol_filter:
+            signals[i] = 0.0
+            continue
         
-        # Hold position during squeeze if already positioned
-        elif in_squeeze:
-            signals[i] = signals[i-1] if i > 0 else 0.0
-        # Outside squeeze - maintain trend bias
-        else:
-            if close[i] > sma200[i]:
-                signals[i] = SIZE * 0.5  # Reduced size outside squeeze
-            elif close[i] < sma200[i]:
-                signals[i] = -SIZE * 0.5
-            else:
-                signals[i] = 0.0
-    
-    # Apply discrete signal levels to reduce churn
-    for i in range(n):
-        if signals[i] > 0.15:
+        # DEMA crossover logic
+        if dema_fast[i] > dema_slow[i]:
             signals[i] = SIZE
-        elif signals[i] < -0.15:
+        elif dema_fast[i] < dema_slow[i]:
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
