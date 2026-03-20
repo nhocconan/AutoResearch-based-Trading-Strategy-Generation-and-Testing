@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-strategy.py - Trend Momentum with RSI Filter and Volatility Scaling
-====================================================================
+strategy.py - Mean Reversion with Trend Filter and RSI Divergence
+=================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
 This file defines the trading strategy. It must expose:
@@ -11,12 +11,17 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Trend-following with momentum confirmation and mean-reversion filter.
-    - Use 50/200 EMA for long-term trend direction
-    - RSI(14) filters entries to avoid overbought/oversold extremes
-    - Volume confirmation for breakout validity
+    Mean-reversion strategy with trend filter - opposite of pure trend-following.
+    - Use 200 EMA for long-term trend bias (not entry trigger)
+    - RSI(14) for mean-reversion entries (oversold in uptrend = long)
+    - RSI divergence detection for stronger signals
+    - Volume confirmation for reversal validity
     - ATR-based volatility scaling for position sizing
     - Conservative leverage to account for crypto volatility
+
+    Rationale: Crypto markets often mean-revert on 1h timeframe. Pure trend-
+    following failed in experiment #001. This strategy buys dips in uptrends
+    and sells rallies in downtrends.
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -31,22 +36,24 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "trend_momentum_rsi_filter"
+name = "mean_reversion_rsi_trend_filter"
 timeframe = "1h"
-leverage = 2.0  # Conservative leverage for crypto volatility
+leverage = 2.5  # Slightly higher than previous due to mean-reversion nature
 
 # Strategy parameters
-EMA_TREND_FAST = 50           # Fast EMA for trend direction
-EMA_TREND_SLOW = 200          # Slow EMA for long-term trend
+EMA_TREND = 200               # Long-term trend filter (not entry trigger)
 RSI_PERIOD = 14               # RSI calculation period
-RSI_OVERBOUGHT = 70           # RSI overbought threshold
-RSI_OVERSOLD = 30             # RSI oversold threshold
+RSI_OVERBOUGHT = 65           # RSI overbought threshold (lower than typical)
+RSI_OVERSOLD = 35             # RSI oversold threshold (higher than typical)
+RSI_EXTREME_OVERBOUGHT = 75   # Extreme overbought for stronger signals
+RSI_EXTREME_OVERSOLD = 25     # Extreme oversold for stronger signals
 VOLUME_LOOKBACK = 20          # Lookback for volume average
-VOLUME_THRESHOLD = 1.3        # Volume spike multiplier
+VOLUME_THRESHOLD = 1.2        # Volume spike multiplier
 ATR_PERIOD = 14               # ATR calculation period
-VOLATILITY_TARGET = 0.02      # Target volatility for position sizing
-MIN_SIGNAL = 0.2              # Minimum signal magnitude to trade
-MAX_SIGNAL = 0.8              # Maximum signal magnitude (leave room for scaling)
+VOLATILITY_TARGET = 0.015     # Target volatility for position sizing
+MIN_SIGNAL = 0.15             # Minimum signal magnitude to trade
+MAX_SIGNAL = 0.85             # Maximum signal magnitude
+DIVERGENCE_LOOKBACK = 5       # Lookback for RSI divergence detection
 
 
 # =============================================================================
@@ -207,29 +214,91 @@ def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray
     return volume_ratio
 
 
-def calculate_price_momentum(close: np.ndarray, period: int = 10) -> np.ndarray:
+def detect_rsi_divergence(close: np.ndarray, rsi: np.ndarray, lookback: int = 5) -> np.ndarray:
     """
-    Calculate price momentum as percentage change over period.
+    Detect RSI divergence using only past data.
+    
+    Bullish divergence: Price makes lower low, RSI makes higher low
+    Bearish divergence: Price makes higher high, RSI makes lower high
+    
+    Args:
+        close: Array of close prices
+        rsi: Array of RSI values
+        lookback: Lookback period for divergence detection
+    
+    Returns:
+        Array of divergence signals: 1=bullish, -1=bearish, 0=none
+    """
+    n = len(close)
+    divergence = np.zeros(n, dtype=np.float64)
+    
+    if n < lookback * 2:
+        return divergence
+    
+    for i in range(lookback * 2, n):
+        # Find local extrema in lookback window
+        window_close = close[i-lookback:i+1]
+        window_rsi = rsi[i-lookback:i+1]
+        
+        if len(window_close) < 3 or len(window_rsi) < 3:
+            continue
+        
+        # Check for bullish divergence (price lower low, RSI higher low)
+        price_min_idx = np.argmin(window_close)
+        rsi_min_idx = np.argmin(window_rsi)
+        
+        # Check recent vs earlier in window
+        if price_min_idx > lookback // 2:
+            earlier_price_min = np.min(window_close[:lookback//2+1])
+            earlier_rsi_min = np.min(window_rsi[:lookback//2+1])
+            
+            if window_close[price_min_idx] < earlier_price_min and window_rsi[price_min_idx] > earlier_rsi_min:
+                divergence[i] = 1.0
+                continue
+        
+        # Check for bearish divergence (price higher high, RSI lower high)
+        price_max_idx = np.argmax(window_close)
+        rsi_max_idx = np.argmax(window_rsi)
+        
+        if price_max_idx > lookback // 2:
+            earlier_price_max = np.max(window_close[:lookback//2+1])
+            earlier_rsi_max = np.max(window_rsi[:lookback//2+1])
+            
+            if window_close[price_max_idx] > earlier_price_max and window_rsi[price_max_idx] < earlier_rsi_max:
+                divergence[i] = -1.0
+    
+    return divergence
+
+
+def calculate_price_position(close: np.ndarray, lookback: int = 20) -> np.ndarray:
+    """
+    Calculate where price sits within recent range (0=low, 1=high).
     Only uses past data.
     
     Args:
         close: Array of close prices
-        period: Momentum lookback period
+        lookback: Lookback period for range calculation
     
     Returns:
-        Array of momentum values (percentage)
+        Array of position values (0-1)
     """
     n = len(close)
-    momentum = np.zeros(n, dtype=np.float64)
+    position = np.zeros(n, dtype=np.float64)
     
-    if n < period:
-        return momentum
+    if n < lookback:
+        return position
     
-    for i in range(period, n):
-        if close[i-period] > 0:
-            momentum[i] = (close[i] - close[i-period]) / close[i-period]
+    for i in range(lookback, n):
+        window = close[i-lookback:i+1]
+        high = np.max(window)
+        low = np.min(window)
+        
+        if high > low:
+            position[i] = (close[i] - low) / (high - low)
+        else:
+            position[i] = 0.5
     
-    return momentum
+    return position
 
 
 # =============================================================================
@@ -238,18 +307,19 @@ def calculate_price_momentum(close: np.ndarray, period: int = 10) -> np.ndarray:
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Trend Momentum Strategy with RSI Filter and Volatility Scaling.
+    Mean Reversion Strategy with Trend Filter and RSI Divergence.
     
     Signal Logic:
-    1. Calculate 50/200 EMA for long-term trend direction
-    2. Calculate RSI(14) to filter overbought/oversold conditions
-    3. Calculate ATR for volatility-based position sizing
-    4. Calculate volume ratio for confirmation
-    5. Calculate price momentum for entry timing
+    1. Calculate 200 EMA for long-term trend bias
+    2. Calculate RSI(14) for mean-reversion entries
+    3. Detect RSI divergence for stronger signals
+    4. Calculate ATR for volatility-based position sizing
+    5. Calculate volume ratio for confirmation
+    6. Calculate price position in recent range
     
     Entry Conditions:
-    - LONG: Fast EMA > Slow EMA AND RSI < 70 AND volume confirmed AND momentum positive
-    - SHORT: Fast EMA < Slow EMA AND RSI > 30 AND volume confirmed AND momentum negative
+    - LONG: Price > 200 EMA (uptrend) AND RSI < 35 (oversold) OR bullish divergence
+    - SHORT: Price < 200 EMA (downtrend) AND RSI > 65 (overbought) OR bearish divergence
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -281,11 +351,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     high = np.where(high <= 0, close, high)
     low = np.where(low <= 0, close * 0.99, low)
     
-    # Calculate EMAs for trend direction
-    ema_fast = calculate_ema(close, EMA_TREND_FAST)
-    ema_slow = calculate_ema(close, EMA_TREND_SLOW)
+    # Calculate EMA for trend bias
+    ema_trend = calculate_ema(close, EMA_TREND)
     
-    # Calculate RSI for entry filtering
+    # Calculate RSI for mean-reversion signals
     rsi = calculate_rsi(close, RSI_PERIOD)
     
     # Calculate ATR for volatility adjustment
@@ -294,20 +363,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Calculate volume ratio
     volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
     
-    # Calculate price momentum
-    momentum = calculate_price_momentum(close, period=10)
+    # Detect RSI divergence
+    divergence = detect_rsi_divergence(close, rsi, DIVERGENCE_LOOKBACK)
     
-    # Calculate trend strength (EMA spread normalized by price)
-    ema_spread = (ema_fast - ema_slow) / close
-    ema_spread = np.nan_to_num(ema_spread, nan=0.0)
+    # Calculate price position in recent range
+    price_position = calculate_price_position(close, lookback=20)
     
     # Determine minimum valid index (all indicators need warmup period)
     min_valid_index = max(
-        EMA_TREND_SLOW,
+        EMA_TREND,
         RSI_PERIOD + 1,
         ATR_PERIOD + 1,
         VOLUME_LOOKBACK,
-        10  # momentum period
+        DIVERGENCE_LOOKBACK * 2 + 1,
+        20  # price position lookback
     )
     
     # Generate signals
@@ -317,61 +386,68 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             signals[i] = 0.0
             continue
         
-        # Trend direction from EMA relationship
-        trend_bullish = ema_fast[i] > ema_slow[i]
-        trend_bearish = ema_fast[i] < ema_slow[i]
+        # Trend bias from EMA
+        trend_bullish = close[i] > ema_trend[i]
+        trend_bearish = close[i] < ema_trend[i]
         
-        # RSI filter - avoid buying overbought, selling oversold
-        rsi_neutral = (RSI_OVERSOLD < rsi[i] < RSI_OVERBOUGHT)
-        rsi_bullish_ok = rsi[i] < RSI_OVERBOUGHT
-        rsi_bearish_ok = rsi[i] > RSI_OVERSOLD
+        # RSI mean-reversion signals
+        rsi_oversold = rsi[i] < RSI_OVERSOLD
+        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        rsi_extreme_oversold = rsi[i] < RSI_EXTREME_OVERSOLD
+        rsi_extreme_overbought = rsi[i] > RSI_EXTREME_OVERBOUGHT
         
         # Volume confirmation
         volume_confirmed = volume_ratio[i] >= VOLUME_THRESHOLD
         
-        # Momentum confirmation
-        momentum_positive = momentum[i] > 0
-        momentum_negative = momentum[i] < 0
+        # Calculate RSI extremity factor (stronger signal at extremes)
+        rsi_factor = 1.0
+        if rsi_extreme_oversold or rsi_extreme_overbought:
+            rsi_factor = 1.5
+        elif rsi_oversold or rsi_overbought:
+            rsi_factor = 1.0
+        else:
+            rsi_factor = 0.5  # Weak signal in neutral RSI
         
-        # Calculate trend strength (normalized)
-        trend_strength = min(abs(ema_spread[i]) * 50, 1.0)  # Cap at 1.0
+        # Divergence boost
+        divergence_boost = 0.0
+        if divergence[i] != 0:
+            divergence_boost = 0.5  # Add 50% to signal strength
+        
+        # Price position factor (better entries at range extremes)
+        position_factor = 1.0
+        if price_position[i] < 0.2 or price_position[i] > 0.8:
+            position_factor = 1.2  # Better entries at range edges
         
         # Volatility adjustment (reduce position in high volatility)
         atr_pct = atr[i] / close[i]
         vol_factor = 1.0
         if atr_pct > 0:
-            # Scale inversely to volatility, target ~2% hourly volatility
+            # Scale inversely to volatility, target ~1.5% hourly volatility
             vol_factor = min(1.5, VOLATILITY_TARGET / max(atr_pct, 0.001))
         
-        # RSI quality factor (better signals when RSI is in middle range)
-        rsi_quality = 1.0
-        if rsi_neutral:
-            # Best quality when RSI is in 40-60 range
-            rsi_center = abs(rsi[i] - 50)
-            rsi_quality = 1.0 - (rsi_center / 50)
-            rsi_quality = max(0.5, rsi_quality)
-        else:
-            rsi_quality = 0.7  # Reduced quality at extremes
-        
-        # Base signal from trend direction
+        # Calculate base signal
         raw_signal = 0.0
         signal_confidence = 0.0
         
-        if trend_bullish and rsi_bullish_ok and momentum_positive:
-            # Long signal
-            signal_confidence = 1.0
-            if volume_confirmed:
-                signal_confidence += 0.3
-            raw_signal = trend_strength * signal_confidence
-        elif trend_bearish and rsi_bearish_ok and momentum_negative:
-            # Short signal
-            signal_confidence = 1.0
-            if volume_confirmed:
-                signal_confidence += 0.3
-            raw_signal = -trend_strength * signal_confidence
+        # LONG signal: uptrend + oversold RSI or bullish divergence
+        if trend_bullish:
+            if rsi_oversold or divergence[i] == 1.0:
+                signal_confidence = rsi_factor + divergence_boost
+                if volume_confirmed:
+                    signal_confidence *= 1.2
+                if price_position[i] < 0.3:
+                    signal_confidence *= position_factor
+                raw_signal = signal_confidence
         
-        # Apply RSI quality factor
-        raw_signal *= rsi_quality
+        # SHORT signal: downtrend + overbought RSI or bearish divergence
+        elif trend_bearish:
+            if rsi_overbought or divergence[i] == -1.0:
+                signal_confidence = rsi_factor + divergence_boost
+                if volume_confirmed:
+                    signal_confidence *= 1.2
+                if price_position[i] > 0.7:
+                    signal_confidence *= position_factor
+                raw_signal = -signal_confidence
         
         # Apply volatility adjustment
         signal = raw_signal * vol_factor
