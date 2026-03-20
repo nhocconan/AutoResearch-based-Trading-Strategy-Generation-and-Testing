@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-strategy.py - Multi-Factor Mean Reversion with Trend Filter
-============================================================
+strategy.py - Multi-Timeframe Trend Following with Volume Confirmation
+=======================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
 This file defines the trading strategy. It must expose:
@@ -11,10 +11,11 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Combine funding rate mean reversion with trend filter and RSI confirmation.
-    - Extreme funding rates suggest overcrowded positions → mean reversion
-    - Trade only in direction of longer-term trend (50-period SMA)
-    - RSI confirms entry timing (avoid catching falling knives)
+    Trend-following strategy with multi-timeframe confirmation and volume filter.
+    - Use 20/50 EMA crossover for trend direction
+    - Volume spike confirms breakout validity
+    - ATR-based position sizing for volatility adjustment
+    - Avoid trading during low volume periods
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -29,116 +30,138 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "funding_mean_reversion_trend"
+name = "multi_tf_trend_volume"
 timeframe = "1h"
-leverage = 2.0  # Conservative leverage for mean reversion strategy
+leverage = 2.5  # Moderate leverage for trend following
 
 # Strategy parameters
-TREMA_PERIOD = 50           # Trend filter SMA period
-RSI_PERIOD = 14             # RSI calculation period
-FUNDING_LOOKBACK = 100      # Lookback for funding rate z-score
-FUNDING_THRESHOLD = 1.5     # Z-score threshold for extreme funding
-RSI_OVERBOUGHT = 65         # RSI level for overbought
-RSI_OVERSOLD = 35           # RSI level for oversold
-VOLATILITY_WINDOW = 20      # Window for volatility adjustment
+EMA_FAST = 20             # Fast EMA period
+EMA_SLOW = 50             # Slow EMA period
+VOLUME_LOOKBACK = 20      # Lookback for volume average
+VOLUME_THRESHOLD = 1.5    # Volume spike multiplier
+ATR_PERIOD = 14           # ATR calculation period
+TREND_STRENGTH_WINDOW = 10  # Window for trend strength calculation
+MIN_SIGNAL = 0.3          # Minimum signal magnitude to trade
 
 
 # =============================================================================
 # Signal Generation
 # =============================================================================
 
-def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
     """
-    Calculate RSI using only past data (no look-ahead).
+    Calculate Exponential Moving Average using only past data.
     
     Args:
         close: Array of close prices
-        period: RSI calculation period
+        period: EMA period
     
     Returns:
-        Array of RSI values (0-100)
+        Array of EMA values
     """
     n = len(close)
-    rsi = np.zeros(n, dtype=np.float64)
+    ema = np.zeros(n, dtype=np.float64)
     
-    if n < period + 1:
-        return rsi
+    if n < period:
+        return ema
     
-    # Calculate price changes
-    delta = np.diff(close)
+    # Initialize with SMA
+    ema[period - 1] = np.mean(close[:period])
     
-    # Separate gains and losses
-    gains = np.where(delta > 0, delta, 0.0)
-    losses = np.where(delta < 0, -delta, 0.0)
+    # Calculate EMA multiplier
+    multiplier = 2.0 / (period + 1)
     
-    # Initialize average gain/loss with SMA
-    avg_gain = np.zeros(n, dtype=np.float64)
-    avg_loss = np.zeros(n, dtype=np.float64)
+    # Calculate EMA for remaining periods
+    for i in range(period, n):
+        ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
     
-    # First average (simple MA of first 'period' changes)
-    avg_gain[period] = np.mean(gains[:period])
-    avg_loss[period] = np.mean(losses[:period])
-    
-    # Subsequent averages (Wilder's smoothing)
-    for i in range(period + 1, n):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gains[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + losses[i-1]) / period
-    
-    # Calculate RS and RSI
-    rs = np.zeros(n, dtype=np.float64)
-    mask = avg_loss > 0
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rsi[mask] = 100 - (100 / (1 + rs[mask]))
-    
-    # Handle division by zero (all gains, no losses)
-    rsi[avg_loss == 0] = 100.0
-    
-    return rsi
+    return ema
 
 
-def calculate_funding_zscore(funding_rates: np.ndarray, lookback: int = 100) -> np.ndarray:
+def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
     """
-    Calculate z-score of funding rates for mean reversion signal.
-    Only uses past funding rate data (no look-ahead).
+    Calculate Average True Range using only past data.
     
     Args:
-        funding_rates: Array of funding rates
-        lookback: Rolling window for mean/std calculation
+        high: Array of high prices
+        low: Array of low prices
+        close: Array of close prices
+        period: ATR period
     
     Returns:
-        Array of z-scores
+        Array of ATR values
     """
-    n = len(funding_rates)
-    zscore = np.zeros(n, dtype=np.float64)
+    n = len(close)
+    atr = np.zeros(n, dtype=np.float64)
     
-    # Use pandas rolling for clean calculation
-    funding_series = pd.Series(funding_rates)
-    rolling_mean = funding_series.rolling(window=lookback, min_periods=lookback).mean()
-    rolling_std = funding_series.rolling(window=lookback, min_periods=lookback).std()
+    if n < period + 1:
+        return atr
     
-    # Calculate z-score where we have enough data
-    mask = rolling_std > 0
-    zscore[mask] = (funding_rates - rolling_mean.values) / rolling_std.values
+    # Calculate True Range
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
     
-    return zscore
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
+    
+    # Initialize ATR with SMA of TR
+    atr[period - 1] = np.mean(tr[:period])
+    
+    # Calculate ATR using Wilder's smoothing
+    for i in range(period, n):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+    
+    return atr
+
+
+def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
+    """
+    Calculate volume ratio relative to rolling average.
+    Only uses past volume data (no look-ahead).
+    
+    Args:
+        volume: Array of volume values
+        lookback: Rolling window for average calculation
+    
+    Returns:
+        Array of volume ratios
+    """
+    n = len(volume)
+    volume_ratio = np.ones(n, dtype=np.float64)
+    
+    if n < lookback:
+        return volume_ratio
+    
+    volume_series = pd.Series(volume)
+    rolling_avg = volume_series.rolling(window=lookback, min_periods=lookback).mean().values
+    
+    # Avoid division by zero
+    mask = rolling_avg > 0
+    volume_ratio[mask] = volume[mask] / rolling_avg[mask]
+    
+    return volume_ratio
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Multi-Factor Mean Reversion Strategy with Trend Filter.
+    Multi-Timeframe Trend Following Strategy with Volume Confirmation.
     
     Signal Logic:
-    1. Calculate funding rate z-score (mean reversion signal)
-    2. Calculate trend direction (50-period SMA)
-    3. Calculate RSI for entry timing
-    4. Combine signals with weights
+    1. Calculate fast/slow EMA for trend direction
+    2. Calculate ATR for volatility adjustment
+    3. Calculate volume ratio for confirmation
+    4. Generate signals based on EMA crossover and volume
     
     Entry Conditions:
-    - LONG: Funding z-score < -threshold (extreme negative) AND price > trend SMA AND RSI < oversold
-    - SHORT: Funding z-score > threshold (extreme positive) AND price < trend SMA AND RSI > overbought
+    - LONG: Fast EMA > Slow EMA AND volume ratio > threshold
+    - SHORT: Fast EMA < Slow EMA AND volume ratio > threshold
     
     Args:
-        prices: DataFrame with columns [open_time, open, high, low, close, volume, funding_rate, ...]
+        prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
     
     Returns:
         np.ndarray of signals, same length as prices. Values in [-1, 1].
@@ -146,85 +169,97 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     n = len(prices)
     signals = np.zeros(n, dtype=np.float64)
     
-    # Extract close prices
-    close = prices["close"].values
+    # Extract required columns with safety checks
+    try:
+        close = prices["close"].values.astype(np.float64)
+        high = prices["high"].values.astype(np.float64)
+        low = prices["low"].values.astype(np.float64)
+        volume = prices["volume"].values.astype(np.float64)
+    except (KeyError, TypeError, ValueError) as e:
+        # Return zeros if required columns missing
+        return signals
     
-    # Check if funding_rate column exists
-    has_funding = "funding_rate" in prices.columns
-    if has_funding:
-        funding_rates = prices["funding_rate"].values
-    else:
-        # If no funding data, create dummy (strategy will rely on price signals only)
-        funding_rates = np.zeros(n, dtype=np.float64)
+    # Handle any NaN values in price data
+    close = np.nan_to_num(close, nan=0.0)
+    high = np.nan_to_num(high, nan=0.0)
+    low = np.nan_to_num(low, nan=0.0)
+    volume = np.nan_to_num(volume, nan=0.0)
     
-    # Calculate trend filter (50-period SMA)
-    close_series = pd.Series(close)
-    trend_sma = close_series.rolling(window=TREMA_PERIOD, min_periods=TREMA_PERIOD).mean().values
+    # Ensure no zero or negative prices
+    close = np.where(close <= 0, 1.0, close)
+    high = np.where(high <= 0, close, high)
+    low = np.where(low <= 0, close * 0.99, low)
     
-    # Calculate RSI
-    rsi = calculate_rsi(close, RSI_PERIOD)
+    # Calculate EMAs
+    ema_fast = calculate_ema(close, EMA_FAST)
+    ema_slow = calculate_ema(close, EMA_SLOW)
     
-    # Calculate funding z-score
-    funding_zscore = calculate_funding_zscore(funding_rates, FUNDING_LOOKBACK)
+    # Calculate ATR for volatility adjustment
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Calculate volatility for position sizing adjustment
-    returns = np.diff(close) / close[:-1]
-    returns = np.insert(returns, 0, 0.0)  # Align with close array
-    vol_series = pd.Series(returns).rolling(window=VOLATILITY_WINDOW, min_periods=VOLATILITY_WINDOW).std().values
-    vol_series = np.nan_to_num(vol_series, nan=0.0)
+    # Calculate volume ratio
+    volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
+    
+    # Calculate trend strength (EMA spread normalized by price)
+    ema_spread = (ema_fast - ema_slow) / close
+    ema_spread = np.nan_to_num(ema_spread, nan=0.0)
+    
+    # Calculate rolling trend strength for smoothing
+    trend_strength_series = pd.Series(ema_spread).rolling(
+        window=TREND_STRENGTH_WINDOW, 
+        min_periods=TREND_STRENGTH_WINDOW
+    ).mean().values
+    trend_strength = np.nan_to_num(trend_strength_series, nan=0.0)
+    
+    # Determine minimum valid index
+    min_valid_index = max(EMA_SLOW, ATR_PERIOD + 1, VOLUME_LOOKBACK, TREND_STRENGTH_WINDOW)
     
     # Generate signals
-    min_valid_index = max(TREMA_PERIOD, FUNDING_LOOKBACK, RSI_PERIOD + 1)
-    
     for i in range(min_valid_index, n):
-        # Skip if any required data is NaN
-        if np.isnan(trend_sma[i]) or np.isnan(rsi[i]) or np.isnan(funding_zscore[i]):
+        # Skip if any required data is invalid
+        if close[i] <= 0 or atr[i] <= 0:
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to SMA
-        price_above_trend = close[i] > trend_sma[i]
-        price_below_trend = close[i] < trend_sma[i]
+        # Trend direction from EMA crossover
+        ema_bullish = ema_fast[i] > ema_slow[i]
+        ema_bearish = ema_fast[i] < ema_slow[i]
         
-        # Funding signal: extreme values suggest mean reversion
-        funding_extreme_long = funding_zscore[i] < -FUNDING_THRESHOLD  # Very negative funding → long
-        funding_extreme_short = funding_zscore[i] > FUNDING_THRESHOLD  # Very positive funding → short
+        # Volume confirmation
+        volume_confirmed = volume_ratio[i] >= VOLUME_THRESHOLD
         
-        # RSI confirmation
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Trend strength (normalized)
+        trend_mag = min(abs(trend_strength[i]) * 100, 1.0)  # Cap at 1.0
         
-        # Volatility adjustment (reduce position size in high volatility)
+        # Volatility adjustment (reduce position in high volatility)
+        # Normalize ATR by price to get percentage volatility
+        atr_pct = atr[i] / close[i]
         vol_factor = 1.0
-        if vol_series[i] > 0:
-            # Normalize volatility (assume typical 1h vol ~0.01-0.02)
-            vol_factor = min(1.0, 0.015 / max(vol_series[i], 0.001))
+        if atr_pct > 0:
+            # Typical 1h ATR% is 0.5-2%, scale inversely
+            vol_factor = min(1.0, 0.015 / max(atr_pct, 0.001))
         
-        # Combine signals
-        long_signal = 0.0
-        short_signal = 0.0
+        # Base signal from trend direction
+        raw_signal = 0.0
+        if ema_bullish:
+            raw_signal = trend_mag
+        elif ema_bearish:
+            raw_signal = -trend_mag
         
-        # Long entry: extreme negative funding + uptrend + oversold RSI
-        if funding_extreme_long and price_above_trend and rsi_oversold:
-            long_signal = 1.0 * vol_factor
-        elif funding_extreme_long and price_above_trend:
-            # Weaker signal without RSI confirmation
-            long_signal = 0.5 * vol_factor
-        elif funding_extreme_long and rsi_oversold:
-            # Weaker signal without trend confirmation
-            long_signal = 0.5 * vol_factor
+        # Apply volume confirmation (reduce signal if volume low)
+        if not volume_confirmed:
+            raw_signal *= 0.5
         
-        # Short entry: extreme positive funding + downtrend + overbought RSI
-        if funding_extreme_short and price_below_trend and rsi_overbought:
-            short_signal = 1.0 * vol_factor
-        elif funding_extreme_short and price_below_trend:
-            # Weaker signal without RSI confirmation
-            short_signal = 0.5 * vol_factor
-        elif funding_extreme_short and rsi_overbought:
-            # Weaker signal without trend confirmation
-            short_signal = 0.5 * vol_factor
+        # Apply volatility adjustment
+        signal = raw_signal * vol_factor
         
-        # Net signal (long - short)
-        signals[i] = long_signal - short_signal
+        # Apply minimum signal threshold
+        if abs(signal) < MIN_SIGNAL:
+            signal = 0.0
+        
+        # Clip to [-1, 1]
+        signal = np.clip(signal, -1.0, 1.0)
+        
+        signals[i] = signal
     
     return signals
