@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-strategy.py - Mean Reversion with Trend Filter and RSI Divergence
-=================================================================
+strategy.py - Bollinger Squeeze Breakout with Trend Filter
+====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
 This file defines the trading strategy. It must expose:
@@ -11,17 +11,12 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Mean-reversion strategy with trend filter - opposite of pure trend-following.
-    - Use 200 EMA for long-term trend bias (not entry trigger)
-    - RSI(14) for mean-reversion entries (oversold in uptrend = long)
-    - RSI divergence detection for stronger signals
-    - Volume confirmation for reversal validity
-    - ATR-based volatility scaling for position sizing
-    - Conservative leverage to account for crypto volatility
-
-    Rationale: Crypto markets often mean-revert on 1h timeframe. Pure trend-
-    following failed in experiment #001. This strategy buys dips in uptrends
-    and sells rallies in downtrends.
+    Volatility compression followed by expansion creates high-probability breakouts.
+    - Detect Bollinger Band squeeze (low volatility regime)
+    - Wait for price breakout with volume confirmation
+    - Filter by EMA trend direction for bias
+    - Use RSI to avoid overextended entries
+    - ATR-based position sizing for risk management
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -36,29 +31,56 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "mean_reversion_rsi_trend_filter"
+name = "bollinger_squeeze_breakout"
 timeframe = "1h"
-leverage = 2.5  # Slightly higher than previous due to mean-reversion nature
+leverage = 2.5  # Moderate leverage with volatility scaling
 
 # Strategy parameters
-EMA_TREND = 200               # Long-term trend filter (not entry trigger)
+BB_PERIOD = 20                # Bollinger Bands period
+BB_STD = 2.0                  # Bollinger Bands standard deviation
+SQUEEZE_LOOKBACK = 10         # Lookback for squeeze detection
+SQUEEZE_THRESHOLD = 0.6       # BB width ratio threshold for squeeze
+EMA_FAST = 20                 # Fast EMA for trend filter
+EMA_SLOW = 50                 # Slow EMA for trend filter
 RSI_PERIOD = 14               # RSI calculation period
-RSI_OVERBOUGHT = 65           # RSI overbought threshold (lower than typical)
-RSI_OVERSOLD = 35             # RSI oversold threshold (higher than typical)
-RSI_EXTREME_OVERBOUGHT = 75   # Extreme overbought for stronger signals
-RSI_EXTREME_OVERSOLD = 25     # Extreme oversold for stronger signals
+RSI_OVERBOUGHT = 75           # RSI overbought threshold
+RSI_OVERSOLD = 25             # RSI oversold threshold
 VOLUME_LOOKBACK = 20          # Lookback for volume average
-VOLUME_THRESHOLD = 1.2        # Volume spike multiplier
+VOLUME_THRESHOLD = 1.5        # Volume spike multiplier for breakout
 ATR_PERIOD = 14               # ATR calculation period
 VOLATILITY_TARGET = 0.015     # Target volatility for position sizing
 MIN_SIGNAL = 0.15             # Minimum signal magnitude to trade
 MAX_SIGNAL = 0.85             # Maximum signal magnitude
-DIVERGENCE_LOOKBACK = 5       # Lookback for RSI divergence detection
 
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
+
+def calculate_sma(close: np.ndarray, period: int) -> np.ndarray:
+    """
+    Calculate Simple Moving Average using only past data.
+    
+    Args:
+        close: Array of close prices
+        period: SMA period
+    
+    Returns:
+        Array of SMA values
+    """
+    n = len(close)
+    sma = np.zeros(n, dtype=np.float64)
+    
+    if n < period:
+        return sma
+    
+    # Use pandas for efficient rolling calculation (past data only)
+    close_series = pd.Series(close)
+    sma_values = close_series.rolling(window=period, min_periods=period).mean().values
+    sma = np.nan_to_num(sma_values, nan=0.0)
+    
+    return sma
+
 
 def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
     """
@@ -77,17 +99,56 @@ def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
     if n < period:
         return ema
     
-    # Initialize with SMA
-    ema[period - 1] = np.mean(close[:period])
-    
-    # Calculate EMA multiplier
-    multiplier = 2.0 / (period + 1)
-    
-    # Calculate EMA for remaining periods
-    for i in range(period, n):
-        ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
+    # Use pandas for efficient calculation (past data only)
+    close_series = pd.Series(close)
+    ema_values = close_series.ewm(span=period, adjust=False, min_periods=period).mean().values
+    ema = np.nan_to_num(ema_values, nan=0.0)
     
     return ema
+
+
+def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_dev: float = 2.0) -> tuple:
+    """
+    Calculate Bollinger Bands using only past data.
+    
+    Args:
+        close: Array of close prices
+        period: BB period
+        std_dev: Number of standard deviations
+    
+    Returns:
+        Tuple of (upper_band, middle_band, lower_band, bb_width)
+    """
+    n = len(close)
+    upper = np.zeros(n, dtype=np.float64)
+    middle = np.zeros(n, dtype=np.float64)
+    lower = np.zeros(n, dtype=np.float64)
+    width = np.zeros(n, dtype=np.float64)
+    
+    if n < period:
+        return upper, middle, lower, width
+    
+    close_series = pd.Series(close)
+    
+    # Calculate middle band (SMA)
+    middle_series = close_series.rolling(window=period, min_periods=period).mean()
+    
+    # Calculate standard deviation
+    std_series = close_series.rolling(window=period, min_periods=period).std()
+    
+    # Calculate bands
+    upper_series = middle_series + (std_dev * std_series)
+    lower_series = middle_series - (std_dev * std_series)
+    
+    # Calculate bandwidth (normalized width)
+    width_series = (upper_series - lower_series) / middle_series
+    
+    upper = np.nan_to_num(upper_series.values, nan=0.0)
+    middle = np.nan_to_num(middle_series.values, nan=0.0)
+    lower = np.nan_to_num(lower_series.values, nan=0.0)
+    width = np.nan_to_num(width_series.values, nan=0.0)
+    
+    return upper, middle, lower, width
 
 
 def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
@@ -107,41 +168,24 @@ def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
     if n < period + 1:
         return rsi
     
+    close_series = pd.Series(close)
+    
     # Calculate price changes
-    delta = np.zeros(n, dtype=np.float64)
-    for i in range(1, n):
-        delta[i] = close[i] - close[i-1]
+    delta = close_series.diff()
     
     # Separate gains and losses
-    gains = np.zeros(n, dtype=np.float64)
-    losses = np.zeros(n, dtype=np.float64)
+    gains = delta.where(delta > 0, 0.0)
+    losses = (-delta).where(delta < 0, 0.0)
     
-    for i in range(1, n):
-        if delta[i] > 0:
-            gains[i] = delta[i]
-        else:
-            losses[i] = -delta[i]
+    # Calculate average gains and losses using Wilder's smoothing
+    avg_gains = gains.ewm(com=period - 1, min_periods=period).mean()
+    avg_losses = losses.ewm(com=period - 1, min_periods=period).mean()
     
-    # Calculate initial average gain/loss using SMA
-    avg_gain = np.mean(gains[1:period+1])
-    avg_loss = np.mean(losses[1:period+1])
+    # Calculate RS and RSI
+    rs = avg_gains / avg_losses.replace(0, np.inf)
+    rsi_series = 100.0 - (100.0 / (1.0 + rs))
     
-    rsi[period] = 50.0  # Default if no data
-    
-    if avg_loss != 0:
-        rs = avg_gain / avg_loss
-        rsi[period] = 100.0 - (100.0 / (1.0 + rs))
-    
-    # Calculate RSI using Wilder's smoothing
-    for i in range(period + 1, n):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-        
-        if avg_loss != 0:
-            rs = avg_gain / avg_loss
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-        else:
-            rsi[i] = 100.0
+    rsi = np.nan_to_num(rsi_series.values, nan=50.0)
     
     return rsi
 
@@ -176,12 +220,11 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
             abs(low[i] - close[i-1])
         )
     
-    # Initialize ATR with SMA of TR
-    atr[period - 1] = np.mean(tr[:period])
+    # Use pandas for Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    tr_series = pd.Series(tr)
+    atr_series = tr_series.ewm(span=period, adjust=False, min_periods=period).mean()
     
-    # Calculate ATR using Wilder's smoothing
-    for i in range(period, n):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+    atr = np.nan_to_num(atr_series.values, nan=0.0)
     
     return atr
 
@@ -214,91 +257,35 @@ def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray
     return volume_ratio
 
 
-def detect_rsi_divergence(close: np.ndarray, rsi: np.ndarray, lookback: int = 5) -> np.ndarray:
+def detect_squeeze(bb_width: np.ndarray, lookback: int = 10, threshold: float = 0.6) -> np.ndarray:
     """
-    Detect RSI divergence using only past data.
-    
-    Bullish divergence: Price makes lower low, RSI makes higher low
-    Bearish divergence: Price makes higher high, RSI makes lower high
+    Detect Bollinger Band squeeze (low volatility regime).
+    Squeeze occurs when BB width is below threshold relative to recent history.
     
     Args:
-        close: Array of close prices
-        rsi: Array of RSI values
-        lookback: Lookback period for divergence detection
+        bb_width: Array of Bollinger Band widths
+        lookback: Lookback period for width comparison
+        threshold: Threshold ratio for squeeze detection
     
     Returns:
-        Array of divergence signals: 1=bullish, -1=bearish, 0=none
+        Array of squeeze indicators (1.0 = squeeze, 0.0 = no squeeze)
     """
-    n = len(close)
-    divergence = np.zeros(n, dtype=np.float64)
-    
-    if n < lookback * 2:
-        return divergence
-    
-    for i in range(lookback * 2, n):
-        # Find local extrema in lookback window
-        window_close = close[i-lookback:i+1]
-        window_rsi = rsi[i-lookback:i+1]
-        
-        if len(window_close) < 3 or len(window_rsi) < 3:
-            continue
-        
-        # Check for bullish divergence (price lower low, RSI higher low)
-        price_min_idx = np.argmin(window_close)
-        rsi_min_idx = np.argmin(window_rsi)
-        
-        # Check recent vs earlier in window
-        if price_min_idx > lookback // 2:
-            earlier_price_min = np.min(window_close[:lookback//2+1])
-            earlier_rsi_min = np.min(window_rsi[:lookback//2+1])
-            
-            if window_close[price_min_idx] < earlier_price_min and window_rsi[price_min_idx] > earlier_rsi_min:
-                divergence[i] = 1.0
-                continue
-        
-        # Check for bearish divergence (price higher high, RSI lower high)
-        price_max_idx = np.argmax(window_close)
-        rsi_max_idx = np.argmax(window_rsi)
-        
-        if price_max_idx > lookback // 2:
-            earlier_price_max = np.max(window_close[:lookback//2+1])
-            earlier_rsi_max = np.max(window_rsi[:lookback//2+1])
-            
-            if window_close[price_max_idx] > earlier_price_max and window_rsi[price_max_idx] < earlier_rsi_max:
-                divergence[i] = -1.0
-    
-    return divergence
-
-
-def calculate_price_position(close: np.ndarray, lookback: int = 20) -> np.ndarray:
-    """
-    Calculate where price sits within recent range (0=low, 1=high).
-    Only uses past data.
-    
-    Args:
-        close: Array of close prices
-        lookback: Lookback period for range calculation
-    
-    Returns:
-        Array of position values (0-1)
-    """
-    n = len(close)
-    position = np.zeros(n, dtype=np.float64)
+    n = len(bb_width)
+    squeeze = np.zeros(n, dtype=np.float64)
     
     if n < lookback:
-        return position
+        return squeeze
     
-    for i in range(lookback, n):
-        window = close[i-lookback:i+1]
-        high = np.max(window)
-        low = np.min(window)
-        
-        if high > low:
-            position[i] = (close[i] - low) / (high - low)
-        else:
-            position[i] = 0.5
+    bb_width_series = pd.Series(bb_width)
     
-    return position
+    # Calculate rolling max width over lookback period
+    rolling_max = bb_width_series.rolling(window=lookback, min_periods=lookback).max().values
+    
+    # Squeeze when current width is below threshold of recent max
+    mask = rolling_max > 0
+    squeeze[mask] = np.where(bb_width[mask] / rolling_max[mask] < threshold, 1.0, 0.0)
+    
+    return squeeze
 
 
 # =============================================================================
@@ -307,19 +294,20 @@ def calculate_price_position(close: np.ndarray, lookback: int = 20) -> np.ndarra
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Mean Reversion Strategy with Trend Filter and RSI Divergence.
+    Bollinger Squeeze Breakout Strategy with Trend Filter.
     
     Signal Logic:
-    1. Calculate 200 EMA for long-term trend bias
-    2. Calculate RSI(14) for mean-reversion entries
-    3. Detect RSI divergence for stronger signals
-    4. Calculate ATR for volatility-based position sizing
-    5. Calculate volume ratio for confirmation
-    6. Calculate price position in recent range
+    1. Detect Bollinger Band squeeze (low volatility compression)
+    2. Wait for price breakout above/below bands with volume confirmation
+    3. Filter by EMA trend direction for bias
+    4. Use RSI to avoid overextended entries
+    5. ATR-based volatility scaling for position sizing
     
     Entry Conditions:
-    - LONG: Price > 200 EMA (uptrend) AND RSI < 35 (oversold) OR bullish divergence
-    - SHORT: Price < 200 EMA (downtrend) AND RSI > 65 (overbought) OR bearish divergence
+    - LONG: Squeeze detected + price breaks above upper BB + volume spike + 
+            EMA fast > slow + RSI not overbought
+    - SHORT: Squeeze detected + price breaks below lower BB + volume spike +
+             EMA fast < slow + RSI not oversold
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -351,10 +339,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     high = np.where(high <= 0, close, high)
     low = np.where(low <= 0, close * 0.99, low)
     
-    # Calculate EMA for trend bias
-    ema_trend = calculate_ema(close, EMA_TREND)
+    # Calculate Bollinger Bands
+    bb_upper, bb_middle, bb_lower, bb_width = calculate_bollinger_bands(
+        close, BB_PERIOD, BB_STD
+    )
     
-    # Calculate RSI for mean-reversion signals
+    # Detect squeeze conditions
+    squeeze = detect_squeeze(bb_width, SQUEEZE_LOOKBACK, SQUEEZE_THRESHOLD)
+    
+    # Calculate EMAs for trend filter
+    ema_fast = calculate_ema(close, EMA_FAST)
+    ema_slow = calculate_ema(close, EMA_SLOW)
+    
+    # Calculate RSI for entry filtering
     rsi = calculate_rsi(close, RSI_PERIOD)
     
     # Calculate ATR for volatility adjustment
@@ -363,60 +360,80 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Calculate volume ratio
     volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
     
-    # Detect RSI divergence
-    divergence = detect_rsi_divergence(close, rsi, DIVERGENCE_LOOKBACK)
-    
-    # Calculate price position in recent range
-    price_position = calculate_price_position(close, lookback=20)
-    
     # Determine minimum valid index (all indicators need warmup period)
     min_valid_index = max(
-        EMA_TREND,
+        BB_PERIOD,
+        SQUEEZE_LOOKBACK,
+        EMA_SLOW,
         RSI_PERIOD + 1,
         ATR_PERIOD + 1,
-        VOLUME_LOOKBACK,
-        DIVERGENCE_LOOKBACK * 2 + 1,
-        20  # price position lookback
+        VOLUME_LOOKBACK
     )
+    
+    # Track squeeze state for breakout detection
+    in_squeeze = False
+    squeeze_start_idx = -1
     
     # Generate signals
     for i in range(min_valid_index, n):
         # Skip if any required data is invalid
-        if close[i] <= 0 or atr[i] <= 0:
+        if close[i] <= 0 or atr[i] <= 0 or bb_width[i] <= 0:
             signals[i] = 0.0
             continue
         
-        # Trend bias from EMA
-        trend_bullish = close[i] > ema_trend[i]
-        trend_bearish = close[i] < ema_trend[i]
+        # Update squeeze state
+        if squeeze[i] == 1.0:
+            if not in_squeeze:
+                in_squeeze = True
+                squeeze_start_idx = i
+        else:
+            in_squeeze = False
+            squeeze_start_idx = -1
         
-        # RSI mean-reversion signals
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
-        rsi_extreme_oversold = rsi[i] < RSI_EXTREME_OVERSOLD
-        rsi_extreme_overbought = rsi[i] > RSI_EXTREME_OVERBOUGHT
+        # Check for breakout conditions
+        # Need squeeze to have been active recently (within last SQUEEZE_LOOKBACK bars)
+        recent_squeeze = False
+        for j in range(max(min_valid_index, i - SQUEEZE_LOOKBACK), i + 1):
+            if squeeze[j] == 1.0:
+                recent_squeeze = True
+                break
         
-        # Volume confirmation
+        if not recent_squeeze:
+            signals[i] = 0.0
+            continue
+        
+        # Trend direction from EMA relationship
+        trend_bullish = ema_fast[i] > ema_slow[i]
+        trend_bearish = ema_fast[i] < ema_slow[i]
+        
+        # RSI filter - avoid buying overbought, selling oversold
+        rsi_bullish_ok = rsi[i] < RSI_OVERBOUGHT
+        rsi_bearish_ok = rsi[i] > RSI_OVERSOLD
+        
+        # Volume confirmation for breakout
         volume_confirmed = volume_ratio[i] >= VOLUME_THRESHOLD
         
-        # Calculate RSI extremity factor (stronger signal at extremes)
-        rsi_factor = 1.0
-        if rsi_extreme_oversold or rsi_extreme_overbought:
-            rsi_factor = 1.5
-        elif rsi_oversold or rsi_overbought:
-            rsi_factor = 1.0
-        else:
-            rsi_factor = 0.5  # Weak signal in neutral RSI
+        # Breakout detection
+        # Long: price closes above upper band
+        breakout_long = close[i] > bb_upper[i]
+        # Short: price closes below lower band
+        breakout_short = close[i] < bb_lower[i]
         
-        # Divergence boost
-        divergence_boost = 0.0
-        if divergence[i] != 0:
-            divergence_boost = 0.5  # Add 50% to signal strength
+        # Calculate breakout strength (how far price is beyond band)
+        breakout_strength_long = 0.0
+        breakout_strength_short = 0.0
         
-        # Price position factor (better entries at range extremes)
-        position_factor = 1.0
-        if price_position[i] < 0.2 or price_position[i] > 0.8:
-            position_factor = 1.2  # Better entries at range edges
+        if breakout_long and bb_upper[i] > 0:
+            breakout_strength_long = (close[i] - bb_upper[i]) / bb_upper[i]
+            breakout_strength_long = min(breakout_strength_long, 0.05)  # Cap at 5%
+        
+        if breakout_short and bb_lower[i] > 0:
+            breakout_strength_short = (bb_lower[i] - close[i]) / bb_lower[i]
+            breakout_strength_short = min(breakout_strength_short, 0.05)  # Cap at 5%
+        
+        # Calculate trend strength (EMA spread normalized by price)
+        ema_spread = abs(ema_fast[i] - ema_slow[i]) / close[i]
+        trend_strength = min(ema_spread * 100, 1.0)  # Cap at 1.0
         
         # Volatility adjustment (reduce position in high volatility)
         atr_pct = atr[i] / close[i]
@@ -425,29 +442,46 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             # Scale inversely to volatility, target ~1.5% hourly volatility
             vol_factor = min(1.5, VOLATILITY_TARGET / max(atr_pct, 0.001))
         
-        # Calculate base signal
+        # RSI quality factor (better signals when RSI confirms trend)
+        rsi_quality = 1.0
+        if trend_bullish:
+            # For longs, prefer RSI in 40-70 range (momentum but not overbought)
+            if 40 <= rsi[i] <= 70:
+                rsi_quality = 1.0
+            elif rsi[i] < 40:
+                rsi_quality = 0.7  # Weak momentum
+            else:
+                rsi_quality = 0.6  # Approaching overbought
+        else:
+            # For shorts, prefer RSI in 30-60 range
+            if 30 <= rsi[i] <= 60:
+                rsi_quality = 1.0
+            elif rsi[i] > 60:
+                rsi_quality = 0.7  # Weak momentum
+            else:
+                rsi_quality = 0.6  # Approaching oversold
+        
+        # Base signal from breakout direction
         raw_signal = 0.0
         signal_confidence = 0.0
         
-        # LONG signal: uptrend + oversold RSI or bullish divergence
-        if trend_bullish:
-            if rsi_oversold or divergence[i] == 1.0:
-                signal_confidence = rsi_factor + divergence_boost
-                if volume_confirmed:
-                    signal_confidence *= 1.2
-                if price_position[i] < 0.3:
-                    signal_confidence *= position_factor
-                raw_signal = signal_confidence
+        if breakout_long and trend_bullish and rsi_bullish_ok:
+            # Long signal
+            signal_confidence = breakout_strength_long * 20  # Scale to ~1.0
+            if volume_confirmed:
+                signal_confidence *= 1.3
+            signal_confidence *= trend_strength
+            raw_signal = signal_confidence
+        elif breakout_short and trend_bearish and rsi_bearish_ok:
+            # Short signal
+            signal_confidence = breakout_strength_short * 20  # Scale to ~1.0
+            if volume_confirmed:
+                signal_confidence *= 1.3
+            signal_confidence *= trend_strength
+            raw_signal = -signal_confidence
         
-        # SHORT signal: downtrend + overbought RSI or bearish divergence
-        elif trend_bearish:
-            if rsi_overbought or divergence[i] == -1.0:
-                signal_confidence = rsi_factor + divergence_boost
-                if volume_confirmed:
-                    signal_confidence *= 1.2
-                if price_position[i] > 0.7:
-                    signal_confidence *= position_factor
-                raw_signal = -signal_confidence
+        # Apply RSI quality factor
+        raw_signal *= rsi_quality
         
         # Apply volatility adjustment
         signal = raw_signal * vol_factor
