@@ -1,29 +1,25 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #003 - RSI Mean Reversion + SMA200 Trend Filter (1h)
-================================================================
-Hypothesis: RSI extremes combined with SMA200 trend filter will capture pullbacks 
-in strong trends while avoiding counter-trend trades. This differs from Supertrend 
-by entering on mean reversion within trends rather than trend breakouts.
+EXPERIMENT #004 - MACD Histogram Momentum Strategy (4h)
+========================================================
+Hypothesis: MACD histogram captures momentum shifts more smoothly than Supertrend's
+binary flips. The histogram provides early warning of momentum decay before price
+reversal, allowing earlier exits. 4h timeframe filters noise while maintaining
+reasonable trade frequency.
 
-Why this should beat Supertrend 4h (Sharpe=0.197):
-- Enters on pullbacks (better entry prices) vs breakout entries
-- SMA200 filter avoids counter-trend trades in ranging markets
-- 1h timeframe = more opportunities than 4h while avoiding 5m/15m noise
-- Discrete signal levels minimize churning costs
-
-Key implementation:
-- RSI(14) < 30 + price > SMA200 → Long (oversold in uptrend)
-- RSI(14) > 70 + price < SMA200 → Short (overbought in downtrend)
-- Signal = 0.0 when no clear setup (avoids whipsaw costs)
-- Position size = 0.35 (same as baseline for DD control)
+Key differences from baseline:
+- Momentum-based (MACD histogram) vs trend-following (Supertrend/EMA)
+- Gradual momentum decay detection vs hard stop flips
+- Same 4h timeframe as best performer (#001)
+- Discrete signal levels (0.0, ±0.25, ±0.35) to minimize churning costs
+- Histogram threshold filter to avoid whipsaws near zero line
 """
 
 import numpy as np
 import pandas as pd
 
-name = "rsi_sma200_1h_v1"
-timeframe = "1h"
+name = "macd_histogram_4h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 
@@ -31,56 +27,87 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     n = len(close)
     
-    # Calculate SMA(200) with proper min_periods
-    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    # MACD parameters
+    fast_period = 12
+    slow_period = 26
+    signal_period = 9
     
-    # Calculate RSI(14) with proper formula
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # Calculate EMAs using pandas for proper handling
+    close_series = pd.Series(close)
     
-    # Rolling mean of gains and losses
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    # EMA fast and slow
+    ema_fast = close_series.ewm(span=fast_period, adjust=False, min_periods=fast_period).mean().values
+    ema_slow = close_series.ewm(span=slow_period, adjust=False, min_periods=slow_period).mean().values
     
-    # Calculate RS and RSI
-    rs = np.zeros(n)
-    rsi = np.zeros(n)
+    # MACD line
+    macd_line = ema_fast - ema_slow
     
-    for i in range(n):
-        if avg_loss[i] == 0:
-            rs[i] = 100.0
-        else:
-            rs[i] = avg_gain[i] / avg_loss[i]
-        rsi[i] = 100.0 - (100.0 / (1.0 + rs[i]))
+    # Signal line (EMA of MACD)
+    macd_series = pd.Series(macd_line)
+    signal_line = macd_series.ewm(span=signal_period, adjust=False, min_periods=signal_period).mean().values
+    
+    # Histogram
+    histogram = macd_line - signal_line
+    
+    # Calculate histogram momentum (rate of change of histogram)
+    hist_momentum = np.zeros(n)
+    hist_momentum[1:] = np.diff(histogram)
     
     # Generate signals with discrete position sizing
     signals = np.zeros(n)
-    SIZE = 0.35  # 35% position size - critical for drawdown control
     
-    # RSI thresholds
-    RSI_OVERSOLD = 30.0
-    RSI_OVERBOUGHT = 70.0
+    # Position size levels - discrete to minimize churning
+    SIZE_MEDIUM = 0.25  # 25% position
+    SIZE_LARGE = 0.35   # 35% position
     
-    # Only trade after both indicators are valid
-    first_valid = max(200, 14)
+    # Threshold to avoid whipsaws near zero
+    HIST_THRESHOLD = 0.0
+    
+    # Track previous signal to avoid unnecessary flips
+    prev_signal = 0.0
+    
+    # Find first valid index (after all warmup periods)
+    first_valid = max(fast_period, slow_period, signal_period) + 1
     
     for i in range(first_valid, n):
-        # Check for valid SMA200
-        if np.isnan(sma200[i]):
+        if np.isnan(histogram[i]) or np.isnan(hist_momentum[i]):
             signals[i] = 0.0
             continue
         
-        # Long setup: RSI oversold AND price above SMA200 (uptrend)
-        if rsi[i] < RSI_OVERSOLD and close[i] > sma200[i]:
-            signals[i] = SIZE
-        
-        # Short setup: RSI overbought AND price below SMA200 (downtrend)
-        elif rsi[i] > RSI_OVERBOUGHT and close[i] < sma200[i]:
-            signals[i] = -SIZE
-        
-        # Otherwise flat (avoid whipsaw costs)
+        # Determine signal based on histogram position and momentum
+        if histogram[i] > HIST_THRESHOLD:
+            # Bullish territory
+            if hist_momentum[i] >= 0:
+                # Momentum increasing or stable - full position
+                signals[i] = SIZE_LARGE
+            else:
+                # Momentum decreasing but still positive - reduce position
+                signals[i] = SIZE_MEDIUM
+        elif histogram[i] < -HIST_THRESHOLD:
+            # Bearish territory
+            if hist_momentum[i] <= 0:
+                # Momentum decreasing or stable - full short
+                signals[i] = -SIZE_LARGE
+            else:
+                # Momentum increasing but still negative - reduce short
+                signals[i] = -SIZE_MEDIUM
         else:
+            # Near zero - flat
             signals[i] = 0.0
+        
+        # Apply hysteresis to reduce churning
+        # Only flip if signal magnitude changes significantly
+        if abs(prev_signal) > 0 and abs(signals[i]) > 0:
+            # Same direction - keep
+            if np.sign(prev_signal) == np.sign(signals[i]):
+                signals[i] = prev_signal  # Maintain previous to avoid churn
+        elif abs(signals[i]) < SIZE_MEDIUM and abs(prev_signal) >= SIZE_MEDIUM:
+            # Reducing position - allow it (momentum decay)
+            pass
+        elif abs(signals[i]) == 0 and abs(prev_signal) > 0:
+            # Going flat - allow it (exit signal)
+            pass
+        
+        prev_signal = signals[i]
     
     return signals
