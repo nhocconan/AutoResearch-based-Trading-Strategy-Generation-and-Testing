@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Trend Momentum V5 Simplified
+strategy.py - Trend Momentum V3 Simplified
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,18 +11,20 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Learning from recent failures (#016-#021 all negative Sharpe):
-    - Simpler logic outperforms complex multi-factor models
-    - Clean trend alignment is more robust than weighted scoring
-    - Volatility filtering is critical for risk management
-    - Signal smoothing reduces whipsaws effectively
+    Learning from #022 failure (Sharpe=-0.890), simplifying the approach:
+    - Reduce complexity: 3 EMAs instead of 4, simpler RSI logic
+    - Better volatility filtering: avoid choppy sideways markets
+    - Cleaner trend alignment: all EMAs must align in same direction
+    - Volume confirmation: simple ratio instead of percentile ranking
+    - Less signal smoothing: reduce lag from exponential decay
     
-    Key changes from v2:
-    - Simpler EMA stack alignment (binary + slope confirmation)
-    - Cleaner RSI integration (momentum filter, not complex scoring)
-    - Better volatility regime detection (ATR percentile)
-    - Reduced parameter count to avoid overfitting
-    - More conservative signal thresholds
+    Key changes from trend_momentum_v2:
+    - Remove major EMA (200) - too slow for 1h timeframe
+    - Simplify RSI to threshold-based (not zone scoring)
+    - Use volume ratio instead of percentile (more responsive)
+    - Reduce smoothing factor (0.5 vs 0.7) for faster response
+    - More conservative leverage (1.5 vs 2.0)
+    - Add ADX-like trend strength filter
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -37,35 +39,37 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "trend_momentum_v5_simplified"
+name = "trend_momentum_v3_simplified"
 timeframe = "1h"
-leverage = 2.0  # Conservative leverage for risk management
+leverage = 1.5  # More conservative for better risk-adjusted returns
 
-# EMA periods for trend detection (simplified stack)
+# EMA periods for trend detection (simplified from 4 to 3)
 EMA_FAST = 12
 EMA_MEDIUM = 26
 EMA_SLOW = 50
-EMA_MAJOR = 200
 
-# RSI configuration (simple momentum filter)
+# RSI configuration (simplified threshold-based)
 RSI_PERIOD = 14
 RSI_LONG_MIN = 45  # Minimum RSI for long entries
 RSI_SHORT_MAX = 55  # Maximum RSI for short entries
 
-# Volume configuration
+# Volume configuration (simple ratio instead of percentile)
 VOLUME_LOOKBACK = 20
-VOLUME_MIN_PERCENTILE = 0.4  # Volume must be above 40th percentile
+VOLUME_RATIO_THRESHOLD = 1.2  # Volume must be 20% above average
+
+# Trend strength configuration
+TREND_STRENGTH_MIN = 0.002  # Minimum EMA separation ratio
 
 # Volatility configuration
 ATR_PERIOD = 14
-VOLATILITY_MIN_PCT = 0.003  # Minimum ATR% to trade
-VOLATILITY_MAX_PCT = 0.025  # Maximum ATR% to trade
-VOLATILITY_TARGET = 0.012  # Target volatility for position sizing
+VOLATILITY_MIN = 0.003  # Avoid too low volatility (choppy)
+VOLATILITY_MAX = 0.025  # Avoid too high volatility (risky)
+VOLATILITY_TARGET = 0.008  # Target hourly volatility
 
 # Signal configuration
-MIN_SIGNAL_MAGNITUDE = 0.15
-MAX_SIGNAL_MAGNITUDE = 0.75
-SMOOTHING_ALPHA = 0.6  # Exponential smoothing alpha
+MIN_SIGNAL = 0.15
+MAX_SIGNAL = 0.70
+SMOOTHING_FACTOR = 0.5  # Less smoothing for faster response
 
 
 # =============================================================================
@@ -167,60 +171,67 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     return atr
 
 
-def calculate_volume_percentile(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
+def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
     """
-    Calculate volume percentile rank using rolling window.
+    Calculate volume ratio vs rolling average.
     Only uses past volume data (no look-ahead).
     
     Args:
         volume: Array of volume values
-        lookback: Rolling window for percentile calculation
+        lookback: Rolling window for average calculation
     
     Returns:
-        Array of volume percentile ranks (0-1)
+        Array of volume ratios (current / average)
     """
     n = len(volume)
-    volume_pct = np.zeros(n, dtype=np.float64)
+    volume_ratio = np.ones(n, dtype=np.float64)
     
     if n < lookback:
-        return volume_pct
+        return volume_ratio
     
     volume_series = pd.Series(volume)
     
     for i in range(lookback, n):
         window = volume_series.iloc[i-lookback:i]
-        current_vol = volume[i]
-        rank = (window < current_vol).sum() / lookback
-        volume_pct[i] = rank
+        avg_volume = window.mean()
+        if avg_volume > 0:
+            volume_ratio[i] = volume[i] / avg_volume
+        else:
+            volume_ratio[i] = 1.0
     
-    return volume_pct
+    return volume_ratio
 
 
-def calculate_atr_percentile(atr_pct: np.ndarray, lookback: int = 50) -> np.ndarray:
+def calculate_trend_strength(ema_fast: float, ema_medium: float, 
+                             ema_slow: float, close: float) -> float:
     """
-    Calculate ATR percentile to detect volatility regime.
-    Only uses past ATR data (no look-ahead).
+    Calculate trend strength based on EMA separation.
+    Returns positive for uptrend, negative for downtrend.
     
     Args:
-        atr_pct: Array of ATR as percentage of price
-        lookback: Rolling window for percentile calculation
+        ema_fast: Fast EMA value
+        ema_medium: Medium EMA value
+        ema_slow: Slow EMA value
+        close: Current close price
     
     Returns:
-        Array of ATR percentile ranks (0-1)
+        Trend strength score (signed)
     """
-    n = len(atr_pct)
-    atr_pct_rank = np.zeros(n, dtype=np.float64)
+    if close <= 0 or ema_slow <= 0:
+        return 0.0
     
-    if n < lookback:
-        return atr_pct_rank
+    # Calculate normalized separations
+    fast_medium_sep = (ema_fast - ema_medium) / close
+    medium_slow_sep = (ema_medium - ema_slow) / close
     
-    for i in range(lookback, n):
-        window = atr_pct[i-lookback:i]
-        current = atr_pct[i]
-        rank = (window < current).sum() / lookback
-        atr_pct_rank[i] = rank
+    # Both separations should have same sign for strong trend
+    if fast_medium_sep * medium_slow_sep < 0:
+        return 0.0  # Conflicting signals
     
-    return atr_pct_rank
+    # Combine separations
+    trend_strength = (fast_medium_sep + medium_slow_sep) / 2.0
+    
+    return trend_strength
 
 
 # =============================================================================
@@ -229,19 +240,18 @@ def calculate_atr_percentile(atr_pct: np.ndarray, lookback: int = 50) -> np.ndar
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Trend Momentum V5 Simplified Strategy.
+    Trend Momentum V3 Simplified Strategy.
     
     Signal Logic:
-    1. Clean EMA stack alignment for trend direction
-    2. EMA slope confirmation (trend strength)
-    3. RSI momentum filter (avoid counter-trend entries)
-    4. Volume confirmation (liquidity check)
-    5. Volatility regime filter (avoid extreme volatility)
-    6. Signal smoothing to reduce whipsaws
+    1. Clean EMA stack alignment (fast > medium > slow for long)
+    2. RSI threshold confirmation (not overbought/oversold extremes)
+    3. Volume ratio confirmation (above average volume)
+    4. Volatility regime filter (avoid choppy/extreme volatility)
+    5. Trend strength measurement for signal magnitude
     
     Entry Conditions:
-    - LONG: EMA stack bullish + RSI > 45 + volume confirmed + normal volatility
-    - SHORT: EMA stack bearish + RSI < 55 + volume confirmed + normal volatility
+    - LONG: EMA_fast > EMA_medium > EMA_slow + RSI > 45 + volume confirmed
+    - SHORT: EMA_fast < EMA_medium < EMA_slow + RSI < 55 + volume confirmed
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -276,27 +286,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     ema_fast = calculate_ema(close, EMA_FAST)
     ema_medium = calculate_ema(close, EMA_MEDIUM)
     ema_slow = calculate_ema(close, EMA_SLOW)
-    ema_major = calculate_ema(close, EMA_MAJOR)
     
     rsi = calculate_rsi(close, RSI_PERIOD)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    volume_pct = calculate_volume_percentile(volume, VOLUME_LOOKBACK)
-    
-    # Calculate ATR as percentage of price
-    atr_pct = np.zeros(n, dtype=np.float64)
-    valid_mask = close > 0
-    atr_pct[valid_mask] = atr[valid_mask] / close[valid_mask]
-    
-    # Calculate ATR percentile for volatility regime
-    atr_pct_rank = calculate_atr_percentile(atr_pct, 50)
+    volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
     
     # Determine minimum valid index
     min_valid_index = max(
-        EMA_MAJOR,
+        EMA_SLOW,
         RSI_PERIOD + 1,
         ATR_PERIOD + 1,
-        VOLUME_LOOKBACK,
-        50  # For ATR percentile
+        VOLUME_LOOKBACK
     )
     
     # Track previous signal for smoothing
@@ -310,88 +310,78 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             prev_signal = 0.0
             continue
         
-        # Volatility regime filter (avoid extreme volatility)
-        if atr_pct[i] < VOLATILITY_MIN_PCT or atr_pct[i] > VOLATILITY_MAX_PCT:
+        # Check volatility regime (avoid choppy or extreme volatility)
+        atr_pct = atr[i] / close[i]
+        if atr_pct < VOLATILITY_MIN or atr_pct > VOLATILITY_MAX:
+            signals[i] = 0.0
+            prev_signal = 0.0
+            continue
+        
+        # Check EMA alignment for trend direction
+        ema_aligned_long = (ema_fast[i] > ema_medium[i] > ema_slow[i])
+        ema_aligned_short = (ema_fast[i] < ema_medium[i] < ema_slow[i])
+        
+        if not ema_aligned_long and not ema_aligned_short:
+            signals[i] = 0.0
+            prev_signal = 0.0
+            continue
+        
+        # Calculate trend strength
+        trend_strength = calculate_trend_strength(
+            ema_fast[i], ema_medium[i], ema_slow[i], close[i]
+        )
+        
+        # Filter weak trends
+        if abs(trend_strength) < TREND_STRENGTH_MIN:
+            signals[i] = 0.0
+            prev_signal = 0.0
+            continue
+        
+        # RSI confirmation
+        rsi_confirmed = False
+        if trend_strength > 0:
+            # Long: RSI should not be too low (weak momentum)
+            rsi_confirmed = rsi[i] >= RSI_LONG_MIN
+        else:
+            # Short: RSI should not be too high (strong upward momentum)
+            rsi_confirmed = rsi[i] <= RSI_SHORT_MAX
+        
+        if not rsi_confirmed:
             signals[i] = 0.0
             prev_signal = 0.0
             continue
         
         # Volume confirmation
-        if volume_pct[i] < VOLUME_MIN_PERCENTILE:
-            signals[i] = 0.0
-            prev_signal = 0.0
-            continue
+        volume_confirmed = volume_ratio[i] >= VOLUME_RATIO_THRESHOLD
         
-        # Check EMA stack alignment for LONG
-        long_alignment = (
-            ema_fast[i] > ema_medium[i] and
-            ema_medium[i] > ema_slow[i] and
-            ema_slow[i] > ema_major[i] and
-            close[i] > ema_fast[i]
-        )
-        
-        # Check EMA stack alignment for SHORT
-        short_alignment = (
-            ema_fast[i] < ema_medium[i] and
-            ema_medium[i] < ema_slow[i] and
-            ema_slow[i] < ema_major[i] and
-            close[i] < ema_fast[i]
-        )
-        
-        # Calculate trend strength (EMA spread normalized by price)
-        if long_alignment:
-            trend_strength = (ema_fast[i] - ema_major[i]) / close[i]
-            trend_direction = 1.0
-        elif short_alignment:
-            trend_strength = (ema_major[i] - ema_fast[i]) / close[i]
-            trend_direction = -1.0
+        # Determine signal direction and base magnitude
+        if trend_strength > 0:
+            # LONG signal
+            base_signal = trend_strength * 100.0  # Scale to reasonable range
+            if not volume_confirmed:
+                base_signal *= 0.7  # Reduce confidence without volume
         else:
-            # No clear alignment
-            signals[i] = 0.0
-            prev_signal = 0.0
-            continue
-        
-        # Skip weak trends
-        if trend_strength < 0.005:
-            signals[i] = 0.0
-            prev_signal = 0.0
-            continue
-        
-        # RSI momentum filter
-        if trend_direction > 0:
-            # Long: RSI should be above minimum threshold
-            if rsi[i] < RSI_LONG_MIN:
-                signals[i] = 0.0
-                prev_signal = 0.0
-                continue
-            rsi_factor = min((rsi[i] - RSI_LONG_MIN) / 30.0, 1.0)
-        else:
-            # Short: RSI should be below maximum threshold
-            if rsi[i] > RSI_SHORT_MAX:
-                signals[i] = 0.0
-                prev_signal = 0.0
-                continue
-            rsi_factor = min((RSI_SHORT_MAX - rsi[i]) / 30.0, 1.0)
+            # SHORT signal
+            base_signal = trend_strength * 100.0  # Already negative
+            if not volume_confirmed:
+                base_signal *= 0.7  # Reduce confidence without volume
         
         # Volatility-based position sizing (inverse relationship)
-        # Reduce position size in higher volatility regimes
-        vol_factor = VOLATILITY_TARGET / max(atr_pct[i], 0.001)
+        vol_factor = VOLATILITY_TARGET / max(atr_pct, 0.001)
         vol_factor = np.clip(vol_factor, 0.5, 1.5)
         
-        # Calculate base signal magnitude
-        base_signal = trend_direction * trend_strength * 100.0  # Scale to reasonable range
-        base_signal = base_signal * rsi_factor * vol_factor
+        raw_signal = base_signal * vol_factor
         
         # Apply exponential smoothing to reduce whipsaws
-        smoothed_signal = SMOOTHING_ALPHA * prev_signal + (1.0 - SMOOTHING_ALPHA) * base_signal
+        smoothed_signal = SMOOTHING_FACTOR * prev_signal + (1.0 - SMOOTHING_FACTOR) * raw_signal
         prev_signal = smoothed_signal
         
-        # Apply minimum threshold
-        if abs(smoothed_signal) < MIN_SIGNAL_MAGNITUDE:
+        # Apply thresholds
+        if abs(smoothed_signal) < MIN_SIGNAL:
             smoothed_signal = 0.0
         
         # Clip to valid range
-        signal = np.clip(smoothed_signal, -MAX_SIGNAL_MAGNITUDE, MAX_SIGNAL_MAGNITUDE)
+        signal = np.clip(smoothed_signal, -MAX_SIGNAL, MAX_SIGNAL)
         
         signals[i] = signal
     
