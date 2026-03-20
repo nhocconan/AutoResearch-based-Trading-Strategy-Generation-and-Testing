@@ -1,48 +1,64 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #011 - Donchian Breakout + RSI Pullback + ATR Trailing Stop
+EXPERIMENT #011 - HMA Trend + RSI Pullback + Z-Score Filter + ATR Stop
 =======================================================================
-Hypothesis: Donchian channels capture trend breakouts with less lag than moving averages.
-Combined with RSI pullback entries and ATR-based trailing stops, this should reduce
-whipsaw while maintaining trend exposure. BB Width filter avoids extreme volatility.
+Hypothesis: Hull Moving Average provides faster trend detection with less lag than
+Donchian channels, while Z-score filter protects against extreme mean reversion.
+Combined with RSI pullback entries and ATR-based trailing stops, this should capture
+trends earlier while avoiding overextended entries.
 
-Key differences from mtf_kama_bb_rsi_v1:
-- Donchian(20) breakout instead of KAMA for trend (pure price action)
-- ATR trailing stop with 2.5*ATR distance (dynamic risk management)
-- BB Width percentile filter to avoid low-volatility traps
-- Multi-timeframe: 4h Donchian trend + 1h RSI entries
+Key differences from mtf_donchian_rsi_atr_v1:
+- HMA(48) trend instead of Donchian (smoother, less whipsaw at turning points)
+- Z-score(20) filter to avoid entering at extreme deviations (>2.5 std)
+- Multi-timeframe: 4h HMA trend + 1h RSI entries + 1h Z-score filter
+- ATR trailing stop with 2.5*ATR distance (same proven risk management)
 
-Why this might beat Sharpe=5.677:
-- Donchian breakouts capture momentum earlier than MA crosses
-- ATR stops adapt to volatility regime
-- BB Width filter avoids choppy consolidation periods
+Why this might beat Sharpe=5.884:
+- HMA reacts faster to trend changes than Donchian breakout
+- Z-score filter prevents buying tops/selling bottoms
+- Same proven ATR stop management from #010
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_donchian_rsi_atr_v1"
+name = "mtf_hma_rsi_zscore_v1"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_donchian(high, low, period=20):
+def calculate_hma(close, period=48):
     """
-    Calculate Donchian Channel
-    Upper = highest high over period
-    Lower = lowest low over period
-    Middle = (Upper + Lower) / 2
+    Calculate Hull Moving Average
+    HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    Provides smoother trend with less lag than EMA
     """
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
+    n = len(close)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
     
+    # Calculate WMA for half period
+    wma_half = np.zeros(n)
+    for i in range(half_period - 1, n):
+        weights = np.arange(1, half_period + 1)
+        wma_half[i] = np.sum(close[i - half_period + 1:i + 1] * weights) / np.sum(weights)
+    
+    # Calculate WMA for full period
+    wma_full = np.zeros(n)
     for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
+        weights = np.arange(1, period + 1)
+        wma_full[i] = np.sum(close[i - period + 1:i + 1] * weights) / np.sum(weights)
     
-    middle = (upper + lower) / 2
-    return upper, lower, middle
+    # Calculate raw HMA
+    raw_hma = 2 * wma_half - wma_full
+    
+    # Calculate final HMA with sqrt period
+    hma = np.zeros(n)
+    for i in range(sqrt_period - 1, n):
+        weights = np.arange(1, sqrt_period + 1)
+        hma[i] = np.sum(raw_hma[i - sqrt_period + 1:i + 1] * weights) / np.sum(weights)
+    
+    return hma
 
 
 def calculate_atr(high, low, close, period=14):
@@ -88,6 +104,20 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion filter"""
+    n = len(close)
+    zscore = np.zeros(n)
+    
+    mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    mask = std > 0
+    zscore[mask] = (close[mask] - mean[mask]) / std[mask]
+    
+    return zscore
+
+
 def calculate_bb_width(close, period=20, std_mult=2.0):
     """Calculate Bollinger Band Width for volatility regime"""
     n = len(close)
@@ -125,9 +155,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # 1h indicators for entry timing and risk
     rsi_1h = calculate_rsi(close, period=14)
     atr_1h = calculate_atr(high, low, close, period=14)
+    zscore_1h = calculate_zscore(close, period=20)
     bb_pct_1h = calculate_bb_percentile(close, period=20, std_mult=2.0, lookback=100)
     
-    # 4h Donchian for trend filter (resample 1h → 4h)
+    # 4h HMA for trend filter (resample 1h → 4h)
     df_1h = pd.DataFrame({
         'open': close,
         'high': high,
@@ -144,22 +175,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         'close': 'last'
     }).dropna()
     
-    h_4h = df_4h['high'].values
-    l_4h = df_4h['low'].values
     c_4h = df_4h['close'].values
     
-    # Calculate 4h Donchian
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(h_4h, l_4h, period=20)
+    # Calculate 4h HMA
+    hma_4h = calculate_hma(c_4h, period=48)
     
-    # 4h trend direction based on Donchian position
+    # 4h trend direction based on HMA slope and price position
     trend_4h = np.zeros(len(c_4h))
-    for i in range(20, len(c_4h)):
-        if donchian_upper[i] > 0:
-            price_position = (c_4h[i] - donchian_lower[i]) / (donchian_upper[i] - donchian_lower[i])
-            if price_position > 0.6:
-                trend_4h[i] = 1  # Bullish (price in upper 40% of channel)
-            elif price_position < 0.4:
-                trend_4h[i] = -1  # Bearish (price in lower 40% of channel)
+    for i in range(50, len(c_4h)):
+        if hma_4h[i] > 0 and hma_4h[i-1] > 0:
+            hma_slope = hma_4h[i] - hma_4h[i-1]
+            price_vs_hma = (c_4h[i] - hma_4h[i]) / hma_4h[i]
+            
+            if hma_slope > 0 and price_vs_hma > -0.02:
+                trend_4h[i] = 1  # Bullish (HMA rising, price near/above HMA)
+            elif hma_slope < 0 and price_vs_hma < 0.02:
+                trend_4h[i] = -1  # Bearish (HMA falling, price near/below HMA)
     
     # Map 4h trend back to 1h timeframe
     trend_1h = np.zeros(n)
@@ -181,6 +212,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     RSI_LONG_ENTRY = 45   # Enter long on pullback in uptrend
     RSI_SHORT_ENTRY = 55  # Enter short on rally in downtrend
     
+    # Z-score thresholds for extreme deviation filter
+    ZSCORE_MAX = 2.5      # Don't enter if price > 2.5 std from mean
+    ZSCORE_MIN = -2.5     # Don't enter if price < -2.5 std from mean
+    
     # BB Width percentile thresholds for volatility filter
     BB_PCT_MIN = 0.20     # Don't trade in extremely low vol (consolidation)
     BB_PCT_MAX = 0.85     # Don't trade in extremely high vol (panic/euphoria)
@@ -188,19 +223,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.5
     
-    first_valid = max(80, 20, 14, 100)  # Wait for all indicators
+    first_valid = max(80, 50, 14, 20, 100)  # Wait for all indicators
     
-    # Track recent highs/lows for trailing stop logic
-    recent_long_entry_price = np.zeros(n)
-    recent_short_entry_price = np.zeros(n)
+    # Track entry prices for trailing stop logic
+    entry_price_long = np.zeros(n)
+    entry_price_short = np.zeros(n)
+    highest_since_entry = np.zeros(n)
+    lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(bb_pct_1h[i]) or np.isnan(trend_1h[i]):
+        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(zscore_1h[i]) or np.isnan(bb_pct_1h[i]) or np.isnan(trend_1h[i]):
             signals[i] = 0.0
             continue
         
         trend = trend_1h[i]
         rsi_val = rsi_1h[i]
+        zscore_val = zscore_1h[i]
         bb_pct = bb_pct_1h[i]
         atr = atr_1h[i]
         price = close[i]
@@ -215,60 +253,84 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             signals[i] = 0.0
             continue
         
+        # Z-score filter - avoid extreme deviations
+        if abs(zscore_val) > ZSCORE_MAX:
+            signals[i] = 0.0
+            continue
+        
         if trend == 1:  # 4h uptrend
-            if rsi_val < RSI_LONG_ENTRY:
+            if rsi_val < RSI_LONG_ENTRY and zscore_val < ZSCORE_MAX:
                 # Pullback entry - full position
                 signals[i] = SIZE_FULL
-                recent_long_entry_price[i] = price
-            elif rsi_val < 50:
+                entry_price_long[i] = price
+                highest_since_entry[i] = price
+            elif rsi_val < 50 and zscore_val < ZSCORE_MAX:
                 # Moderate pullback - half position
                 signals[i] = SIZE_HALF
-                recent_long_entry_price[i] = price
-            else:
-                # Check trailing stop for existing long
-                if i > 0 and signals[i - 1] > 0:
-                    # Find most recent long entry price
-                    entry_idx = max(0, i - 50)
-                    entry_prices = recent_long_entry_price[entry_idx:i]
-                    valid_entries = entry_prices[entry_prices > 0]
-                    if len(valid_entries) > 0:
-                        entry_price = valid_entries[-1]
-                        stoploss_price = entry_price - ATR_STOP_MULT * atr
-                        if price < stoploss_price:
-                            signals[i] = 0.0  # Stoploss triggered
-                        else:
-                            signals[i] = signals[i - 1]  # Hold position
+                entry_price_long[i] = price
+                highest_since_entry[i] = price
+            elif i > 0 and signals[i - 1] > 0:
+                # Hold or trail existing long
+                # Track highest price since entry
+                entry_idx = max(0, i - 100)
+                entry_prices = entry_price_long[entry_idx:i+1]
+                valid_entries = entry_prices[entry_prices > 0]
+                
+                if len(valid_entries) > 0:
+                    entry_price = valid_entries[0]
+                    
+                    # Update highest since entry
+                    prices_since = close[entry_idx:i+1]
+                    highest_since_entry[i] = max(np.max(prices_since), highest_since_entry[i-1] if i > 0 else price)
+                    
+                    # Trail stop: highest - 2.5*ATR
+                    stoploss_price = highest_since_entry[i] - ATR_STOP_MULT * atr
+                    
+                    if price < stoploss_price:
+                        signals[i] = 0.0  # Stoploss triggered
                     else:
-                        signals[i] = 0.0
+                        signals[i] = signals[i - 1]  # Hold position
                 else:
                     signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+                
         elif trend == -1:  # 4h downtrend
-            if rsi_val > RSI_SHORT_ENTRY:
+            if rsi_val > RSI_SHORT_ENTRY and zscore_val > ZSCORE_MIN:
                 # Rally entry - full short
                 signals[i] = -SIZE_FULL
-                recent_short_entry_price[i] = price
-            elif rsi_val > 50:
+                entry_price_short[i] = price
+                lowest_since_entry[i] = price
+            elif rsi_val > 50 and zscore_val > ZSCORE_MIN:
                 # Moderate rally - half short
                 signals[i] = -SIZE_HALF
-                recent_short_entry_price[i] = price
-            else:
-                # Check trailing stop for existing short
-                if i > 0 and signals[i - 1] < 0:
-                    # Find most recent short entry price
-                    entry_idx = max(0, i - 50)
-                    entry_prices = recent_short_entry_price[entry_idx:i]
-                    valid_entries = entry_prices[entry_prices > 0]
-                    if len(valid_entries) > 0:
-                        entry_price = valid_entries[-1]
-                        stoploss_price = entry_price + ATR_STOP_MULT * atr
-                        if price > stoploss_price:
-                            signals[i] = 0.0  # Stoploss triggered
-                        else:
-                            signals[i] = signals[i - 1]  # Hold position
+                entry_price_short[i] = price
+                lowest_since_entry[i] = price
+            elif i > 0 and signals[i - 1] < 0:
+                # Hold or trail existing short
+                # Track lowest price since entry
+                entry_idx = max(0, i - 100)
+                entry_prices = entry_price_short[entry_idx:i+1]
+                valid_entries = entry_prices[entry_prices > 0]
+                
+                if len(valid_entries) > 0:
+                    entry_price = valid_entries[0]
+                    
+                    # Update lowest since entry
+                    prices_since = close[entry_idx:i+1]
+                    lowest_since_entry[i] = min(np.min(prices_since), lowest_since_entry[i-1] if i > 0 else price)
+                    
+                    # Trail stop: lowest + 2.5*ATR
+                    stoploss_price = lowest_since_entry[i] + ATR_STOP_MULT * atr
+                    
+                    if price > stoploss_price:
+                        signals[i] = 0.0  # Stoploss triggered
                     else:
-                        signals[i] = 0.0
+                        signals[i] = signals[i - 1]  # Hold position
                 else:
                     signals[i] = 0.0
+            else:
+                signals[i] = 0.0
         else:  # No clear trend
             signals[i] = 0.0
     
