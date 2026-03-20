@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #012 - KAMA Trend + RSI Pullback + ADX Strength + ATR Stop
-======================================================================
-Hypothesis: KAMA's adaptive smoothing captures trends with less lag than HMA.
-Combined with RSI pullback entries (buy dips in uptrend), ADX strength filter,
-and ATR-based trailing stops, this should improve risk-adjusted returns.
+EXPERIMENT #009 - KAMA Trend + BB Squeeze Breakout + Volume Confirmation
+=======================================================================
+Hypothesis: Bollinger Band squeeze breakouts capture volatility expansion early,
+combined with KAMA adaptive trend filter and volume confirmation to reduce false breakouts.
+This differs from current best by using volatility regime (BB squeeze) instead of RSI pullback.
 
-Key improvements over mtf_hma_supertrend_rsi_v1:
-- KAMA instead of HMA (better adaptation to volatility regimes - worked well in exp 002/005)
-- ADX filter to avoid weak/choppy trend periods (missing from previous best)
-- RSI pullback entries (40-50 for long, 50-60 for short) - cleaner than Supertrend
-- Proper ATR trailing stop with 2.5*ATR distance
-- Discrete position sizing (0.0, 0.20, 0.35) to reduce churn costs
+Key innovations:
+- 4h KAMA for adaptive trend (responds to volatility changes better than HMA)
+- 1h BB squeeze detection (low vol → expansion = breakout opportunity)
+- Volume spike confirmation (1.5x average volume validates breakout)
+- ATR trailing stop for dynamic risk management
+- Z-score filter to avoid extreme overbought/oversold entries
 
 Why this might beat Sharpe=2.931:
-- KAMA showed strong results in experiments 002 (+94.9%) and 005 (+810.4%)
-- ADX filter avoids 30-40% of losing trades in choppy markets
-- RSI pullbacks provide better entry timing than pure breakout
+- BB squeeze captures momentum before price moves significantly
+- Volume confirmation reduces false breakout whipsaw
+- KAMA adapts to regime changes faster than fixed MA
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_kama_rsi_adx_v1"
+name = "mtf_kama_bbsqueeze_volume_v2"
 timeframe = "1h"
 leverage = 1.0
 
 
 def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
     """
-    Kaufman's Adaptive Moving Average
-    Adapts smoothing based on market efficiency (trend vs noise)
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts smoothing based on market noise/volatility
     """
     n = len(close)
     kama = np.zeros(n)
@@ -39,19 +39,20 @@ def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
     er = np.zeros(n)
     for i in range(er_period, n):
         signal = abs(close[i] - close[i - er_period])
-        noise = sum(abs(close[j] - close[j-1]) for j in range(i - er_period + 1, i + 1))
-        er[i] = signal / noise if noise > 0 else 0
+        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        if noise > 0:
+            er[i] = signal / noise
     
-    # Calculate smoothing constant
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
+    # Calculate smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
     
     # Initialize KAMA
     kama[er_period] = close[er_period]
     
     for i in range(er_period + 1, n):
         sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
     
     return kama
 
@@ -77,6 +78,67 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
+def calculate_bb_squeeze(close, period=20, std_mult=2.0, bb_period=20, kc_mult=1.5):
+    """
+    Detect Bollinger Band squeeze (BB inside Keltner Channel)
+    Returns: squeeze_active (bool), bb_width, position within bands
+    """
+    n = len(close)
+    
+    # Bollinger Bands
+    bb_mean = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = bb_mean + std_mult * bb_std
+    bb_lower = bb_mean - std_mult * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_mean
+    
+    # Keltner Channels (using ATR)
+    atr = calculate_atr(
+        pd.Series(close).values,
+        pd.Series(close).values,
+        close,
+        period=bb_period
+    )
+    # Approximate high/low for ATR calculation
+    kc_upper = bb_mean + kc_mult * atr
+    kc_lower = bb_mean - kc_mult * atr
+    
+    # Squeeze detection: BB inside KC
+    squeeze_active = np.zeros(n, dtype=bool)
+    for i in range(bb_period, n):
+        if bb_upper[i] < kc_upper[i] and bb_lower[i] > kc_lower[i]:
+            squeeze_active[i] = True
+    
+    # Position within BB (0=lower, 0.5=middle, 1=upper)
+    bb_position = np.zeros(n)
+    for i in range(bb_period, n):
+        if bb_upper[i] > bb_lower[i]:
+            bb_position[i] = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i])
+    
+    return squeeze_active, bb_width, bb_position, bb_upper, bb_lower
+
+
+def calculate_volume_spike(volume, period=20, threshold=1.5):
+    """Detect volume spikes above moving average"""
+    n = len(volume)
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    vol_spike = volume > (vol_ma * threshold)
+    return vol_spike, vol_ma
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion filter"""
+    n = len(close)
+    mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    zscore = np.zeros(n)
+    mask = std > 0
+    zscore[mask] = (close[mask] - mean[mask]) / std[mask]
+    
+    return zscore
+
+
 def calculate_rsi(close, period=14):
     """Calculate RSI with proper min_periods"""
     n = len(close)
@@ -99,83 +161,56 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_adx(high, low, close, period=14, adx_period=14):
-    """Calculate ADX for trend strength"""
-    n = len(close)
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        up_move = high[i] - high[i - 1]
-        down_move = low[i - 1] - low[i]
-        
-        plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0
-        minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0
-    
-    atr = calculate_atr(high, low, close, period)
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period, n):
-        plus_di[i] = 100 * plus_dm[i] / atr[i] if atr[i] > 0 else 0
-        minus_di[i] = 100 * minus_dm[i] / atr[i] if atr[i] > 0 else 0
-    
-    dx = np.zeros(n)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).rolling(window=adx_period, min_periods=adx_period).mean().values
-    
-    return adx
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices.get("volume", np.ones(len(close))).values
     n = len(close)
     
-    # 1h indicators for entry timing and risk
+    # 1h indicators for entry timing
     rsi_1h = calculate_rsi(close, period=14)
     atr_1h = calculate_atr(high, low, close, period=14)
+    squeeze_1h, bb_width_1h, bb_pos_1h, bb_upper_1h, bb_lower_1h = calculate_bb_squeeze(close)
+    vol_spike_1h, vol_ma_1h = calculate_volume_spike(volume, period=20, threshold=1.5)
+    zscore_1h = calculate_zscore(close, period=20)
     
-    # 4h indicators for trend (resample 1h → 4h)
+    # 4h KAMA for trend filter (resample 1h → 4h)
     df_1h = pd.DataFrame({
         'open': close,
         'high': high,
         'low': low,
-        'close': close
+        'close': close,
+        'volume': volume
     })
     df_1h.index = pd.date_range(start='2021-01-01', periods=n, freq='1h')
     
+    # Resample to 4h
     df_4h = df_1h.resample('4h').agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',
-        'close': 'last'
+        'close': 'last',
+        'volume': 'sum'
     }).dropna()
     
     c_4h = df_4h['close'].values
     h_4h = df_4h['high'].values
     l_4h = df_4h['low'].values
     
-    # 4h KAMA for trend direction
+    # Calculate 4h KAMA
     kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
     
-    # 4h ADX for trend strength
-    adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14, adx_period=14)
-    
-    # 4h trend direction based on KAMA position and ADX strength
+    # 4h trend direction based on KAMA slope and price position
     trend_4h = np.zeros(len(c_4h))
     for i in range(40, len(c_4h)):
-        if adx_4h[i] > 20:  # Strong trend
-            if c_4h[i] > kama_4h[i]:
+        if kama_4h[i] > 0 and kama_4h[i-1] > 0:
+            kama_slope = (kama_4h[i] - kama_4h[i-1]) / kama_4h[i-1]
+            price_vs_kama = (c_4h[i] - kama_4h[i]) / kama_4h[i]
+            
+            if kama_slope > 0.001 and price_vs_kama > -0.02:
                 trend_4h[i] = 1  # Bullish
-            elif c_4h[i] < kama_4h[i]:
+            elif kama_slope < -0.001 and price_vs_kama < 0.02:
                 trend_4h[i] = -1  # Bearish
     
     # Map 4h trend back to 1h timeframe
@@ -191,111 +226,163 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels to reduce churn
-    SIZE_FULL = 0.35   # Full position in strong trend
-    SIZE_HALF = 0.20   # Reduced position in weaker conditions
+    SIZE_FULL = 0.35   # Full position with all confirmations
+    SIZE_HALF = 0.20   # Reduced position with partial confirmations
     
-    # RSI thresholds for pullback entries
-    RSI_LONG_PULLBACK = 45   # Enter long on pullback in uptrend
-    RSI_SHORT_PULLBACK = 55  # Enter short on rally in downtrend
+    # BB squeeze breakout thresholds
+    BB_WIDTH_LOW = 0.02   # Squeeze threshold (narrow bands)
+    BB_WIDTH_HIGH = 0.08  # Expansion threshold
     
-    # ADX thresholds for trend strength
-    ADX_STRONG = 25    # Strong trend - full position
-    ADX_WEAK = 15      # Weak trend - no trading
+    # Z-score filter thresholds
+    ZSCORE_MAX = 2.0      # Don't enter if extremely overbought/oversold
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.5
     
-    first_valid = max(80, 40, 14)  # Wait for all indicators
+    first_valid = max(80, 40, 20, 14)  # Wait for all indicators
     
     # Track entry prices for trailing stop
-    entry_price = np.zeros(n)
-    position_direction = np.zeros(n)  # 1=long, -1=short, 0=none
+    long_entry_price = np.zeros(n)
+    short_entry_price = np.zeros(n)
+    long_highest = np.zeros(n)
+    short_lowest = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(trend_1h[i]):
+        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(bb_width_1h[i]):
             signals[i] = 0.0
             continue
         
         trend = trend_1h[i]
         rsi_val = rsi_1h[i]
+        bb_width = bb_width_1h[i]
+        bb_pos = bb_pos_1h[i]
         atr = atr_1h[i]
         price = close[i]
-        adx_val = adx_4h[min(i // 4, len(adx_4h) - 1)] if len(adx_4h) > 0 else 0
+        zscore = zscore_1h[i]
+        vol_confirmed = vol_spike_1h[i]
         
-        # ATR filter - avoid trading when ATR is extremely high
-        if atr > 0 and atr / price > 0.04:  # ATR > 4% of price = too volatile
+        # Z-score filter - avoid extreme entries
+        if abs(zscore) > ZSCORE_MAX:
             signals[i] = 0.0
-            if i > 0 and signals[i-1] != 0:
-                entry_price[i] = 0
-                position_direction[i] = 0
             continue
         
-        # Check trailing stop for existing positions FIRST
-        if i > 0 and position_direction[i-1] != 0:
-            prev_direction = position_direction[i-1]
-            prev_entry = entry_price[i-1] if entry_price[i-1] > 0 else close[i-1]
+        # ATR filter - avoid trading when ATR is extremely high
+        if atr > 0 and atr / price > 0.05:  # ATR > 5% of price = too volatile
+            signals[i] = 0.0
+            continue
+        
+        # Check existing positions for trailing stop
+        if signals[i - 1] > 0:  # Existing long
+            # Update highest price since entry
+            if i > 0:
+                long_highest[i] = max(long_highest[i-1], price)
+            else:
+                long_highest[i] = price
             
-            if prev_direction == 1:  # Long position
-                stoploss_price = prev_entry - ATR_STOP_MULT * atr
-                if price < stoploss_price:
-                    signals[i] = 0.0  # Stoploss triggered
-                    entry_price[i] = 0
-                    position_direction[i] = 0
-                    continue
-                else:
-                    # Hold position, update entry to highest since entry
-                    entry_price[i] = max(prev_entry, price)
-                    position_direction[i] = 1
-            elif prev_direction == -1:  # Short position
-                stoploss_price = prev_entry + ATR_STOP_MULT * atr
-                if price > stoploss_price:
-                    signals[i] = 0.0  # Stoploss triggered
-                    entry_price[i] = 0
-                    position_direction[i] = 0
-                    continue
-                else:
-                    # Hold position, update entry to lowest since entry
-                    entry_price[i] = min(prev_entry, price)
-                    position_direction[i] = -1
+            # Find entry price
+            if long_entry_price[i-1] > 0:
+                entry_price = long_entry_price[i-1]
+            else:
+                entry_price = price
             
-            # Keep existing signal
-            signals[i] = signals[i-1]
+            # Trailing stop: exit if price drops 2.5*ATR from highest
+            stoploss_price = long_highest[i] - ATR_STOP_MULT * atr
+            
+            if price < stoploss_price:
+                signals[i] = 0.0  # Stoploss triggered
+                long_entry_price[i] = 0.0
+                long_highest[i] = 0.0
+            else:
+                # Hold position, maybe reduce at profit target
+                profit_pct = (price - entry_price) / entry_price if entry_price > 0 else 0
+                if profit_pct > 0.04:  # 4% profit = reduce to half
+                    signals[i] = SIZE_HALF
+                else:
+                    signals[i] = signals[i - 1]
+                long_entry_price[i] = entry_price
+            continue
+        
+        elif signals[i - 1] < 0:  # Existing short
+            # Update lowest price since entry
+            if i > 0:
+                short_lowest[i] = min(short_lowest[i-1], price)
+            else:
+                short_lowest[i] = price
+            
+            # Find entry price
+            if short_entry_price[i-1] > 0:
+                entry_price = short_entry_price[i-1]
+            else:
+                entry_price = price
+            
+            # Trailing stop: exit if price rises 2.5*ATR from lowest
+            stoploss_price = short_lowest[i] + ATR_STOP_MULT * atr
+            
+            if price > stoploss_price:
+                signals[i] = 0.0  # Stoploss triggered
+                short_entry_price[i] = 0.0
+                short_lowest[i] = 0.0
+            else:
+                # Hold position, maybe reduce at profit target
+                profit_pct = (entry_price - price) / entry_price if entry_price > 0 else 0
+                if profit_pct > 0.04:  # 4% profit = reduce to half
+                    signals[i] = -SIZE_HALF
+                else:
+                    signals[i] = signals[i - 1]
+                short_entry_price[i] = entry_price
             continue
         
         # No existing position - look for new entries
-        if adx_val < ADX_WEAK:
-            signals[i] = 0.0
-            continue
-        
-        if trend == 1:  # 4h uptrend
-            if rsi_val < RSI_LONG_PULLBACK:
-                # Pullback entry - determine size based on ADX
-                if adx_val > ADX_STRONG:
+        if trend == 1:  # 4h uptrend - look for long entries
+            # BB squeeze breakout: narrow bands + price breaking upper + volume confirmation
+            squeeze_active = squeeze_1h[i] or (i > 0 and squeeze_1h[i-1])
+            breakout_long = bb_pos > 0.75  # Price in upper 25% of BB
+            
+            if squeeze_active and breakout_long:
+                if vol_confirmed:
                     signals[i] = SIZE_FULL
-                else:
+                    long_entry_price[i] = price
+                    long_highest[i] = price
+                elif bb_width < BB_WIDTH_LOW:
+                    # Squeeze but no volume - half position
                     signals[i] = SIZE_HALF
-                entry_price[i] = price
-                position_direction[i] = 1
-            else:
-                signals[i] = 0.0
-                entry_price[i] = 0
-                position_direction[i] = 0
-        elif trend == -1:  # 4h downtrend
-            if rsi_val > RSI_SHORT_PULLBACK:
-                # Rally entry - determine size based on ADX
-                if adx_val > ADX_STRONG:
-                    signals[i] = -SIZE_FULL
+                    long_entry_price[i] = price
+                    long_highest[i] = price
                 else:
-                    signals[i] = -SIZE_HALF
-                entry_price[i] = price
-                position_direction[i] = -1
+                    signals[i] = 0.0
+            elif bb_width < BB_WIDTH_LOW and bb_pos > 0.5:
+                # Early squeeze position (before breakout)
+                signals[i] = SIZE_HALF
+                long_entry_price[i] = price
+                long_highest[i] = price
             else:
                 signals[i] = 0.0
-                entry_price[i] = 0
-                position_direction[i] = 0
+                
+        elif trend == -1:  # 4h downtrend - look for short entries
+            # BB squeeze breakout: narrow bands + price breaking lower + volume confirmation
+            squeeze_active = squeeze_1h[i] or (i > 0 and squeeze_1h[i-1])
+            breakout_short = bb_pos < 0.25  # Price in lower 25% of BB
+            
+            if squeeze_active and breakout_short:
+                if vol_confirmed:
+                    signals[i] = -SIZE_FULL
+                    short_entry_price[i] = price
+                    short_lowest[i] = price
+                elif bb_width < BB_WIDTH_LOW:
+                    # Squeeze but no volume - half position
+                    signals[i] = -SIZE_HALF
+                    short_entry_price[i] = price
+                    short_lowest[i] = price
+                else:
+                    signals[i] = 0.0
+            elif bb_width < BB_WIDTH_LOW and bb_pos < 0.5:
+                # Early squeeze position (before breakout)
+                signals[i] = -SIZE_HALF
+                short_entry_price[i] = price
+                short_lowest[i] = price
+            else:
+                signals[i] = 0.0
         else:  # No clear trend
             signals[i] = 0.0
-            entry_price[i] = 0
-            position_direction[i] = 0
     
     return signals
