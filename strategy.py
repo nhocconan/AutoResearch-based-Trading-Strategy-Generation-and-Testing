@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Adaptive Regime Trend V4
+strategy.py - Adaptive Regime Trend V5
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -12,20 +12,20 @@ This file defines the trading strategy. It must expose:
 
 Strategy Hypothesis:
     Building on adaptive_regime_trend_v3 success (Sharpe=0.531), improving:
-    - Simplified regime detection (reduce over-fitting)
-    - Stronger funding rate filter (avoid extreme funding against position)
-    - Adaptive volume thresholds (percentile-based instead of fixed)
-    - Better EMA stack alignment for trend confirmation
-    - Improved signal smoothing with momentum-based hysteresis
-    - Cleaner code structure for maintainability
+    - Taker buy/sell ratio for market pressure detection
+    - Cleaner regime detection with smoother transitions
+    - Better funding rate mean reversion integration
+    - Improved volatility-adaptive position sizing
+    - Reduced signal flipping with better hysteresis
+    - More conservative in uncertain regimes
     
     Key improvements over adaptive_regime_trend_v3:
-    - Simplified regime logic (2 regimes instead of 3)
-    - Funding rate as hard filter (not just signal modifier)
-    - Volume percentile ranking for adaptive thresholds
-    - Better trend strength from EMA stack alignment
-    - Momentum-based hysteresis (signal change rate matters)
-    - Reduced parameter count for better generalization
+    - Taker ratio integration: taker_buy_volume/volume as pressure signal
+    - Simplified regime detection (trending vs ranging with confidence)
+    - Funding rate as mean reversion overlay (not primary signal)
+    - Better volatility scaling (inverse ATR relationship)
+    - Stronger hysteresis to reduce whipsaw
+    - Cleaner code structure for maintainability
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -40,7 +40,7 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "adaptive_regime_trend_v4"
+name = "adaptive_regime_trend_v5"
 timeframe = "1h"
 leverage = 2.0  # Conservative leverage for better risk-adjusted returns
 
@@ -60,7 +60,7 @@ RSI_EXTREME_LOW = 25
 # ADX regime detection
 ADX_PERIOD = 14
 ADX_TREND_THRESHOLD = 25
-ADX_WEAK_THRESHOLD = 20
+ADX_STRONG_THRESHOLD = 40
 
 # Bollinger Band configuration
 BB_PERIOD = 20
@@ -74,13 +74,13 @@ MACD_SIGNAL = 9
 
 # Volume configuration
 VOLUME_LOOKBACK = 20
-VOLUME_SPIKE_PERCENTILE = 75  # Top 25% volume
+VOLUME_SPIKE_THRESHOLD = 1.5
 
 # Volatility configuration
 ATR_PERIOD = 14
 VOLATILITY_TARGET = 0.008
 VOLATILITY_MIN = 0.002
-VOLATILITY_MAX = 0.040
+VOLATILITY_MAX = 0.035
 
 # Signal configuration
 MIN_SIGNAL_TRENDING = 0.20
@@ -90,11 +90,12 @@ SMOOTHING_FACTOR = 0.70
 HYSTERESIS_THRESHOLD = 0.10
 
 # Funding rate configuration
-FUNDING_EXTREME_THRESHOLD = 0.0008  # 0.08% per 8h
-FUNDING_FILTER_WEIGHT = 0.5  # Reduce signal by 50% if funding opposes
+FUNDING_EXTREME_THRESHOLD = 0.0005  # 0.05% per 8h
+FUNDING_BIAS_WEIGHT = 0.20
 
-# Regime transition smoothing
-REGIME_MEMORY = 5  # Bars to remember previous regime
+# Taker ratio configuration
+TAKER_RATIO_LOOKBACK = 20
+TAKER_RATIO_THRESHOLD = 0.55  # Above this = bullish pressure
 
 
 # =============================================================================
@@ -184,7 +185,6 @@ def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     if n < period * 2 + 1:
         return adx
     
-    # Calculate True Range and Directional Movement
     tr = np.zeros(n, dtype=np.float64)
     plus_dm = np.zeros(n, dtype=np.float64)
     minus_dm = np.zeros(n, dtype=np.float64)
@@ -201,13 +201,11 @@ def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
         plus_dm[i] = max(high[i] - high[i-1], 0.0)
         minus_dm[i] = max(low[i-1] - low[i], 0.0)
         
-        # True DM rules
         if plus_dm[i] > minus_dm[i]:
             minus_dm[i] = 0.0
         elif minus_dm[i] > plus_dm[i]:
             plus_dm[i] = 0.0
     
-    # Smooth with EMA
     tr_series = pd.Series(tr)
     plus_dm_series = pd.Series(plus_dm)
     minus_dm_series = pd.Series(minus_dm)
@@ -218,7 +216,6 @@ def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     minus_di_series = (minus_dm_series.ewm(span=period, adjust=False, min_periods=period).mean() / 
                        atr_series * 100)
     
-    # Calculate DX and ADX
     dx = 100 * np.abs(plus_di_series - minus_di_series) / (plus_di_series + minus_di_series).replace(0, np.inf)
     adx_series = dx.ewm(span=period, adjust=False, min_periods=period).mean()
     
@@ -281,107 +278,123 @@ def calculate_macd(close: np.ndarray, fast: int = 12, slow: int = 26, signal: in
     return macd_line, signal_line, histogram
 
 
-def calculate_volume_percentile(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
+def calculate_volume_spike(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
     """
-    Calculate volume percentile rank using rolling window.
-    Returns value in [0, 1] where 1 = highest volume in lookback.
+    Detect volume spikes using rolling average.
+    Returns ratio of current volume to rolling average.
     Only uses past volume data (no look-ahead).
     """
     n = len(volume)
-    volume_pct = np.zeros(n, dtype=np.float64)
+    volume_ratio = np.ones(n, dtype=np.float64)
     
     if n < lookback:
-        return volume_pct
+        return volume_ratio
     
-    for i in range(lookback - 1, n):
-        window = volume[i - lookback + 1:i + 1]
-        rank = np.sum(window <= volume[i]) / lookback
-        volume_pct[i] = rank
+    volume_series = pd.Series(volume)
+    rolling_avg = volume_series.rolling(window=lookback, min_periods=lookback).mean()
     
-    return volume_pct
+    volume_ratio = np.nan_to_num(volume_series.values / rolling_avg.values, nan=1.0)
+    
+    return volume_ratio
 
 
-def calculate_funding_filter(funding_rate: np.ndarray, threshold: float = 0.0008) -> np.ndarray:
+def calculate_taker_ratio(prices: pd.DataFrame, lookback: int = 20) -> np.ndarray:
     """
-    Calculate funding rate filter for position sizing.
-    Extreme funding reduces position size if trading against it.
-    Returns value in [0, 1] where 1 = no filter, 0 = blocked.
+    Calculate taker buy/sell ratio from volume data.
+    Returns rolling average of taker buy pressure.
+    Only uses past data (no look-ahead).
+    
+    Looks for taker_buy_volume column, falls back to 0.5 if not available.
+    """
+    n = len(prices)
+    taker_ratio = np.full(n, 0.5, dtype=np.float64)
+    
+    try:
+        # Try to get taker buy volume
+        taker_buy = prices["taker_buy_volume"].values.astype(np.float64)
+        volume = prices["volume"].values.astype(np.float64)
+        
+        taker_buy = np.nan_to_num(taker_buy, nan=0.0)
+        volume = np.nan_to_num(volume, nan=1.0)
+        volume = np.where(volume <= 0, 1.0, volume)
+        
+        # Calculate instantaneous taker ratio
+        inst_ratio = taker_buy / volume
+        inst_ratio = np.clip(inst_ratio, 0.0, 1.0)
+        
+        # Rolling average
+        inst_series = pd.Series(inst_ratio)
+        rolling_ratio = inst_series.rolling(window=lookback, min_periods=lookback).mean()
+        
+        taker_ratio = np.nan_to_num(rolling_ratio.values, nan=0.5)
+        
+    except (KeyError, TypeError, ValueError):
+        # Column not available, use neutral value
+        pass
+    
+    return taker_ratio
+
+
+def calculate_funding_bias(funding_rate: np.ndarray, threshold: float = 0.0005) -> np.ndarray:
+    """
+    Calculate funding rate bias for mean reversion signal.
+    Extreme positive funding → short bias
+    Extreme negative funding → long bias
+    Returns value in [-1, 1].
     Only uses current/past funding rate (no look-ahead).
     """
     n = len(funding_rate)
-    filter_val = np.ones(n, dtype=np.float64)
+    bias = np.zeros(n, dtype=np.float64)
     
     for i in range(n):
-        if abs(funding_rate[i]) > threshold:
-            # Extreme funding - reduce position size
-            filter_val[i] = 1.0 - FUNDING_FILTER_WEIGHT
+        if funding_rate[i] > threshold:
+            bias[i] = -np.clip(funding_rate[i] / threshold, 0, 1)
+        elif funding_rate[i] < -threshold:
+            bias[i] = np.clip(-funding_rate[i] / threshold, 0, 1)
         else:
-            filter_val[i] = 1.0
+            bias[i] = 0.0
     
-    return filter_val
+    return bias
 
 
-def calculate_ema_stack_alignment(close: float, ema_fast: float, ema_medium: float, 
-                                   ema_slow: float, ema_major: float) -> float:
+def calculate_trend_direction(close: float, ema_fast: float, ema_medium: float, 
+                              ema_slow: float, ema_major: float) -> float:
     """
-    Calculate EMA stack alignment score.
-    Returns value in [-1, 1] where:
-    - 1 = perfect bullish alignment (fast > medium > slow > major)
-    - -1 = perfect bearish alignment (fast < medium < slow < major)
-    - 0 = mixed/no alignment
+    Calculate trend direction score based on EMA alignment.
+    Returns value in [-1, 1] where sign indicates direction.
     """
     if close <= 0 or ema_major <= 0:
         return 0.0
     
-    # Check bullish alignment
-    bullish_score = 0.0
-    if ema_fast > ema_medium > ema_slow > ema_major:
-        bullish_score = 1.0
-    elif ema_fast > ema_medium > ema_slow:
-        bullish_score = 0.7
-    elif ema_fast > ema_medium:
-        bullish_score = 0.4
-    elif close > ema_major:
-        bullish_score = 0.2
+    # Count bullish alignments
+    bullish_count = 0
+    bearish_count = 0
     
-    # Check bearish alignment
-    bearish_score = 0.0
-    if ema_fast < ema_medium < ema_slow < ema_major:
-        bearish_score = 1.0
-    elif ema_fast < ema_medium < ema_slow:
-        bearish_score = 0.7
-    elif ema_fast < ema_medium:
-        bearish_score = 0.4
-    elif close < ema_major:
-        bearish_score = 0.2
-    
-    # Return net alignment
-    alignment = bullish_score - bearish_score
-    
-    # Scale by deviation from major EMA
-    deviation = (close - ema_major) / ema_major
-    alignment *= np.clip(abs(deviation) * 50, 0.5, 2.0)
-    
-    return np.clip(alignment, -1.0, 1.0)
-
-
-def determine_regime(adx: float, bb_width: float, adx_trend: float, 
-                     bb_squeeze: float) -> str:
-    """
-    Determine market regime based on ADX and Bollinger Band width.
-    Returns: 'trending' or 'ranging'
-    """
-    is_squeeze = bb_width < bb_squeeze
-    is_trending = adx >= adx_trend
-    
-    if is_trending and not is_squeeze:
-        return 'trending'
-    elif is_squeeze:
-        return 'ranging'  # Squeeze suggests consolidation
-    elif adx < adx_trend * 0.8:
-        return 'ranging'
+    if ema_fast > ema_medium:
+        bullish_count += 1
     else:
-        return 'trending'
+        bearish_count += 1
+        
+    if ema_medium > ema_slow:
+        bullish_count += 1
+    else:
+        bearish_count += 1
+        
+    if ema_slow > ema_major:
+        bullish_count += 1
+    else:
+        bearish_count += 1
+    
+    if close > ema_major:
+        bullish_count += 1
+    else:
+        bearish_count += 1
+    
+    # Net direction
+    net = bullish_count - bearish_count
+    direction = net / 4.0  # Normalize to [-1, 1]
+    
+    return direction
 
 
 # =============================================================================
@@ -390,17 +403,16 @@ def determine_regime(adx: float, bb_width: float, adx_trend: float,
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Adaptive Regime Trend V4 Strategy.
+    Adaptive Regime Trend V5 Strategy.
     
     Signal Logic:
-    1. Calculate regime (trending vs ranging)
-    2. Apply regime-specific logic
-    3. EMA stack alignment for trend confirmation
-    4. RSI for mean reversion in ranging markets
-    5. Volume percentile for breakout confirmation
-    6. Funding rate filter (reduce position against extreme funding)
-    7. MACD histogram for momentum confirmation
-    8. Signal smoothing with momentum-based hysteresis
+    1. Calculate regime confidence (trending vs ranging)
+    2. Trending: Follow EMA stack direction with MACD confirmation
+    3. Ranging: RSI mean reversion with Bollinger Band support
+    4. Funding rate as mean reversion overlay
+    5. Taker ratio for market pressure confirmation
+    6. Volatility-adaptive position sizing
+    7. Signal smoothing with hysteresis
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, funding_rate, ...]
@@ -418,7 +430,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         low = prices["low"].values.astype(np.float64)
         volume = prices["volume"].values.astype(np.float64)
         
-        # Try to get funding rate if available
         try:
             funding_rate = prices["funding_rate"].values.astype(np.float64)
             funding_rate = np.nan_to_num(funding_rate, nan=0.0)
@@ -451,8 +462,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     bb_upper, bb_middle, bb_lower, bb_width = calculate_bollinger_bands(close, BB_PERIOD, BB_STD)
     macd_line, macd_signal, macd_hist = calculate_macd(close, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
     
-    volume_pct = calculate_volume_percentile(volume, VOLUME_LOOKBACK)
-    funding_filter = calculate_funding_filter(funding_rate, FUNDING_EXTREME_THRESHOLD)
+    volume_ratio = calculate_volume_spike(volume, VOLUME_LOOKBACK)
+    taker_ratio = calculate_taker_ratio(prices, TAKER_RATIO_LOOKBACK)
+    funding_bias = calculate_funding_bias(funding_rate, FUNDING_EXTREME_THRESHOLD)
     
     # Determine minimum valid index
     min_valid_index = max(
@@ -462,14 +474,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         ADX_PERIOD * 2 + 1,
         VOLUME_LOOKBACK,
         BB_PERIOD,
-        MACD_SLOW + MACD_SIGNAL
+        MACD_SLOW + MACD_SIGNAL,
+        TAKER_RATIO_LOOKBACK
     )
     
     # Track previous signal for smoothing and hysteresis
     prev_signal = 0.0
     prev_direction = 0  # 0=neutral, 1=long, -1=short
-    prev_regime = 'ranging'
-    regime_memory = ['ranging'] * REGIME_MEMORY  # Track recent regimes
     
     # Generate signals
     for i in range(min_valid_index, n):
@@ -489,48 +500,65 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             continue
         
         # Determine regime
-        regime = determine_regime(adx[i], bb_width[i], ADX_TREND_THRESHOLD, BB_SQUEEZE_THRESHOLD)
+        is_trending = adx[i] >= ADX_TREND_THRESHOLD
+        is_squeeze = bb_width[i] < BB_SQUEEZE_THRESHOLD
         
-        # Update regime memory
-        regime_memory.pop(0)
-        regime_memory.append(regime)
-        recent_trending = sum(1 for r in regime_memory if r == 'trending') / REGIME_MEMORY
-        
-        # Calculate EMA stack alignment (trend strength)
-        ema_alignment = calculate_ema_stack_alignment(
+        # Calculate trend direction
+        trend_dir = calculate_trend_direction(
             close[i], ema_fast[i], ema_medium[i],
             ema_slow[i], ema_major[i]
         )
         
-        # Volume confirmation (high percentile = strong volume)
-        volume_confirmed = volume_pct[i] >= (VOLUME_SPIKE_PERCENTILE / 100.0)
+        # Volume confirmation
+        volume_confirmed = volume_ratio[i] >= VOLUME_SPIKE_THRESHOLD
+        
+        # Taker pressure signal
+        taker_signal = 0.0
+        if taker_ratio[i] > TAKER_RATIO_THRESHOLD:
+            taker_signal = 0.3  # Bullish pressure
+        elif taker_ratio[i] < (1.0 - TAKER_RATIO_THRESHOLD):
+            taker_signal = -0.3  # Bearish pressure
         
         # Initialize raw signal
         raw_signal = 0.0
+        regime_weight = 0.0
         
         # TRENDING REGIME
-        if regime == 'trending':
-            # Base signal from EMA alignment
-            raw_signal = ema_alignment
+        if is_trending and not is_squeeze:
+            regime_weight = MIN_SIGNAL_TRENDING
             
-            # MACD momentum confirmation
-            macd_momentum = np.sign(macd_hist[i]) * np.clip(abs(macd_hist[i]) / (close[i] * 0.001), 0, 1)
-            raw_signal *= (0.6 + 0.4 * (0.5 + 0.5 * macd_momentum))
+            # Base signal from trend direction
+            raw_signal = trend_dir
             
-            # Volume boost for trend confirmation
-            if volume_confirmed:
+            # Amplify in strong trends
+            if adx[i] >= ADX_STRONG_THRESHOLD:
                 raw_signal *= 1.15
             
-            # Apply funding filter
-            raw_signal *= funding_filter[i]
+            # MACD confirmation
+            macd_conf = np.sign(macd_hist[i])
+            if np.sign(trend_dir) == macd_conf:
+                raw_signal *= 1.1  # Confirming
+            else:
+                raw_signal *= 0.85  # Diverging
             
-            # Minimum signal threshold
-            if abs(raw_signal) < MIN_SIGNAL_TRENDING:
-                raw_signal = 0.0
+            # Volume boost
+            if volume_confirmed:
+                raw_signal *= 1.1
+            
+            # Taker ratio confirmation
+            if np.sign(trend_dir) == np.sign(taker_signal):
+                raw_signal += taker_signal * 0.3
+            
+            # Apply funding bias (reduce position if funding opposes trend)
+            if abs(funding_bias[i]) > 0.3:
+                if np.sign(trend_dir) != np.sign(funding_bias[i]):
+                    raw_signal *= (1.0 - FUNDING_BIAS_WEIGHT)
         
-        # RANGING REGIME
-        else:
-            # RSI-based mean reversion signal
+        # RANGING REGIME (mean reversion)
+        elif not is_trending:
+            regime_weight = MIN_SIGNAL_RANGING
+            
+            # RSI-based mean reversion
             if rsi[i] < RSI_OVERSOLD:
                 raw_signal = 0.5  # Long signal
             elif rsi[i] > RSI_OVERBOUGHT:
@@ -544,15 +572,34 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             elif rsi[i] > RSI_EXTREME_HIGH:
                 raw_signal = -0.65
             
-            # Apply funding filter (mean reversion benefit)
-            raw_signal *= funding_filter[i]
+            # Bollinger Band confirmation
+            if raw_signal > 0 and close[i] < bb_lower[i]:
+                raw_signal *= 1.15  # Price below lower band, stronger long
+            elif raw_signal < 0 and close[i] > bb_upper[i]:
+                raw_signal *= 1.15  # Price above upper band, stronger short
             
-            # Reduce if trend is fighting mean reversion
-            if abs(ema_alignment) > 0.4:
-                raw_signal *= 0.5
+            # Apply funding bias (enhance mean reversion)
+            if abs(funding_bias[i]) > 0.3:
+                if np.sign(raw_signal) == np.sign(funding_bias[i]):
+                    raw_signal *= (1.0 + FUNDING_BIAS_WEIGHT)
             
-            # Minimum signal threshold
-            if abs(raw_signal) < MIN_SIGNAL_RANGING:
+            # Taker ratio for entry timing
+            if raw_signal > 0 and taker_signal > 0:
+                raw_signal += taker_signal * 0.2
+            elif raw_signal < 0 and taker_signal < 0:
+                raw_signal += taker_signal * 0.2
+        
+        # SQUEEZE REGIME (wait for breakout)
+        else:
+            # Squeeze with trending ADX = potential breakout
+            regime_weight = MIN_SIGNAL_TRENDING * 0.5
+            
+            # Wait for directional confirmation
+            if trend_dir > 0.3 and volume_confirmed:
+                raw_signal = trend_dir * 0.6
+            elif trend_dir < -0.3 and volume_confirmed:
+                raw_signal = trend_dir * 0.6
+            else:
                 raw_signal = 0.0
         
         # Volatility-based position sizing (inverse relationship)
@@ -564,22 +611,15 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         # Apply exponential smoothing
         smoothed_signal = SMOOTHING_FACTOR * prev_signal + (1.0 - SMOOTHING_FACTOR) * raw_signal
         
-        # Apply momentum-based hysteresis
+        # Apply hysteresis to reduce flipping
         current_direction = np.sign(smoothed_signal)
         if current_direction != 0 and current_direction != prev_direction:
-            # Check if signal change exceeds hysteresis threshold
-            signal_change = abs(smoothed_signal - prev_signal)
-            if signal_change < HYSTERESIS_THRESHOLD:
-                smoothed_signal = prev_signal  # Keep previous direction
+            if abs(smoothed_signal - prev_signal) < HYSTERESIS_THRESHOLD:
+                smoothed_signal = prev_signal
         
-        # Apply funding rate directional filter
-        # If funding is extreme positive, reduce long signals
-        # If funding is extreme negative, reduce short signals
-        if abs(funding_rate[i]) > FUNDING_EXTREME_THRESHOLD:
-            if funding_rate[i] > 0 and smoothed_signal > 0:
-                smoothed_signal *= 0.6  # Reduce long when funding is positive
-            elif funding_rate[i] < 0 and smoothed_signal < 0:
-                smoothed_signal *= 0.6  # Reduce short when funding is negative
+        # Apply minimum signal threshold based on regime
+        if abs(smoothed_signal) < regime_weight:
+            smoothed_signal = 0.0
         
         # Clip to valid range
         signal = np.clip(smoothed_signal, -MAX_SIGNAL, MAX_SIGNAL)
@@ -587,6 +627,5 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         signals[i] = signal
         prev_signal = signal
         prev_direction = np.sign(signal)
-        prev_regime = regime
     
     return signals
