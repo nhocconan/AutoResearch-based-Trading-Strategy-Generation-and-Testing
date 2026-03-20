@@ -1,96 +1,86 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #002 - HMA Crossover(4h) Trend Following Strategy
-=============================================================
-Hypothesis: Hull Moving Average (HMA) reduces lag compared to EMA while maintaining
-smoothness. HMA(16)/HMA(48) crossover on 4h should capture trends faster than EMA(21/55)
-baseline, potentially improving Sharpe ratio. HMA's weighted calculation responds quicker
-to price changes while filtering noise better than simple MA crossovers.
+EXPERIMENT #003 - RSI Mean Reversion + SMA200 Trend Filter (1h)
+================================================================
+Hypothesis: RSI extremes combined with SMA200 trend filter will capture pullbacks 
+in strong trends while avoiding counter-trend trades. This differs from Supertrend 
+by entering on mean reversion within trends rather than trend breakouts.
 
-Key differences from baseline:
-- HMA reduces lag vs EMA (faster trend detection)
-- Same 4h timeframe as Supertrend #001 (cleaner trends)
-- Discrete signal levels (0.0, ±0.35) to minimize churning costs
-- Conservative 35% position sizing for drawdown control
+Why this should beat Supertrend 4h (Sharpe=0.197):
+- Enters on pullbacks (better entry prices) vs breakout entries
+- SMA200 filter avoids counter-trend trades in ranging markets
+- 1h timeframe = more opportunities than 4h while avoiding 5m/15m noise
+- Discrete signal levels minimize churning costs
+
+Key implementation:
+- RSI(14) < 30 + price > SMA200 → Long (oversold in uptrend)
+- RSI(14) > 70 + price < SMA200 → Short (overbought in downtrend)
+- Signal = 0.0 when no clear setup (avoids whipsaw costs)
+- Position size = 0.35 (same as baseline for DD control)
 """
 
 import numpy as np
 import pandas as pd
 
-name = "hma_crossover_4h_v1"
-timeframe = "4h"
+name = "rsi_sma200_1h_v1"
+timeframe = "1h"
 leverage = 1.0
-
-
-def wma(x, n):
-    """Calculate Weighted Moving Average"""
-    weights = np.arange(1, n + 1)
-    wma_val = np.convolve(x, weights / weights.sum(), mode='valid')
-    # Pad beginning with NaN to match input length
-    padding = np.full(n - 1, np.nan)
-    return np.concatenate([padding, wma_val])
-
-
-def hma(x, n):
-    """Calculate Hull Moving Average"""
-    if len(x) < n:
-        return np.full(len(x), np.nan)
-    
-    # WMA(n/2)
-    wma_half = wma(x, n // 2)
-    # WMA(n)
-    wma_full = wma(x, n)
-    
-    # 2*WMA(n/2) - WMA(n)
-    diff = 2 * wma_half - wma_full
-    
-    # WMA of diff with sqrt(n)
-    sqrt_n = int(np.sqrt(n))
-    if sqrt_n < 1:
-        sqrt_n = 1
-    
-    hma_val = wma(diff, sqrt_n)
-    return hma_val
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     n = len(close)
     
-    if n < 100:
-        return np.zeros(n)
+    # Calculate SMA(200) with proper min_periods
+    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
     
-    # Calculate HMA(16) and HMA(48)
-    hma_fast = hma(close, 16)
-    hma_slow = hma(close, 48)
+    # Calculate RSI(14) with proper formula
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    # Determine crossover signals
+    # Rolling mean of gains and losses
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate RS and RSI
+    rs = np.zeros(n)
+    rsi = np.zeros(n)
+    
+    for i in range(n):
+        if avg_loss[i] == 0:
+            rs[i] = 100.0
+        else:
+            rs[i] = avg_gain[i] / avg_loss[i]
+        rsi[i] = 100.0 - (100.0 / (1.0 + rs[i]))
+    
+    # Generate signals with discrete position sizing
     signals = np.zeros(n)
     SIZE = 0.35  # 35% position size - critical for drawdown control
     
-    # Track previous signal to avoid excessive churning
-    prev_signal = 0.0
+    # RSI thresholds
+    RSI_OVERSOLD = 30.0
+    RSI_OVERBOUGHT = 70.0
     
-    for i in range(n):
-        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
+    # Only trade after both indicators are valid
+    first_valid = max(200, 14)
+    
+    for i in range(first_valid, n):
+        # Check for valid SMA200
+        if np.isnan(sma200[i]):
             signals[i] = 0.0
             continue
         
-        # Generate raw signal based on crossover
-        if hma_fast[i] > hma_slow[i]:
-            raw_signal = SIZE
-        elif hma_fast[i] < hma_slow[i]:
-            raw_signal = -SIZE
-        else:
-            raw_signal = 0.0
+        # Long setup: RSI oversold AND price above SMA200 (uptrend)
+        if rsi[i] < RSI_OVERSOLD and close[i] > sma200[i]:
+            signals[i] = SIZE
         
-        # Only change signal if there's a meaningful crossover
-        # This reduces churning and fees
-        if raw_signal != prev_signal:
-            # Confirm signal persists for at least 1 bar (already satisfied by using current bar)
-            signals[i] = raw_signal
-            prev_signal = raw_signal
+        # Short setup: RSI overbought AND price below SMA200 (downtrend)
+        elif rsi[i] > RSI_OVERBOUGHT and close[i] < sma200[i]:
+            signals[i] = -SIZE
+        
+        # Otherwise flat (avoid whipsaw costs)
         else:
-            signals[i] = prev_signal
+            signals[i] = 0.0
     
     return signals
