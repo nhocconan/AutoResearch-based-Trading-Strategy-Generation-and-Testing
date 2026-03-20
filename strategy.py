@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Bollinger Mean Reversion with Trend Filter
+strategy.py - Volatility Breakout with Momentum Confirmation
 =======================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,15 +11,12 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Mean reversion strategy with trend filter for crypto perpetuals.
-    - Use Bollinger Bands to identify overextended prices
-    - RSI confirms overbought/oversold conditions
-    - Longer EMA filters trade direction (only trade with trend)
-    - Volume confirms reversal validity
-    
-    Rationale: Crypto markets often overshoot then revert. Pure trend
-    following failed in experiments #002-#006. This tests mean reversion
-    with trend alignment to avoid catching falling knives.
+    Volatility breakout strategy with momentum and volume confirmation.
+    - Detect Bollinger Band squeeze (low volatility periods)
+    - Enter on breakout with volume confirmation
+    - Filter by longer-term trend direction (200 EMA)
+    - Use ADX to avoid choppy markets
+    - ATR-based position sizing for volatility adjustment
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -34,56 +31,48 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "bb_mean_reversion_trend_filter"
+name = "volatility_breakout_momentum"
 timeframe = "1h"
-leverage = 2.0  # Conservative leverage for mean reversion
+leverage = 2.0  # Conservative leverage for breakout strategy
 
-# Bollinger Band parameters
-BB_PERIOD = 20              # Rolling window for BB
-BB_STD_MULT = 2.0           # Standard deviation multiplier
-
-# RSI parameters
-RSI_PERIOD = 14             # RSI calculation period
-RSI_OVERBOUGHT = 70         # Overbought threshold
-RSI_OVERSOLD = 30           # Oversold threshold
-
-# Trend filter parameters
-TREND_EMA_PERIOD = 50       # Longer EMA for trend direction
-TREND_STRENGTH_MIN = 0.001  # Minimum trend strength to trade
-
-# Volume confirmation
+# Strategy parameters
+BB_PERIOD = 20              # Bollinger Bands period
+BB_STD = 2.0                # Bollinger Bands standard deviations
+SQUEEZE_THRESHOLD = 0.5     # BB width percentile for squeeze detection
+MOMENTUM_PERIOD = 10        # Rate of Change period
 VOLUME_LOOKBACK = 20        # Lookback for volume average
-VOLUME_THRESHOLD = 1.2      # Minimum volume ratio to confirm
-
-# Signal parameters
-MIN_SIGNAL_MAGNITUDE = 0.3  # Minimum signal to execute trade
-MAX_SIGNAL = 1.0            # Maximum signal magnitude
+VOLUME_THRESHOLD = 1.3      # Volume spike multiplier
+TREND_EMA = 200             # Long-term trend filter EMA
+ADX_PERIOD = 14             # ADX calculation period
+ADX_MIN = 20                # Minimum ADX for trending market
+ATR_PERIOD = 14             # ATR calculation period
+MIN_SIGNAL = 0.25           # Minimum signal magnitude to trade
 
 
 # =============================================================================
-# Helper Functions
+# Technical Indicator Calculations
 # =============================================================================
 
-def calculate_sma(data: np.ndarray, period: int) -> np.ndarray:
+def calculate_sma(close: np.ndarray, period: int) -> np.ndarray:
     """
     Calculate Simple Moving Average using only past data.
     
     Args:
-        data: Array of values
+        close: Array of close prices
         period: SMA period
     
     Returns:
         Array of SMA values
     """
-    n = len(data)
+    n = len(close)
     sma = np.zeros(n, dtype=np.float64)
     
     if n < period:
         return sma
     
-    # Calculate SMA for each position
+    # Calculate SMA using rolling window
     for i in range(period - 1, n):
-        sma[i] = np.mean(data[i - period + 1:i + 1])
+        sma[i] = np.mean(close[i - period + 1:i + 1])
     
     return sma
 
@@ -118,111 +107,36 @@ def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
     return ema
 
 
-def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_mult: float = 2.0) -> tuple:
+def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_dev: float = 2.0) -> tuple:
     """
     Calculate Bollinger Bands using only past data.
     
     Args:
         close: Array of close prices
-        period: Rolling window period
-        std_mult: Standard deviation multiplier
+        period: BB period
+        std_dev: Standard deviation multiplier
     
     Returns:
-        Tuple of (upper_band, middle_band, lower_band)
+        Tuple of (upper, middle, lower, bandwidth) arrays
     """
     n = len(close)
     upper = np.zeros(n, dtype=np.float64)
     middle = np.zeros(n, dtype=np.float64)
     lower = np.zeros(n, dtype=np.float64)
+    bandwidth = np.zeros(n, dtype=np.float64)
     
     if n < period:
-        return upper, middle, lower
+        return upper, middle, lower, bandwidth
     
     for i in range(period - 1, n):
         window = close[i - period + 1:i + 1]
         middle[i] = np.mean(window)
         std = np.std(window, ddof=0)
-        upper[i] = middle[i] + std_mult * std
-        lower[i] = middle[i] - std_mult * std
+        upper[i] = middle[i] + std_dev * std
+        lower[i] = middle[i] - std_dev * std
+        bandwidth[i] = (upper[i] - lower[i]) / middle[i] if middle[i] > 0 else 0
     
-    return upper, middle, lower
-
-
-def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
-    """
-    Calculate Relative Strength Index using only past data.
-    
-    Args:
-        close: Array of close prices
-        period: RSI period
-    
-    Returns:
-        Array of RSI values (0-100)
-    """
-    n = len(close)
-    rsi = np.zeros(n, dtype=np.float64)
-    
-    if n < period + 1:
-        return rsi
-    
-    # Calculate price changes
-    delta = np.zeros(n, dtype=np.float64)
-    for i in range(1, n):
-        delta[i] = close[i] - close[i-1]
-    
-    # Separate gains and losses
-    gains = np.where(delta > 0, delta, 0.0)
-    losses = np.where(delta < 0, -delta, 0.0)
-    
-    # Calculate average gains and losses using EMA-like smoothing
-    avg_gain = np.zeros(n, dtype=np.float64)
-    avg_loss = np.zeros(n, dtype=np.float64)
-    
-    # Initialize with SMA
-    avg_gain[period] = np.mean(gains[1:period+1])
-    avg_loss[period] = np.mean(losses[1:period+1])
-    
-    # Calculate RSI for remaining periods
-    for i in range(period + 1, n):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gains[i]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + losses[i]) / period
-    
-    # Calculate RS and RSI
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-    
-    return rsi
-
-
-def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
-    """
-    Calculate volume ratio relative to rolling average.
-    Only uses past volume data (no look-ahead).
-    
-    Args:
-        volume: Array of volume values
-        lookback: Rolling window for average calculation
-    
-    Returns:
-        Array of volume ratios
-    """
-    n = len(volume)
-    volume_ratio = np.ones(n, dtype=np.float64)
-    
-    if n < lookback:
-        return volume_ratio
-    
-    for i in range(lookback - 1, n):
-        window = volume[i - lookback + 1:i + 1]
-        avg_volume = np.mean(window)
-        if avg_volume > 0:
-            volume_ratio[i] = volume[i] / avg_volume
-    
-    return volume_ratio
+    return upper, middle, lower, bandwidth
 
 
 def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
@@ -265,24 +179,201 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     return atr
 
 
+def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+    """
+    Calculate Relative Strength Index using only past data.
+    
+    Args:
+        close: Array of close prices
+        period: RSI period
+    
+    Returns:
+        Array of RSI values (0-100)
+    """
+    n = len(close)
+    rsi = np.zeros(n, dtype=np.float64)
+    
+    if n < period + 1:
+        return rsi
+    
+    # Calculate price changes
+    delta = np.diff(close)
+    
+    # Separate gains and losses
+    gains = np.zeros(n, dtype=np.float64)
+    losses = np.zeros(n, dtype=np.float64)
+    
+    for i in range(1, n):
+        if delta[i-1] > 0:
+            gains[i] = delta[i-1]
+        else:
+            losses[i] = -delta[i-1]
+    
+    # Calculate average gains and losses using EMA
+    avg_gain = np.zeros(n, dtype=np.float64)
+    avg_loss = np.zeros(n, dtype=np.float64)
+    
+    # Initialize with SMA
+    avg_gain[period] = np.mean(gains[1:period+1])
+    avg_loss[period] = np.mean(losses[1:period+1])
+    
+    # Calculate using Wilder's smoothing
+    for i in range(period + 1, n):
+        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gains[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period - 1) + losses[i]) / period
+    
+    # Calculate RSI
+    for i in range(period, n):
+        if avg_loss[i] == 0:
+            rsi[i] = 100.0
+        else:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+    
+    return rsi
+
+
+def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    """
+    Calculate Average Directional Index using only past data.
+    
+    Args:
+        high: Array of high prices
+        low: Array of low prices
+        close: Array of close prices
+        period: ADX period
+    
+    Returns:
+        Array of ADX values (0-100)
+    """
+    n = len(close)
+    adx = np.zeros(n, dtype=np.float64)
+    
+    if n < period * 2:
+        return adx
+    
+    # Calculate True Range
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
+    
+    # Calculate Directional Movement
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
+    
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    # Smooth TR, +DM, -DM using Wilder's method
+    atr = np.zeros(n, dtype=np.float64)
+    plus_di = np.zeros(n, dtype=np.float64)
+    minus_di = np.zeros(n, dtype=np.float64)
+    
+    # Initialize with SMA
+    atr[period-1] = np.mean(tr[:period])
+    plus_di[period-1] = 100 * np.mean(plus_dm[:period]) / atr[period-1] if atr[period-1] > 0 else 0
+    minus_di[period-1] = 100 * np.mean(minus_dm[:period]) / atr[period-1] if atr[period-1] > 0 else 0
+    
+    # Smooth using Wilder's method
+    for i in range(period, n):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+        plus_di[i] = 100 * ((plus_di[i-1] * (period - 1) / 100) * (period - 1) + plus_dm[i]) / period / atr[i] if atr[i] > 0 else 0
+        minus_di[i] = 100 * ((minus_di[i-1] * (period - 1) / 100) * (period - 1) + minus_dm[i]) / period / atr[i] if atr[i] > 0 else 0
+    
+    # Calculate DX and ADX
+    dx = np.zeros(n, dtype=np.float64)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    # Smooth DX to get ADX
+    adx[period*2-1] = np.mean(dx[period:period*2])
+    for i in range(period*2, n):
+        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    
+    return adx
+
+
+def calculate_momentum(close: np.ndarray, period: int = 10) -> np.ndarray:
+    """
+    Calculate Rate of Change (momentum) using only past data.
+    
+    Args:
+        close: Array of close prices
+        period: Momentum period
+    
+    Returns:
+        Array of momentum values (percentage)
+    """
+    n = len(close)
+    momentum = np.zeros(n, dtype=np.float64)
+    
+    if n < period + 1:
+        return momentum
+    
+    for i in range(period, n):
+        if close[i - period] > 0:
+            momentum[i] = (close[i] - close[i - period]) / close[i - period] * 100
+    
+    return momentum
+
+
+def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
+    """
+    Calculate volume ratio relative to rolling average.
+    Only uses past volume data (no look-ahead).
+    
+    Args:
+        volume: Array of volume values
+        lookback: Rolling window for average calculation
+    
+    Returns:
+        Array of volume ratios
+    """
+    n = len(volume)
+    volume_ratio = np.ones(n, dtype=np.float64)
+    
+    if n < lookback:
+        return volume_ratio
+    
+    for i in range(lookback - 1, n):
+        avg_volume = np.mean(volume[i - lookback + 1:i + 1])
+        if avg_volume > 0:
+            volume_ratio[i] = volume[i] / avg_volume
+    
+    return volume_ratio
+
+
 # =============================================================================
 # Signal Generation
 # =============================================================================
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Bollinger Band Mean Reversion with Trend Filter Strategy.
+    Volatility Breakout Strategy with Momentum Confirmation.
     
     Signal Logic:
-    1. Calculate Bollinger Bands for overextension detection
-    2. Calculate RSI for overbought/oversold confirmation
-    3. Calculate trend EMA for direction filter
-    4. Calculate volume ratio for confirmation
-    5. Generate mean reversion signals aligned with trend
+    1. Detect Bollinger Band squeeze (low volatility)
+    2. Wait for breakout above/below bands
+    3. Confirm with volume spike and momentum
+    4. Filter by long-term trend (200 EMA)
+    5. Filter by ADX (avoid choppy markets)
     
     Entry Conditions:
-    - LONG: Price < Lower BB AND RSI < Oversold AND Price > Trend EMA
-    - SHORT: Price > Upper BB AND RSI > Overbought AND Price < Trend EMA
+    - LONG: Price breaks above BB upper + volume spike + momentum positive + trend up
+    - SHORT: Price breaks below BB lower + volume spike + momentum negative + trend down
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -314,106 +405,113 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     high = np.where(high <= 0, close, high)
     low = np.where(low <= 0, close * 0.99, low)
     
-    # Calculate Bollinger Bands
-    bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(
-        close, BB_PERIOD, BB_STD_MULT
-    )
-    
-    # Calculate RSI
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    
-    # Calculate trend EMA
-    trend_ema = calculate_ema(close, TREND_EMA_PERIOD)
-    
-    # Calculate volume ratio
+    # Calculate all technical indicators
+    ema_trend = calculate_ema(close, TREND_EMA)
+    bb_upper, bb_middle, bb_lower, bb_bandwidth = calculate_bollinger_bands(close, BB_PERIOD, BB_STD)
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    momentum = calculate_momentum(close, MOMENTUM_PERIOD)
     volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
+    adx = calculate_adx(high, low, close, ADX_PERIOD)
+    rsi = calculate_rsi(close, 14)
     
-    # Calculate ATR for volatility adjustment
-    atr = calculate_atr(high, low, close, 14)
+    # Calculate bandwidth percentile for squeeze detection
+    # Use rolling percentile of bandwidth over last 100 bars
+    bandwidth_percentile = np.zeros(n, dtype=np.float64)
+    lookback_pct = 100
+    for i in range(lookback_pct - 1, n):
+        window = bb_bandwidth[i - lookback_pct + 1:i + 1]
+        sorted_window = np.sort(window)
+        rank = np.searchsorted(sorted_window, bb_bandwidth[i])
+        bandwidth_percentile[i] = rank / len(sorted_window)
     
-    # Calculate bandwidth for regime detection
-    bandwidth = np.zeros(n, dtype=np.float64)
-    for i in range(BB_PERIOD - 1, n):
-        if bb_middle[i] > 0:
-            bandwidth[i] = (bb_upper[i] - bb_lower[i]) / bb_middle[i]
-    
-    # Determine minimum valid index
+    # Determine minimum valid index (need enough data for all indicators)
     min_valid_index = max(
-        BB_PERIOD,
-        RSI_PERIOD + 1,
-        TREND_EMA_PERIOD,
+        TREND_EMA,
+        BB_PERIOD + BB_PERIOD,  # Need extra for ADX calculation
+        ATR_PERIOD + 1,
+        MOMENTUM_PERIOD,
         VOLUME_LOOKBACK,
-        15  # ATR period
+        ADX_PERIOD * 2,
+        lookback_pct
     )
     
     # Generate signals
     for i in range(min_valid_index, n):
         # Skip if any required data is invalid
-        if close[i] <= 0 or bb_middle[i] <= 0:
+        if close[i] <= 0 or atr[i] <= 0 or ema_trend[i] <= 0:
             signals[i] = 0.0
             continue
         
-        # Price position relative to Bollinger Bands
-        price_position = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i])
-        price_position = np.clip(price_position, 0.0, 1.0)
+        # Trend filter: price above/below 200 EMA
+        trend_bullish = close[i] > ema_trend[i] * 1.002  # Small buffer
+        trend_bearish = close[i] < ema_trend[i] * 0.998
         
-        # Distance from middle band (normalized)
-        dist_from_middle = (close[i] - bb_middle[i]) / bb_middle[i]
+        # Volatility squeeze detection (low bandwidth percentile)
+        is_squeeze = bandwidth_percentile[i] < SQUEEZE_THRESHOLD
         
-        # Trend direction
-        price_above_trend = close[i] > trend_ema[i]
-        price_below_trend = close[i] < trend_ema[i]
-        
-        # Trend strength (distance from EMA normalized)
-        trend_strength = abs(close[i] - trend_ema[i]) / close[i]
-        
-        # RSI conditions
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Breakout detection
+        breakout_long = close[i] > bb_upper[i]
+        breakout_short = close[i] < bb_lower[i]
         
         # Volume confirmation
         volume_confirmed = volume_ratio[i] >= VOLUME_THRESHOLD
         
-        # Calculate base signal from mean reversion logic
-        raw_signal = 0.0
+        # Momentum confirmation
+        momentum_strong_long = momentum[i] > 0.5  # Positive momentum
+        momentum_strong_short = momentum[i] < -0.5  # Negative momentum
         
-        # LONG signal: Price at lower band, RSI oversold, above trend EMA
-        if price_position < 0.2 and rsi_oversold and price_above_trend:
-            # Stronger signal when deeper in oversold territory
-            signal_strength = (1.0 - price_position) * (RSI_OVERSOLD - rsi[i]) / RSI_OVERSOLD
-            raw_signal = signal_strength
+        # ADX filter (trending market, not choppy)
+        trend_market = adx[i] >= ADX_MIN
         
-        # SHORT signal: Price at upper band, RSI overbought, below trend EMA
-        elif price_position > 0.8 and rsi_overbought and price_below_trend:
-            # Stronger signal when deeper in overbought territory
-            signal_strength = price_position * (rsi[i] - RSI_OVERBOUGHT) / (100 - RSI_OVERBOUGHT)
-            raw_signal = -signal_strength
+        # RSI filter (avoid overbought/oversold extremes for entries)
+        rsi_ok_long = rsi[i] < 75  # Not extremely overbought
+        rsi_ok_short = rsi[i] > 25  # Not extremely oversold
         
-        # Skip if no clear signal
-        if raw_signal == 0.0:
-            signals[i] = 0.0
-            continue
+        # Calculate base signal strength
+        signal_strength = 0.0
         
-        # Apply volume confirmation (reduce signal if volume low)
-        if not volume_confirmed:
-            raw_signal *= 0.5
+        # Long signal conditions
+        if breakout_long and trend_bullish and volume_confirmed and momentum_strong_long and rsi_ok_long:
+            # Stronger signal if coming from squeeze
+            if is_squeeze:
+                signal_strength = 0.8
+            else:
+                signal_strength = 0.5
+            
+            # Add momentum component
+            signal_strength += min(abs(momentum[i]) / 5.0, 0.2)
         
-        # Apply trend strength filter (only trade if trend is clear)
-        if trend_strength < TREND_STRENGTH_MIN:
-            raw_signal *= 0.3
+        # Short signal conditions
+        elif breakout_short and trend_bearish and volume_confirmed and momentum_strong_short and rsi_ok_short:
+            # Stronger signal if coming from squeeze
+            if is_squeeze:
+                signal_strength = -0.8
+            else:
+                signal_strength = -0.5
+            
+            # Add momentum component
+            signal_strength -= min(abs(momentum[i]) / 5.0, 0.2)
+        
+        # Apply ADX filter (reduce signal in choppy markets)
+        if not trend_market:
+            signal_strength *= 0.3
         
         # Volatility adjustment (reduce position in very high volatility)
-        if atr[i] > 0:
-            atr_pct = atr[i] / close[i]
-            # Typical 1h ATR% is 0.5-2%, reduce position if > 3%
-            if atr_pct > 0.03:
-                raw_signal *= 0.5
+        atr_pct = atr[i] / close[i]
+        vol_factor = 1.0
+        if atr_pct > 0:
+            # Typical 1h ATR% is 0.5-2%, scale inversely
+            vol_factor = min(1.0, 0.02 / max(atr_pct, 0.001))
+        
+        signal_strength *= vol_factor
         
         # Apply minimum signal threshold
-        if abs(raw_signal) < MIN_SIGNAL_MAGNITUDE:
-            signals[i] = 0.0
-        else:
-            # Clip to [-1, 1]
-            signals[i] = np.clip(raw_signal, -MAX_SIGNAL, MAX_SIGNAL)
+        if abs(signal_strength) < MIN_SIGNAL:
+            signal_strength = 0.0
+        
+        # Clip to [-1, 1]
+        signal_strength = np.clip(signal_strength, -1.0, 1.0)
+        
+        signals[i] = signal_strength
     
     return signals
