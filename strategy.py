@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
 """
-strategy.py - ADX Donchian Breakout V15
+strategy.py - HMA Trend Momentum V16
 ====================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
+This file defines the trading strategy. It must expose:
+    - name: str                    - Strategy identifier
+    - timeframe: str               - Primary timeframe (e.g., "4h")
+    - leverage: float              - Leverage multiplier (default 1.0)
+    - generate_signals(prices)     - Signal generation function
+
 Strategy Hypothesis:
-    Combine Donchian channel breakouts with ADX trend strength filter:
-    - Primary signal: Donchian(20) breakout above/below 20-period high/low
-    - Confirmation: ADX(14) > 25 ensures strong trending market
-    - Filter: +DI/-DI crossover confirms direction
-    - Volume: Breakout volume > 1.2x average confirms genuine move
-    - Risk: ATR-based position sizing limits exposure during high vol
+    Hull Moving Average trend-following on 4h timeframe:
+    - HMA(16) vs HMA(48) crossover for trend direction
+    - HMA slope confirmation (rising/falling)
+    - ATR volatility filter to avoid low-vol chop
+    - Price vs HMA(48) position for trend strength
+    - Simple momentum confirmation via ROC(10)
     
-    Why this works:
-    - Donchian channels capture momentum breakouts effectively
-    - ADX filter avoids whipsaws in ranging markets (major failure point of v4)
-    - Volume confirmation reduces false breakouts
-    - 4h timeframe worked well for supertrend (best Sharpe=0.253)
-    - Conservative leverage (1.5x) should keep drawdown < 50%
+    Why this should work better than previous attempts:
+    - HMA has less lag than EMA while maintaining smoothness
+    - 4h timeframe captures sustained trends without noise
+    - Fewer filters than v12-v15 = more actual trades
+    - No funding rate dependency (works across all symbols)
+    - ATR filter avoids whipsaws in low volatility
+    - Conservative leverage (1.5x) for better risk-adjusted returns
     
-    Differences from failed strategies:
-    - v4 (kama_donchian_breakout) had 0 trades - too restrictive
-    - This version relaxes entry filters while adding ADX confirmation
-    - Better warmup handling to ensure signals generate
+    Key improvements over failed strategies:
+    - Simpler signal logic (avoided over-filtering like v12-v15)
+    - No mean-reversion component (crypto trends persist)
+    - Proper HMA calculation (unlike failed hma_regime_hybrid_v1)
+    - Volatility-adjusted position sizing
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -37,56 +45,92 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "adx_donchian_breakout_v15"
+name = "hma_trend_momentum_v16"
 timeframe = "4h"
-leverage = 1.5  # Conservative to control drawdown
+leverage = 1.5  # Conservative for better Sharpe ratio
 
-# Donchian channel configuration
-DONCHIAN_PERIOD = 20  # 20-period high/low for breakout
+# HMA configuration
+HMA_FAST = 16
+HMA_SLOW = 48
+HMA_TREND = 48  # For trend filter
 
-# ADX configuration for trend strength
-ADX_PERIOD = 14
-ADX_THRESHOLD = 22  # Minimum ADX to trade (slightly lower than 25 for more trades)
-DI_THRESHOLD = 5  # Minimum +DI/-DI difference
+# Momentum configuration
+ROC_PERIOD = 10
+ROC_THRESHOLD = 0.02  # 2% momentum threshold
 
-# Volume confirmation
-VOLUME_LOOKBACK = 20
-VOLUME_MIN_RATIO = 1.10  # Breakout volume must be > 1.1x average
-
-# ATR configuration for risk management
+# Volatility configuration
 ATR_PERIOD = 14
-ATR_STOP_MULT = 2.5  # ATR multiplier for trailing stop
-VOLATILITY_TARGET = 0.020  # Target ATR as % of price
-VOLATILITY_MIN = 0.005  # Minimum ATR % to trade
-VOLATILITY_MAX = 0.080  # Maximum ATR % to trade
+ATR_MIN_PCT = 0.005  # Minimum ATR % to trade (avoid low vol)
+ATR_MAX_PCT = 0.080  # Maximum ATR % to trade (avoid extreme vol)
+VOLATILITY_TARGET = 0.020  # Target volatility for position sizing
 
 # Signal configuration
 MIN_SIGNAL_MAGNITUDE = 0.20  # Minimum signal to generate position
-MAX_SIGNAL = 0.80  # Maximum signal magnitude
+MAX_SIGNAL = 0.90  # Maximum signal magnitude
 SIGNAL_SMOOTHING = 0.30  # EMA smoothing factor for signals
-COOLDOWN_PERIOD = 3  # Bars after signal flip before allowing another flip
+TRENGTH_THRESHOLD = 0.15  # Minimum trend strength
+
+# Risk management
+MAX_DRAWDOWN_TARGET = 0.40  # Target max drawdown
 
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
 
-def calculate_donchian_channels(high: np.ndarray, low: np.ndarray, period: int = 20) -> tuple:
+def calculate_wma(close: np.ndarray, period: int) -> np.ndarray:
     """
-    Calculate Donchian channel upper and lower bands.
-    Upper = highest high over last N periods
-    Lower = lowest low over last N periods
-    Only uses past data (no look-ahead).
+    Calculate Weighted Moving Average using only past data.
     """
-    n = len(high)
-    upper = np.zeros(n, dtype=np.float64)
-    lower = np.zeros(n, dtype=np.float64)
+    n = len(close)
+    wma = np.zeros(n, dtype=np.float64)
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
+    if n < period:
+        return wma
     
-    return upper, lower
+    weights = np.arange(1, period + 1, dtype=np.float64)
+    weights = weights / weights.sum()
+    
+    close_series = pd.Series(close)
+    wma_series = close_series.rolling(window=period, min_periods=period).apply(
+        lambda x: np.dot(x, weights), raw=True
+    )
+    
+    wma = np.nan_to_num(wma_series.values, nan=0.0)
+    
+    return wma
+
+
+def calculate_hma(close: np.ndarray, period: int) -> np.ndarray:
+    """
+    Calculate Hull Moving Average using only past data.
+    HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    """
+    n = len(close)
+    hma = np.zeros(n, dtype=np.float64)
+    
+    if n < period:
+        return hma
+    
+    half_period = period // 2
+    if half_period < 1:
+        half_period = 1
+    
+    sqrt_period = int(np.sqrt(period))
+    if sqrt_period < 1:
+        sqrt_period = 1
+    
+    # Calculate WMA(n/2) and WMA(n)
+    wma_half = calculate_wma(close, half_period)
+    wma_full = calculate_wma(close, period)
+    
+    # Calculate 2*WMA(n/2) - WMA(n)
+    diff = 2.0 * wma_half - wma_full
+    
+    # Calculate WMA of the difference with sqrt(n) period
+    hma = calculate_wma(diff, sqrt_period)
+    
+    return hma
 
 
 def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
@@ -109,129 +153,52 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
             abs(low[i] - close[i-1])
         )
     
-    # EMA smoothing for ATR
-    alpha = 1.0 / period
-    atr[period - 1] = np.mean(tr[:period])
+    tr_series = pd.Series(tr)
+    atr_series = tr_series.ewm(span=period, adjust=False, min_periods=period).mean()
     
-    for i in range(period, n):
-        atr[i] = alpha * tr[i] + (1 - alpha) * atr[i - 1]
+    atr = np.nan_to_num(atr_series.values, nan=0.0)
     
     return atr
 
 
-def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> tuple:
+def calculate_roc(close: np.ndarray, period: int = 10) -> np.ndarray:
     """
-    Calculate ADX, +DI, and -DI using only past data.
-    Returns: (adx, plus_di, minus_di)
+    Calculate Rate of Change using only past data.
+    ROC = (close - close[period]) / close[period]
     """
     n = len(close)
-    adx = np.zeros(n, dtype=np.float64)
-    plus_di = np.zeros(n, dtype=np.float64)
-    minus_di = np.zeros(n, dtype=np.float64)
+    roc = np.zeros(n, dtype=np.float64)
     
-    if n < period * 2:
-        return adx, plus_di, minus_di
+    if n < period + 1:
+        return roc
     
-    # Calculate True Range and Directional Movement
-    tr = np.zeros(n, dtype=np.float64)
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
+    close_series = pd.Series(close)
+    roc_series = close_series.pct_change(periods=period)
     
-    tr[0] = high[0] - low[0]
+    roc = np.nan_to_num(roc_series.values, nan=0.0)
     
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
-        
-        if high[i] - high[i-1] > low[i-1] - low[i]:
-            plus_dm[i] = max(0, high[i] - high[i-1])
+    return roc
+
+
+def calculate_hma_slope(hma: np.ndarray, lookback: int = 3) -> np.ndarray:
+    """
+    Calculate HMA slope (rate of change over lookback periods).
+    Positive = rising, Negative = falling.
+    Only uses past HMA values (no look-ahead).
+    """
+    n = len(hma)
+    slope = np.zeros(n, dtype=np.float64)
+    
+    if n < lookback + 1:
+        return slope
+    
+    for i in range(lookback, n):
+        if hma[i-lookback] != 0:
+            slope[i] = (hma[i] - hma[i-lookback]) / hma[i-lookback]
         else:
-            plus_dm[i] = 0
-            
-        if low[i-1] - low[i] > high[i] - high[i-1]:
-            minus_dm[i] = max(0, low[i-1] - low[i])
-        else:
-            minus_dm[i] = 0
+            slope[i] = 0.0
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
-    alpha = 1.0 / period
-    
-    atr_smooth = np.zeros(n, dtype=np.float64)
-    plus_dm_smooth = np.zeros(n, dtype=np.float64)
-    minus_dm_smooth = np.zeros(n, dtype=np.float64)
-    
-    # Initialize with simple average for first period
-    atr_smooth[period - 1] = np.mean(tr[:period])
-    plus_dm_smooth[period - 1] = np.mean(plus_dm[:period])
-    minus_dm_smooth[period - 1] = np.mean(minus_dm[:period])
-    
-    for i in range(period, n):
-        atr_smooth[i] = alpha * tr[i] + (1 - alpha) * atr_smooth[i - 1]
-        plus_dm_smooth[i] = alpha * plus_dm[i] + (1 - alpha) * plus_dm_smooth[i - 1]
-        minus_dm_smooth[i] = alpha * minus_dm[i] + (1 - alpha) * minus_dm_smooth[i - 1]
-    
-    # Calculate +DI and -DI
-    for i in range(period - 1, n):
-        if atr_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / atr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / atr_smooth[i]
-    
-    # Calculate DX and ADX
-    dx = np.zeros(n, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    # Smooth DX to get ADX
-    adx[2 * period - 2] = np.mean(dx[period - 1:2 * period - 1])
-    
-    for i in range(2 * period - 1, n):
-        adx[i] = alpha * dx[i] + (1 - alpha) * adx[i - 1]
-    
-    return adx, plus_di, minus_di
-
-
-def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
-    """
-    Calculate volume ratio vs rolling average.
-    Only uses past volume data (no look-ahead).
-    """
-    n = len(volume)
-    volume_ratio = np.ones(n, dtype=np.float64)
-    
-    if n < lookback:
-        return volume_ratio
-    
-    for i in range(lookback - 1, n):
-        avg_vol = np.mean(volume[i - lookback + 1:i + 1])
-        if avg_vol > 0:
-            volume_ratio[i] = volume[i] / avg_vol
-    
-    return volume_ratio
-
-
-def calculate_ema(data: np.ndarray, period: int) -> np.ndarray:
-    """
-    Calculate Exponential Moving Average using only past data.
-    """
-    n = len(data)
-    ema = np.zeros(n, dtype=np.float64)
-    
-    if n < period:
-        return ema
-    
-    alpha = 2.0 / (period + 1)
-    ema[period - 1] = np.mean(data[:period])
-    
-    for i in range(period, n):
-        ema[i] = alpha * data[i] + (1 - alpha) * ema[i - 1]
-    
-    return ema
+    return slope
 
 
 # =============================================================================
@@ -240,17 +207,16 @@ def calculate_ema(data: np.ndarray, period: int) -> np.ndarray:
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    ADX Donchian Breakout V15 Strategy.
+    HMA Trend Momentum V16 Strategy.
     
     Signal Logic:
-    1. Calculate Donchian channels (20-period high/low)
-    2. Calculate ADX, +DI, -DI for trend strength and direction
-    3. Calculate ATR for volatility normalization
-    4. Calculate volume ratio for breakout confirmation
-    5. Entry: Price breaks above Donchian upper + ADX > threshold + +DI > -DI
-    6. Exit: Price breaks below Donchian lower + ADX > threshold + -DI > +DI
-    7. Filter: Volume confirmation and volatility bounds
-    8. Smooth signals and apply cooldown to reduce whipsaws
+    1. Calculate HMA(16) and HMA(48) for trend direction
+    2. Calculate HMA slope for momentum confirmation
+    3. Calculate ROC(10) for additional momentum
+    4. Calculate ATR for volatility filter
+    5. Combine signals with proper weighting
+    6. Apply volatility normalization
+    7. Smooth signals to reduce whipsaws
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -280,97 +246,109 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = np.where(close <= 0, 1.0, close)
     high = np.where(high <= 0, close, high)
     low = np.where(low <= 0, close * 0.99, low)
-    high = np.where(high < close, close, high)
-    low = np.where(low > close, close, low)
     
     # Calculate all indicators (all use only past data)
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, ADX_PERIOD)
+    hma_fast = calculate_hma(close, HMA_FAST)
+    hma_slow = calculate_hma(close, HMA_SLOW)
+    
+    hma_slope_fast = calculate_hma_slope(hma_fast, lookback=3)
+    hma_slope_slow = calculate_hma_slope(hma_slow, lookback=5)
+    
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
+    roc = calculate_roc(close, ROC_PERIOD)
     
     # Calculate minimum valid index (all indicators need warmup)
     min_valid_index = max(
-        DONCHIAN_PERIOD,
-        ADX_PERIOD * 2,  # ADX needs 2x period for proper calculation
+        HMA_SLOW * 2,  # HMA needs extra warmup due to nested WMA
         ATR_PERIOD + 1,
-        VOLUME_LOOKBACK
+        ROC_PERIOD + 1,
+        10  # Minimum for slope calculation
     )
     
     # Generate signals
     prev_signal = 0.0
-    prev_direction = 0
-    cooldown_counter = 0
     
     for i in range(min_valid_index, n):
         # Skip invalid bars
-        if close[i] <= 0 or atr[i] <= 0 or adx[i] <= 0:
+        if close[i] <= 0 or atr[i] <= 0:
             signals[i] = 0.0
             prev_signal = 0.0
-            prev_direction = 0
-            cooldown_counter = 0
             continue
         
         # Volatility filter (not too low, not too high)
         atr_pct = atr[i] / close[i]
-        if atr_pct < VOLATILITY_MIN or atr_pct > VOLATILITY_MAX:
+        if atr_pct < ATR_MIN_PCT or atr_pct > ATR_MAX_PCT:
             signals[i] = 0.0
             prev_signal = 0.0
-            prev_direction = 0
-            cooldown_counter = 0
             continue
         
-        # Check for Donchian breakout
-        breakout_long = close[i] > donchian_upper[i]
-        breakout_short = close[i] < donchian_lower[i]
+        # Calculate HMA crossover signal
+        hma_diff = (hma_fast[i] - hma_slow[i]) / close[i]
+        hma_direction = np.sign(hma_diff)
+        hma_strength = abs(hma_diff) * 100  # Scale to reasonable range
         
-        # ADX trend strength filter
-        trend_strong = adx[i] > ADX_THRESHOLD
+        # HMA slope confirmation
+        slope_confirmation = 1.0
+        if hma_direction > 0:
+            # Long: want rising HMA
+            if hma_slope_fast[i] <= 0 or hma_slope_slow[i] <= 0:
+                slope_confirmation = 0.5  # Reduce strength if slope not confirmed
+        elif hma_direction < 0:
+            # Short: want falling HMA
+            if hma_slope_fast[i] >= 0 or hma_slope_slow[i] >= 0:
+                slope_confirmation = 0.5  # Reduce strength if slope not confirmed
         
-        # DI direction confirmation
-        di_long = plus_di[i] > minus_di[i] + DI_THRESHOLD
-        di_short = minus_di[i] > plus_di[i] + DI_THRESHOLD
+        # Price position vs HMA(48)
+        price_vs_hma = (close[i] - hma_slow[i]) / close[i]
+        price_position = np.sign(price_vs_hma)
         
-        # Volume confirmation
-        volume_confirmed = volume_ratio[i] >= VOLUME_MIN_RATIO
+        # Momentum confirmation via ROC
+        momentum_confirmation = 1.0
+        if hma_direction > 0:
+            # Long: want positive ROC
+            if roc[i] < 0:
+                momentum_confirmation = 0.3  # Weak momentum
+            elif roc[i] < ROC_THRESHOLD:
+                momentum_confirmation = 0.7  # Moderate momentum
+        elif hma_direction < 0:
+            # Short: want negative ROC
+            if roc[i] > 0:
+                momentum_confirmation = 0.3  # Weak momentum
+            elif roc[i] > -ROC_THRESHOLD:
+                momentum_confirmation = 0.7  # Moderate momentum
         
-        # Calculate raw signal
-        raw_signal = 0.0
+        # Check trend alignment (all signals should agree)
+        trend_aligned = (
+            np.sign(hma_direction) == np.sign(price_position) or
+            abs(price_vs_hma) < 0.01  # Price near HMA is okay
+        )
         
-        if breakout_long and trend_strong and di_long:
-            # Long breakout confirmed
-            if volume_confirmed:
-                raw_signal = 1.0
-            else:
-                raw_signal = 0.5  # Weaker signal without volume
-        elif breakout_short and trend_strong and di_short:
-            # Short breakout confirmed
-            if volume_confirmed:
-                raw_signal = -1.0
-            else:
-                raw_signal = -0.5  # Weaker signal without volume
+        if not trend_aligned:
+            # Conflicting signals → reduce strength significantly
+            trend_strength = hma_strength * 0.3
+        else:
+            # Aligned signals → full strength
+            trend_strength = hma_strength
         
-        # Apply cooldown to reduce whipsaws
-        if cooldown_counter > 0:
-            # In cooldown period, maintain previous direction or go flat
-            if prev_direction != 0:
-                raw_signal = prev_direction * 0.5  # Maintain but weaken
-            cooldown_counter -= 1
+        # Combine all factors
+        raw_signal = (
+            hma_direction * 
+            trend_strength * 
+            slope_confirmation * 
+            momentum_confirmation
+        )
         
-        # Check if signal direction changed
-        current_direction = np.sign(raw_signal)
-        if current_direction != 0 and current_direction != prev_direction and prev_direction != 0:
-            # Direction flip detected, start cooldown
-            cooldown_counter = COOLDOWN_PERIOD
-            raw_signal = 0.0  # Go flat during cooldown
-        
-        # Signal smoothing (EMA on signals)
-        smoothed_signal = SIGNAL_SMOOTHING * prev_signal + (1.0 - SIGNAL_SMOOTHING) * raw_signal
+        # Apply minimum strength threshold
+        if abs(raw_signal) < TRENGTH_THRESHOLD:
+            raw_signal = 0.0
         
         # Volatility normalization (scale by target volatility)
         vol_factor = VOLATILITY_TARGET / max(atr_pct, 0.001)
         vol_factor = np.clip(vol_factor, 0.5, 2.0)
-        smoothed_signal *= vol_factor
+        raw_signal *= vol_factor
+        
+        # Signal smoothing (EMA on signals to reduce whipsaws)
+        smoothed_signal = SIGNAL_SMOOTHING * prev_signal + (1.0 - SIGNAL_SMOOTHING) * raw_signal
         
         # Apply minimum magnitude filter
         if abs(smoothed_signal) < MIN_SIGNAL_MAGNITUDE:
@@ -379,15 +357,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         # Clip to max signal
         signal = np.clip(smoothed_signal, -MAX_SIGNAL, MAX_SIGNAL)
         
-        # Ensure no NaN or Inf
-        if not np.isfinite(signal):
-            signal = 0.0
-        
         signals[i] = signal
         prev_signal = signal
-        prev_direction = np.sign(signal)
-    
-    # Final validation: ensure no NaN or Inf in output
-    signals = np.nan_to_num(signals, nan=0.0, posinf=0.0, neginf=0.0)
     
     return signals
