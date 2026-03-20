@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-strategy.py - Volatility Breakout with Momentum Confirmation
+strategy.py - Momentum Trend Following with Volatility Scaling
 =======================================================================
 MUTABLE FILE - The LLM agent edits this file during research.
 
@@ -11,12 +11,12 @@ This file defines the trading strategy. It must expose:
     - generate_signals(prices)     - Signal generation function
 
 Strategy Hypothesis:
-    Volatility breakout strategy with momentum and volume confirmation.
-    - Detect Bollinger Band squeeze (low volatility periods)
-    - Enter on breakout with volume confirmation
-    - Filter by longer-term trend direction (200 EMA)
-    - Use ADX to avoid choppy markets
-    - ATR-based position sizing for volatility adjustment
+    Simplified trend-following with momentum confirmation.
+    - EMA crossover for trend direction (20/50)
+    - Rate of Change (ROC) for momentum confirmation
+    - Volatility-based position sizing (reduce size in high vol)
+    - Signal smoothing to reduce whipsaws
+    - No strict volume filter (was killing too many signals)
 
 Look-Ahead Safety:
     - All rolling calculations use only past data (min_periods respected)
@@ -31,51 +31,23 @@ import pandas as pd
 # Strategy Configuration
 # =============================================================================
 
-name = "volatility_breakout_momentum"
+name = "momentum_trend_volatility"
 timeframe = "1h"
-leverage = 2.0  # Conservative leverage for breakout strategy
+leverage = 2.0  # Conservative leverage for crypto futures
 
 # Strategy parameters
-BB_PERIOD = 20              # Bollinger Bands period
-BB_STD = 2.0                # Bollinger Bands standard deviations
-SQUEEZE_THRESHOLD = 0.5     # BB width percentile for squeeze detection
-MOMENTUM_PERIOD = 10        # Rate of Change period
-VOLUME_LOOKBACK = 20        # Lookback for volume average
-VOLUME_THRESHOLD = 1.3      # Volume spike multiplier
-TREND_EMA = 200             # Long-term trend filter EMA
-ADX_PERIOD = 14             # ADX calculation period
-ADX_MIN = 20                # Minimum ADX for trending market
-ATR_PERIOD = 14             # ATR calculation period
-MIN_SIGNAL = 0.25           # Minimum signal magnitude to trade
+EMA_FAST = 20             # Fast EMA period
+EMA_SLOW = 50             # Slow EMA period
+ROC_PERIOD = 10           # Rate of Change period for momentum
+ATR_PERIOD = 14           # ATR calculation period
+SIGNAL_SMOOTH = 5         # Signal smoothing window
+MIN_SIGNAL = 0.15         # Minimum signal magnitude to trade
+MAX_SIGNAL = 0.8          # Maximum signal magnitude (leave room for scaling)
 
 
 # =============================================================================
-# Technical Indicator Calculations
+# Signal Generation
 # =============================================================================
-
-def calculate_sma(close: np.ndarray, period: int) -> np.ndarray:
-    """
-    Calculate Simple Moving Average using only past data.
-    
-    Args:
-        close: Array of close prices
-        period: SMA period
-    
-    Returns:
-        Array of SMA values
-    """
-    n = len(close)
-    sma = np.zeros(n, dtype=np.float64)
-    
-    if n < period:
-        return sma
-    
-    # Calculate SMA using rolling window
-    for i in range(period - 1, n):
-        sma[i] = np.mean(close[i - period + 1:i + 1])
-    
-    return sma
-
 
 def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
     """
@@ -105,38 +77,6 @@ def calculate_ema(close: np.ndarray, period: int) -> np.ndarray:
         ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
     
     return ema
-
-
-def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_dev: float = 2.0) -> tuple:
-    """
-    Calculate Bollinger Bands using only past data.
-    
-    Args:
-        close: Array of close prices
-        period: BB period
-        std_dev: Standard deviation multiplier
-    
-    Returns:
-        Tuple of (upper, middle, lower, bandwidth) arrays
-    """
-    n = len(close)
-    upper = np.zeros(n, dtype=np.float64)
-    middle = np.zeros(n, dtype=np.float64)
-    lower = np.zeros(n, dtype=np.float64)
-    bandwidth = np.zeros(n, dtype=np.float64)
-    
-    if n < period:
-        return upper, middle, lower, bandwidth
-    
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        middle[i] = np.mean(window)
-        std = np.std(window, ddof=0)
-        upper[i] = middle[i] + std_dev * std
-        lower[i] = middle[i] - std_dev * std
-        bandwidth[i] = (upper[i] - lower[i]) / middle[i] if middle[i] > 0 else 0
-    
-    return upper, middle, lower, bandwidth
 
 
 def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
@@ -179,201 +119,48 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     return atr
 
 
-def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+def calculate_roc(close: np.ndarray, period: int = 10) -> np.ndarray:
     """
-    Calculate Relative Strength Index using only past data.
+    Calculate Rate of Change using only past data.
+    
+    ROC = (close[i] - close[i-period]) / close[i-period] * 100
     
     Args:
         close: Array of close prices
-        period: RSI period
+        period: ROC lookback period
     
     Returns:
-        Array of RSI values (0-100)
+        Array of ROC values (percentage)
     """
     n = len(close)
-    rsi = np.zeros(n, dtype=np.float64)
+    roc = np.zeros(n, dtype=np.float64)
     
-    if n < period + 1:
-        return rsi
-    
-    # Calculate price changes
-    delta = np.diff(close)
-    
-    # Separate gains and losses
-    gains = np.zeros(n, dtype=np.float64)
-    losses = np.zeros(n, dtype=np.float64)
-    
-    for i in range(1, n):
-        if delta[i-1] > 0:
-            gains[i] = delta[i-1]
-        else:
-            losses[i] = -delta[i-1]
-    
-    # Calculate average gains and losses using EMA
-    avg_gain = np.zeros(n, dtype=np.float64)
-    avg_loss = np.zeros(n, dtype=np.float64)
-    
-    # Initialize with SMA
-    avg_gain[period] = np.mean(gains[1:period+1])
-    avg_loss[period] = np.mean(losses[1:period+1])
-    
-    # Calculate using Wilder's smoothing
-    for i in range(period + 1, n):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gains[i]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + losses[i]) / period
-    
-    # Calculate RSI
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-    
-    return rsi
-
-
-def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
-    """
-    Calculate Average Directional Index using only past data.
-    
-    Args:
-        high: Array of high prices
-        low: Array of low prices
-        close: Array of close prices
-        period: ADX period
-    
-    Returns:
-        Array of ADX values (0-100)
-    """
-    n = len(close)
-    adx = np.zeros(n, dtype=np.float64)
-    
-    if n < period * 2:
-        return adx
-    
-    # Calculate True Range
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
-    
-    # Calculate Directional Movement
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    
-    for i in range(1, n):
-        plus_move = high[i] - high[i-1]
-        minus_move = low[i-1] - low[i]
-        
-        if plus_move > minus_move and plus_move > 0:
-            plus_dm[i] = plus_move
-        if minus_move > plus_move and minus_move > 0:
-            minus_dm[i] = minus_move
-    
-    # Smooth TR, +DM, -DM using Wilder's method
-    atr = np.zeros(n, dtype=np.float64)
-    plus_di = np.zeros(n, dtype=np.float64)
-    minus_di = np.zeros(n, dtype=np.float64)
-    
-    # Initialize with SMA
-    atr[period-1] = np.mean(tr[:period])
-    plus_di[period-1] = 100 * np.mean(plus_dm[:period]) / atr[period-1] if atr[period-1] > 0 else 0
-    minus_di[period-1] = 100 * np.mean(minus_dm[:period]) / atr[period-1] if atr[period-1] > 0 else 0
-    
-    # Smooth using Wilder's method
-    for i in range(period, n):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-        plus_di[i] = 100 * ((plus_di[i-1] * (period - 1) / 100) * (period - 1) + plus_dm[i]) / period / atr[i] if atr[i] > 0 else 0
-        minus_di[i] = 100 * ((minus_di[i-1] * (period - 1) / 100) * (period - 1) + minus_dm[i]) / period / atr[i] if atr[i] > 0 else 0
-    
-    # Calculate DX and ADX
-    dx = np.zeros(n, dtype=np.float64)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    # Smooth DX to get ADX
-    adx[period*2-1] = np.mean(dx[period:period*2])
-    for i in range(period*2, n):
-        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
-    
-    return adx
-
-
-def calculate_momentum(close: np.ndarray, period: int = 10) -> np.ndarray:
-    """
-    Calculate Rate of Change (momentum) using only past data.
-    
-    Args:
-        close: Array of close prices
-        period: Momentum period
-    
-    Returns:
-        Array of momentum values (percentage)
-    """
-    n = len(close)
-    momentum = np.zeros(n, dtype=np.float64)
-    
-    if n < period + 1:
-        return momentum
+    if n <= period:
+        return roc
     
     for i in range(period, n):
         if close[i - period] > 0:
-            momentum[i] = (close[i] - close[i - period]) / close[i - period] * 100
+            roc[i] = (close[i] - close[i - period]) / close[i - period] * 100.0
+        else:
+            roc[i] = 0.0
     
-    return momentum
+    return roc
 
-
-def calculate_volume_ratio(volume: np.ndarray, lookback: int = 20) -> np.ndarray:
-    """
-    Calculate volume ratio relative to rolling average.
-    Only uses past volume data (no look-ahead).
-    
-    Args:
-        volume: Array of volume values
-        lookback: Rolling window for average calculation
-    
-    Returns:
-        Array of volume ratios
-    """
-    n = len(volume)
-    volume_ratio = np.ones(n, dtype=np.float64)
-    
-    if n < lookback:
-        return volume_ratio
-    
-    for i in range(lookback - 1, n):
-        avg_volume = np.mean(volume[i - lookback + 1:i + 1])
-        if avg_volume > 0:
-            volume_ratio[i] = volume[i] / avg_volume
-    
-    return volume_ratio
-
-
-# =============================================================================
-# Signal Generation
-# =============================================================================
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     """
-    Volatility Breakout Strategy with Momentum Confirmation.
+    Momentum Trend Following Strategy with Volatility Scaling.
     
     Signal Logic:
-    1. Detect Bollinger Band squeeze (low volatility)
-    2. Wait for breakout above/below bands
-    3. Confirm with volume spike and momentum
-    4. Filter by long-term trend (200 EMA)
-    5. Filter by ADX (avoid choppy markets)
+    1. Calculate fast/slow EMA for trend direction
+    2. Calculate ROC for momentum confirmation
+    3. Calculate ATR for volatility adjustment
+    4. Generate signals based on trend + momentum
+    5. Smooth signals to reduce whipsaws
     
     Entry Conditions:
-    - LONG: Price breaks above BB upper + volume spike + momentum positive + trend up
-    - SHORT: Price breaks below BB lower + volume spike + momentum negative + trend down
+    - LONG: Fast EMA > Slow EMA AND ROC > 0
+    - SHORT: Fast EMA < Slow EMA AND ROC < 0
     
     Args:
         prices: DataFrame with columns [open_time, open, high, low, close, volume, ...]
@@ -389,7 +176,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         close = prices["close"].values.astype(np.float64)
         high = prices["high"].values.astype(np.float64)
         low = prices["low"].values.astype(np.float64)
-        volume = prices["volume"].values.astype(np.float64)
     except (KeyError, TypeError, ValueError) as e:
         # Return zeros if required columns missing
         return signals
@@ -398,120 +184,98 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = np.nan_to_num(close, nan=0.0)
     high = np.nan_to_num(high, nan=0.0)
     low = np.nan_to_num(low, nan=0.0)
-    volume = np.nan_to_num(volume, nan=0.0)
     
     # Ensure no zero or negative prices
     close = np.where(close <= 0, 1.0, close)
     high = np.where(high <= 0, close, high)
     low = np.where(low <= 0, close * 0.99, low)
     
-    # Calculate all technical indicators
-    ema_trend = calculate_ema(close, TREND_EMA)
-    bb_upper, bb_middle, bb_lower, bb_bandwidth = calculate_bollinger_bands(close, BB_PERIOD, BB_STD)
+    # Calculate EMAs
+    ema_fast = calculate_ema(close, EMA_FAST)
+    ema_slow = calculate_ema(close, EMA_SLOW)
+    
+    # Calculate ATR for volatility adjustment
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    momentum = calculate_momentum(close, MOMENTUM_PERIOD)
-    volume_ratio = calculate_volume_ratio(volume, VOLUME_LOOKBACK)
-    adx = calculate_adx(high, low, close, ADX_PERIOD)
-    rsi = calculate_rsi(close, 14)
     
-    # Calculate bandwidth percentile for squeeze detection
-    # Use rolling percentile of bandwidth over last 100 bars
-    bandwidth_percentile = np.zeros(n, dtype=np.float64)
-    lookback_pct = 100
-    for i in range(lookback_pct - 1, n):
-        window = bb_bandwidth[i - lookback_pct + 1:i + 1]
-        sorted_window = np.sort(window)
-        rank = np.searchsorted(sorted_window, bb_bandwidth[i])
-        bandwidth_percentile[i] = rank / len(sorted_window)
+    # Calculate ROC for momentum
+    roc = calculate_roc(close, ROC_PERIOD)
     
-    # Determine minimum valid index (need enough data for all indicators)
-    min_valid_index = max(
-        TREND_EMA,
-        BB_PERIOD + BB_PERIOD,  # Need extra for ADX calculation
-        ATR_PERIOD + 1,
-        MOMENTUM_PERIOD,
-        VOLUME_LOOKBACK,
-        ADX_PERIOD * 2,
-        lookback_pct
-    )
+    # Calculate EMA spread (trend strength indicator)
+    ema_spread = (ema_fast - ema_slow) / close
+    ema_spread = np.nan_to_num(ema_spread, nan=0.0)
     
-    # Generate signals
+    # Normalize ROC to [-1, 1] range for signal combination
+    # Typical 1h ROC ranges from -5% to +5%, so divide by 5
+    roc_normalized = np.clip(roc / 5.0, -1.0, 1.0)
+    
+    # Determine minimum valid index
+    min_valid_index = max(EMA_SLOW, ATR_PERIOD + 1, ROC_PERIOD, SIGNAL_SMOOTH)
+    
+    # Generate raw signals
+    raw_signals = np.zeros(n, dtype=np.float64)
+    
     for i in range(min_valid_index, n):
         # Skip if any required data is invalid
-        if close[i] <= 0 or atr[i] <= 0 or ema_trend[i] <= 0:
-            signals[i] = 0.0
+        if close[i] <= 0 or atr[i] <= 0:
+            raw_signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 200 EMA
-        trend_bullish = close[i] > ema_trend[i] * 1.002  # Small buffer
-        trend_bearish = close[i] < ema_trend[i] * 0.998
+        # Trend direction from EMA crossover
+        ema_diff = ema_fast[i] - ema_slow[i]
+        trend_direction = np.sign(ema_diff)
         
-        # Volatility squeeze detection (low bandwidth percentile)
-        is_squeeze = bandwidth_percentile[i] < SQUEEZE_THRESHOLD
+        # Momentum confirmation from ROC
+        momentum_signal = roc_normalized[i]
         
-        # Breakout detection
-        breakout_long = close[i] > bb_upper[i]
-        breakout_short = close[i] < bb_lower[i]
+        # Combine trend and momentum (both must agree for strong signal)
+        # If trend and momentum agree, amplify signal
+        # If they disagree, reduce signal
+        if trend_direction > 0 and momentum_signal > 0:
+            # Bullish trend + positive momentum
+            raw_signal = (abs(ema_spread[i]) * 100 + momentum_signal) / 2.0
+        elif trend_direction < 0 and momentum_signal < 0:
+            # Bearish trend + negative momentum
+            raw_signal = -(abs(ema_spread[i]) * 100 + abs(momentum_signal)) / 2.0
+        elif trend_direction > 0:
+            # Bullish trend but weak/negative momentum
+            raw_signal = abs(ema_spread[i]) * 100 * 0.5
+        elif trend_direction < 0:
+            # Bearish trend but weak/positive momentum
+            raw_signal = -abs(ema_spread[i]) * 100 * 0.5
+        else:
+            # No clear trend
+            raw_signal = 0.0
         
-        # Volume confirmation
-        volume_confirmed = volume_ratio[i] >= VOLUME_THRESHOLD
-        
-        # Momentum confirmation
-        momentum_strong_long = momentum[i] > 0.5  # Positive momentum
-        momentum_strong_short = momentum[i] < -0.5  # Negative momentum
-        
-        # ADX filter (trending market, not choppy)
-        trend_market = adx[i] >= ADX_MIN
-        
-        # RSI filter (avoid overbought/oversold extremes for entries)
-        rsi_ok_long = rsi[i] < 75  # Not extremely overbought
-        rsi_ok_short = rsi[i] > 25  # Not extremely oversold
-        
-        # Calculate base signal strength
-        signal_strength = 0.0
-        
-        # Long signal conditions
-        if breakout_long and trend_bullish and volume_confirmed and momentum_strong_long and rsi_ok_long:
-            # Stronger signal if coming from squeeze
-            if is_squeeze:
-                signal_strength = 0.8
-            else:
-                signal_strength = 0.5
-            
-            # Add momentum component
-            signal_strength += min(abs(momentum[i]) / 5.0, 0.2)
-        
-        # Short signal conditions
-        elif breakout_short and trend_bearish and volume_confirmed and momentum_strong_short and rsi_ok_short:
-            # Stronger signal if coming from squeeze
-            if is_squeeze:
-                signal_strength = -0.8
-            else:
-                signal_strength = -0.5
-            
-            # Add momentum component
-            signal_strength -= min(abs(momentum[i]) / 5.0, 0.2)
-        
-        # Apply ADX filter (reduce signal in choppy markets)
-        if not trend_market:
-            signal_strength *= 0.3
-        
-        # Volatility adjustment (reduce position in very high volatility)
-        atr_pct = atr[i] / close[i]
+        # Volatility adjustment (reduce position in high volatility)
+        # Typical 1h ATR% is 0.5-2% for crypto
+        atr_pct = atr[i] / close[i] * 100
         vol_factor = 1.0
         if atr_pct > 0:
-            # Typical 1h ATR% is 0.5-2%, scale inversely
-            vol_factor = min(1.0, 0.02 / max(atr_pct, 0.001))
+            # Scale down when volatility is high (>2%)
+            vol_factor = min(1.0, 2.0 / max(atr_pct, 0.5))
         
-        signal_strength *= vol_factor
+        # Apply volatility factor
+        raw_signals[i] = raw_signal * vol_factor
+    
+    # Smooth signals to reduce whipsaws using simple moving average
+    if n >= SIGNAL_SMOOTH:
+        smoothed = pd.Series(raw_signals).rolling(
+            window=SIGNAL_SMOOTH, 
+            min_periods=SIGNAL_SMOOTH
+        ).mean().values
+        raw_signals = np.nan_to_num(smoothed, nan=0.0)
+    
+    # Apply signal thresholds and clipping
+    for i in range(n):
+        signal = raw_signals[i]
         
         # Apply minimum signal threshold
-        if abs(signal_strength) < MIN_SIGNAL:
-            signal_strength = 0.0
+        if abs(signal) < MIN_SIGNAL:
+            signal = 0.0
         
-        # Clip to [-1, 1]
-        signal_strength = np.clip(signal_strength, -1.0, 1.0)
+        # Clip to [-MAX_SIGNAL, MAX_SIGNAL] to leave room for risk management
+        signal = np.clip(signal, -MAX_SIGNAL, MAX_SIGNAL)
         
-        signals[i] = signal_strength
+        signals[i] = signal
     
     return signals
