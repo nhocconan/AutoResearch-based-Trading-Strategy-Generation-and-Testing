@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #370: 4h KAMA Adaptive Trend + Daily/Weekly HMA + Choppiness Regime + RSI Momentum
-Hypothesis: 4h timeframe needs adaptive indicators (KAMA) that adjust to market efficiency.
-Choppiness Index detects regime (trending vs range) to switch logic. Daily HMA provides
-intermediate trend bias, Weekly HMA provides macro filter. RSI(14) with loose thresholds
-(30-70) ensures trade frequency. ATR(14) stoploss at 2.0x protects capital.
-Key insight from failures: 4h strategies fail due to whipsaws - KAMA adapts to volatility,
-Choppiness filters out range markets where trend strategies fail. Multiple entry paths
-ensure minimum trade frequency (critical - many 4h strategies got 0 trades).
-Timeframe: 4h (REQUIRED), HTF: 1d + 1w for trend bias via mtf_data helper.
+Experiment #371: 12h KAMA Adaptive Crossover + Daily HMA Trend + Choppiness Regime + ATR Stop
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market efficiency - fast during trends,
+slow during ranges. This should reduce whipsaws compared to fixed EMA/HMA. 12h timeframe captures
+medium-term moves with fewer false signals than 4h. Daily HMA provides trend bias filter.
+Choppiness Index (CHOP) detects regime: CHOP>61.8 = range (avoid trend trades), CHOP<38.2 = trend.
+RSI(14) with loose thresholds (30-70) ensures minimum trade frequency. ATR(14) stoploss at 2.5x.
+Timeframe: 12h (REQUIRED), HTF: 1d for trend bias via mtf_data helper.
 Target: Beat Sharpe=0.499 with 40-80 trades total across train+test.
-Position sizing: 0.25 entry, 0.125 half-position at take profit.
+Key insight: KAMA's adaptive nature should outperform fixed MA in crypto's varying volatility regimes.
+Build on #359 by replacing Donchian with KAMA crossover + CHOP regime filter.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_adaptive_daily_weekly_hma_chop_regime_rsi_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_kama_daily_hma_chop_regime_rsi_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -30,31 +29,40 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average."""
+def calculate_kama(close, fast_period=2, slow_period=30, efficiency_period=10):
+    """
+    Calculate Kaufman Adaptive Moving Average.
+    KAMA adapts speed based on market efficiency (trend vs noise).
+    """
     n = len(close)
     kama = np.zeros(n)
     
-    # Calculate Efficiency Ratio
-    change = np.abs(close - np.roll(close, er_period))
-    change[:er_period] = np.abs(close[:er_period] - close[0])
+    # Calculate price change and noise
+    price_change = np.abs(close - np.roll(close, efficiency_period))
+    price_change[:efficiency_period] = np.abs(close[:efficiency_period] - close[0])
     
-    volatility = np.zeros(n)
-    for i in range(er_period, n):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-er_period:i+1])))
-    volatility[:er_period] = change[:er_period]
+    noise = np.zeros(n)
+    for i in range(1, n):
+        noise[i] = np.abs(close[i] - close[i-1])
     
+    # Sum of noise over efficiency period
+    noise_sum = np.zeros(n)
+    for i in range(efficiency_period, n):
+        noise_sum[i] = np.sum(noise[i-efficiency_period+1:i+1])
+    noise_sum[:efficiency_period] = noise_sum[efficiency_period]
+    
+    # Efficiency Ratio (ER)
     er = np.zeros(n)
-    er[er_period:] = np.where(volatility[er_period:] > 0, change[er_period:] / volatility[er_period:], 0)
-    er[:er_period] = 1.0
+    mask = noise_sum > 0
+    er[mask] = price_change[mask] / noise_sum[mask]
+    er = np.clip(er, 0, 1)
     
-    # Calculate smoothing constant
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    sc = er * (fast_sc - slow_sc) + slow_sc
-    sc = np.clip(sc, slow_sc, fast_sc)
+    # Smoothing constants
+    fast_sc = 2 / (fast_period + 1)
+    slow_sc = 2 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Initialize KAMA
+    # Calculate KAMA
     kama[0] = close[0]
     for i in range(1, n):
         kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
@@ -84,20 +92,27 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_choppiness(high, low, close, period=14):
-    """Calculate Choppiness Index (CHOP) for regime detection."""
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = ranging market
+    CHOP < 38.2 = trending market
+    """
     n = len(close)
     chop = np.zeros(n)
     
     for i in range(period, n):
         highest_high = np.max(high[i-period+1:i+1])
         lowest_low = np.min(low[i-period+1:i+1])
-        atr_sum = 0.0
+        tr_sum = 0.0
         for j in range(i-period+1, i+1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-            atr_sum += tr
+            tr1 = high[j] - low[j]
+            tr2 = np.abs(high[j] - close[j-1])
+            tr3 = np.abs(low[j] - close[j-1])
+            tr = max(tr1, tr2, tr3)
+            tr_sum += tr
         
         if highest_high - lowest_low > 0:
-            chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+            chop[i] = 100 * np.log10(tr_sum / (highest_high - lowest_low)) / np.log10(period)
         else:
             chop[i] = 50.0
     
@@ -112,28 +127,25 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
     hma_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     chop = calculate_choppiness(high, low, close, 14)
     
-    # KAMA fast line for crossover signals
-    kama_fast = calculate_kama(close, er_period=5, fast_period=2, slow_period=15)
+    # KAMA fast and slow
+    kama_fast = calculate_kama(close, fast_period=2, slow_period=10, efficiency_period=10)
+    kama_slow = calculate_kama(close, fast_period=2, slow_period=30, efficiency_period=10)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.125
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -145,82 +157,66 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(kama[i]) or np.isnan(chop[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        # Weekly macro trend bias (SOFT filter)
-        weekly_bullish = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
-        weekly_bearish = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
+        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
+            signals[i] = 0.0
+            continue
         
-        # Daily intermediate trend bias
+        # Daily trend bias
         daily_bullish = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
         daily_bearish = not np.isnan(hma_1d_aligned[i]) and close[i] < hma_1d_aligned[i]
         
-        # Regime detection via Choppiness Index
-        # CHOP > 61.8 = range/choppy (mean reversion mode)
-        # CHOP < 38.2 = trending (trend following mode)
-        is_trending = chop[i] < 45.0
-        is_choppy = chop[i] > 55.0
-        
-        # KAMA trend signals
-        kama_bullish = close[i] > kama[i]
-        kama_bearish = close[i] < kama[i]
+        # Choppiness regime filter
+        is_trending = chop[i] < 50  # Loose filter to allow more trades
+        is_ranging = chop[i] >= 50
         
         # KAMA crossover signals
-        kama_cross_long = kama_fast[i] > kama[i] and kama_fast[i-1] <= kama[i-1]
-        kama_cross_short = kama_fast[i] < kama[i] and kama_fast[i-1] >= kama[i-1]
+        kama_cross_long = kama_fast[i] > kama_slow[i] and kama_fast[i-1] <= kama_slow[i-1]
+        kama_cross_short = kama_fast[i] < kama_slow[i] and kama_fast[i-1] >= kama_slow[i-1]
         
-        # RSI momentum (LOOSE thresholds for trade frequency)
-        rsi_ok_long = rsi[i] > 30 and rsi[i] < 70
-        rsi_ok_short = rsi[i] > 30 and rsi[i] < 70
-        rsi_strong_long = rsi[i] > 40 and rsi[i] < 65
-        rsi_strong_short = rsi[i] > 35 and rsi[i] < 60
+        # KAMA position (already crossed)
+        kama_bullish = kama_fast[i] > kama_slow[i]
+        kama_bearish = kama_fast[i] < kama_slow[i]
+        
+        # RSI filter (LOOSE to ensure trade frequency)
+        rsi_ok_long = rsi[i] > 30  # Not deeply oversold
+        rsi_ok_short = rsi[i] < 70  # Not deeply overbought
+        
+        # RSI momentum confirmation
+        rsi_momentum_long = rsi[i] > 40 and rsi[i] < 75
+        rsi_momentum_short = rsi[i] > 25 and rsi[i] < 60
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (multiple paths to ensure trade frequency) ===
-        
-        # Path 1: Trending regime + KAMA bullish + Daily bullish + RSI ok
-        if is_trending and kama_bullish and daily_bullish and rsi_ok_long:
+        # === LONG ENTRIES ===
+        # Primary: KAMA cross long + Daily bullish + Trending + RSI ok
+        if kama_cross_long and daily_bullish and is_trending and rsi_ok_long:
+            new_signal = SIZE_ENTRY
+        # Secondary: KAMA bullish + Daily bullish + RSI momentum (no cross needed)
+        elif kama_bullish and daily_bullish and rsi_momentum_long:
+            new_signal = SIZE_ENTRY
+        # Tertiary: KAMA cross long + RSI ok (daily neutral ok in strong trend)
+        elif kama_cross_long and is_trending and rsi[i] > 35:
+            new_signal = SIZE_ENTRY
+        # Quaternary: KAMA bullish alone (ensures minimum trade frequency)
+        elif kama_bullish and rsi[i] > 35 and rsi[i] < 70:
             new_signal = SIZE_ENTRY
         
-        # Path 2: KAMA crossover long + Daily bullish (regime neutral)
-        elif kama_cross_long and daily_bullish and rsi[i] > 35:
-            new_signal = SIZE_ENTRY
-        
-        # Path 3: Choppy regime + KAMA bullish + RSI not overbought (mean reversion long)
-        elif is_choppy and kama_bullish and rsi[i] > 30 and rsi[i] < 55:
-            new_signal = SIZE_ENTRY
-        
-        # Path 4: Weekly bullish + KAMA bullish + RSI ok (macro bias)
-        elif weekly_bullish and kama_bullish and rsi[i] > 35 and rsi[i] < 65:
-            new_signal = SIZE_ENTRY
-        
-        # Path 5: KAMA cross long alone (ensures minimum trades)
-        elif kama_cross_long and rsi[i] > 30 and rsi[i] < 70:
-            new_signal = SIZE_ENTRY
-        
-        # === SHORT ENTRIES (multiple paths to ensure trade frequency) ===
-        
-        # Path 1: Trending regime + KAMA bearish + Daily bearish + RSI ok
-        if is_trending and kama_bearish and daily_bearish and rsi_ok_short:
+        # === SHORT ENTRIES ===
+        # Primary: KAMA cross short + Daily bearish + Trending + RSI ok
+        if kama_cross_short and daily_bearish and is_trending and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        
-        # Path 2: KAMA crossover short + Daily bearish (regime neutral)
-        elif kama_cross_short and daily_bearish and rsi[i] < 65:
+        # Secondary: KAMA bearish + Daily bearish + RSI momentum (no cross needed)
+        elif kama_bearish and daily_bearish and rsi_momentum_short:
             new_signal = -SIZE_ENTRY
-        
-        # Path 3: Choppy regime + KAMA bearish + RSI not oversold (mean reversion short)
-        elif is_choppy and kama_bearish and rsi[i] > 45 and rsi[i] < 70:
+        # Tertiary: KAMA cross short + RSI ok (daily neutral ok in strong trend)
+        elif kama_cross_short and is_trending and rsi[i] < 65:
             new_signal = -SIZE_ENTRY
-        
-        # Path 4: Weekly bearish + KAMA bearish + RSI ok (macro bias)
-        elif weekly_bearish and kama_bearish and rsi[i] > 35 and rsi[i] < 65:
-            new_signal = -SIZE_ENTRY
-        
-        # Path 5: KAMA cross short alone (ensures minimum trades)
-        elif kama_cross_short and rsi[i] > 30 and rsi[i] < 70:
+        # Quaternary: KAMA bearish alone (ensures minimum trade frequency)
+        elif kama_bearish and rsi[i] > 30 and rsi[i] < 65:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -229,8 +225,8 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.0*ATR from highest)
-            current_stop = highest_close - 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR from highest)
+            current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -239,7 +235,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
@@ -250,8 +246,8 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.0*ATR from lowest)
-            current_stop = lowest_close + 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR from lowest)
+            current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -260,7 +256,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
@@ -273,7 +269,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
@@ -282,7 +278,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
