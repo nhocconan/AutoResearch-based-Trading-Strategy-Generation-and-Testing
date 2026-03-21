@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #337: 15m Supertrend + Dual HTF HMA Filter (4h+1h) + RSI Momentum + ATR Stop
-Hypothesis: 15m timeframe failed in exp#325 (Sharpe=-7.403) with mean reversion.
-This attempt uses TREND FOLLOWING with DUAL HTF filter (4h HMA + 1h HMA must agree).
-Previous 15m failures used single HTF or no HTF filter. Dual agreement should reduce
-false signals by 50%+ while maintaining sufficient trade frequency (30-50/year).
-Supertrend(10,3) for entry timing, RSI(14) 40-60 filter for trend continuation,
-2.5*ATR trailing stop. Position size 0.25 (25% capital) to limit drawdown.
-Key insight: 15m needs STRONGER HTF filter than 1h/4h strategies to overcome noise.
-Target: Beat Sharpe=0.499 with clean trend-following, DD < -30%, trades >= 10/train.
+Experiment #338: 30m Keltner Breakout + 4h HMA Trend + RSI Momentum + ATR Stop
+Hypothesis: 30m timeframe with Keltner Channel breakouts provides cleaner signals than Donchian.
+Keltner (EMA20 + 2*ATR) adapts to volatility better than fixed Donchian periods.
+4h HMA(21) provides macro trend bias to avoid counter-trend breakouts.
+RSI(14) momentum filter (50-60 range for longs, 40-50 for shorts) ensures entry quality.
+This combines volatility breakout (proven in exp#329) with adaptive channels and HTF filter.
+Timeframe: 30m (REQUIRED), HTF: 4h for trend bias via mtf_data helper.
+Target: Beat Sharpe=0.499 with 30-60 trades/year, symmetric long/short logic.
+Key insight: Keltner breakouts + 4h HMA filter = fewer false breakouts, better win rate in both bull/bear.
+Position sizing: 0.25 entry, 0.125 half-profit, 2.5*ATR trailing stop.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_supertrend_dual_hma_4h_1h_rsi_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_keltner_4h_hma_rsi_momentum_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -50,54 +51,13 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator (trend following)."""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2.0
-    
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    n = len(close)
-    final_upper = np.zeros(n)
-    final_lower = np.zeros(n)
-    supertrend = np.zeros(n)
-    trend = np.ones(n)  # 1 = bullish, -1 = bearish
-    
-    final_upper[0] = upper_band[0]
-    final_lower[0] = lower_band[0]
-    supertrend[0] = lower_band[0]
-    
-    for i in range(1, n):
-        # Update upper band
-        if upper_band[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]:
-            final_upper[i] = upper_band[i]
-        else:
-            final_upper[i] = final_upper[i-1]
-        
-        # Update lower band
-        if lower_band[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]:
-            final_lower[i] = lower_band[i]
-        else:
-            final_lower[i] = final_lower[i-1]
-        
-        # Determine trend
-        if trend[i-1] == 1:
-            if close[i] < final_lower[i]:
-                trend[i] = -1
-                supertrend[i] = final_upper[i]
-            else:
-                trend[i] = 1
-                supertrend[i] = final_lower[i]
-        else:
-            if close[i] > final_upper[i]:
-                trend[i] = 1
-                supertrend[i] = final_lower[i]
-            else:
-                trend[i] = -1
-                supertrend[i] = final_upper[i]
-    
-    return supertrend, trend
+def calculate_keltner(high, low, close, ema_period=20, atr_period=14, atr_mult=2.0):
+    """Calculate Keltner Channel bands."""
+    ema = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
+    atr = calculate_atr(high, low, close, atr_period)
+    upper = ema + atr_mult * atr
+    lower = ema - atr_mult * atr
+    return upper, lower, ema
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -107,20 +67,17 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
-    df_1h = get_htf_data(prices, '1h')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_1h = calculate_hma(df_1h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
+    keltner_upper, keltner_lower, keltner_ema = calculate_keltner(high, low, close, 20, 14, 2.0)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -136,59 +93,57 @@ def generate_signals(prices):
     
     for i in range(250, n):  # Start after 250 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(supertrend[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(keltner_upper[i]):
             signals[i] = 0.0
             continue
         
-        # Skip if HTF data not available
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1h_aligned[i]):
-            signals[i] = 0.0
-            continue
+        # 4h macro trend bias
+        hma_valid = not np.isnan(hma_4h_aligned[i])
+        four_h_bullish = hma_valid and close[i] > hma_4h_aligned[i]
+        four_h_bearish = hma_valid and close[i] < hma_4h_aligned[i]
         
-        # Dual HTF trend filter (BOTH must agree)
-        hma_4h_bullish = close[i] > hma_4h_aligned[i]
-        hma_4h_bearish = close[i] < hma_4h_aligned[i]
-        hma_1h_bullish = close[i] > hma_1h_aligned[i]
-        hma_1h_bearish = close[i] < hma_1h_aligned[i]
+        # Keltner breakout signals (price closes outside channel)
+        breakout_long = close[i] > keltner_upper[i-1] and close[i-1] <= keltner_upper[i-1]
+        breakout_short = close[i] < keltner_lower[i-1] and close[i-1] >= keltner_lower[i-1]
         
-        # Both HTFs must agree for strong signal
-        dual_bullish = hma_4h_bullish and hma_1h_bullish
-        dual_bearish = hma_4h_bearish and hma_1h_bearish
+        # Keltner trend state (price outside channel)
+        above_upper = close[i] > keltner_upper[i-1]
+        below_lower = close[i] < keltner_lower[i-1]
         
-        # Supertrend signal
-        st_long = st_trend[i] == 1
-        st_short = st_trend[i] == -1
+        # RSI momentum filter (moderate values, not extremes)
+        rsi_ok_long = rsi[i] > 45 and rsi[i] < 75  # Not overbought
+        rsi_ok_short = rsi[i] < 55 and rsi[i] > 25  # Not oversold
         
-        # RSI momentum filter (trend continuation, not extreme)
-        rsi_ok_long = 40 <= rsi[i] <= 65  # Not overbought for long
-        rsi_ok_short = 35 <= rsi[i] <= 60  # Not oversold for short
+        # Strong momentum confirmation
+        rsi_strong_long = rsi[i] > 50 and rsi[i] < 70
+        rsi_strong_short = rsi[i] < 50 and rsi[i] > 30
         
-        # RSI strength filter
-        rsi_strong_long = rsi[i] > 50
-        rsi_strong_short = rsi[i] < 50
+        # EMA position relative to Keltner (trend confirmation)
+        ema_above_mid = keltner_ema[i] > (keltner_upper[i] + keltner_lower[i]) / 2
+        ema_below_mid = keltner_ema[i] < (keltner_upper[i] + keltner_lower[i]) / 2
         
         new_signal = 0.0
         
         # === LONG ENTRIES ===
-        # Primary: Supertrend long + Dual HTF bullish + RSI ok
-        if st_long and dual_bullish and rsi_ok_long:
+        # Primary: Keltner breakout + 4h bullish + RSI ok
+        if breakout_long and four_h_bullish and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        # Secondary: Supertrend long + 4h bullish only + RSI strong
-        elif st_long and hma_4h_bullish and rsi_strong_long and rsi[i] < 60:
+        # Secondary: Price above upper + 4h bullish + RSI strong
+        elif above_upper and four_h_bullish and rsi_strong_long:
             new_signal = SIZE_ENTRY
-        # Tertiary: Supertrend flip to long + Dual HTF bullish
-        if i > 0 and st_trend[i-1] == -1 and st_long and dual_bullish:
+        # Tertiary: Breakout with EMA confirmation (no 4h filter for momentum)
+        elif breakout_long and ema_above_mid and rsi[i] > 55:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES ===
-        # Primary: Supertrend short + Dual HTF bearish + RSI ok
-        if st_short and dual_bearish and rsi_ok_short:
+        # Primary: Keltner breakout + 4h bearish + RSI ok
+        if breakout_short and four_h_bearish and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        # Secondary: Supertrend short + 4h bearish only + RSI strong
-        elif st_short and hma_4h_bearish and rsi_strong_short and rsi[i] > 40:
+        # Secondary: Price below lower + 4h bearish + RSI strong
+        elif below_lower and four_h_bearish and rsi_strong_short:
             new_signal = -SIZE_ENTRY
-        # Tertiary: Supertrend flip to short + Dual HTF bearish
-        if i > 0 and st_trend[i-1] == 1 and st_short and dual_bearish:
+        # Tertiary: Breakout with EMA confirmation (no 4h filter for momentum)
+        elif breakout_short and ema_below_mid and rsi[i] < 45:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
