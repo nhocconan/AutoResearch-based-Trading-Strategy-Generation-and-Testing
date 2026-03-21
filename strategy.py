@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #037 - Volume-Weighted Momentum with Dual HTF Trend Filter (15m primary)
-====================================================================================
-Hypothesis: 15m entries with dual HTF confirmation (1h + 4h HMA) reduce false signals.
-Volume spikes confirm genuine momentum moves. VWAP-based momentum filter ensures
-we enter only when price is above/below fair value. This differs from previous
-attempts by using volume-weighted signals and requiring BOTH HTF trends to agree.
+EXPERIMENT #038 - MACD Momentum + RSI Pullback + 4h Trend Filter (30m primary)
+================================================================================
+Hypothesis: 30m MACD histogram captures momentum shifts, but needs 4h HMA(21) 
+trend filter for direction. RSI(14) pullback to 45-55 zone ensures we enter on 
+dips in uptrends (not chasing tops). Bollinger Band Width percentile filters 
+out low-volatility chop. This differs from failed MACD strategies by adding 
+proper HTF trend alignment and RSI timing filter.
 
 Key features:
-- Primary TF: 15m (this experiment)
-- HTF filters: 1h HMA(21) + 4h HMA(21) - BOTH must agree on trend direction
-- Momentum: Price vs VWAP(20) deviation (Z-score style)
-- Volume confirmation: Volume > 1.5x 20-period average
-- Entry: Momentum + Volume + Dual HTF trend alignment
-- Stoploss: 2.0*ATR(14) trailing
-- Position sizing: 0.25 discrete levels (conservative for 15m)
-- Take profit: Reduce to half at 2R, trail stop at 1R
+- Primary TF: 30m (required for this experiment)
+- HTF filter: 4h HMA(21) for trend direction
+- Momentum: MACD(12,26,9) histogram > 0 for long, < 0 for short
+- Entry timing: RSI(14) in 45-55 pullback zone (not extreme)
+- Regime: BB Width > 40th percentile (avoid dead markets)
+- Stoploss: 2.5*ATR(14) trailing
+- Position sizing: 0.25-0.30 discrete levels
+- Take profit: Reduce to half at 2R, trail stop
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "vwmomentum_dual_htf_15m_1h_4h_v1"
-timeframe = "15m"
+name = "macd_rsi_4htrend_30m_v1"
+timeframe = "30m"
 leverage = 1.0
 
 
@@ -50,45 +51,55 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_vwap(high, low, close, volume, period=20):
-    """Calculate Volume-Weighted Average Price (rolling)"""
-    n = len(close)
-    vwap = np.zeros(n)
-    vwap[:] = np.nan
-    
-    for i in range(period - 1, n):
-        typical_price = (high[i - period + 1:i + 1] + low[i - period + 1:i + 1] + close[i - period + 1:i + 1]) / 3
-        vol = volume[i - period + 1:i + 1]
-        vwap[i] = np.sum(typical_price * vol) / (np.sum(vol) + 1e-10)
-    
-    return vwap
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram"""
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=fast, adjust=False, min_periods=fast).mean()
+    ema_slow = close_s.ewm(span=slow, adjust=False, min_periods=slow).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
 
 
-def calculate_momentum_zscore(close, vwap, period=20):
-    """Calculate Z-score of price deviation from VWAP"""
-    n = len(close)
-    deviation = close - vwap
-    zscore = np.zeros(n)
-    zscore[:] = np.nan
-    
-    for i in range(period - 1, n):
-        if not np.isnan(vwap[i]) and vwap[i] > 0:
-            window_dev = deviation[i - period + 1:i + 1]
-            window_dev = window_dev[~np.isnan(window_dev)]
-            if len(window_dev) > 0:
-                mean_dev = np.mean(window_dev)
-                std_dev = np.std(window_dev) + 1e-10
-                zscore[i] = (deviation[i] - mean_dev) / std_dev
-    
-    return zscore
+def calculate_rsi(close, period=14):
+    """Calculate RSI"""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs rolling average"""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean().values
-    volume_ratio = volume / (vol_avg + 1e-10)
-    return volume_ratio
+def calculate_bollinger_bands(close, period=20, std_dev=2):
+    """Calculate Bollinger Bands and Band Width"""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    band_width = (upper - lower) / sma
+    return upper.values, lower.values, band_width.values
+
+
+def calculate_percentile_rank(series, window=100):
+    """Calculate rolling percentile rank"""
+    n = len(series)
+    pr = np.zeros(n)
+    pr[:] = np.nan
+    
+    for i in range(window - 1, n):
+        if not np.isnan(series[i]):
+            window_data = series[i - window + 1:i + 1]
+            window_data = window_data[~np.isnan(window_data)]
+            if len(window_data) > 0:
+                pr[i] = np.sum(window_data <= series[i]) / len(window_data)
+    
+    return pr
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -98,27 +109,23 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1)
-    df_1h = get_htf_data(prices, '1h')
+    # Load 4h HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    
-    # Calculate HTF HMAs
-    hma_1h = calculate_hma(df_1h['close'].values, 21)
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    
-    # Align HTF indicators to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
     atr = calculate_atr(high, low, close, 14)
-    vwap = calculate_vwap(high, low, close, volume, 20)
-    momentum_z = calculate_momentum_zscore(close, vwap, 20)
-    volume_ratio = calculate_volume_ratio(volume, 20)
+    rsi = calculate_rsi(close, 14)
+    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2)
+    
+    # Calculate Bollinger Band Width percentile rank (regime filter)
+    bb_width_pr = calculate_percentile_rank(bb_width, 100)
     
     # Generate signals
     signals = np.zeros(n)
-    SIZE = 0.25  # Base position size (25% of capital - conservative for 15m)
+    SIZE = 0.28  # Base position size (28% of capital)
     HALF_SIZE = SIZE / 2  # For take profit reduction
     
     # Track position state for stoploss and take profit
@@ -128,40 +135,44 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_price = 0.0
     profit_target_hit = False
     
-    min_period = 100  # Wait for all indicators to stabilize
+    min_period = 120  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1h_aligned[i]) or np.isnan(hma_4h_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vwap[i]) or np.isnan(momentum_z[i]) or 
-            np.isnan(volume_ratio[i]) or atr[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(macd_hist[i]) or 
+            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_width_pr[i]) or 
+            atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Dual HTF trend filter - BOTH must agree
-        hma_1h_trend = 1 if close[i] > hma_1h_aligned[i] else -1
+        # 4h trend filter (HTF) - price above HMA = bullish
         hma_4h_trend = 1 if close[i] > hma_4h_aligned[i] else -1
         
-        # Only trade when both HTF trends agree
-        dual_htf_aligned = (hma_1h_trend == hma_4h_trend)
-        htf_direction = hma_1h_trend if dual_htf_aligned else 0
+        # MACD histogram momentum
+        macd_momentum = 1 if macd_hist[i] > 0 else -1
         
-        # Momentum filter: Z-score > 0.5 for long, < -0.5 for short
-        momentum_long = momentum_z[i] > 0.5
-        momentum_short = momentum_z[i] < -0.5
+        # RSI pullback zone (45-55 for entry timing - not extreme)
+        rsi_neutral = 45 <= rsi[i] <= 55
         
-        # Volume confirmation: volume > 1.3x average
-        volume_confirmed = volume_ratio[i] > 1.3
+        # Regime filter: only trade when BB Width is in top 60% (trending market)
+        regime_valid = bb_width_pr[i] > 0.40
+        
+        # MACD histogram increasing (momentum accelerating)
+        macd_increasing = False
+        if i >= 2 and not np.isnan(macd_hist[i-1]):
+            macd_increasing = macd_hist[i] > macd_hist[i-1]
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: Dual HTF bullish + Momentum positive + Volume confirmed
-        if htf_direction == 1 and momentum_long and volume_confirmed:
+        # Long entry: 4h trend bullish + MACD positive + RSI neutral + Regime valid + MACD increasing
+        if (hma_4h_trend == 1 and macd_momentum == 1 and rsi_neutral and 
+            regime_valid and macd_increasing):
             target_signal = SIZE
         
-        # Short entry: Dual HTF bearish + Momentum negative + Volume confirmed
-        elif htf_direction == -1 and momentum_short and volume_confirmed:
+        # Short entry: 4h trend bearish + MACD negative + RSI neutral + Regime valid + MACD decreasing
+        if (hma_4h_trend == -1 and macd_momentum == -1 and rsi_neutral and 
+            regime_valid and not macd_increasing):
             target_signal = -SIZE
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -172,20 +183,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.0 * atr[i]
+                trailing_stop = highest_since_entry - 2.5 * atr[i]
                 
                 # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry, where R = 2.0*ATR)
+                # Check take profit (2R from entry, where R = 2.5*ATR)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 4.0 * atr[i]:  # 2R = 4*ATR
+                    if close[i] >= entry_price + 5.0 * atr[i]:  # 2R = 5*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.0 * atr[i]
+                trailing_stop = lowest_since_entry + 2.5 * atr[i]
                 
                 # Check stoploss
                 if close[i] > trailing_stop:
@@ -193,7 +204,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 4.0 * atr[i]:  # 2R profit
+                    if close[i] <= entry_price - 5.0 * atr[i]:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -218,17 +229,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 entry_price = close[i]
                 profit_target_hit = False
             elif position_side != 0:
-                # Maintain existing position (check if HTF trend reversed)
-                if position_side == 1 and htf_direction == -1:
-                    # HTF trend reversed, exit long
+                # Maintain existing position (check if trend reversed)
+                if position_side == 1 and hma_4h_trend == -1:
+                    # 4h trend reversed, exit long
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
                     profit_target_hit = False
-                elif position_side == -1 and htf_direction == 1:
-                    # HTF trend reversed, exit short
+                elif position_side == -1 and hma_4h_trend == 1:
+                    # 4h trend reversed, exit short
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
