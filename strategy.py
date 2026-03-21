@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #010 - MTF EMA+Bollinger+RSI+ATR (15m+1h+4h v1)
+EXPERIMENT #011 - MTF Donchian+DEMA+MACD+Volume+Z-score (4h+1h v1)
 ==================================================================================================
-Hypothesis: 4h EMA(21/55) crossover provides clean trend direction. 1h Bollinger %B identifies
-pullback entries within the trend (buy when %B < 0.3 in uptrend, sell when %B > 0.7 in downtrend).
-15m RSI confirms entry timing. ATR stoploss at 2.0*ATR for tight risk control.
+Hypothesis: Combine proven elements from #005 (DEMA+Supertrend+MACD, Sharpe=0.213) and 
+#006 (KAMA+Donchian+RSI, Sharpe=0.160) with volume confirmation (new element).
 
-Key changes from #009:
-- Trend: 4h EMA(21/55) crossover instead of Donchian (smoother, less whipsaw)
-- Entry filter: 1h Bollinger %B for pullback detection (mean reversion within trend)
-- Entry timing: 15m RSI(14) for precise entry
-- Stoploss: 2.0*ATR trailing (proven effective)
-- Position size: 0.35 max (discrete levels: 0.0, ±0.25, ±0.35)
-- Timeframe: 15m primary with 1h and 4h MTF filters
-- FIX: Use integer index mapping instead of datetime comparison to avoid timezone issues
+Key changes:
+- Timeframe: 1h (stable, proven in winning strategies)
+- MTF: 4h Donchian trend + 1h DEMA entry (cleaner than 15m+1h complexity)
+- Trend: Donchian Channel 20-period breakout (strong trend signal)
+- Entry: DEMA(8/21) crossover with MACD histogram confirmation
+- Filters: Z-score < 2.0, Volume > 20-period SMA (new confirmation)
+- Position size: 0.30 (conservative, proven safe range)
+- Stoploss: 2.5*ATR (slightly wider for 1h timeframe)
 
 Why this should beat #005 (Sharpe=0.213):
-- EMA crossovers are smoother than Donchian breakouts (fewer false signals)
-- Bollinger %B adds mean-reversion entry logic (buy dips in uptrend)
-- 3-timeframe structure provides layered confirmation
-- Based on classic trend-following with pullback entry (proven edge)
+- Donchian trend is cleaner than HMA for trend direction
+- Volume filter adds confirmation (reduces false signals)
+- DEMA is faster than HMA for entries
+- Simpler MTF logic (4h+1h vs 15m+1h) reduces bugs
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_ema_bollinger_rsi_atr_15m_v1"
-timeframe = "15m"
+name = "mtf_donchian_dema_macd_volume_zscore_4h_1h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
@@ -53,169 +52,185 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
+def calculate_dema(close, period=21):
+    """Calculate Double Exponential Moving Average"""
     n = len(close)
     if n < period:
         return np.zeros(n)
     
-    ema = np.zeros(n)
-    ema[period - 1] = np.mean(close[:period])
+    ema1 = np.zeros(n)
+    ema2 = np.zeros(n)
+    dema = np.zeros(n)
     
     multiplier = 2.0 / (period + 1)
-    for i in range(period, n):
-        ema[i] = ema[i - 1] + multiplier * (close[i] - ema[i - 1])
     
-    return ema
+    ema1[0] = close[0]
+    for i in range(1, n):
+        ema1[i] = multiplier * close[i] + (1 - multiplier) * ema1[i - 1]
+    
+    ema2[0] = ema1[0]
+    for i in range(1, n):
+        ema2[i] = multiplier * ema1[i] + (1 - multiplier) * ema2[i - 1]
+    
+    for i in range(n):
+        dema[i] = 2 * ema1[i] - ema2[i]
+    
+    return dema
 
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and %B"""
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD (Moving Average Convergence Divergence)"""
     n = len(close)
+    if n < slow:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    ema_fast = np.zeros(n)
+    ema_slow = np.zeros(n)
+    macd_line = np.zeros(n)
+    signal_line = np.zeros(n)
+    histogram = np.zeros(n)
+    
+    fast_mult = 2.0 / (fast + 1)
+    slow_mult = 2.0 / (slow + 1)
+    signal_mult = 2.0 / (signal + 1)
+    
+    ema_fast[0] = close[0]
+    ema_slow[0] = close[0]
+    
+    for i in range(1, n):
+        ema_fast[i] = fast_mult * close[i] + (1 - fast_mult) * ema_fast[i - 1]
+        ema_slow[i] = slow_mult * close[i] + (1 - slow_mult) * ema_slow[i - 1]
+        macd_line[i] = ema_fast[i] - ema_slow[i]
+    
+    signal_line[slow - 1] = macd_line[slow - 1]
+    for i in range(slow, n):
+        signal_line[i] = signal_mult * macd_line[i] + (1 - signal_mult) * signal_line[i - 1]
+    
+    for i in range(n):
+        histogram[i] = macd_line[i] - signal_line[i]
+    
+    return macd_line, signal_line, histogram
+
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high / lowest low over period)"""
+    n = len(close := high)
     if n < period:
         return np.zeros(n), np.zeros(n), np.zeros(n)
     
-    sma = np.zeros(n)
     upper = np.zeros(n)
     lower = np.zeros(n)
-    pct_b = np.zeros(n)
+    middle = np.zeros(n)
     
     for i in range(period - 1, n):
-        sma[i] = np.mean(close[i - period + 1:i + 1])
-        std = np.std(close[i - period + 1:i + 1])
-        upper[i] = sma[i] + std_mult * std
-        lower[i] = sma[i] - std_mult * std
-        
-        if upper[i] != lower[i]:
-            pct_b[i] = (close[i] - lower[i]) / (upper[i] - lower[i])
-        else:
-            pct_b[i] = 0.5
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+        middle[i] = (upper[i] + lower[i]) / 2
     
-    return upper, lower, pct_b
+    return upper, middle, lower
 
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI"""
+def calculate_zscore(close, period=20):
+    """Calculate Z-score (standardized deviation from mean)"""
     n = len(close)
-    if n < period + 1:
+    if n < period:
         return np.zeros(n)
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    zscore = np.zeros(n)
     
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    
-    avg_gain[period] = np.mean(gain[:period + 1])
-    avg_loss[period] = np.mean(loss[:period + 1])
-    
-    for i in range(period + 1, n):
-        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
-    
-    rs = np.zeros(n)
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rs[i] = 100
+    for i in range(period - 1, n):
+        window = close[i - period + 1:i + 1]
+        mean = np.mean(window)
+        std = np.std(window)
+        
+        if std > 0:
+            zscore[i] = (close[i] - mean) / std
         else:
-            rs[i] = avg_gain[i] / avg_loss[i]
+            zscore[i] = 0
     
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi
+    return zscore
 
 
-def resample_to_timeframe(prices, timeframe):
-    """Resample prices to higher timeframe using proper aggregation"""
-    prices_indexed = prices.set_index('open_time')
-    prices_indexed.index = pd.to_datetime(prices_indexed.index, utc=True)
+def calculate_volume_sma(volume, period=20):
+    """Calculate SMA of volume"""
+    n = len(volume)
+    if n < period:
+        return np.zeros(n)
     
-    if timeframe == '1h':
-        df_resampled = prices_indexed.resample('1h').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum'
-        }).dropna()
-    elif timeframe == '4h':
-        df_resampled = prices_indexed.resample('4h').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum'
-        }).dropna()
-    else:
-        return prices
+    volume_sma = np.zeros(n)
+    for i in range(period - 1, n):
+        volume_sma[i] = np.mean(volume[i - period + 1:i + 1])
     
-    return df_resampled
+    return volume_sma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # Initialize output arrays
+    # 1h indicators for entry timing
+    atr_1h = calculate_atr(high, low, close, period=14)
+    zscore_1h = calculate_zscore(close, period=20)
+    dema_fast_1h = calculate_dema(close, period=8)
+    dema_slow_1h = calculate_dema(close, period=21)
+    macd_line_1h, macd_signal_1h, macd_hist_1h = calculate_macd(close, fast=12, slow=26, signal=9)
+    volume_sma_1h = calculate_volume_sma(volume, period=20)
+    
+    # Resample to 4h for trend filter using proper method
+    prices_indexed = prices.set_index('open_time')
+    
+    # Resample to 4h
+    df_4h = prices_indexed.resample('4h').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum'
+    }).dropna()
+    
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # Calculate 4h Donchian trend
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    donchian_upper_4h, donchian_middle_4h, donchian_lower_4h = calculate_donchian(high_4h, low_4h, period=20)
+    
+    # Determine 4h trend direction
+    trend_4h = np.zeros(len(close_4h))
+    for i in range(20, len(close_4h)):
+        if close_4h[i] > donchian_middle_4h[i]:
+            trend_4h[i] = 1
+        elif close_4h[i] < donchian_middle_4h[i]:
+            trend_4h[i] = -1
+    
+    # Map 4h trend back to 1h using reindex with ffill
+    trend_4h_series = pd.Series(trend_4h, index=df_4h.index)
+    trend_4h_aligned = trend_4h_series.reindex(prices_indexed.index, method='ffill').values
+    
+    # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
-    # 15m indicators for entry timing
-    atr_15m = calculate_atr(high, low, close, period=14)
-    rsi_15m = calculate_rsi(close, period=14)
-    
-    # Resample to 1h for Bollinger filter
-    prices_df = prices.copy()
-    prices_df['open_time'] = pd.to_datetime(prices_df['open_time'], utc=True)
-    prices_1h = resample_to_timeframe(prices_df, '1h')
-    
-    c_1h = prices_1h['close'].values
-    upper_1h, lower_1h, pct_b_1h = calculate_bollinger(c_1h, period=20, std_mult=2.0)
-    
-    # Resample to 4h for EMA trend
-    prices_4h = resample_to_timeframe(prices_df, '4h')
-    
-    c_4h = prices_4h['close'].values
-    ema21_4h = calculate_ema(c_4h, period=21)
-    ema55_4h = calculate_ema(c_4h, period=55)
-    
-    # Create mapping from 15m index to 1h and 4h indices
-    # Use integer-based alignment to avoid datetime timezone issues
-    base_times = pd.to_datetime(prices['open_time'], utc=True)
-    
-    # Map 1h times to 15m indices
-    times_1h = prices_1h.index
-    times_4h = prices_4h.index
-    
-    # Create forward-fill mapping arrays
-    idx_1h_aligned = np.zeros(n, dtype=int)
-    idx_4h_aligned = np.zeros(n, dtype=int)
-    
-    # For each 15m bar, find the most recent 1h and 4h bar
-    j_1h = 0
-    j_4h = 0
-    for i in range(n):
-        # Find latest 1h bar <= current 15m time
-        while j_1h < len(times_1h) - 1 and times_1h[j_1h + 1] <= base_times[i]:
-            j_1h += 1
-        idx_1h_aligned[i] = j_1h
-        
-        # Find latest 4h bar <= current 15m time
-        while j_4h < len(times_4h) - 1 and times_4h[j_4h + 1] <= base_times[i]:
-            j_4h += 1
-        idx_4h_aligned[i] = j_4h
-    
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.35
-    SIZE_HALF = 0.175
+    SIZE_FULL = 0.30
+    SIZE_HALF = 0.15
+    
+    # Z-score threshold for mean reversion filter
+    ZSCORE_MAX = 2.0
     
     # ATR stoploss multiplier
-    ATR_STOP_MULT = 2.0
+    ATR_STOP_MULT = 2.5
     
-    # Minimum warmup period
-    first_valid = max(200, 55, 40, 20)
+    # Volume confirmation threshold
+    VOLUME_MULT = 1.0  # Volume must be >= 1.0x SMA
+    
+    first_valid = max(200, 20 * 4, 26, 20)  # Need enough data for all indicators
     
     # Track position state
     position_side = np.zeros(n)
@@ -225,35 +240,28 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        # Check for valid data
-        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
+        if np.isnan(atr_1h[i]) or np.isnan(zscore_1h[i]) or atr_1h[i] == 0:
             signals[i] = 0.0
             continue
         
-        # Get aligned indices
-        idx_1h = idx_1h_aligned[i]
-        idx_4h = idx_4h_aligned[i]
-        
-        # Check bounds for MTF data
-        if idx_1h >= len(pct_b_1h) or idx_4h >= len(ema21_4h):
-            signals[i] = 0.0
-            continue
-        
-        # 4h EMA trend direction
-        ema_trend = 0
-        if ema21_4h[idx_4h] > 0 and ema55_4h[idx_4h] > 0:
-            if ema21_4h[idx_4h] > ema55_4h[idx_4h]:
-                ema_trend = 1  # Bullish
-            elif ema21_4h[idx_4h] < ema55_4h[idx_4h]:
-                ema_trend = -1  # Bearish
-        
-        # 1h Bollinger %B for pullback detection
-        pct_b = pct_b_1h[idx_1h]
-        
-        # 15m RSI for entry timing
-        rsi_val = rsi_15m[i]
-        atr = atr_15m[i]
+        trend = trend_4h_aligned[i]
+        zscore_val = zscore_1h[i]
+        atr = atr_1h[i]
         price = close[i]
+        vol = volume[i]
+        vol_sma = volume_sma_1h[i]
+        
+        # Volume filter - must have sufficient volume
+        if vol_sma > 0 and vol < VOLUME_MULT * vol_sma:
+            signals[i] = 0.0
+            position_side[i] = 0
+            continue
+        
+        # Z-score filter - avoid extreme moves
+        if abs(zscore_val) >= ZSCORE_MAX:
+            signals[i] = 0.0
+            position_side[i] = 0
+            continue
         
         # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
@@ -274,7 +282,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.0*ATR)
+            # Stoploss check (2.5*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -348,9 +356,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h EMA trend + 1h Bollinger pullback + 15m RSI timing
-        # Long: EMA bullish + %B < 0.4 (pullback) + RSI 35-55 (not overbought)
-        if ema_trend == 1 and pct_b < 0.4 and 35 <= rsi_val <= 55:
+        # Entry logic: 4h Donchian trend + 1h DEMA crossover + MACD confirmation
+        dema_cross = dema_fast_1h[i] - dema_slow_1h[i]
+        dema_cross_prev = dema_fast_1h[i - 1] - dema_slow_1h[i - 1] if i > 0 else 0
+        macd_hist = macd_hist_1h[i]
+        macd_hist_prev = macd_hist_1h[i - 1] if i > 0 else 0
+        
+        # Bullish entry: 4h uptrend + DEMA golden cross + MACD histogram positive/increasing
+        if trend == 1 and dema_cross > 0 and dema_cross_prev <= 0 and macd_hist > 0:
             signals[i] = SIZE_FULL
             position_side[i] = 1
             entry_price[i] = price
@@ -358,8 +371,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = price
             lowest_since_entry[i] = price
         
-        # Short: EMA bearish + %B > 0.6 (rally) + RSI 45-65 (not oversold)
-        elif ema_trend == -1 and pct_b > 0.6 and 45 <= rsi_val <= 65:
+        # Bearish entry: 4h downtrend + DEMA death cross + MACD histogram negative/decreasing
+        elif trend == -1 and dema_cross < 0 and dema_cross_prev >= 0 and macd_hist < 0:
             signals[i] = -SIZE_FULL
             position_side[i] = -1
             entry_price[i] = price
