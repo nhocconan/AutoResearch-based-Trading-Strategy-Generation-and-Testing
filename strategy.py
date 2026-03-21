@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #210: 1d Supertrend with Weekly HMA Macro Filter and RSI Pullback
-Hypothesis: Daily Supertrend captures multi-day trends effectively. Weekly HMA provides 
-macro bias (only trade in direction of weekly trend). RSI pullback (not extreme) entries 
-reduce whipsaw. This is simpler than Donchian and should generate more consistent trades 
-on 1d timeframe. Position sizing: 0.30 entry, 0.15 half at 2R profit. Stoploss: 2.5*ATR 
-trailing. Target: Beat Sharpe=0.499 from current best (mtf_12h_supertrend...).
-Key insight: 1d needs looser entry filters than lower TFs to generate enough trades.
+Experiment #211: 15m Multi-Timeframe HMA Trend + RSI Pullback with ADX Filter
+Hypothesis: 15m timeframe needs HTF trend confirmation to avoid whipsaws. 
+4h HMA provides macro trend bias. 1h RSI identifies pullback entries within trend.
+ADX filter (>20) avoids choppy range markets where trend strategies fail.
+This combines proven elements from best strategies but at faster 15m TF for more trades.
+Position sizing: 0.25 entry, 0.125 half at 2R profit. Stoploss: 2.5*ATR trailing.
+Target: Beat Sharpe=0.499 with more trades and better risk-adjusted returns.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_supertrend_weekly_hma_rsi_pullback_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_hma_4h_trend_1h_rsi_pullback_adx_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -25,38 +25,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator."""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.zeros(len(close))
-    trend = np.ones(len(close))  # 1 = bullish, -1 = bearish
-    
-    supertrend[0] = upper_band[0]
-    trend[0] = 1
-    
-    for i in range(1, len(close)):
-        if trend[i-1] == 1:
-            if close[i] < lower_band[i]:
-                trend[i] = -1
-                supertrend[i] = upper_band[i]
-            else:
-                trend[i] = 1
-                supertrend[i] = max(lower_band[i], supertrend[i-1])
-        else:
-            if close[i] > upper_band[i]:
-                trend[i] = 1
-                supertrend[i] = lower_band[i]
-            else:
-                trend[i] = -1
-                supertrend[i] = min(upper_band[i], supertrend[i-1])
-    
-    return supertrend, trend
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -80,6 +48,31 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return adx, plus_di, minus_di
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -87,22 +80,28 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1h = get_htf_data(prices, '1h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
+    rsi_15m = calculate_rsi(close, 14)
+    
+    # HMA for 15m trend confirmation
+    hma_15m = calculate_hma(close, 21)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -113,54 +112,46 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # Weekly HMA macro bias
-        weekly_bullish = close[i] > hma_1w_aligned[i]
-        weekly_bearish = close[i] < hma_1w_aligned[i]
+        # HTF trend filters (4h HMA)
+        trend_bullish = close[i] > hma_4h_aligned[i]
+        trend_bearish = close[i] < hma_4h_aligned[i]
         
-        # Supertrend direction
-        st_bullish = st_trend[i] == 1
-        st_bearish = st_trend[i] == -1
+        # 1h RSI pullback signals
+        rsi_1h_oversold = rsi_1h_aligned[i] < 45
+        rsi_1h_overbought = rsi_1h_aligned[i] > 55
+        rsi_1h_neutral = 40 < rsi_1h_aligned[i] < 60
         
-        # RSI pullback conditions (looser for 1d to ensure trades)
-        rsi_long_ok = 35 < rsi[i] < 70  # Not overbought
-        rsi_short_ok = 30 < rsi[i] < 65  # Not oversold
+        # ADX trend strength filter
+        adx_strong = adx[i] > 20
         
-        # Supertrend flip detection (entry signal)
-        st_flip_long = st_trend[i] == 1 and st_trend[i-1] == -1
-        st_flip_short = st_trend[i] == -1 and st_trend[i-1] == 1
+        # 15m RSI for entry timing
+        rsi_15m_oversold = rsi_15m[i] < 40
+        rsi_15m_overbought = rsi_15m[i] > 60
         
-        # Price vs Supertrend (continuation)
-        above_st = close[i] > supertrend[i]
-        below_st = close[i] < supertrend[i]
+        # 15m HMA confirmation
+        hma_15m_bullish = close[i] > hma_15m[i]
+        hma_15m_bearish = close[i] < hma_15m[i]
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Supertrend flip long with weekly bias
-        if st_flip_long:
-            if weekly_bullish and rsi_long_ok:
+        # Trend is bullish + RSI pullback + ADX confirms trend
+        if trend_bullish and rsi_1h_oversold and adx_strong:
+            # Entry trigger: 15m RSI oversold + price above 15m HMA
+            if rsi_15m_oversold and hma_15m_bullish:
                 new_signal = SIZE_ENTRY
-            elif rsi_long_ok:  # Enter even without weekly bias if ST flips
-                new_signal = SIZE_ENTRY * 0.7  # Smaller size without weekly confirmation
-        
-        # Supertrend continuation long
-        elif above_st and weekly_bullish and rsi_long_ok:
-            # Enter on pullback to Supertrend
-            if close[i-1] < supertrend[i-1] * 1.005 and close[i] > supertrend[i]:
+            # Alternative: RSI crossing up from oversold
+            elif rsi_15m[i] > 35 and rsi_15m[i-1] <= 35:
                 new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Supertrend flip short with weekly bias
-        if st_flip_short:
-            if weekly_bearish and rsi_short_ok:
+        # Trend is bearish + RSI pullback + ADX confirms trend
+        if trend_bearish and rsi_1h_overbought and adx_strong:
+            # Entry trigger: 15m RSI overbought + price below 15m HMA
+            if rsi_15m_overbought and hma_15m_bearish:
                 new_signal = -SIZE_ENTRY
-            elif rsi_short_ok:  # Enter even without weekly bias if ST flips
-                new_signal = -SIZE_ENTRY * 0.7  # Smaller size without weekly confirmation
-        
-        # Supertrend continuation short
-        elif below_st and weekly_bearish and rsi_short_ok:
-            # Enter on pullback to Supertrend
-            if close[i-1] > supertrend[i-1] * 0.995 and close[i] < supertrend[i]:
+            # Alternative: RSI crossing down from overbought
+            elif rsi_15m[i] < 65 and rsi_15m[i-1] >= 65:
                 new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
