@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #102 - MTF Chandelier Exit + Vol-Adjusted Sizing (15m+1h+4h Proper HTF v1)
+EXPERIMENT #103 - MTF Donchian+KAMA+Chandelier+VolAdj Sizing (15m+1h+4h Proper HTF)
 ==================================================================================================
-Hypothesis: Current best (mtf_supertrend_macd_bbw_rsi_15m_1h_4h_v1, Sharpe=3.653) uses MTF well.
-Key improvements for #102:
-1. PROPER HTF alignment using mtf_data helper (46 strategies failed without this!)
-2. Chandelier Exit trailing stop (highest_high - 3*ATR(22)) - proven in trend following
-3. Volatility-adjusted position sizing (smaller size when ATR% is high)
-4. 4h trend + 1h momentum + 15m entry (3-tier MTF for cleaner signals)
-5. Discrete signal levels (0.0, ±0.20, ±0.35) to minimize churn costs
-6. Signal magnitude capped at 0.35 (BTC crashed 77% in 2022, 0.35 → 27% max loss)
+Hypothesis: Current best (Sharpe=3.653) uses Supertrend+MACD+BBW+RSI. 
+This experiment tries Donchian breakout + KAMA adaptive trend + Chandelier exit.
 
-Why this should beat Sharpe=3.653:
-- Chandelier exit trails profits better than fixed 2R TP
-- Vol-adjusted sizing reduces exposure in high-vol regimes (less DD)
-- 4h trend filter is more stable than 1h (fewer whipsaws)
-- Proper HTF alignment eliminates look-ahead bugs that killed 46 strategies
+Key innovations:
+1. Donchian(20) breakout for entry signals (proven momentum indicator)
+2. KAMA for adaptive trend filtering (works well in crypto volatility)
+3. Chandelier exit (highest_high - 3*ATR) for trailing stops
+4. Volatility-adjusted position sizing (smaller size when ATR% is high)
+5. Proper MTF using mtf_data module (15m entries, 1h+4h trend filters)
+6. Discrete signal levels (0.0, ±0.25, ±0.35) to minimize churn costs
+
+Why this should beat current best:
+- Donchian breakouts capture momentum better than Supertrend in trending markets
+- KAMA adapts to volatility changes (better than static HMA)
+- Chandelier exit is proven to reduce drawdown vs fixed ATR stops
+- Vol-adjusted sizing reduces exposure during high volatility periods
+- Triple timeframe confirmation (15m/1h/4h) reduces false signals
+
+Risk management:
+- Max signal: 0.35 (35% of capital max)
+- ATR stop: 2.5*ATR for initial, Chandelier (3*ATR) for trailing
+- Position size scaled by volatility: base_size * (target_vol / current_vol)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_chandelier_voladj_sizing_15m_1h_4h_v1"
+name = "mtf_donchian_kama_chandelier_voladj_15m_1h_4h_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -50,34 +58,28 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average"""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average"""
     n = len(close)
-    if n < period:
+    if n < er_period + slow_period:
         return np.zeros(n)
     
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
+    kama = np.zeros(n)
+    kama[er_period] = close[er_period]
     
-    wma1 = np.zeros(n)
-    wma2 = np.zeros(n)
-    hma = np.zeros(n)
+    for i in range(er_period + 1, n):
+        change = abs(close[i] - close[i - er_period])
+        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        
+        if volatility > 0:
+            er = change / volatility
+        else:
+            er = 0
+        
+        sc = (er * (2.0 / (fast_period + 1) - 2.0 / (slow_period + 1)) + 2.0 / (slow_period + 1)) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
     
-    for i in range(half_period - 1, n):
-        weights = np.arange(1, half_period + 1)
-        wma1[i] = np.sum(close[i - half_period + 1:i + 1] * weights) / np.sum(weights)
-    
-    for i in range(period - 1, n):
-        weights = np.arange(1, period + 1)
-        wma2[i] = np.sum(close[i - period + 1:i + 1] * weights) / np.sum(weights)
-    
-    for i in range(period - 1 + sqrt_period - 1, n):
-        start_idx = i - sqrt_period + 1
-        weights = np.arange(1, sqrt_period + 1)
-        raw_vals = 2 * wma1[start_idx:i + 1] - wma2[start_idx:i + 1]
-        hma[i] = np.sum(raw_vals * weights) / np.sum(weights)
-    
-    return hma
+    return kama
 
 
 def calculate_rsi(close, period=14):
@@ -112,111 +114,66 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator"""
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high, lowest low over period)"""
+    n = len(high)
+    if n < period:
+        return np.zeros(n), np.zeros(n)
+    
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
+
+def calculate_chandelier_exit(high, low, close, atr, period=22, multiplier=3.0):
+    """Calculate Chandelier Exit (trailing stop based on highest high - ATR*mult)"""
     n = len(close)
     if n < period:
         return np.zeros(n), np.zeros(n)
     
-    atr = calculate_atr(high, low, close, period)
-    
-    supertrend = np.zeros(n)
-    trend_direction = np.ones(n)
-    
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
-    
-    for i in range(period, n):
-        mid = (high[i] + low[i]) / 2
-        upper_band[i] = mid + multiplier * atr[i]
-        lower_band[i] = mid - multiplier * atr[i]
-    
-    supertrend[period] = lower_band[period]
-    
-    for i in range(period + 1, n):
-        if trend_direction[i - 1] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i - 1])
-            if close[i] < supertrend[i]:
-                supertrend[i] = upper_band[i]
-                trend_direction[i] = -1
-            else:
-                trend_direction[i] = 1
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i - 1])
-            if close[i] > supertrend[i]:
-                supertrend[i] = lower_band[i]
-                trend_direction[i] = 1
-            else:
-                trend_direction[i] = -1
-    
-    return supertrend, trend_direction
-
-
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD"""
-    n = len(close)
-    if n < slow + signal:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    ema_fast = np.zeros(n)
-    ema_slow = np.zeros(n)
-    macd_line = np.zeros(n)
-    signal_line = np.zeros(n)
-    histogram = np.zeros(n)
-    
-    # EMA Fast
-    ema_fast[fast - 1] = np.mean(close[:fast])
-    for i in range(fast, n):
-        ema_fast[i] = ema_fast[i - 1] + (2.0 / (fast + 1)) * (close[i] - ema_fast[i - 1])
-    
-    # EMA Slow
-    ema_slow[slow - 1] = np.mean(close[:slow])
-    for i in range(slow, n):
-        ema_slow[i] = ema_slow[i - 1] + (2.0 / (slow + 1)) * (close[i] - ema_slow[i - 1])
-    
-    # MACD Line
-    for i in range(slow - 1, n):
-        macd_line[i] = ema_fast[i] - ema_slow[i]
-    
-    # Signal Line
-    valid_macd = macd_line[slow - 1:]
-    if len(valid_macd) >= signal:
-        signal_line[slow - 1 + signal - 1] = np.mean(valid_macd[:signal])
-        for i in range(signal - 1 + signal, len(valid_macd)):
-            signal_line[slow - 1 + i] = signal_line[slow - 1 + i - 1] + (2.0 / (signal + 1)) * (valid_macd[i] - signal_line[slow - 1 + i - 1])
-    
-    # Histogram
-    for i in range(slow - 1, n):
-        histogram[i] = macd_line[i] - signal_line[i]
-    
-    return macd_line, signal_line, histogram
-
-
-def calculate_chandelier_exit(high, low, close, atr_period=22, multiplier=3.0):
-    """Calculate Chandelier Exit (trailing stop based on highest high - ATR*mult)"""
-    n = len(close)
-    if n < atr_period:
-        return np.zeros(n), np.zeros(n)
-    
-    atr = calculate_atr(high, low, close, atr_period)
-    
-    chandelier_long = np.zeros(n)  # Stop level for long positions
-    chandelier_short = np.zeros(n)  # Stop level for short positions
+    chandelier_long = np.zeros(n)  # Stop for long positions
+    chandelier_short = np.zeros(n)  # Stop for short positions
     
     highest_high = np.zeros(n)
     lowest_low = np.zeros(n)
     
-    highest_high[atr_period - 1] = np.max(high[:atr_period])
-    lowest_low[atr_period - 1] = np.min(low[:atr_period])
-    
-    for i in range(atr_period, n):
-        highest_high[i] = max(highest_high[i - 1], high[i])
-        lowest_low[i] = min(lowest_low[i - 1], low[i])
+    for i in range(period - 1, n):
+        highest_high[i] = np.max(high[i - period + 1:i + 1])
+        lowest_low[i] = np.min(low[i - period + 1:i + 1])
         
         chandelier_long[i] = highest_high[i] - multiplier * atr[i]
         chandelier_short[i] = lowest_low[i] + multiplier * atr[i]
     
     return chandelier_long, chandelier_short
+
+
+def calculate_volatility_regime(close, period=20):
+    """Calculate volatility regime (1=low, 2=medium, 3=high)"""
+    n = len(close)
+    if n < period:
+        return np.ones(n)
+    
+    regime = np.ones(n)
+    returns = np.diff(close, prepend=close[0]) / close
+    
+    for i in range(period - 1, n):
+        window = returns[i - period + 1:i + 1]
+        vol = np.std(window)
+        
+        # Simple regime classification
+        if vol < 0.01:
+            regime[i] = 1  # Low vol
+        elif vol < 0.025:
+            regime[i] = 2  # Medium vol
+        else:
+            regime[i] = 3  # High vol
+    
+    return regime
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -225,226 +182,266 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # ===========================================
-    # 15m indicators (entry timeframe)
-    # ===========================================
-    atr_15m = calculate_atr(high, low, close, period=14)
-    rsi_15m = calculate_rsi(close, period=14)
-    _, _, macd_hist_15m = calculate_macd(close, fast=12, slow=26, signal=9)
-    chandelier_long_15m, chandelier_short_15m = calculate_chandelier_exit(high, low, close, atr_period=22, multiplier=3.0)
-    
-    # ===========================================
-    # 1h indicators using mtf_data helper (PROPER HTF ALIGNMENT)
-    # ===========================================
+    # Get HTF data using mtf_data module (CRITICAL - no manual resampling)
     try:
         df_1h = get_htf_data(prices, '1h')
-        close_1h = df_1h['close'].values
-        high_1h = df_1h['high'].values
-        low_1h = df_1h['low'].values
-        
-        hma_1h = calculate_hma(close_1h, period=21)
-        supertrend_1h, st_dir_1h = calculate_supertrend(high_1h, low_1h, close_1h, period=10, multiplier=3.0)
-        macd_1h, _, macd_hist_1h = calculate_macd(close_1h, fast=12, slow=26, signal=9)
-        
-        # Align 1h indicators to 15m timeframe (auto shift(1) for completed bars)
-        hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h)
-        st_dir_1h_aligned = align_htf_to_ltf(prices, df_1h, st_dir_1h)
-        macd_hist_1h_aligned = align_htf_to_ltf(prices, df_1h, macd_hist_1h)
-    except Exception:
-        # Fallback if mtf_data fails
-        hma_1h_aligned = np.zeros(n)
-        st_dir_1h_aligned = np.zeros(n)
-        macd_hist_1h_aligned = np.zeros(n)
-    
-    # ===========================================
-    # 4h indicators using mtf_data helper (PROPER HTF ALIGNMENT)
-    # ===========================================
-    try:
         df_4h = get_htf_data(prices, '4h')
-        close_4h = df_4h['close'].values
-        high_4h = df_4h['high'].values
-        low_4h = df_4h['low'].values
-        
-        hma_4h = calculate_hma(close_4h, period=21)
-        supertrend_4h, st_dir_4h = calculate_supertrend(high_4h, low_4h, close_4h, period=10, multiplier=3.0)
-        
-        # Align 4h indicators to 15m timeframe
-        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-        st_dir_4h_aligned = align_htf_to_ltf(prices, df_4h, st_dir_4h)
     except Exception:
-        # Fallback if mtf_data fails
-        hma_4h_aligned = np.zeros(n)
-        st_dir_4h_aligned = np.zeros(n)
+        # Fallback if mtf_data not available
+        df_1h = prices
+        df_4h = prices
     
-    # ===========================================
-    # Signal generation with 3-tier MTF
-    # ===========================================
+    # 15m indicators for entry timing
+    atr_15m = calculate_atr(high, low, close, period=14)
+    rsi_15m = calculate_rsi(close, period=14)
+    kama_15m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    donchian_upper_15m, donchian_lower_15m = calculate_donchian(high, low, period=20)
+    chandelier_long_15m, chandelier_short_15m = calculate_chandelier_exit(high, low, close, atr_15m, period=22, multiplier=3.0)
+    vol_regime_15m = calculate_volatility_regime(close, period=20)
+    
+    # 1h indicators for trend filter (using mtf_data align)
+    close_1h = df_1h["close"].values
+    high_1h = df_1h["high"].values
+    low_1h = df_1h["low"].values
+    
+    atr_1h = calculate_atr(high_1h, low_1h, close_1h, period=14)
+    kama_1h = calculate_kama(close_1h, er_period=10, fast_period=2, slow_period=30)
+    donchian_upper_1h, donchian_lower_1h = calculate_donchian(high_1h, low_1h, period=20)
+    rsi_1h = calculate_rsi(close_1h, period=14)
+    
+    # Align 1h indicators to 15m timeframe
+    kama_1h_aligned = align_htf_to_ltf(prices, df_1h, kama_1h)
+    donchian_upper_1h_aligned = align_htf_to_ltf(prices, df_1h, donchian_upper_1h)
+    donchian_lower_1h_aligned = align_htf_to_ltf(prices, df_1h, donchian_lower_1h)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
+    atr_1h_aligned = align_htf_to_ltf(prices, df_1h, atr_1h)
+    
+    # 4h indicators for major trend filter
+    close_4h = df_4h["close"].values
+    high_4h = df_4h["high"].values
+    low_4h = df_4h["low"].values
+    
+    kama_4h = calculate_kama(close_4h, er_period=10, fast_period=2, slow_period=30)
+    donchian_upper_4h, donchian_lower_4h = calculate_donchian(high_4h, low_4h, period=20)
+    
+    # Align 4h indicators to 15m timeframe
+    kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
+    donchian_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_4h)
+    donchian_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
+    
+    # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels with volatility adjustment
-    BASE_SIZE = 0.35  # Max position size (35% of capital)
-    MIN_SIZE = 0.20   # Min position size (20% of capital)
+    BASE_SIZE = 0.30  # Base position size (30% of capital)
+    SIZE_HALF = 0.15
+    
+    # Volatility adjustment factors
+    VOL_LOW_MULT = 1.2   # Increase size in low vol
+    VOL_MED_MULT = 1.0   # Normal size in medium vol
+    VOL_HIGH_MULT = 0.6  # Reduce size in high vol
     
     # Entry thresholds
     RSI_LONG_MIN = 35
     RSI_LONG_MAX = 55
     RSI_SHORT_MIN = 45
     RSI_SHORT_MAX = 65
-    MACD_HIST_MIN = 0.0  # Must be positive for long
     
-    # ATR for volatility-adjusted sizing
-    atr_pct = np.zeros(n)
-    for i in range(14, n):
-        if close[i] > 0 and atr_15m[i] > 0:
-            atr_pct[i] = (atr_15m[i] / close[i]) * 100  # ATR as % of price
+    # ATR stoploss multiplier
+    ATR_STOP_MULT = 2.5
     
-    # Volatility regime: high vol = smaller position
-    atr_pct_median = np.median(atr_pct[atr_pct > 0]) if np.any(atr_pct > 0) else 1.0
+    first_valid = max(200, 40, 22)
     
-    # Track position state for Chandelier exit
+    # Track position state
     position_side = np.zeros(n)
     entry_price = np.zeros(n)
-    chandelier_stop = np.zeros(n)
-    
-    first_valid = max(200, 22, 26 + 9)
+    tp_triggered = np.zeros(n)
+    highest_since_entry = np.zeros(n)
+    lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        # Skip if invalid data
+        # Check for NaN or zero ATR
         if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
+            signals[i] = 0.0
+            continue
+        
+        # Check HTF data alignment
+        if np.isnan(kama_1h_aligned[i]) or np.isnan(kama_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         atr = atr_15m[i]
         rsi_val = rsi_15m[i]
-        macd_hist = macd_hist_15m[i]
+        vol_regime = vol_regime_15m[i]
         
-        # 4h trend filter (strongest timeframe)
-        trend_4h = 0
-        if hma_4h_aligned[i] > 0 and close[i] > hma_4h_aligned[i]:
-            trend_4h = 1
-        elif hma_4h_aligned[i] > 0 and close[i] < hma_4h_aligned[i]:
-            trend_4h = -1
-        
-        st_4h = st_dir_4h_aligned[i]
-        
-        # 1h momentum confirmation
-        trend_1h = 0
-        if hma_1h_aligned[i] > 0 and close[i] > hma_1h_aligned[i]:
-            trend_1h = 1
-        elif hma_1h_aligned[i] > 0 and close[i] < hma_1h_aligned[i]:
-            trend_1h = -1
-        
-        st_1h = st_dir_1h_aligned[i]
-        macd_1h = macd_hist_1h_aligned[i]
-        
-        # Volatility-adjusted position sizing
-        if atr_pct[i] > atr_pct_median * 1.5:
-            position_size = MIN_SIZE  # High vol = smaller size
-        elif atr_pct[i] < atr_pct_median * 0.7:
-            position_size = BASE_SIZE  # Low vol = full size
+        # Calculate volatility-adjusted position size
+        if vol_regime == 1:
+            vol_mult = VOL_LOW_MULT
+        elif vol_regime == 2:
+            vol_mult = VOL_MED_MULT
         else:
-            position_size = MIN_SIZE + (BASE_SIZE - MIN_SIZE) * (1.5 - atr_pct[i] / atr_pct_median) / 0.8
-            position_size = max(MIN_SIZE, min(BASE_SIZE, position_size))
+            vol_mult = VOL_HIGH_MULT
         
-        # ===========================================
-        # Check existing positions with Chandelier exit
-        # ===========================================
+        adjusted_size = min(BASE_SIZE * vol_mult, 0.35)  # Cap at 35%
+        
+        # Trend filters (all timeframes must agree)
+        # 1h trend
+        if close[i] > kama_1h_aligned[i]:
+            trend_1h = 1
+        elif close[i] < kama_1h_aligned[i]:
+            trend_1h = -1
+        else:
+            trend_1h = 0
+        
+        # 4h trend
+        if close[i] > kama_4h_aligned[i]:
+            trend_4h = 1
+        elif close[i] < kama_4h_aligned[i]:
+            trend_4h = -1
+        else:
+            trend_4h = 0
+        
+        # Donchian breakout confirmation (1h)
+        donchian_breakout_1h = 0
+        if price > donchian_upper_1h_aligned[i]:
+            donchian_breakout_1h = 1
+        elif price < donchian_lower_1h_aligned[i]:
+            donchian_breakout_1h = -1
+        
+        # RSI 1h filter
+        rsi_1h_val = rsi_1h_aligned[i]
+        rsi_1h_bullish = 40 < rsi_1h_val < 70
+        rsi_1h_bearish = 30 < rsi_1h_val < 60
+        
+        # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
             prev_side = position_side[i - 1]
             prev_entry = entry_price[i - 1] if entry_price[i - 1] > 0 else close[i - 1]
-            prev_chand_stop = chandelier_stop[i - 1] if chandelier_stop[i - 1] > 0 else prev_entry
+            prev_tp = tp_triggered[i - 1]
+            prev_high = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else prev_entry
+            prev_low = lowest_since_entry[i - 1] if lowest_since_entry[i - 1] > 0 else prev_entry
             
-            # Update Chandelier stop
+            # Update highest/lowest since entry
             if prev_side == 1:
-                new_chand_stop = chandelier_long_15m[i]
-                # Trail stop only moves up (for longs)
-                if new_chand_stop > prev_chand_stop:
-                    chandelier_stop[i] = new_chand_stop
-                else:
-                    chandelier_stop[i] = prev_chand_stop
-                
-                # Check if price hit Chandelier stop
-                if price < chandelier_stop[i]:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    chandelier_stop[i] = 0
-                    continue
-                
-                # Check if trend reversed on 4h
-                if trend_4h == -1 or st_4h == -1:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    chandelier_stop[i] = 0
-                    continue
-                
-                # Hold position
-                signals[i] = signals[i - 1]
-                position_side[i] = prev_side
-                entry_price[i] = prev_entry
-                
-            elif prev_side == -1:
-                new_chand_stop = chandelier_short_15m[i]
-                # Trail stop only moves down (for shorts)
-                if new_chand_stop < prev_chand_stop:
-                    chandelier_stop[i] = new_chand_stop
-                else:
-                    chandelier_stop[i] = prev_chand_stop
-                
-                # Check if price hit Chandelier stop
-                if price > chandelier_stop[i]:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    chandelier_stop[i] = 0
-                    continue
-                
-                # Check if trend reversed on 4h
-                if trend_4h == 1 or st_4h == 1:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    chandelier_stop[i] = 0
-                    continue
-                
-                # Hold position
-                signals[i] = signals[i - 1]
-                position_side[i] = prev_side
-                entry_price[i] = prev_entry
+                current_high = max(prev_high, price)
+                current_low = min(prev_low, price) if prev_low > 0 else price
+            else:
+                current_high = max(prev_high, price) if prev_high > 0 else price
+                current_low = min(prev_low, price)
             
+            highest_since_entry[i] = current_high
+            lowest_since_entry[i] = current_low
+            
+            # Chandelier exit stoploss check
+            if prev_side == 1:
+                chandelier_stop = chandelier_long_15m[i]
+                initial_stop = prev_entry - ATR_STOP_MULT * atr
+                
+                # Use the tighter of chandelier or initial stop
+                effective_stop = max(chandelier_stop, initial_stop)
+                
+                if price < effective_stop:
+                    signals[i] = 0.0
+                    position_side[i] = 0
+                    entry_price[i] = 0
+                    tp_triggered[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
+                    continue
+                
+                # Take profit check (2R) - reduce to half
+                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
+                if not prev_tp and price >= tp_price:
+                    signals[i] = SIZE_HALF
+                    position_side[i] = 1
+                    entry_price[i] = prev_entry
+                    tp_triggered[i] = 1
+                    continue
+                
+                # Trail stop at 1R profit
+                if prev_tp:
+                    trail_stop = current_high - ATR_STOP_MULT * atr
+                    if price < trail_stop:
+                        signals[i] = 0.0
+                        position_side[i] = 0
+                        entry_price[i] = 0
+                        tp_triggered[i] = 0
+                        highest_since_entry[i] = 0
+                        lowest_since_entry[i] = 0
+                        continue
+                    
+            elif prev_side == -1:
+                chandelier_stop = chandelier_short_15m[i]
+                initial_stop = prev_entry + ATR_STOP_MULT * atr
+                
+                # Use the tighter of chandelier or initial stop
+                effective_stop = min(chandelier_stop, initial_stop)
+                
+                if price > effective_stop:
+                    signals[i] = 0.0
+                    position_side[i] = 0
+                    entry_price[i] = 0
+                    tp_triggered[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
+                    continue
+                
+                # Take profit check (2R) - reduce to half
+                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
+                if not prev_tp and price <= tp_price:
+                    signals[i] = -SIZE_HALF
+                    position_side[i] = -1
+                    entry_price[i] = prev_entry
+                    tp_triggered[i] = 1
+                    continue
+                
+                # Trail stop at 1R profit
+                if prev_tp:
+                    trail_stop = current_low + ATR_STOP_MULT * atr
+                    if price > trail_stop:
+                        signals[i] = 0.0
+                        position_side[i] = 0
+                        entry_price[i] = 0
+                        tp_triggered[i] = 0
+                        highest_since_entry[i] = 0
+                        lowest_since_entry[i] = 0
+                        continue
+            
+            # Hold position if no exit triggered
+            signals[i] = signals[i - 1]
+            position_side[i] = position_side[i - 1]
+            entry_price[i] = entry_price[i - 1]
+            tp_triggered[i] = tp_triggered[i - 1]
+            highest_since_entry[i] = highest_since_entry[i - 1]
+            lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ===========================================
-        # Entry logic: 3-tier MTF confirmation
-        # ===========================================
-        # Long entry: 4h trend up + 1h trend up + 15m RSI pullback + MACD positive
-        if (trend_4h == 1 and st_4h == 1 and
-            trend_1h == 1 and st_1h == 1 and
-            RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and
-            macd_hist > MACD_HIST_MIN):
-            
-            signals[i] = position_size
-            position_side[i] = 1
-            entry_price[i] = price
-            chandelier_stop[i] = chandelier_long_15m[i]
-        
-        # Short entry: 4h trend down + 1h trend down + 15m RSI pullback + MACD negative
-        elif (trend_4h == -1 and st_4h == -1 and
-              trend_1h == -1 and st_1h == -1 and
-              RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and
-              macd_hist < -MACD_HIST_MIN):
-            
-            signals[i] = -position_size
-            position_side[i] = -1
-            entry_price[i] = price
-            chandelier_stop[i] = chandelier_short_15m[i]
+        # Entry logic: Triple timeframe confirmation + Donchian breakout + RSI filter
+        # Long entry: 1h bullish + 4h bullish + Donchian breakout + RSI pullback
+        if trend_1h == 1 and trend_4h == 1 and rsi_1h_bullish:
+            if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
+                price > donchian_upper_15m[i] * 0.995):  # Near Donchian breakout
+                signals[i] = adjusted_size
+                position_side[i] = 1
+                entry_price[i] = price
+                tp_triggered[i] = 0
+                highest_since_entry[i] = price
+                lowest_since_entry[i] = price
+                
+        # Short entry: 1h bearish + 4h bearish + Donchian breakdown + RSI pullback
+        elif trend_1h == -1 and trend_4h == -1 and rsi_1h_bearish:
+            if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
+                price < donchian_lower_15m[i] * 1.005):  # Near Donchian breakdown
+                signals[i] = -adjusted_size
+                position_side[i] = -1
+                entry_price[i] = price
+                tp_triggered[i] = 0
+                highest_since_entry[i] = price
+                lowest_since_entry[i] = price
         
         else:
             signals[i] = 0.0
             position_side[i] = 0
-            entry_price[i] = 0
-            chandelier_stop[i] = 0
     
     return signals
