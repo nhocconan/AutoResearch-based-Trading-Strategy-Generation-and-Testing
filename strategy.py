@@ -1,30 +1,78 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #001 - Supertrend + RSI Pullback with 4h Trend Filter (15m)
-=======================================================================
-Hypothesis: 15m Supertrend entries aligned with 4h HMA(21) trend direction
-capture intraday momentum while avoiding counter-trend trades. RSI(14) pullback
-filter ensures we enter on dips in uptrends (RSI 40-55) and rallies in downtrends
-(RSI 45-60), not at extremes. Volume confirmation filters false breakouts.
-ATR(14) trailing stop at 2.5x protects against reversals.
+EXPERIMENT #002 - KAMA Adaptive Trend + Bollinger Regime + 4h HMA Filter (30m)
+==============================================================================
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market efficiency,
+performing better than fixed EMAs in varying volatility regimes. Combined with
+Bollinger Band Width to detect low-volatility squeezes (avoid choppy markets)
+and 4h HMA for higher timeframe trend alignment. RSI pullback entries within
+the trend direction improve entry timing vs pure breakouts.
 
 Key features:
-- Primary TF: 15m (intraday momentum)
+- Primary TF: 30m (faster signals than 1h/4h, slower than 5m/15m)
 - HTF filter: 4h HMA(21) for major trend direction
-- Entry: Supertrend(10,3) flip + RSI pullback zone + volume > SMA(20)
-- Filter: 4h trend must align with entry direction
-- Stoploss: 2.5*ATR(14) trailing
+- Trend: KAMA(10) vs KAMA(40) crossover with efficiency ratio filter
+- Regime: Bollinger Band Width percentile (avoid bottom 30% = choppy)
+- Entry: RSI(14) pullback to 40-60 zone within trend
+- Stoploss: 2.0*ATR(14) trailing
+- Take profit: Reduce to half at 2R, trail stop at 1R
 - Position sizing: 0.25-0.30 discrete levels
-- Take profit: Reduce to half at 2R profit
+
+Why different from failed #001:
+- KAMA adapts to volatility vs fixed Supertrend parameters
+- Bollinger BW regime filter avoids choppy markets (major failure cause)
+- RSI pullback entries vs RSI extreme entries (better risk/reward)
+- 30m timeframe captures more intraday moves than 15m
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "supertrend_rsi_4h_filter_15m_v1"
-timeframe = "15m"
+name = "kama_bollinger_regime_4h_30m_v1"
+timeframe = "30m"
 leverage = 1.0
+
+
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average
+    Adapts smoothing based on market efficiency ratio
+    """
+    n = len(close)
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    if n < period + slow_period:
+        return kama
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    er[:] = np.nan
+    
+    for i in range(slow_period, n):
+        price_change = abs(close[i] - close[i - slow_period])
+        volatility = np.sum(np.abs(np.diff(close[i - slow_period:i + 1])))
+        if volatility > 0:
+            er[i] = price_change / volatility
+        else:
+            er[i] = 0
+    
+    # Calculate smoothing constant
+    fast_sc = 2 / (fast_period + 1)
+    slow_sc = 2 / (slow_period + 1)
+    
+    # Initialize KAMA
+    kama[slow_period] = close[slow_period]
+    
+    for i in range(slow_period + 1, n):
+        if np.isnan(er[i]):
+            kama[i] = kama[i - 1]
+            continue
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 
 def calculate_hma(close, period):
@@ -50,60 +98,15 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-    Returns: supertrend_values, supertrend_direction (1=long, -1=short)
-    """
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    hl2 = (high + low) / 2.0
-    
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)
-    
-    for i in range(period, n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            upper_band[i] = np.nan
-            lower_band[i] = np.nan
-            supertrend[i] = np.nan
-            direction[i] = 0
-            continue
-        
-        upper_band[i] = hl2[i] + multiplier * atr[i]
-        lower_band[i] = hl2[i] - multiplier * atr[i]
-        
-        if i == period:
-            supertrend[i] = upper_band[i]
-            direction[i] = 1
-        else:
-            # Upper band logic
-            if close[i - 1] <= supertrend[i - 1]:
-                upper_band[i] = min(upper_band[i], upper_band[i - 1])
-            else:
-                upper_band[i] = hl2[i] + multiplier * atr[i]
-            
-            # Lower band logic
-            if close[i - 1] >= supertrend[i - 1]:
-                lower_band[i] = max(lower_band[i], lower_band[i - 1])
-            else:
-                lower_band[i] = hl2[i] - multiplier * atr[i]
-            
-            # Determine supertrend value and direction
-            if close[i] <= lower_band[i]:
-                supertrend[i] = lower_band[i]
-                direction[i] = 1  # Long signal
-            elif close[i] >= upper_band[i]:
-                supertrend[i] = upper_band[i]
-                direction[i] = -1  # Short signal
-            else:
-                supertrend[i] = supertrend[i - 1]
-                direction[i] = direction[i - 1]
-    
-    return supertrend, direction
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands and Band Width"""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    band_width = (upper - lower) / sma
+    return upper.values, lower.values, band_width.values
 
 
 def calculate_rsi(close, period=14):
@@ -119,6 +122,23 @@ def calculate_rsi(close, period=14):
     return rsi.values
 
 
+def calculate_bb_width_percentile(band_width, lookback=100):
+    """Calculate rolling percentile of Bollinger Band Width"""
+    n = len(band_width)
+    percentile = np.zeros(n)
+    percentile[:] = np.nan
+    
+    for i in range(lookback, n):
+        window = band_width[i - lookback:i + 1]
+        valid = window[~np.isnan(window)]
+        if len(valid) > 0:
+            percentile[i] = np.sum(valid <= band_width[i]) / len(valid) * 100
+        else:
+            percentile[i] = 50.0
+    
+    return percentile
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
@@ -131,13 +151,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     hma_4h = calculate_hma(df_4h['close'].values, 21)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
-    supertrend, supertrend_dir = calculate_supertrend(high, low, close, 10, 3.0)
+    # Calculate 30m indicators
+    kama_fast = calculate_kama(close, period=10, fast_period=2, slow_period=30)
+    kama_slow = calculate_kama(close, period=40, fast_period=2, slow_period=30)
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    
-    # Volume moving average
-    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2.0)
+    bb_width_pct = calculate_bb_width_percentile(bb_width, 100)
     
     # Generate signals
     signals = np.zeros(n)
@@ -151,50 +171,53 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_price = 0.0
     profit_target_hit = False
     
-    min_period = 100  # Wait for 4h HMA and indicators to stabilize
+    min_period = 150  # Wait for KAMA, BB, and 4h HMA to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(supertrend[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_sma[i]) or np.isnan(rsi[i]) or 
-            atr[i] == 0 or supertrend_dir[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(kama_fast[i]) or 
+            np.isnan(kama_slow[i]) or np.isnan(atr[i]) or 
+            np.isnan(rsi[i]) or np.isnan(bb_width_pct[i]) or 
+            atr[i] == 0 or bb_width[i] == 0):
             signals[i] = 0.0
             continue
         
-        # 4h trend filter
-        trend_4h = 1 if close[i] > hma_4h_aligned[i] else -1
+        # 4h trend filter (HTF alignment)
+        htf_trend = 1 if close[i] > hma_4h_aligned[i] else -1
         
-        # Volume confirmation (must be above 20-period average)
-        volume_confirmed = volume[i] > volume_sma[i]
+        # Bollinger Band Width regime filter (avoid choppy markets)
+        # Only trade when BB width is in top 70% (not in squeeze)
+        regime_valid = bb_width_pct[i] >= 30.0
         
-        # Supertrend direction signal
-        st_signal = int(supertrend_dir[i])
-        st_prev = int(supertrend_dir[i - 1]) if i > 0 else 0
+        # KAMA trend direction
+        kama_trend = 0
+        if kama_fast[i] > kama_slow[i]:
+            kama_trend = 1
+        elif kama_fast[i] < kama_slow[i]:
+            kama_trend = -1
         
-        # Detect Supertrend flip (entry signal)
-        st_flip = 0
-        if st_signal == 1 and st_prev == -1:
-            st_flip = 1  # Long flip
-        elif st_signal == -1 and st_prev == 1:
-            st_flip = -1  # Short flip
+        # KAMA efficiency filter (fast KAMA should be moving)
+        kama_moving = False
+        if i >= 5:
+            kama_change = abs(kama_fast[i] - kama_fast[i - 5]) / kama_fast[i - 5] if kama_fast[i - 5] > 0 else 0
+            kama_moving = kama_change > 0.001  # At least 0.1% move in 5 bars
         
-        # RSI pullback filter
-        # For longs: RSI should be in pullback zone (40-55), not overbought
-        # For shorts: RSI should be in rally zone (45-60), not oversold
-        rsi_valid_long = 40 < rsi[i] < 55
-        rsi_valid_short = 45 < rsi[i] < 60
+        # RSI pullback entry signal (within trend, not extreme)
+        rsi_signal = 0
+        if htf_trend == 1 and kama_trend == 1:
+            # Long: RSI pullback to 40-55 zone
+            if 40 <= rsi[i] <= 55:
+                rsi_signal = 1
+        elif htf_trend == -1 and kama_trend == -1:
+            # Short: RSI pullback to 45-60 zone
+            if 45 <= rsi[i] <= 60:
+                rsi_signal = -1
         
         # Determine target signal based on all filters
         target_signal = 0.0
-        if st_flip != 0:
-            if st_flip == 1:  # Long flip
-                # Must align with 4h uptrend, volume confirmed, RSI in pullback zone
-                if trend_4h == 1 and volume_confirmed and rsi_valid_long:
-                    target_signal = SIZE
-            elif st_flip == -1:  # Short flip
-                # Must align with 4h downtrend, volume confirmed, RSI in rally zone
-                if trend_4h == -1 and volume_confirmed and rsi_valid_short:
-                    target_signal = -SIZE
+        if rsi_signal != 0 and regime_valid and kama_moving:
+            # All filters aligned
+            target_signal = SIZE * rsi_signal
         
         # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
@@ -204,20 +227,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.5 * atr[i]
+                trailing_stop = highest_since_entry - 2.0 * atr[i]
                 
                 # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry, where R = 2.5*ATR)
+                # Check take profit (2R from entry, R = 2*ATR)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 5.0 * atr[i]:  # 2R = 5*ATR
+                    if close[i] >= entry_price + 4.0 * atr[i]:  # 2R = 4*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.5 * atr[i]
+                trailing_stop = lowest_since_entry + 2.0 * atr[i]
                 
                 # Check stoploss
                 if close[i] > trailing_stop:
@@ -225,7 +248,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 5.0 * atr[i]:  # 2R profit
+                    if close[i] <= entry_price - 4.0 * atr[i]:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -239,19 +262,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
+            # Trail stop tighter after TP (1R from highest/lowest)
+            if position_side == 1:
+                highest_since_entry = max(highest_since_entry, close[i])
+            else:
+                lowest_since_entry = min(lowest_since_entry, close[i])
         else:
             # Apply signal change
             if target_signal != 0.0:
                 signals[i] = target_signal
                 if position_side == 0:
                     # New entry
-                    position_side = 1 if target_signal > 0 else -1
-                    highest_since_entry = close[i]
-                    lowest_since_entry = close[i]
-                    entry_price = close[i]
-                    profit_target_hit = False
-                else:
-                    # Position reversal
                     position_side = 1 if target_signal > 0 else -1
                     highest_since_entry = close[i]
                     lowest_since_entry = close[i]
