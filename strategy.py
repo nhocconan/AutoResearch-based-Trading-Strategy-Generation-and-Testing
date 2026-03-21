@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #284: 30m Trend Following with 4h/1d HMA Filter and KAMA Pullback
-Hypothesis: 30m timeframe needs stronger HTF filtering to avoid whipsaws that destroyed
-previous 30m attempts. Using 4h HMA as primary trend filter + 1d HMA as macro bias.
-Entry on KAMA pullback with RSI confirmation in direction of HTF trend.
-Simple logic to ensure sufficient trades while maintaining quality.
-Position sizing: 0.28 entry, 0.14 half at 2R profit. Stoploss: 2.5*ATR trailing.
-Target: Beat Sharpe=0.499 from current best (mtf_12h_supertrend_daily_hma_rsi_pullback_v2)
+Experiment #285: 1h KAMA Trend with 4h HMA Filter and RSI Pullback
+Hypothesis: 1h primary timeframe with 4h HMA trend filter provides optimal balance
+between signal frequency and trend confirmation. KAMA adapts to volatility better
+than EMA, reducing whipsaws. RSI pullback entries (loose thresholds 35-65) ensure
+sufficient trades (>10 train, >3 test). Single HTF filter (4h) avoids over-filtering
+that caused 0 trades in previous experiments. ATR stoploss at 2.0*ATR controls DD.
+Position sizing: 0.25 entry, 0.125 half at 2R profit. Target: Sharpe > 0.5
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_trend_4h_1d_hma_kama_rsi_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_kama_4h_hma_rsi_pullback_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -61,32 +61,15 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX for trend strength."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD indicator."""
     close_s = pd.Series(close)
-    
-    plus_dm = high_s.diff()
-    minus_dm = -low_s.diff()
-    
-    plus_dm = np.where((plus_dm.values > minus_dm.values) & (plus_dm.values > 0), plus_dm.values, 0.0)
-    minus_dm = np.where((minus_dm.values > plus_dm.values) & (minus_dm.values > 0), minus_dm.values, 0.0)
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
-    
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) > 0, plus_di + minus_di, 1.0)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx, plus_di, minus_di
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -96,33 +79,30 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     kama = calculate_kama(close, 10, 2, 30)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
     
     # Track previous values
     prev_kama = np.roll(kama, 1)
     prev_kama[0] = kama[0]
     prev_rsi = np.roll(rsi, 1)
     prev_rsi[0] = rsi[0]
-    prev_adx = np.roll(adx, 1)
-    prev_adx[0] = adx[0]
+    prev_macd_hist = np.roll(macd_hist, 1)
+    prev_macd_hist[0] = macd_hist[0]
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.28
-    SIZE_HALF = 0.14
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -133,72 +113,70 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filters
-        trend_4h_bullish = close[i] > hma_4h_aligned[i]
-        trend_4h_bearish = close[i] < hma_4h_aligned[i]
-        trend_1d_bullish = close[i] > hma_1d_aligned[i]
-        trend_1d_bearish = close[i] < hma_1d_aligned[i]
+        # HTF trend filter (4h HMA - simpler than daily+weekly)
+        hma_4h_bullish = close[i] > hma_4h_aligned[i]
+        hma_4h_bearish = close[i] < hma_4h_aligned[i]
         
-        # KAMA signals
+        # KAMA trend signals
         kama_bullish = close[i] > kama[i] and kama[i] > prev_kama[i]
         kama_bearish = close[i] < kama[i] and kama[i] < prev_kama[i]
+        
+        # KAMA cross signals
         kama_cross_up = prev_kama[i] >= close[i] and kama[i] < close[i]
         kama_cross_down = prev_kama[i] <= close[i] and kama[i] > close[i]
         
-        # RSI signals (looser for more trades)
+        # MACD momentum
+        macd_bullish = macd_hist[i] > 0 and prev_macd_hist[i] <= 0
+        macd_bearish = macd_hist[i] < 0 and prev_macd_hist[i] >= 0
+        macd_positive = macd_hist[i] > 0
+        macd_negative = macd_hist[i] < 0
+        
+        # RSI pullback signals (LOOSE thresholds for more trades)
+        rsi_pullback_long = 35 <= rsi[i] <= 55
+        rsi_pullback_short = 45 <= rsi[i] <= 65
         rsi_oversold = rsi[i] < 45
         rsi_overbought = rsi[i] > 55
-        rsi_rising = rsi[i] > prev_rsi[i]
-        rsi_falling = rsi[i] < prev_rsi[i]
-        
-        # ADX trend strength
-        trend_strong = adx[i] > 20
-        trend_weak = adx[i] <= 20
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Primary: 4h bullish + KAMA bullish + RSI confirmation
-        if trend_4h_bullish and kama_bullish:
-            if rsi[i] > 45 and rsi_rising:
+        # Primary: KAMA bullish + 4h HMA bullish + RSI pullback
+        if kama_bullish and hma_4h_bullish:
+            if rsi_pullback_long or rsi_oversold:
                 new_signal = SIZE_ENTRY
-            elif rsi_oversold and trend_1d_bullish:
+            elif macd_positive and rsi[i] > 40:
                 new_signal = SIZE_ENTRY
         
-        # KAMA cross up with HTF confirmation
+        # KAMA cross up with trend confirmation
         elif kama_cross_up:
-            if trend_4h_bullish and rsi[i] > 40:
+            if hma_4h_bullish and rsi[i] > 35:
                 new_signal = SIZE_ENTRY
-            elif trend_1d_bullish and adx[i] > 15:
+            elif macd_bullish and rsi[i] > 40:
                 new_signal = SIZE_ENTRY
         
-        # Strong trend continuation (both HTF bullish)
-        elif trend_4h_bullish and trend_1d_bullish:
-            if kama_bullish and rsi[i] > 50:
-                new_signal = SIZE_ENTRY
-            elif rsi[i] > 45 and rsi_rising:
+        # MACD momentum with trend
+        elif macd_bullish and hma_4h_bullish:
+            if kama_bullish and rsi[i] > 40:
                 new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Primary: 4h bearish + KAMA bearish + RSI confirmation
-        if trend_4h_bearish and kama_bearish:
-            if rsi[i] < 55 and rsi_falling:
+        # Primary: KAMA bearish + 4h HMA bearish + RSI pullback
+        if kama_bearish and hma_4h_bearish:
+            if rsi_pullback_short or rsi_overbought:
                 new_signal = -SIZE_ENTRY
-            elif rsi_overbought and trend_1d_bearish:
+            elif macd_negative and rsi[i] < 60:
                 new_signal = -SIZE_ENTRY
         
-        # KAMA cross down with HTF confirmation
+        # KAMA cross down with trend confirmation
         elif kama_cross_down:
-            if trend_4h_bearish and rsi[i] < 60:
+            if hma_4h_bearish and rsi[i] < 65:
                 new_signal = -SIZE_ENTRY
-            elif trend_1d_bearish and adx[i] > 15:
+            elif macd_bearish and rsi[i] < 60:
                 new_signal = -SIZE_ENTRY
         
-        # Strong trend continuation (both HTF bearish)
-        elif trend_4h_bearish and trend_1d_bearish:
-            if kama_bearish and rsi[i] < 50:
-                new_signal = -SIZE_ENTRY
-            elif rsi[i] < 55 and rsi_falling:
+        # MACD momentum with trend
+        elif macd_bearish and hma_4h_bearish:
+            if kama_bearish and rsi[i] < 60:
                 new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -207,8 +185,8 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR from highest)
-            current_stop = highest_close - 2.5 * atr[i]
+            # Calculate trailing stop (2.0*ATR from highest)
+            current_stop = highest_close - 2.0 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -217,7 +195,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.5 * atr[i]
+                risk = 2.0 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
@@ -228,8 +206,8 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR from lowest)
-            current_stop = lowest_close + 2.5 * atr[i]
+            # Calculate trailing stop (2.0*ATR from lowest)
+            current_stop = lowest_close + 2.0 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -238,7 +216,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.5 * atr[i]
+                risk = 2.0 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
@@ -251,7 +229,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
@@ -260,7 +238,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
