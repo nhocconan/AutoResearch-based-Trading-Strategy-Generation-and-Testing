@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #023 - Donchian Breakout + 1d HMA Trend + RSI Filter (12h primary)
+EXPERIMENT #024 - Weekly Trend + Daily EMA Crossover + RSI Momentum (1d primary)
 =====================================================================================
-Hypothesis: 12h timeframe captures medium-term trends better than faster TFs.
-Donchian channel breakouts (20-period) work well on slower timeframes where
-noise is reduced. 1d HMA(21) provides higher timeframe trend confirmation.
-RSI filter is kept permissive (40-60 range) to ensure sufficient trade generation.
+Hypothesis: Daily timeframe captures major crypto moves while avoiding noise of lower TFs.
+Using Weekly HMA(21) as the ultimate trend filter ensures we only trade with the macro direction.
+Daily EMA(21/55) crossover provides clear entry signals. RSI(14) momentum filter confirms strength.
+ADX(14) > 15 ensures we're in a trending environment (lower threshold for daily since ADX moves slower).
 
 Key features:
-- Primary TF: 12h (as required for this experiment)
-- HTF filter: 1d HMA(21) for major trend direction
-- Entry: Donchian(20) breakout (price breaks 20-period high/low)
-- Filter: RSI(14) > 40 for longs, < 60 for shorts (permissive)
-- Strength: ADX(14) > 20 (lower threshold for more trades)
-- Stoploss: 2.5*ATR(14) trailing (wider for 12h timeframe)
-- Position sizing: 0.25 base, 0.30 max, discrete levels
-- Take profit: Reduce to half at 2.5R profit
+- Primary TF: 1d (daily candles - fewer but higher quality signals)
+- HTF filter: 1w HMA(21) for macro trend direction
+- Entry: EMA(21) crossing EMA(55) with momentum confirmation
+- Momentum: RSI(14) > 45 for longs, < 55 for shorts (not too strict)
+- Trend strength: ADX(14) > 15 (lower threshold for daily data)
+- Stoploss: 3.0*ATR(14) trailing (wider for daily volatility)
+- Position sizing: 0.25-0.30 discrete levels
+- Take profit: Reduce to half at 2R profit, then trail
 
-Why this should work on 12h:
-- 12h has less noise than 15m/1h/4h strategies that failed
-- Donchian breakouts capture sustained moves on slower TFs
-- Permissive RSI/ADX filters ensure ≥10 trades per symbol
-- Conservative sizing (0.25-0.30) controls drawdown
+Why this should work on daily:
+- Weekly HMA filter removes counter-trend trades during major reversals
+- EMA crossover on daily captures sustained moves (not noise)
+- Looser RSI/ADX thresholds ensure enough trades on daily data
+- Conservative 0.25-0.30 sizing controls drawdown during 2022 crash
+- 3*ATR stoploss accounts for daily volatility without premature exits
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "donchian_rsi_1dhma_12h_v1"
-timeframe = "12h"
+name = "weekly_trend_daily_ema_rsi_1d_v1"
+timeframe = "1d"
 leverage = 1.0
 
 
@@ -120,6 +121,13 @@ def calculate_adx(high, low, close, period=14):
     return adx, plus_di, minus_di
 
 
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average"""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
+    return ema.values
+
+
 def calculate_hma(close, period):
     """Calculate Hull Moving Average"""
     close_s = pd.Series(close)
@@ -130,44 +138,33 @@ def calculate_hma(close, period):
     return hma.values
 
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (upper/lower bands)"""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (Rule 1) - Weekly for macro trend
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d HMA for trend filter
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    # Calculate Weekly HMA for major trend filter
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
-    atr = calculate_atr(high, low, close, period=14)
+    # Calculate Daily indicators
+    ema21 = calculate_ema(close, 21)
+    ema55 = calculate_ema(close, 55)
     rsi = calculate_rsi(close, period=14)
+    atr = calculate_atr(high, low, close, period=14)
     adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.25  # Base position size (25% of capital)
-    MAX_SIZE = 0.30   # Max position size
+    BASE_SIZE = 0.28  # Base position size (28% of capital)
+    MAX_SIZE = 0.32   # Max position size with strong ADX
+    MIN_SIZE = 0.22   # Min position size
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -178,51 +175,51 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_atr = 0.0
     profit_target_hit = False
     
-    min_period = 50  # Wait for indicators to stabilize (Donchian needs 20, ADX needs ~28)
+    min_period = 100  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1d_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(atr[i]) or np.isnan(adx[i]) or
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+        if (np.isnan(hma_1w_aligned[i]) or np.isnan(ema21[i]) or np.isnan(ema55[i]) or
+            np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(adx[i]) or
             atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # 1d HMA trend filter
-        price_above_1d_hma = close[i] > hma_1d_aligned[i]
-        hma_trend = 1 if price_above_1d_hma else -1
+        # Weekly HMA trend filter (macro direction)
+        price_above_1w_hma = close[i] > hma_1w_aligned[i]
+        weekly_trend = 1 if price_above_1w_hma else -1
         
-        # ADX strength filter (ADX > 20 for more trades)
-        adx_strong = adx[i] > 20
+        # Daily EMA crossover signal
+        # Fast EMA above slow EMA = bullish
+        ema_bullish = ema21[i] > ema55[i]
+        ema_bearish = ema21[i] < ema55[i]
         
-        # RSI filter (permissive: > 40 for longs, < 60 for shorts)
-        rsi_ok_long = rsi[i] > 40
-        rsi_ok_short = rsi[i] < 60
+        # ADX strength filter (lower threshold for daily data)
+        adx_strong = adx[i] > 15
         
-        # DI+ vs DI- for trend confirmation
+        # RSI momentum (not too strict to ensure enough trades)
+        rsi_momentum_long = rsi[i] > 45
+        rsi_momentum_short = rsi[i] < 55
+        
+        # DI+ vs DI- for additional trend confirmation
         di_bullish = plus_di[i] > minus_di[i]
         di_bearish = minus_di[i] > plus_di[i]
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
-        
-        # Calculate position size based on ADX strength
-        adx_multiplier = min(1.0 + (adx[i] - 20) / 60, 1.2)  # Max 1.2x
-        position_size = min(MAX_SIZE, max(BASE_SIZE, BASE_SIZE * adx_multiplier))
+        # Calculate position size based on ADX strength (dynamic sizing)
+        adx_multiplier = min(1.0 + (adx[i] - 15) / 40, 1.15)  # Max 1.15x
+        position_size = min(MAX_SIZE, max(MIN_SIZE, BASE_SIZE * adx_multiplier))
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: Donchian breakout + 1d HMA bullish + ADX strong + RSI > 40 + DI+ > DI-
-        if (breakout_long and hma_trend == 1 and adx_strong and 
-            rsi_ok_long and di_bullish):
+        # Long entry: Weekly trend up + EMA bullish + ADX strong + RSI momentum + DI+ > DI-
+        if (weekly_trend == 1 and ema_bullish and adx_strong and 
+            rsi_momentum_long and di_bullish):
             target_signal = position_size
         
-        # Short entry: Donchian breakout + 1d HMA bearish + ADX strong + RSI < 60 + DI- > DI+
-        elif (breakout_short and hma_trend == -1 and adx_strong and 
-              rsi_ok_short and di_bearish):
+        # Short entry: Weekly trend down + EMA bearish + ADX strong + RSI momentum + DI- > DI+
+        elif (weekly_trend == -1 and ema_bearish and adx_strong and 
+              rsi_momentum_short and di_bearish):
             target_signal = -position_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -233,20 +230,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.5 * atr[i]
+                trailing_stop = highest_since_entry - 3.0 * atr[i]  # 3*ATR for daily
                 
                 # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2.5R from entry, where R = 2.5*ATR at entry)
+                # Check take profit (2R from entry, where R = 3*ATR at entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 6.25 * entry_atr:  # 2.5R = 6.25*ATR
+                    if close[i] >= entry_price + 6.0 * entry_atr:  # 2R = 6*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.5 * atr[i]
+                trailing_stop = lowest_since_entry + 3.0 * atr[i]  # 3*ATR for daily
                 
                 # Check stoploss
                 if close[i] > trailing_stop:
@@ -254,7 +251,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 6.25 * entry_atr:  # 2.5R profit
+                    if close[i] <= entry_price - 6.0 * entry_atr:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -266,7 +263,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             entry_atr = 0.0
             profit_target_hit = False
         elif take_profit_triggered:
-            # Reduce position to half at 2.5R profit
+            # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
@@ -282,14 +279,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if 1d HMA alignment breaks
-                hma_alignment_broken = (position_side == 1 and hma_trend == -1) or \
-                                       (position_side == -1 and hma_trend == 1)
+                # Exit if EMA crossover reverses OR weekly HMA alignment breaks
+                ema_reversal_long = ema_bearish
+                ema_reversal_short = ema_bullish
+                weekly_alignment_broken = (position_side == 1 and weekly_trend == -1) or \
+                                          (position_side == -1 and weekly_trend == 1)
                 
-                # Exit if ADX drops too low (trend weakening)
-                adx_weak = adx[i] < 15
-                
-                if hma_alignment_broken or adx_weak:
+                if ema_reversal_long or ema_reversal_short or weekly_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
