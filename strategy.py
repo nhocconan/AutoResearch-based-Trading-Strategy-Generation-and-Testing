@@ -1,67 +1,67 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #021 - HMA Trend + RSI Pullback + ATR Dynamic Sizing + Take Profit
+EXPERIMENT #022 - KAMA Trend + BB-RSI Entry + Volume Confirmation + Chandelier Exit
 ====================================================================================
-Hypothesis: Building on #017's success, replace Donchian with HMA for smoother trend detection.
-HMA reduces lag vs EMA while maintaining responsiveness. Add take-profit logic at 2R to lock gains.
-Use 4h HMA for trend + 15m RSI for faster entries than 1h. Dynamic position sizing based on ATR.
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts better to volatility regimes than HMA.
+Combine Bollinger Band position (price location within bands) with RSI for better entry timing.
+Add volume confirmation to filter weak moves. Use Chandelier Exit for trailing stops.
 
-Key improvements over #017:
-- HMA(16/48) instead of Donchian - smoother trend, fewer whipsaws
-- 15m RSI entries instead of 1h - catch pullbacks earlier
-- Take profit at 2R (reduce to half position) - lock in gains
-- ATR-based dynamic sizing: size = base * (target_vol / current_vol)
-- Tighter stoploss: 2.0*ATR instead of 2.5*ATR
-- Discrete signal levels: 0.0, ±0.25, ±0.35 to minimize churn costs
+Key improvements over #021:
+- KAMA(14,2,30) instead of HMA - adapts efficiency ratio to market noise
+- 1h timeframe instead of 15m - fewer false signals, cleaner trends
+- BB position filter (price in lower 40% of bands for long) - better entry location
+- Volume confirmation (volume > 1.5x SMA20) - confirms move strength
+- Chandelier Exit (22-period, 3*ATR) for trailing - professional trend-following stop
+- Regime-adjusted position sizing (reduce size in high volatility)
 
-Why this might beat Sharpe=6.689:
-- HMA captures trends with less noise than Donchian breakouts
-- Faster 15m entries capture more of the move vs 1h
-- Take-profit logic reduces giveback on reversals
-- Dynamic sizing adapts to volatility regimes
+Why this might beat Sharpe=11.523:
+- KAMA reduces whipsaws in choppy markets better than HMA
+- BB position ensures we enter at better prices within the trend
+- Volume filter avoids low-liquidity traps
+- Chandelier Exit is proven trend-following stop used by professionals
+- 1h timeframe balances signal quality vs opportunity frequency
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_rsi_atr_dynamic_tp_v1"
-timeframe = "15m"
+name = "mtf_kama_bb_rsi_vol_chandelier_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_hma(close, period=16):
-    """Calculate Hull Moving Average - reduces lag vs EMA"""
+def calculate_kama(close, period=14, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average
+    KAMA adapts to market noise using Efficiency Ratio
+    """
     n = len(close)
-    if n < period:
-        return np.zeros(n)
+    kama = np.zeros(n)
     
-    # WMA of half period
-    half = period // 2
-    wma_half = np.zeros(n)
-    wma_full = np.zeros(n)
+    if n < period + slow_period:
+        return kama
     
-    # Calculate WMA helper
-    def wma(arr, w):
-        result = np.zeros(len(arr))
-        weights = np.arange(1, w + 1)
-        for i in range(w - 1, len(arr)):
-            result[i] = np.sum(arr[i - w + 1:i + 1] * weights) / np.sum(weights)
-        return result
+    # Calculate Efficiency Ratio
+    er = np.zeros(n)
+    for i in range(period, n):
+        change = abs(close[i] - close[i - period])
+        noise = np.sum(np.abs(np.diff(close[i - period:i + 1])))
+        if noise > 0:
+            er[i] = change / noise
+        else:
+            er[i] = 0
     
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
+    # Calculate smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
     
-    # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    hma_raw = 2 * wma_half - wma_full
+    # KAMA calculation
+    kama[period - 1] = close[period - 1]
+    for i in range(period, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
     
-    # Smooth with WMA of sqrt(period)
-    sqrt_period = int(np.sqrt(period))
-    if sqrt_period < 1:
-        sqrt_period = 1
-    
-    hma = wma(hma_raw, sqrt_period)
-    
-    return hma
+    return kama
 
 
 def calculate_atr(high, low, close, period=14):
@@ -107,17 +107,46 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion filter"""
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands"""
     n = len(close)
+    
     mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     
-    zscore = np.zeros(n)
-    mask = std > 0
-    zscore[mask] = (close[mask] - mean[mask]) / std[mask]
+    upper = mean + std_mult * std
+    lower = mean - std_mult * std
     
-    return zscore
+    # Calculate BB position (0 = lower band, 1 = upper band)
+    bb_position = np.zeros(n)
+    mask = (upper - lower) > 0
+    bb_position[mask] = (close[mask] - lower[mask]) / (upper[mask] - lower[mask])
+    
+    return upper, lower, mean, bb_position
+
+
+def calculate_volume_sma(volume, period=20):
+    """Calculate volume SMA"""
+    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+
+
+def calculate_chandelier_exit(high, low, close, atr, period=22, mult=3.0):
+    """
+    Calculate Chandelier Exit for trailing stops
+    Long exit: highest high - mult * ATR
+    Short exit: lowest low + mult * ATR
+    """
+    n = len(close)
+    chandelier_long = np.zeros(n)
+    chandelier_short = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        highest = np.max(high[i - period + 1:i + 1])
+        lowest = np.min(low[i - period + 1:i + 1])
+        chandelier_long[i] = highest - mult * atr[i]
+        chandelier_short[i] = lowest + mult * atr[i]
+    
+    return chandelier_long, chandelier_short
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -127,25 +156,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values if "volume" in prices.columns else np.ones(len(close))
     n = len(close)
     
-    # 15m indicators for entry timing and risk
-    rsi_15m = calculate_rsi(close, period=14)
-    atr_15m = calculate_atr(high, low, close, period=14)
-    zscore_15m = calculate_zscore(close, period=20)
-    hma_16_15m = calculate_hma(close, period=16)
-    hma_48_15m = calculate_hma(close, period=48)
+    # 1h indicators for entry timing and risk
+    rsi_1h = calculate_rsi(close, period=14)
+    atr_1h = calculate_atr(high, low, close, period=14)
+    kama_1h = calculate_kama(close, period=14, fast_period=2, slow_period=30)
+    bb_upper, bb_lower, bb_mean, bb_position = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    volume_sma = calculate_volume_sma(volume, period=20)
+    chandelier_long, chandelier_short = calculate_chandelier_exit(high, low, close, atr_1h, period=22, mult=3.0)
     
-    # 4h HMA for trend filter (resample 15m → 4h)
-    df_15m = pd.DataFrame({
+    # 4h KAMA for trend filter (resample 1h → 4h)
+    df_1h = pd.DataFrame({
         'open': close,
         'high': high,
         'low': low,
         'close': close,
         'volume': volume
     })
-    df_15m.index = pd.date_range(start='2021-01-01', periods=n, freq='15min')
+    df_1h.index = pd.date_range(start='2021-01-01', periods=n, freq='1h')
     
     # Resample to 4h
-    df_4h = df_15m.resample('4h').agg({
+    df_4h = df_1h.resample('4h').agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',
@@ -154,27 +184,31 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     }).dropna()
     
     c_4h = df_4h['close'].values
+    h_4h = df_4h['high'].values
+    l_4h = df_4h['low'].values
     
-    # Calculate 4h HMA for trend
-    hma_16_4h = calculate_hma(c_4h, period=16)
-    hma_48_4h = calculate_hma(c_4h, period=48)
+    # Calculate 4h KAMA for trend
+    kama_4h = calculate_kama(c_4h, period=14, fast_period=2, slow_period=30)
+    atr_4h = calculate_atr(h_4h, l_4h, c_4h, period=14)
     
-    # 4h trend direction based on HMA cross
+    # 4h trend direction based on KAMA slope and price position
     trend_4h = np.zeros(len(c_4h))
-    for i in range(48, len(c_4h)):
-        if hma_16_4h[i] > hma_48_4h[i] and c_4h[i] > hma_16_4h[i]:
+    for i in range(30, len(c_4h)):
+        kama_slope = kama_4h[i] - kama_4h[i - 5] if i >= 5 else 0
+        
+        if kama_4h[i] > kama_4h[i - 1] and c_4h[i] > kama_4h[i] and kama_slope > 0:
             trend_4h[i] = 1  # Bullish
-        elif hma_16_4h[i] < hma_48_4h[i] and c_4h[i] < hma_16_4h[i]:
+        elif kama_4h[i] < kama_4h[i - 1] and c_4h[i] < kama_4h[i] and kama_slope < 0:
             trend_4h[i] = -1  # Bearish
     
-    # Map 4h trend back to 15m timeframe (16 x 15m = 4h)
-    trend_15m = np.zeros(n)
-    idx_15m_to_4h = np.arange(n) // 16
+    # Map 4h trend back to 1h timeframe (4 x 1h = 4h)
+    trend_1h = np.zeros(n)
+    idx_1h_to_4h = np.arange(n) // 4
     
     for i in range(n):
-        idx_4h = idx_15m_to_4h[i]
+        idx_4h = idx_1h_to_4h[i]
         if idx_4h < len(trend_4h):
-            trend_15m[i] = trend_4h[idx_4h]
+            trend_1h[i] = trend_4h[idx_4h]
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
@@ -182,86 +216,84 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Position sizing - DISCRETE levels to reduce churn
     SIZE_FULL = 0.35   # Full position
     SIZE_HALF = 0.20   # Half position (after take profit)
+    SIZE_QUARTER = 0.10  # Quarter position (high volatility)
     
-    # RSI thresholds for pullback entries
-    RSI_LONG_ENTRY = 45   # Enter long on pullback in uptrend
-    RSI_SHORT_ENTRY = 55  # Enter short on rally in downtrend
-    RSI_EXIT_LONG = 65    # Exit long when overbought
-    RSI_EXIT_SHORT = 35   # Exit short when oversold
+    # RSI thresholds for entries
+    RSI_LONG_ENTRY = 45   # Enter long on pullback
+    RSI_SHORT_ENTRY = 55  # Enter short on rally
+    RSI_EXIT_LONG = 70    # Exit long when overbought
+    RSI_EXIT_SHORT = 30   # Exit short when oversold
     
-    # Z-score thresholds for regime filter
-    ZSCORE_MAX = 2.5      # Don't enter if price > 2.5 std dev from mean
+    # BB position thresholds
+    BB_LONG_MAX = 0.40    # Enter long when price in lower 40% of BB
+    BB_SHORT_MIN = 0.60   # Enter short when price in upper 40% of BB
     
-    # ATR stoploss multiplier
-    ATR_STOP_MULT = 2.0   # Tighter than #017's 2.5
+    # Volume confirmation
+    VOLUME_MULT = 1.5     # Volume must be > 1.5x SMA
+    
+    # ATR stoploss multiplier (Chandelier uses 3*ATR)
+    ATR_STOP_MULT = 3.0
     
     # Take profit multiplier (2R)
     TP_MULT = 2.0
     
     # ATR volatility target for dynamic sizing
-    TARGET_ATR_PCT = 0.02  # Target 2% ATR
+    TARGET_ATR_PCT = 0.015  # Target 1.5% ATR for 1h
     
-    first_valid = max(80, 48, 14, 20)  # Wait for all indicators
+    first_valid = max(80, 30, 14, 20, 22)  # Wait for all indicators
     
     # Track entry prices for stoploss/takeprofit logic
     entry_price = np.zeros(n)
     position_side = np.zeros(n)  # 1 for long, -1 for short, 0 for flat
-    highest_since_entry = np.zeros(n)
-    lowest_since_entry = np.zeros(n)
     tp_triggered = np.zeros(n)  # Track if take profit was hit
+    entry_atr = np.zeros(n)  # ATR at entry for R calculation
     
     for i in range(first_valid, n):
-        if np.isnan(rsi_15m[i]) or np.isnan(atr_15m[i]) or np.isnan(zscore_15m[i]):
+        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(bb_position[i]):
             signals[i] = 0.0
             continue
         
-        trend = trend_15m[i]
-        rsi_val = rsi_15m[i]
-        zscore_val = zscore_15m[i]
-        atr = atr_15m[i]
+        trend = trend_1h[i]
+        rsi_val = rsi_1h[i]
+        bb_pos = bb_position[i]
+        atr = atr_1h[i]
         price = close[i]
+        vol_ratio = volume[i] / volume_sma[i] if volume_sma[i] > 0 else 1.0
         
         # ATR filter - avoid trading when ATR is extremely high
-        if atr > 0 and atr / price > 0.05:  # ATR > 5% of price = too volatile
+        if atr > 0 and atr / price > 0.04:  # ATR > 4% of price = too volatile
             signals[i] = 0.0
             position_side[i] = 0
             entry_price[i] = 0
             tp_triggered[i] = 0
             continue
         
-        # Check trailing stop and take profit for existing positions
+        # Check Chandelier Exit and take profit for existing positions
         if i > 0 and position_side[i - 1] != 0:
             prev_side = position_side[i - 1]
             prev_entry = entry_price[i - 1] if entry_price[i - 1] > 0 else price
             prev_tp = tp_triggered[i - 1]
+            prev_atr = entry_atr[i - 1] if entry_atr[i - 1] > 0 else atr
             
-            # Update highest/lowest since entry for trailing
             if prev_side == 1:
-                highest_since_entry[i] = max(highest_since_entry[i-1] if i > 0 else 0, price)
-                lowest_since_entry[i] = lowest_since_entry[i-1] if i > 0 else price
-                
-                # Stoploss check
-                stoploss_price = prev_entry - ATR_STOP_MULT * atr
-                if price < stoploss_price:
+                # Chandelier Exit for long
+                chand_exit = chandelier_long[i]
+                if price < chand_exit:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
                     tp_triggered[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
+                    entry_atr[i] = 0
                     continue
                 
                 # Take profit check (2R)
-                tp_price = prev_entry + TP_MULT * ATR_STOP_MULT * atr
+                tp_price = prev_entry + TP_MULT * ATR_STOP_MULT * prev_atr
                 if not prev_tp and price >= tp_price:
-                    # Reduce to half position
                     signals[i] = SIZE_HALF
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
-                    highest_since_entry[i] = highest_since_entry[i-1]
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
-                    # Trail stop to breakeven
+                    entry_atr[i] = prev_atr
                     continue
                 
                 # RSI exit signal
@@ -270,35 +302,28 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     position_side[i] = 0
                     entry_price[i] = 0
                     tp_triggered[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
+                    entry_atr[i] = 0
                     continue
                 
             elif prev_side == -1:
-                lowest_since_entry[i] = min(lowest_since_entry[i-1] if i > 0 else price, price)
-                highest_since_entry[i] = highest_since_entry[i-1] if i > 0 else 0
-                
-                # Stoploss check
-                stoploss_price = prev_entry + ATR_STOP_MULT * atr
-                if price > stoploss_price:
+                # Chandelier Exit for short
+                chand_exit = chandelier_short[i]
+                if price > chand_exit:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
                     tp_triggered[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
+                    entry_atr[i] = 0
                     continue
                 
                 # Take profit check (2R)
-                tp_price = prev_entry - TP_MULT * ATR_STOP_MULT * atr
+                tp_price = prev_entry - TP_MULT * ATR_STOP_MULT * prev_atr
                 if not prev_tp and price <= tp_price:
-                    # Reduce to half position
                     signals[i] = -SIZE_HALF
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
-                    highest_since_entry[i] = highest_since_entry[i-1]
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
+                    entry_atr[i] = prev_atr
                     continue
                 
                 # RSI exit signal
@@ -307,23 +332,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     position_side[i] = 0
                     entry_price[i] = 0
                     tp_triggered[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
+                    entry_atr[i] = 0
                     continue
-        
-        # Z-score filter - avoid entering at extreme deviations
-        if abs(zscore_val) > ZSCORE_MAX:
-            if i > 0 and position_side[i - 1] != 0:
-                signals[i] = signals[i - 1]
-                position_side[i] = position_side[i - 1]
-                entry_price[i] = entry_price[i - 1]
-                tp_triggered[i] = tp_triggered[i - 1]
-                highest_since_entry[i] = highest_since_entry[i-1]
-                lowest_since_entry[i] = lowest_since_entry[i-1]
-            else:
-                signals[i] = 0.0
-                position_side[i] = 0
-            continue
         
         # Dynamic position sizing based on ATR volatility
         current_atr_pct = atr / price if price > 0 else 0
@@ -332,18 +342,28 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         else:
             size_multiplier = 1.0
         
-        position_size = SIZE_FULL * size_multiplier
-        position_size = min(SIZE_FULL, max(SIZE_HALF, position_size))  # Clamp
+        # Adjust size based on volatility regime
+        if current_atr_pct > 0.03:  # High volatility
+            base_size = SIZE_QUARTER
+        elif current_atr_pct > 0.02:  # Medium volatility
+            base_size = SIZE_HALF
+        else:  # Low volatility
+            base_size = SIZE_FULL
+        
+        position_size = base_size * size_multiplier
+        position_size = min(SIZE_FULL, max(SIZE_QUARTER, position_size))
+        
+        # Volume confirmation required for new entries
+        volume_confirmed = vol_ratio >= VOLUME_MULT
         
         if trend == 1:  # 4h uptrend
-            # RSI pullback entry in uptrend
-            if rsi_val < RSI_LONG_ENTRY and rsi_val > 30:
+            # BB-RSI entry in uptrend with volume confirmation
+            if bb_pos < BB_LONG_MAX and rsi_val < RSI_LONG_ENTRY and rsi_val > 30 and volume_confirmed:
                 signals[i] = position_size
                 position_side[i] = 1
                 entry_price[i] = price
                 tp_triggered[i] = 0
-                highest_since_entry[i] = price
-                lowest_since_entry[i] = price
+                entry_atr[i] = atr
             else:
                 # Hold or exit
                 if i > 0 and position_side[i - 1] == 1:
@@ -351,25 +371,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     position_side[i] = 1
                     entry_price[i] = entry_price[i - 1]
                     tp_triggered[i] = tp_triggered[i - 1]
-                    highest_since_entry[i] = highest_since_entry[i-1]
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
+                    entry_atr[i] = entry_atr[i - 1]
                 else:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
                     tp_triggered[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
+                    entry_atr[i] = 0
                     
         elif trend == -1:  # 4h downtrend
-            # RSI rally entry in downtrend
-            if rsi_val > RSI_SHORT_ENTRY and rsi_val < 70:
+            # BB-RSI entry in downtrend with volume confirmation
+            if bb_pos > BB_SHORT_MIN and rsi_val > RSI_SHORT_ENTRY and rsi_val < 70 and volume_confirmed:
                 signals[i] = -position_size
                 position_side[i] = -1
                 entry_price[i] = price
                 tp_triggered[i] = 0
-                highest_since_entry[i] = price
-                lowest_since_entry[i] = price
+                entry_atr[i] = atr
             else:
                 # Hold or exit
                 if i > 0 and position_side[i - 1] == -1:
@@ -377,21 +394,18 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     position_side[i] = -1
                     entry_price[i] = entry_price[i - 1]
                     tp_triggered[i] = tp_triggered[i - 1]
-                    highest_since_entry[i] = highest_since_entry[i-1]
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
+                    entry_atr[i] = entry_atr[i - 1]
                 else:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
                     tp_triggered[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
+                    entry_atr[i] = 0
         else:  # No clear trend
             signals[i] = 0.0
             position_side[i] = 0
             entry_price[i] = 0
             tp_triggered[i] = 0
-            highest_since_entry[i] = 0
-            lowest_since_entry[i] = 0
+            entry_atr[i] = 0
     
     return signals
