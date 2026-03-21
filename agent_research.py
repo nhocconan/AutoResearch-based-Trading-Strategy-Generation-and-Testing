@@ -251,54 +251,64 @@ def build_experiment_prompt(
     # Determine which phase and what to try next
     phase_hint = ""
     n = experiment_num
-    if n <= 20:
+    # Cycle through timeframe-focused phases
+    phase_cycle = n % 60  # repeat every 60 experiments
+    if phase_cycle <= 10:
         phase_hint = """
-PHASE 1 — EXPLORE TIMEFRAMES & SIGNAL COMBOS (experiments 1-20)
-IMPORTANT: Try DIFFERENT primary timeframes! Not just 15m!
-Available primary: 5m, 15m, 30m, 1h, 4h, 6h, 12h, 1d
-Available HTF reference: all above + 1w (for weekly trend)
-Use mtf_data.get_htf_data(prices, '4h') for any HTF data.
+PHASE A — HIGHER TIMEFRAMES: 4h, 6h, 12h, 1d (experiments 1-10)
+Higher TF = less noise, less fee impact, cleaner trends. Focus here FIRST.
+Lower TF strategies have mostly failed test period (overfit).
 
-Examples — VARY the primary timeframe each experiment:
-1. Primary=1h, HTF=4h: Supertrend 4h trend + 1h MACD entry + Z-score filter
-2. Primary=30m, HTF=4h: 4h Donchian trend + 30m RSI pullback + volume
-3. Primary=1h, HTF=1d: Daily SMA(50) trend + 1h Stochastic entry + ADX
-4. Primary=4h (single TF): Supertrend + MACD + RSI combo, no MTF needed
-5. Primary=30m, HTF=1h: 1h KAMA trend + 30m Bollinger squeeze entry
-6. Primary=6h, HTF=1d: Daily trend + 6h MACD entry (fewer trades, cleaner)
-7. Primary=1h, HTF=12h: 12h HMA trend + 1h RSI pullback + BBW filter
-8. Primary=12h, HTF=1w: Weekly trend + 12h momentum (swing trading)
-9. Primary=4h, HTF=1d: Daily EMA crossover + 4h Supertrend entry
-10. Primary=30m, HTF=6h: 6h trend + 30m pullback entries
+Try these SPECIFIC setups:
+1. Primary=4h, single TF: Supertrend(10,3) + RSI(14) pullback + ADX(14)>20 filter
+2. Primary=4h, HTF=1d: Daily EMA(21/55) trend + 4h RSI entry on pullback
+3. Primary=1d, single TF: MACD(12,26,9) crossover + ATR trailing stop
+4. Primary=12h, single TF: HMA(16/48) crossover + BBW regime filter
+5. Primary=6h, HTF=1d: Daily trend direction + 6h MACD histogram entry
+6. Primary=12h, HTF=1w: Weekly SMA(10) trend + 12h RSI momentum
+7. Primary=4h, single TF: Donchian(20) breakout + volume confirm + ATR stop
+8. Primary=1d, single TF: KAMA(10) trend + RSI(14) < 40 pullback entry
+9. Primary=6h, single TF: EMA(21/55) cross + Supertrend confirmation
+10. Primary=4h, HTF=12h: 12h trend + 4h stochastic entry
 
-Signal combos: Trend(Supertrend/HMA/KAMA/EMA/Donchian) + Entry(RSI/MACD/Stoch/volume) + Filter(Z-score/BBW/ADX)
-REMEMBER: signal size 0.20-0.35, discrete levels, stoploss via signal→0"""
-    elif n <= 50:
+WHY higher TF: 0.10% round-trip cost is ~2 daily candles of noise.
+On 15m that's 192 bars/day of noise. On 4h that's 1.5 bars. On 1d nearly zero."""
+    elif phase_cycle <= 25:
         phase_hint = """
-PHASE 2 — OPTIMIZE WITH VARIED TIMEFRAMES (experiments 21-50)
-Take best approach and try ON DIFFERENT TIMEFRAMES:
-- If best was 15m, try same logic on 30m and 1h
-- If best was 1h, try on 30m (more trades) and 4h (cleaner signals)
-- Try single-TF strategies on 4h or 1d (no MTF complexity, cleaner)
-- Different position sizing (0.20 vs 0.30 vs 0.35)
-- ATR-based dynamic sizing: size = base * (target_vol / current_vol)
-- Tighter/looser stoploss (1.5*ATR vs 2.5*ATR)"""
-    elif n <= 100:
+PHASE B — 1h WITH HIGHER TF TREND (experiments 11-25)
+Primary=1h with proper MTF trend from 4h/6h/12h/1d.
+Use mtf_data.get_htf_data() ONCE before loop, aligned arrays inside loop.
+
+Examples:
+1. Primary=1h, HTF=4h: 4h Supertrend trend + 1h RSI pullback
+2. Primary=1h, HTF=1d: Daily KAMA direction + 1h MACD histogram entry
+3. Primary=1h, HTF=12h: 12h HMA trend + 1h Z-score mean reversion
+4. Primary=1h, HTF=6h: 6h EMA crossover + 1h Bollinger squeeze breakout
+5. Primary=1h, HTF=4h: 4h Donchian trend + 1h RSI + volume spike entry"""
+    elif phase_cycle <= 40:
         phase_hint = """
-PHASE 3 — ENSEMBLE & REGIME STRATEGIES (experiments 51-100)
-- Signal voting: combine 3+ strategies, take majority vote
-- Regime detection: Bollinger BW percentile → trend follow in low vol, mean revert in high vol
-- Adaptive sizing: scale position by signal confidence (more signals agree = larger position)
-- Cross-asset signals: BTC trend for filtering ETH/SOL trades"""
+PHASE C — 30m AND LOWER WITH HTF FILTER (experiments 26-40)
+Only try lower TF if you have strong HTF filter (4h/1d trend).
+Lower TF has more trades but higher fee impact — need high win rate.
+
+1. Primary=30m, HTF=4h: 4h Supertrend + 30m RSI pullback + tight ATR stop
+2. Primary=15m, HTF=1h: 1h trend + 15m momentum entry (high frequency)
+3. Primary=30m, HTF=1d: Daily trend + 30m MACD + volume confirmation"""
+    elif phase_cycle <= 50:
+        phase_hint = """
+PHASE D — ENSEMBLE & REGIME (experiments 41-50)
+Combine 2-3 signals with regime detection:
+- Bollinger BW percentile: low vol → breakout, high vol → mean revert
+- Signal voting: 2 of 3 indicators agree → trade
+- Dynamic sizing: higher confidence → larger position (0.30 vs 0.15)"""
     else:
         phase_hint = """
-PHASE 4 — OPTIMIZATION & RISK MANAGEMENT (experiments 100+)
-Take the best performing strategy and add:
-- ATR trailing stop (Chandelier exit: highest_high - 3*ATR(22))
-- Volatility-adjusted position sizing (signal strength based on vol regime)
-- Dynamic leverage: low vol=2x, high vol=1x
-- Parameter sensitivity analysis on the best strategy"""
-
+PHASE E — OPTIMIZE BEST (experiments 51-60)
+Take the current best strategy and try:
+- Different parameters (ATR period, EMA lengths, RSI thresholds)
+- Tighter/wider stoploss (1.5 vs 2.0 vs 3.0 ATR)
+- Different position sizes (0.20 vs 0.25 vs 0.30)
+- Add/remove one signal component"""
     # Gather failed approaches to avoid repeating
     failed_approaches = set()
     if history:
