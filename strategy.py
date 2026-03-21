@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #001: 15m Multi-Timeframe Mean Reversion + Trend Filter
-Hypothesis: 15m timeframe captures intraday swings while 4h HMA filters major trend.
-Uses Connors RSI (CRSI) for mean reversion entries in trend direction.
-Choppiness Index detects regime: range (mean revert) vs trend (trend follow).
-4h HMA provides major trend bias - only long when 4h bullish, short when bearish.
-ATR stoploss at 2.5x protects against 2022-style crashes.
-Position sizing: 0.25 base, 0.30 on strong signals, discrete levels to reduce churn.
-This should generate 50-100 trades/year with better risk-adjusted returns than daily.
+Experiment #002: 30m Multi-Timeframe Trend + Mean Reversion Hybrid
+Hypothesis: 30m timeframe balances noise reduction with trade frequency.
+4h HMA provides major trend direction (bull/bear regime filter).
+30m RSI pullback entries in trend direction + MACD confirmation.
+Choppiness Index detects range vs trend regime for adaptive logic.
+ATR-based stoploss (2.5x) protects against crashes like 2022.
+Position sizing capped at 0.30 with discrete levels to minimize fee churn.
+This should generate 30-60 trades/year with positive Sharpe on ALL symbols.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_crsi_chop_15m_v1"
-timeframe = "15m"
+name = "mtf_30m_hma_rsi_chop_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -26,6 +26,10 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average."""
+    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -39,93 +43,44 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
-    """
-    Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    Extreme readings (<10 or >90) signal mean reversion opportunities.
-    """
-    n = len(close)
-    
-    # RSI(3) - fast RSI for short-term extremes
-    rsi_fast = calculate_rsi(close, rsi_period)
-    
-    # RSI Streak - RSI of consecutive up/down days
-    streak = np.zeros(n)
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif close[i] < close[i-1]:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = 0
-    
-    # Convert streak to RSI-like value (0-100)
-    streak_abs = np.abs(streak)
-    streak_rsi = np.zeros(n)
-    for i in range(streak_period, n):
-        if streak[i] > 0:
-            streak_rsi[i] = min(100, 50 + streak[i] * 10)
-        elif streak[i] < 0:
-            streak_rsi[i] = max(0, 50 + streak[i] * 10)
-        else:
-            streak_rsi[i] = 50
-    
-    # Percent Rank - where current price ranks in last 100 bars
-    percent_rank = np.zeros(n)
-    for i in range(rank_period, n):
-        window = close[i-rank_period+1:i+1]
-        rank = np.sum(window[:-1] < window[-1]) / (rank_period - 1) * 100
-        percent_rank[i] = rank
-    
-    crsi = (rsi_fast + streak_rsi + percent_rank) / 3
-    crsi = np.clip(crsi, 0, 100)
-    return crsi
-
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP) measures market choppy vs trending.
-    CHOP > 61.8 = range-bound (mean reversion favorable)
-    CHOP < 38.2 = trending (trend following favorable)
-    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    """
-    n = len(close)
-    chop = np.zeros(n)
-    
-    for i in range(period, n):
-        atr_sum = 0
-        for j in range(i-period+1, i+1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-            atr_sum += tr
-        
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 0 and atr_sum > 0:
-            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-        else:
-            chop[i] = 50
-    
-    chop = np.clip(chop, 0, 100)
-    return chop
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD indicator."""
+    ema_fast = pd.Series(close).ewm(span=fast, min_periods=fast, adjust=False).mean().values
+    ema_slow = pd.Series(close).ewm(span=slow, min_periods=slow, adjust=False).mean().values
+    macd_line = ema_fast - ema_slow
+    macd_signal = pd.Series(macd_line).ewm(span=signal, min_periods=signal, adjust=False).mean().values
+    macd_hist = macd_line - macd_signal
+    return macd_line, macd_signal, macd_hist
 
 def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for trend direction."""
+    """Calculate Hull Moving Average."""
     close_s = pd.Series(close)
     wma1 = close_s.ewm(span=period//2, min_periods=period//2, adjust=False).mean()
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_choppiness(high, low, close, period=14):
+    """Calculate Choppiness Index (CHOP)."""
+    atr = calculate_atr(high, low, close, period)
+    highest = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    tr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        chop = 100 * np.log10(tr_sum / (highest - lowest)) / np.log10(period)
+    chop = np.nan_to_num(chop, nan=50.0)
+    chop = np.clip(chop, 0, 100)
+    return chop
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion."""
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    # Bandwidth for regime detection
-    bw = (upper - lower) / sma * 100
-    return upper, lower, sma, bw
+    with np.errstate(divide='ignore', invalid='ignore'):
+        zscore = (close - sma) / std
+    zscore = np.nan_to_num(zscore, nan=0.0)
+    return zscore
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -137,34 +92,25 @@ def generate_signals(prices):
     # Load 4h HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)  # auto shift(1)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Also load 1h for intermediate trend
-    df_1h = get_htf_data(prices, '1h')
-    hma_1h = calculate_hma(df_1h['close'].values, 21)
-    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h)
-    
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    crsi = calculate_crsi(close, 3, 2, 100)
+    ema_fast = calculate_ema(close, 8)
+    ema_slow = calculate_ema(close, 21)
+    ema_50 = calculate_ema(close, 50)
+    rsi = calculate_rsi(close, 14)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
     chop = calculate_choppiness(high, low, close, 14)
-    rsi_14 = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_mid, bb_bw = calculate_bollinger(close, 20, 2.0)
+    zscore = calculate_zscore(close, 20)
     
     # Volume SMA for confirmation
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_sma = np.nan_to_num(vol_sma, nan=0.0)
     
-    # Bollinger Band Width percentile for regime
-    bb_bw_percentile = pd.Series(bb_bw).rolling(window=100, min_periods=50).apply(
-        lambda x: np.percentile(x[x>0], 50) if len(x[x>0]) > 0 else 50, raw=False
-    ).values
-    bb_bw_percentile = np.nan_to_num(bb_bw_percentile, nan=50)
-    
     signals = np.zeros(n)
-    BASE_SIZE = 0.25
-    STRONG_SIZE = 0.30
-    HALF_SIZE = 0.12
+    SIZE = 0.30
+    HALF_SIZE = 0.15
     
     # Track positions for stoploss
     entry_price = np.zeros(n)
@@ -172,70 +118,67 @@ def generate_signals(prices):
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
-    for i in range(150, n):
-        # 4h major trend filter
-        hma_4h_val = hma_4h_aligned[i]
-        hma_4h_prev = hma_4h_aligned[i-1] if i > 0 else hma_4h_val
-        trend_4h_bullish = hma_4h_val > 0 and close[i] > hma_4h_val
-        trend_4h_bearish = hma_4h_val > 0 and close[i] < hma_4h_val
+    for i in range(100, n):
+        # 4h trend filter (major regime)
+        hma_4h_valid = hma_4h_aligned[i] > 0
+        trend_4h_bullish = hma_4h_valid and close[i] > hma_4h_aligned[i]
+        trend_4h_bearish = hma_4h_valid and close[i] < hma_4h_aligned[i]
         
-        # 1h intermediate trend
-        hma_1h_val = hma_1h_aligned[i]
-        trend_1h_bullish = hma_1h_val > 0 and close[i] > hma_1h_val
-        trend_1h_bearish = hma_1h_val > 0 and close[i] < hma_1h_val
+        # Regime detection via Choppiness Index
+        is_trending = chop[i] < 55  # Below 55 = trending market
+        is_ranging = chop[i] > 62   # Above 62 = ranging market
         
-        # Regime detection
-        is_choppy = chop[i] > 55  # Range-bound market
-        is_trending = chop[i] < 45  # Trending market
+        # 30m EMA trend
+        ema_trend_long = ema_fast[i] > ema_slow[i] and close[i] > ema_50[i]
+        ema_trend_short = ema_fast[i] < ema_slow[i] and close[i] < ema_50[i]
         
-        # Connors RSI extremes for mean reversion
-        crsi_oversold = crsi[i] < 15
-        crsi_overbought = crsi[i] > 85
-        crsi_neutral = crsi[i] > 35 and crsi[i] < 65
+        # RSI conditions - relaxed for more trades
+        rsi_long = rsi[i] > 35 and rsi[i] < 70
+        rsi_short = rsi[i] < 65 and rsi[i] > 30
+        rsi_pullback_long = rsi[i] > 40 and rsi[i] < 55 and rsi[i] > rsi[i-1] if i > 0 else False
+        rsi_pullback_short = rsi[i] < 60 and rsi[i] > 45 and rsi[i] < rsi[i-1] if i > 0 else False
         
-        # Bollinger position
-        price_vs_bb_long = close[i] < bb_lower[i] * 1.005  # Near or below lower band
-        price_vs_bb_short = close[i] > bb_upper[i] * 0.995  # Near or above upper band
+        # MACD confirmation
+        macd_long = macd_hist[i] > 0 and (i < 1 or macd_hist[i] >= macd_hist[i-1])
+        macd_short = macd_hist[i] < 0 and (i < 1 or macd_hist[i] <= macd_hist[i-1])
         
-        # RSI confirmation
-        rsi_oversold = rsi_14[i] < 35
-        rsi_overbought = rsi_14[i] > 65
+        # Volume confirmation (relaxed)
+        vol_confirm = vol_sma[i] > 0 and volume[i] > vol_sma[i] * 0.7
         
-        # Volume confirmation
-        vol_confirm = volume[i] > vol_sma[i] * 0.7 if vol_sma[i] > 0 else True
+        # Z-score mean reversion filter
+        zscore_ok_long = zscore[i] > -2.5  # Not extremely oversold
+        zscore_ok_short = zscore[i] < 2.5  # Not extremely overbought
         
+        # Entry logic - multiple pathways to ensure trades
         new_signal = 0.0
         
-        # LONG ENTRY: 4h bullish + mean reversion signal
-        if trend_4h_bullish:
-            # Strong long: CRSI oversold + BB lower + volume
-            if crsi_oversold and price_vs_bb_long and vol_confirm:
-                new_signal = STRONG_SIZE
-            # Moderate long: RSI oversold + 1h bullish
-            elif rsi_oversold and trend_1h_bullish and crsi[i] < 30:
-                new_signal = BASE_SIZE
-            # Trend continuation: CRSI neutral + price above BB mid
-            elif crsi_neutral and close[i] > bb_mid[i] and trend_1h_bullish:
-                new_signal = BASE_SIZE
+        # LONG ENTRY PATHWAYS
+        # Path 1: Trending market + 4h bullish + EMA trend + RSI ok
+        if is_trending and trend_4h_bullish and ema_trend_long and rsi_long:
+            new_signal = SIZE
+        # Path 2: 4h bullish + RSI pullback + MACD confirmation
+        elif trend_4h_bullish and rsi_pullback_long and macd_long:
+            new_signal = SIZE
+        # Path 3: Range market + mean reversion long (RSI oversold)
+        elif is_ranging and rsi[i] < 40 and zscore[i] < -1.0:
+            new_signal = SIZE
+        # Path 4: EMA crossover with 4h support
+        elif trend_4h_bullish and ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1] and rsi[i] > 40:
+            new_signal = SIZE
         
-        # SHORT ENTRY: 4h bearish + mean reversion signal
-        elif trend_4h_bearish:
-            # Strong short: CRSI overbought + BB upper + volume
-            if crsi_overbought and price_vs_bb_short and vol_confirm:
-                new_signal = -STRONG_SIZE
-            # Moderate short: RSI overbought + 1h bearish
-            elif rsi_overbought and trend_1h_bearish and crsi[i] > 70:
-                new_signal = -BASE_SIZE
-            # Trend continuation: CRSI neutral + price below BB mid
-            elif crsi_neutral and close[i] < bb_mid[i] and trend_1h_bearish:
-                new_signal = -BASE_SIZE
-        
-        # Choppy market: tighter mean reversion (both directions allowed)
-        if is_choppy and not trend_4h_bullish and not trend_4h_bearish:
-            if crsi_oversold and price_vs_bb_long:
-                new_signal = BASE_SIZE
-            elif crsi_overbought and price_vs_bb_short:
-                new_signal = -BASE_SIZE
+        # SHORT ENTRY PATHWAYS
+        # Path 1: Trending market + 4h bearish + EMA trend + RSI ok
+        elif is_trending and trend_4h_bearish and ema_trend_short and rsi_short:
+            new_signal = -SIZE
+        # Path 2: 4h bearish + RSI pullback + MACD confirmation
+        elif trend_4h_bearish and rsi_pullback_short and macd_short:
+            new_signal = -SIZE
+        # Path 3: Range market + mean reversion short (RSI overbought)
+        elif is_ranging and rsi[i] > 60 and zscore[i] > 1.0:
+            new_signal = -SIZE
+        # Path 4: EMA crossover with 4h resistance
+        elif trend_4h_bearish and ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1] and rsi[i] < 60:
+            new_signal = -SIZE
         
         # Stoploss logic (Rule 6) - ATR based
         if position_side > 0 and entry_price[i-1] > 0:
@@ -244,7 +187,7 @@ def generate_signals(prices):
                 new_signal = 0.0  # Stoploss hit
             # Trail stop for longs - take partial profit at 3R
             elif close[i] > entry_price[i-1] + 3.0 * atr[i]:
-                if signals[i-1] > 0 and new_signal == 0:
+                if signals[i-1] == SIZE:  # Only reduce if at full size
                     new_signal = HALF_SIZE
         
         if position_side < 0 and entry_price[i-1] > 0:
@@ -253,7 +196,7 @@ def generate_signals(prices):
                 new_signal = 0.0  # Stoploss hit
             # Trail stop for shorts - take partial profit at 3R
             elif close[i] < entry_price[i-1] - 3.0 * atr[i]:
-                if signals[i-1] < 0 and new_signal == 0:
+                if signals[i-1] == -SIZE:  # Only reduce if at full size
                     new_signal = -HALF_SIZE
         
         # Update position tracking
