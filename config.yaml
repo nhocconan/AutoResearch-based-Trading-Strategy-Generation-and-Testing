@@ -27,7 +27,7 @@ data:
   train_end: "2024-12-31"
   # Testing period: 2025-01-01 to now
   test_start: "2025-01-01"
-  test_end: "2026-03-20"
+  test_end: "2026-12-31"
 
 # --- Backtesting Settings ---
 backtest:
