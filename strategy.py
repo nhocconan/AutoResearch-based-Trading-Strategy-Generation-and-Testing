@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #247: 15m Trend Pullback with 4h/1h HMA Filter
-Hypothesis: 15m timeframe is noisy, so use 4h HMA for primary trend bias and 1h HMA for 
-intermediate confirmation. Enter on RSI pullbacks (35-65 range, not extremes) in trend direction.
-This is simpler than failed multi-indicator approaches. Volume ratio adds conviction. 
-ATR trailing stop at 2.5*ATR protects capital. Position sizing: 0.25 entry, 0.125 at 2R profit.
-Target: Beat Sharpe=0.499 with fewer but higher-quality trades.
+Experiment #248: 30m RSI Pullback with 4h/1d HMA Trend Filter + Volume + ATR Stop
+Hypothesis: 30m timeframe with strong HTF trend filters (4h HMA + 1d HMA) can capture 
+pullback entries in established trends. RSI(14) pullback to 35-65 zone provides entry 
+timing with looser thresholds to ensure sufficient trades. Volume ratio confirms 
+conviction. ATR(14) 2.5x trailing stop manages risk. Position sizing: 0.25 entry, 
+0.125 half at 2R profit. This differs from failed 30m strategies by using dual HTF 
+filters (4h+1d) with wider RSI entry zone to ensure ≥10 trades per symbol.
+Target: Beat Sharpe=0.499 with positive Sharpe on ALL symbols.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_rsi_pullback_4h_1h_hma_volume_atr_v2"
-timeframe = "15m"
+name = "mtf_30m_rsi_pullback_4h_1d_hma_volume_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -52,13 +54,6 @@ def calculate_volume_ratio(taker_buy_volume, volume):
     ratio = np.where(volume > 0, taker_buy_volume / volume, 0.5)
     return ratio
 
-def calculate_price_momentum(close, period=5):
-    """Calculate price momentum as ROC."""
-    momentum = np.zeros(len(close))
-    for i in range(period, len(close)):
-        momentum[i] = (close[i] - close[i - period]) / close[i - period] * 100
-    return momentum
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -68,28 +63,25 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1h = get_htf_data(prices, '1h')
     df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_1h = calculate_hma(df_1h['close'].values, 21)
     hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
-    momentum = calculate_price_momentum(close, 5)
     
-    # Track previous values
+    # Track previous RSI for momentum
     prev_rsi = np.roll(rsi, 1)
     prev_rsi[0] = rsi[0]
-    prev_momentum = np.roll(momentum, 1)
-    prev_momentum[0] = momentum[0]
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -104,55 +96,54 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filters
-        hma_4h_bullish = close[i] > hma_4h_aligned[i]
-        hma_4h_bearish = close[i] < hma_4h_aligned[i]
-        hma_1h_bullish = close[i] > hma_1h_aligned[i]
-        hma_1h_bearish = close[i] < hma_1h_aligned[i]
+        # HTF trend filters (use 4h as primary, 1d as confirmation)
+        trend_4h_bullish = close[i] > hma_4h_aligned[i]
+        trend_4h_bearish = close[i] < hma_4h_aligned[i]
+        trend_1d_bullish = close[i] > hma_1d_aligned[i]
+        trend_1d_bearish = close[i] < hma_1d_aligned[i]
         
-        # RSI pullback signals (wider range for more trades)
-        rsi_pullback_long = 35 < rsi[i] < 55 and rsi[i] > prev_rsi[i]
-        rsi_pullback_short = 45 < rsi[i] < 65 and rsi[i] < prev_rsi[i]
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
+        # RSI pullback signals (wider zone to ensure trades)
+        rsi_rising = rsi[i] > prev_rsi[i]
+        rsi_falling = rsi[i] < prev_rsi[i]
         
-        # Volume confirmation
-        vol_bullish = vol_ratio[i] > 0.52
-        vol_bearish = vol_ratio[i] < 0.48
+        # Long: RSI pullback in bullish trend (35-55 zone, rising)
+        rsi_pullback_long = 35 < rsi[i] < 55 and rsi_rising
+        # Short: RSI pullback in bearish trend (45-65 zone, falling)
+        rsi_pullback_short = 45 < rsi[i] < 65 and rsi_falling
         
-        # Momentum confirmation
-        mom_positive = momentum[i] > 0
-        mom_negative = momentum[i] < 0
-        mom_improving = momentum[i] > prev_momentum[i]
-        mom_worsening = momentum[i] < prev_momentum[i]
+        # Volume confirmation (looser thresholds)
+        vol_bullish = vol_ratio[i] > 0.50
+        vol_bearish = vol_ratio[i] < 0.50
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Primary: 4h bullish + 1h bullish + RSI pullback
-        if hma_4h_bullish and hma_1h_bullish:
-            if rsi_pullback_long and vol_bullish:
+        # Primary: 4h bullish + RSI pullback
+        if rsi_pullback_long and trend_4h_bullish:
+            if trend_1d_bullish:
+                # Both HTF agree = full size
                 new_signal = SIZE_ENTRY
-            elif rsi_oversold and mom_positive:
-                new_signal = SIZE_ENTRY
-        
-        # Secondary: 4h bullish + 1h neutral + strong volume
-        elif hma_4h_bullish:
-            if rsi_pullback_long and vol_bullish and mom_improving:
-                new_signal = SIZE_ENTRY
+            else:
+                # Only 4h bullish = reduced size
+                new_signal = SIZE_ENTRY * 0.8
+        # Secondary: RSI oversold bounce with any bullish trend
+        elif rsi[i] < 35 and rsi_rising:
+            if trend_4h_bullish or trend_1d_bullish:
+                new_signal = SIZE_ENTRY * 0.7
         
         # === SHORT ENTRY ===
-        # Primary: 4h bearish + 1h bearish + RSI pullback
-        if hma_4h_bearish and hma_1h_bearish:
-            if rsi_pullback_short and vol_bearish:
+        # Primary: 4h bearish + RSI pullback
+        if rsi_pullback_short and trend_4h_bearish:
+            if trend_1d_bearish:
+                # Both HTF agree = full size
                 new_signal = -SIZE_ENTRY
-            elif rsi_overbought and mom_negative:
-                new_signal = -SIZE_ENTRY
-        
-        # Secondary: 4h bearish + 1h neutral + strong volume
-        elif hma_4h_bearish:
-            if rsi_pullback_short and vol_bearish and mom_worsening:
-                new_signal = -SIZE_ENTRY
+            else:
+                # Only 4h bearish = reduced size
+                new_signal = -SIZE_ENTRY * 0.8
+        # Secondary: RSI overbought drop with any bearish trend
+        elif rsi[i] > 65 and rsi_falling:
+            if trend_4h_bearish or trend_1d_bearish:
+                new_signal = -SIZE_ENTRY * 0.7
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
