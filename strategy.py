@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #073 - VOLATILITY_ADAPTIVE_HMA_ST_MOMENTUM_15M_4H_V1
+EXPERIMENT #074 - ENSEMBLE_REGIME_CONFIDENCE_BBW_15M_4H_V1
 ==================================================================================================
-Hypothesis: After #072's moderate Sharpe (0.589), return to 15m timeframe (proven in #062 with 
-Sharpe=11.924) but with improved regime detection and position sizing. Use ATR volatility 
-percentile instead of BBW for regime, add ROC momentum confirmation, and scale position size 
-by both signal confidence AND current volatility level.
+Hypothesis: After #073's crash (variable scope issue), return to a cleaner ensemble approach
+with proper regime detection using Bollinger Band Width percentile. Use 3-signal voting system
+(HMA trend, Supertrend, RSI momentum) with confidence-weighted position sizing. Regime detection
+determines whether to trend-follow (low BBW) or mean-revert (high BBW).
 
 Why this should work:
-- 15m has more trade opportunities than 1h (proven in #062)
-- ATR volatility regime is more direct than BBW for position sizing
-- ROC(10) momentum filter reduces false breakouts in choppy markets
-- Volatility-adaptive sizing: smaller positions in high vol, larger in low vol
-- HMA(16/48) + Supertrend(10,3) proven combination from best strategies
-- 4h trend filter prevents counter-trend trades (learned from #061)
-- Discrete signal levels (0, ±0.20, ±0.30, ±0.35) minimize fee churn
-- Clean position state tracking (no scoping issues from #069)
+- 15m timeframe proven successful (#062 Sharpe=11.924)
+- BBW regime detection is more stable than ATR percentile
+- 3-signal voting reduces false entries vs single-indicator strategies
+- Confidence-weighted sizing: more agreement = larger position (up to 0.35)
+- 4h trend filter prevents counter-trend trades
+- Discrete signal levels (0, ±0.20, ±0.28, ±0.35) minimize fee churn
+- Clean variable scoping (learned from #073 crash)
 
-Key changes from #072:
-- 15m instead of 1h (more signals, proven track record)
-- ATR volatility regime instead of BBW percentile
-- ROC momentum confirmation filter
-- Position size scales with volatility (smaller in high vol)
-- Added Donchian channel for breakout confirmation
+Key improvements from #073:
+- Fixed variable scope issues (all functions receive required parameters)
+- BBW regime instead of ATR percentile (more stable)
+- Simpler 3-signal voting system (HMA, Supertrend, RSI)
+- Regime-aware entry logic (trend vs mean reversion)
+- Cleaner position state management
 """
 
 import numpy as np
 import pandas as pd
 
-name = "volatility_adaptive_hma_st_momentum_15m_4h_v1"
+name = "ensemble_regime_confidence_bbw_15m_4h_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -170,105 +169,58 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_roc(close, period=10):
-    """Calculate Rate of Change (momentum)"""
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width"""
     n = len(close)
     if n < period:
-        return np.zeros(n)
+        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
     
-    roc = np.zeros(n)
-    for i in range(period, n):
-        if close[i - period] != 0:
-            roc[i] = (close[i] - close[i - period]) / close[i - period] * 100
-    
-    return roc
-
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n)
-    
+    sma = np.zeros(n)
+    std = np.zeros(n)
     upper = np.zeros(n)
     lower = np.zeros(n)
+    bbw = np.zeros(n)
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    n = len(close)
-    if n < period * 2:
-        return np.zeros(n)
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
-        
-        if high[i] - high[i - 1] > low[i - 1] - low[i]:
-            plus_dm[i] = max(0, high[i] - high[i - 1])
-        else:
-            plus_dm[i] = 0
-            
-        if low[i - 1] - low[i] > high[i] - high[i - 1]:
-            minus_dm[i] = max(0, low[i - 1] - low[i])
-        else:
-            minus_dm[i] = 0
-    
-    atr = np.zeros(n)
-    atr[period - 1] = np.mean(tr[1:period])
-    for i in range(period, n):
-        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period, n):
-        if atr[i] > 0:
-            plus_di[i] = 100 * plus_dm[i] / atr[i]
-            minus_di[i] = 100 * minus_dm[i] / atr[i]
-    
-    dx = np.zeros(n)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = np.zeros(n)
-    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
-    for i in range(period * 2, n):
-        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
-    
-    return adx
-
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion detection"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    zscore = np.zeros(n)
     for i in range(period - 1, n):
         window = close[i - period + 1:i + 1]
-        mean = np.mean(window)
-        std = np.std(window)
-        if std > 0:
-            zscore[i] = (close[i] - mean) / std
+        sma[i] = np.mean(window)
+        std[i] = np.std(window)
+        upper[i] = sma[i] + std_mult * std[i]
+        lower[i] = sma[i] - std_mult * std[i]
+        if sma[i] > 0:
+            bbw[i] = (upper[i] - lower[i]) / sma[i] * 100
     
-    return zscore
+    return upper, lower, sma, bbw
+
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    n = len(close)
+    if n < er_period + slow_period:
+        return np.zeros(n)
+    
+    kama = np.zeros(n)
+    
+    # Calculate Efficiency Ratio
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        change = abs(close[i] - close[i - er_period])
+        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        if volatility > 0:
+            er[i] = change / volatility
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA
+    kama[er_period] = close[er_period]
+    
+    for i in range(er_period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 
 def resample_to_timeframe(close, high, low, open_price, bars_per_tf):
@@ -312,10 +264,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     hma_fast_15m = calculate_hma(close, period=16)
     hma_slow_15m = calculate_hma(close, period=48)
     st_15m, st_upper_15m, st_lower_15m, st_trend_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    roc_15m = calculate_roc(close, period=10)
-    donchian_upper_15m, donchian_lower_15m = calculate_donchian(high, low, period=20)
-    adx_15m = calculate_adx(high, low, close, period=14)
-    zscore_15m = calculate_zscore(close, period=20)
+    upper_15m, lower_15m, sma_15m, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    kama_15m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     
     # Resample to 4h for trend regime (16 x 15m = 4h)
     bars_per_4h = 16
@@ -329,22 +279,23 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     hma_fast_4h = calculate_hma(c_4h, period=16)
     hma_slow_4h = calculate_hma(c_4h, period=48)
     st_4h, st_upper_4h, st_lower_4h, st_trend_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
+    upper_4h, lower_4h, sma_4h, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
     atr_4h = calculate_atr(h_4h, l_4h, c_4h, period=14)
-    adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
     
-    # Calculate ATR volatility percentile for regime detection
-    atr_valid = atr_4h[50:]
-    if len(atr_valid) > 0:
-        atr_sorted = np.sort(atr_valid)
+    # Calculate BBW percentile for regime detection (using 4h data)
+    bbw_valid = bbw_4h[50:]
+    if len(bbw_valid) > 0:
+        bbw_sorted = np.sort(bbw_valid[bbw_valid > 0])
     else:
-        atr_sorted = np.array([0])
+        bbw_sorted = np.array([1.0])
     
     # Map 4h indicators back to 15m timeframe
     hma_trend_4h = np.zeros(n)
     st_trend_4h_mapped = np.zeros(n)
-    adx_4h_mapped = np.zeros(n)
-    vol_regime = np.zeros(n)  # 0 = low vol, 1 = high vol
+    bbw_4h_mapped = np.zeros(n)
+    bbw_percentile = np.zeros(n)
     atr_4h_mapped = np.zeros(n)
+    regime = np.zeros(n)  # 0 = low vol (trend), 1 = high vol (mean revert)
     
     for i in range(n):
         idx_4h = i // bars_per_4h
@@ -358,33 +309,35 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             # Supertrend
             st_trend_4h_mapped[i] = st_trend_4h[idx_4h]
             
-            # ADX strength
-            adx_4h_mapped[i] = adx_4h[idx_4h]
+            # BBW value and percentile
+            bbw_4h_mapped[i] = bbw_4h[idx_4h]
+            if len(bbw_sorted) > 0 and bbw_4h[idx_4h] > 0:
+                bbw_pct = np.searchsorted(bbw_sorted, bbw_4h[idx_4h]) / len(bbw_sorted)
+                bbw_percentile[i] = bbw_pct
+                regime[i] = 1 if bbw_pct > 0.7 else 0
+            else:
+                bbw_percentile[i] = 0.5
+                regime[i] = 0
             
             # ATR value
             atr_4h_mapped[i] = atr_4h[idx_4h]
-            
-            # Volatility regime (percentile-based)
-            atr_idx = np.searchsorted(atr_sorted, atr_4h[idx_4h]) / len(atr_sorted)
-            vol_regime[i] = 1 if atr_idx > 0.7 else 0
     
     # Generate signals
     signals = np.zeros(n)
     
-    # Position sizing - DISCRETE levels with volatility adjustment
+    # Position sizing - DISCRETE levels
     SIZE_LOW = 0.20
     SIZE_MED = 0.28
     SIZE_HIGH = 0.35
     
     # Thresholds
-    ADX_MIN = 20
     RSI_LONG_MIN = 40
     RSI_LONG_MAX = 55
     RSI_SHORT_MIN = 45
     RSI_SHORT_MAX = 60
+    RSI_MR_LONG = 30
+    RSI_MR_SHORT = 70
     ATR_STOP_MULT = 2.5
-    ROC_MIN = 0.5  # Minimum momentum for entry
-    ZSCORE_MAX = 1.5  # Max z-score for entry (avoid extremes)
     
     first_valid = max(300, 50 * bars_per_4h)
     
@@ -400,24 +353,23 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         # Check for invalid data
         if np.isnan(atr_15m[i]) or atr_15m[i] == 0 or np.isnan(rsi_15m[i]):
             signals[i] = 0.0
-            pos_side = 0
-            pos_entry = 0.0
-            pos_tp_triggered = False
-            pos_highest = 0.0
-            pos_lowest = 0.0
+            if pos_side != 0:
+                pos_side = 0
+                pos_entry = 0.0
+                pos_tp_triggered = False
+                pos_highest = 0.0
+                pos_lowest = 0.0
             continue
         
         price = close[i]
         atr = atr_15m[i]
         rsi = rsi_15m[i]
-        roc = roc_15m[i]
-        zscore = zscore_15m[i]
         
         # Get regime info
         hma_trend = hma_trend_4h[i]
         st_trend = st_trend_4h_mapped[i]
-        adx_val = adx_4h_mapped[i]
-        vol_regime_val = vol_regime[i]
+        bbw_pct = bbw_percentile[i]
+        regime_val = regime[i]
         atr_4h_val = atr_4h_mapped[i]
         
         # Manage existing position
@@ -443,7 +395,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit (2R) - reduce to half
                 tp_price = pos_entry + 2 * ATR_STOP_MULT * atr
                 if not pos_tp_triggered and price >= tp_price:
-                    signals[i] = SIZE_LOW * 0.5 if vol_regime_val == 0 else SIZE_LOW * 0.35
+                    signals[i] = SIZE_LOW * 0.5
                     pos_tp_triggered = True
                     continue
                 
@@ -473,7 +425,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit (2R) - reduce to half
                 tp_price = pos_entry - 2 * ATR_STOP_MULT * atr
                 if not pos_tp_triggered and price <= tp_price:
-                    signals[i] = -SIZE_LOW * 0.5 if vol_regime_val == 0 else -SIZE_LOW * 0.35
+                    signals[i] = -SIZE_LOW * 0.5
                     pos_tp_triggered = True
                     continue
                 
@@ -494,7 +446,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             continue
         
         # No position - check for new entry
-        # Count signal agreement
+        # Count signal agreement (3-signal voting)
         confidence = 0
         signal_direction = 0
         
@@ -506,44 +458,71 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         # Signal 2: Supertrend (4h)
         if st_trend != 0:
             confidence += 1
-            signal_direction += st_trend
+            signal_direction += int(st_trend)
         
-        # Signal 3: ADX strength
-        if adx_val >= ADX_MIN:
+        # Signal 3: 15m RSI momentum
+        if rsi > 50:
             confidence += 1
-        
-        # Signal 4: ROC momentum confirmation
-        if abs(roc) >= ROC_MIN:
+            signal_direction += 1
+        elif rsi < 50:
             confidence += 1
-            signal_direction += 1 if roc > 0 else -1
+            signal_direction -= 1
         
-        # Signal 5: Z-score filter (not at extreme)
-        if abs(zscore) <= ZSCORE_MAX:
-            confidence += 1
-        
-        # Determine position size based on confidence AND volatility
-        if confidence >= 5:
+        # Determine position size based on confidence
+        if confidence >= 3:
             base_size = SIZE_HIGH
-        elif confidence >= 4:
+        elif confidence >= 2:
             base_size = SIZE_MED
-        elif confidence >= 3:
-            base_size = SIZE_LOW
         else:
             signals[i] = 0.0
             continue
         
-        # Volatility adjustment: reduce size in high volatility
-        if vol_regime_val == 1:
-            base_size *= 0.7  # 30% reduction in high vol
+        # Entry logic based on regime
+        if regime_val == 0:
+            # LOW VOLATILITY (BBW < 70th percentile) - TREND FOLLOWING
+            # LONG: uptrend + RSI pullback
+            if signal_direction >= 2 and hma_trend == 1 and st_trend == 1:
+                if RSI_LONG_MIN <= rsi <= RSI_LONG_MAX:
+                    # Additional filter: price above KAMA
+                    if price > kama_15m[i] and kama_15m[i] > 0:
+                        signals[i] = base_size
+                        pos_side = 1
+                        pos_entry = price
+                        pos_entry_bar = i
+                        pos_tp_triggered = False
+                        pos_highest = price
+                        pos_lowest = price
+                    else:
+                        signals[i] = 0.0
+                else:
+                    signals[i] = 0.0
+            
+            # SHORT: downtrend + RSI pullback
+            elif signal_direction <= -2 and hma_trend == -1 and st_trend == -1:
+                if RSI_SHORT_MIN <= rsi <= RSI_SHORT_MAX:
+                    # Additional filter: price below KAMA
+                    if price < kama_15m[i] and kama_15m[i] > 0:
+                        signals[i] = -base_size
+                        pos_side = -1
+                        pos_entry = price
+                        pos_entry_bar = i
+                        pos_tp_triggered = False
+                        pos_highest = price
+                        pos_lowest = price
+                    else:
+                        signals[i] = 0.0
+                else:
+                    signals[i] = 0.0
+            else:
+                signals[i] = 0.0
         
-        # Entry logic
-        # LONG: uptrend + RSI pullback + momentum confirmation
-        if signal_direction >= 2 and hma_trend == 1 and st_trend == 1:
-            if RSI_LONG_MIN <= rsi <= RSI_LONG_MAX and roc >= ROC_MIN:
-                # Additional filter: price above Donchian mid
-                donchian_mid = (donchian_upper_15m[i] + donchian_lower_15m[i]) / 2
-                if price > donchian_mid:
-                    signals[i] = base_size
+        else:
+            # HIGH VOLATILITY (BBW > 70th percentile) - MEAN REVERSION
+            # LONG: RSI oversold in uptrend
+            if hma_trend == 1 and rsi <= RSI_MR_LONG:
+                # Additional filter: price below lower BB
+                if price < lower_15m[i] and lower_15m[i] > 0:
+                    signals[i] = SIZE_MED
                     pos_side = 1
                     pos_entry = price
                     pos_entry_bar = i
@@ -552,16 +531,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     pos_lowest = price
                 else:
                     signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-        
-        # SHORT: downtrend + RSI pullback + momentum confirmation
-        elif signal_direction <= -2 and hma_trend == -1 and st_trend == -1:
-            if RSI_SHORT_MIN <= rsi <= RSI_SHORT_MAX and roc <= -ROC_MIN:
-                # Additional filter: price below Donchian mid
-                donchian_mid = (donchian_upper_15m[i] + donchian_lower_15m[i]) / 2
-                if price < donchian_mid:
-                    signals[i] = -base_size
+            # SHORT: RSI overbought in downtrend
+            elif hma_trend == -1 and rsi >= RSI_MR_SHORT:
+                # Additional filter: price above upper BB
+                if price > upper_15m[i] and upper_15m[i] > 0:
+                    signals[i] = -SIZE_MED
                     pos_side = -1
                     pos_entry = price
                     pos_entry_bar = i
@@ -572,7 +546,5 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     signals[i] = 0.0
             else:
                 signals[i] = 0.0
-        else:
-            signals[i] = 0.0
     
     return signals
