@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #012 - Donchian Breakout with Weekly Trend + Volume Filter (1d)
-==========================================================================
-Hypothesis: Daily Donchian breakouts (20-day high/low) capture trend continuations
-when aligned with weekly HMA(50) trend direction. Volume confirmation filters
-false breakouts. ATR trailing stop protects against reversals. This differs from
-previous KAMA/RSI approaches by using pure price breakout logic with volume validation.
+EXPERIMENT #001 - Supertrend + RSI Pullback with 4h Trend Filter (15m)
+=======================================================================
+Hypothesis: 15m Supertrend entries aligned with 4h HMA(21) trend direction
+capture intraday momentum while avoiding counter-trend trades. RSI(14) pullback
+filter ensures we enter on dips in uptrends (RSI 40-55) and rallies in downtrends
+(RSI 45-60), not at extremes. Volume confirmation filters false breakouts.
+ATR(14) trailing stop at 2.5x protects against reversals.
 
 Key features:
-- Primary TF: 1d (daily candles)
-- HTF filter: 1w HMA(50) for major trend direction
-- Entry: Donchian(20) breakout + volume > 20-day average
-- Filter: Weekly trend must align with breakout direction
+- Primary TF: 15m (intraday momentum)
+- HTF filter: 4h HMA(21) for major trend direction
+- Entry: Supertrend(10,3) flip + RSI pullback zone + volume > SMA(20)
+- Filter: 4h trend must align with entry direction
 - Stoploss: 2.5*ATR(14) trailing
 - Position sizing: 0.25-0.30 discrete levels
-- Take profit: Reduce to half at 2R, trail stop at 1R
+- Take profit: Reduce to half at 2R profit
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "donchian_volume_weekly_1d_v1"
-timeframe = "1d"
+name = "supertrend_rsi_4h_filter_15m_v1"
+timeframe = "15m"
 leverage = 1.0
 
 
@@ -49,19 +50,60 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (20-day high/low)"""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """
+    Calculate Supertrend indicator.
+    Returns: supertrend_values, supertrend_direction (1=long, -1=short)
+    """
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
+    hl2 = (high + low) / 2.0
     
-    return upper, lower
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    supertrend = np.zeros(n)
+    direction = np.zeros(n)
+    
+    for i in range(period, n):
+        if np.isnan(atr[i]) or atr[i] == 0:
+            upper_band[i] = np.nan
+            lower_band[i] = np.nan
+            supertrend[i] = np.nan
+            direction[i] = 0
+            continue
+        
+        upper_band[i] = hl2[i] + multiplier * atr[i]
+        lower_band[i] = hl2[i] - multiplier * atr[i]
+        
+        if i == period:
+            supertrend[i] = upper_band[i]
+            direction[i] = 1
+        else:
+            # Upper band logic
+            if close[i - 1] <= supertrend[i - 1]:
+                upper_band[i] = min(upper_band[i], upper_band[i - 1])
+            else:
+                upper_band[i] = hl2[i] + multiplier * atr[i]
+            
+            # Lower band logic
+            if close[i - 1] >= supertrend[i - 1]:
+                lower_band[i] = max(lower_band[i], lower_band[i - 1])
+            else:
+                lower_band[i] = hl2[i] - multiplier * atr[i]
+            
+            # Determine supertrend value and direction
+            if close[i] <= lower_band[i]:
+                supertrend[i] = lower_band[i]
+                direction[i] = 1  # Long signal
+            elif close[i] >= upper_band[i]:
+                supertrend[i] = upper_band[i]
+                direction[i] = -1  # Short signal
+            else:
+                supertrend[i] = supertrend[i - 1]
+                direction[i] = direction[i - 1]
+    
+    return supertrend, direction
 
 
 def calculate_rsi(close, period=14):
@@ -84,13 +126,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load 1w HTF data ONCE before loop (Rule 1)
-    df_1w = get_htf_data(prices, '1w')
-    hma_1w = calculate_hma(df_1w['close'].values, 50)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Load 4h HTF data ONCE before loop (Rule 1)
+    df_4h = get_htf_data(prices, '4h')
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    # Calculate 15m indicators
+    supertrend, supertrend_dir = calculate_supertrend(high, low, close, 10, 3.0)
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     
@@ -109,41 +151,50 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_price = 0.0
     profit_target_hit = False
     
-    min_period = 100  # Wait for weekly HMA and indicators to stabilize
+    min_period = 100  # Wait for 4h HMA and indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(atr[i]) or 
-            np.isnan(volume_sma[i]) or np.isnan(rsi[i]) or atr[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(supertrend[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_sma[i]) or np.isnan(rsi[i]) or 
+            atr[i] == 0 or supertrend_dir[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        weekly_trend = 1 if close[i] > hma_1w_aligned[i] else -1
+        # 4h trend filter
+        trend_4h = 1 if close[i] > hma_4h_aligned[i] else -1
         
-        # Volume confirmation (must be above 20-day average)
+        # Volume confirmation (must be above 20-period average)
         volume_confirmed = volume[i] > volume_sma[i]
         
-        # Donchian breakout detection
-        breakout_signal = 0
-        if i > 0:
-            # Long breakout: price crosses above Donchian upper
-            if close[i] > donchian_upper[i] and close[i - 1] <= donchian_upper[i - 1]:
-                breakout_signal = 1
-            # Short breakout: price crosses below Donchian lower
-            elif close[i] < donchian_lower[i] and close[i - 1] >= donchian_lower[i - 1]:
-                breakout_signal = -1
+        # Supertrend direction signal
+        st_signal = int(supertrend_dir[i])
+        st_prev = int(supertrend_dir[i - 1]) if i > 0 else 0
         
-        # RSI filter (avoid extreme overbought/oversold entries)
-        rsi_valid = 25 < rsi[i] < 75
+        # Detect Supertrend flip (entry signal)
+        st_flip = 0
+        if st_signal == 1 and st_prev == -1:
+            st_flip = 1  # Long flip
+        elif st_signal == -1 and st_prev == 1:
+            st_flip = -1  # Short flip
+        
+        # RSI pullback filter
+        # For longs: RSI should be in pullback zone (40-55), not overbought
+        # For shorts: RSI should be in rally zone (45-60), not oversold
+        rsi_valid_long = 40 < rsi[i] < 55
+        rsi_valid_short = 45 < rsi[i] < 60
         
         # Determine target signal based on all filters
         target_signal = 0.0
-        if breakout_signal != 0:
-            # Breakout must align with weekly trend
-            if breakout_signal == weekly_trend and volume_confirmed and rsi_valid:
-                target_signal = SIZE * breakout_signal
+        if st_flip != 0:
+            if st_flip == 1:  # Long flip
+                # Must align with 4h uptrend, volume confirmed, RSI in pullback zone
+                if trend_4h == 1 and volume_confirmed and rsi_valid_long:
+                    target_signal = SIZE
+            elif st_flip == -1:  # Short flip
+                # Must align with 4h downtrend, volume confirmed, RSI in rally zone
+                if trend_4h == -1 and volume_confirmed and rsi_valid_short:
+                    target_signal = -SIZE
         
         # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
@@ -159,10 +210,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry)
+                # Check take profit (2R from entry, where R = 2.5*ATR)
                 if not profit_target_hit:
-                    profit_target = entry_price + 2.0 * (entry_price - (entry_price - 2.5 * atr[i]))
-                    if close[i] >= entry_price + 5.0 * atr[i]:  # 2R = 5*ATR (since stop is 2.5*ATR)
+                    if close[i] >= entry_price + 5.0 * atr[i]:  # 2R = 5*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
@@ -189,17 +239,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
-            # Trail stop tighter after TP (1R from highest/lowest)
-            if position_side == 1:
-                highest_since_entry = max(highest_since_entry, close[i])
-            else:
-                lowest_since_entry = min(lowest_since_entry, close[i])
         else:
             # Apply signal change
             if target_signal != 0.0:
                 signals[i] = target_signal
                 if position_side == 0:
                     # New entry
+                    position_side = 1 if target_signal > 0 else -1
+                    highest_since_entry = close[i]
+                    lowest_since_entry = close[i]
+                    entry_price = close[i]
+                    profit_target_hit = False
+                else:
+                    # Position reversal
                     position_side = 1 if target_signal > 0 else -1
                     highest_since_entry = close[i]
                     lowest_since_entry = close[i]
