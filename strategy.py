@@ -1,35 +1,35 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #022 - KAMA Trend + RSI Momentum + 1d HMA Filter (4h primary)
+EXPERIMENT #023 - Donchian Breakout + 1d HMA Trend + RSI Filter (12h primary)
 =====================================================================================
-Hypothesis: 4h timeframe captures sustained trends better than lower TFs while generating
-more trades than daily strategies. KAMA (Kaufman Adaptive Moving Average) adapts to
-market volatility - fast in trends, slow in chop. Combined with 1d HMA(21) for major
-trend direction and RSI(14) for entry timing with LOOSE thresholds to ensure trades.
+Hypothesis: 12h timeframe captures medium-term trends better than faster TFs.
+Donchian channel breakouts (20-period) work well on slower timeframes where
+noise is reduced. 1d HMA(21) provides higher timeframe trend confirmation.
+RSI filter is kept permissive (40-60 range) to ensure sufficient trade generation.
 
 Key features:
-- Primary TF: 4h (REQUIRED for this experiment)
+- Primary TF: 12h (as required for this experiment)
 - HTF filter: 1d HMA(21) for major trend direction
-- Trend: KAMA(10, ER=10) adaptive moving average
-- Entry: RSI(14) extremes with loose thresholds (<35 long, >65 short)
-- Stoploss: 2.5*ATR(14) trailing (wider for 4h timeframe)
-- Position sizing: 0.25-0.30 discrete levels
+- Entry: Donchian(20) breakout (price breaks 20-period high/low)
+- Filter: RSI(14) > 40 for longs, < 60 for shorts (permissive)
+- Strength: ADX(14) > 20 (lower threshold for more trades)
+- Stoploss: 2.5*ATR(14) trailing (wider for 12h timeframe)
+- Position sizing: 0.25 base, 0.30 max, discrete levels
 - Take profit: Reduce to half at 2.5R profit
 
-Why this should work:
-- 4h captures multi-day trends without excessive noise
-- KAMA adapts to crypto volatility better than fixed EMA/SMA
-- LOOSE RSI thresholds ensure we get trades (learning from #017 with 0 trades)
-- 1d HMA filter keeps us with major trend
-- Conservative sizing controls drawdown during 2022 crash
+Why this should work on 12h:
+- 12h has less noise than 15m/1h/4h strategies that failed
+- Donchian breakouts capture sustained moves on slower TFs
+- Permissive RSI/ADX filters ensure ≥10 trades per symbol
+- Conservative sizing (0.25-0.30) controls drawdown
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_rsi_1dhma_4h_v1"
-timeframe = "4h"
+name = "donchian_rsi_1dhma_12h_v1"
+timeframe = "12h"
 leverage = 1.0
 
 
@@ -46,44 +46,6 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA)
-    KAMA adapts to market noise - moves fast in trends, slow in chop
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(period, n):
-        signal = abs(close[i] - close[i - period])
-        noise = 0.0
-        for j in range(i - period + 1, i + 1):
-            noise += abs(close[j] - close[j - 1])
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0
-    
-    # Calculate smoothing constant
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    
-    sc = np.zeros(n)
-    for i in range(period, n):
-        sc[i] = er[i] * (fast_sc - slow_sc) + slow_sc
-        sc[i] = sc[i] ** 2  # Square for smoother adaptation
-    
-    # Calculate KAMA
-    kama[period] = close[period]
-    for i in range(period + 1, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama
-
-
 def calculate_rsi(close, period=14):
     """Calculate RSI (Relative Strength Index)"""
     n = len(close)
@@ -97,20 +59,65 @@ def calculate_rsi(close, period=14):
     gain[1:] = np.where(delta > 0, delta, 0)
     loss[1:] = np.where(delta < 0, -delta, 0)
     
-    # Use EMA for smoothing (Wilder's method)
     avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
     avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
     
     for i in range(period, n):
-        if np.isnan(avg_loss[i]) or avg_loss[i] == 0:
+        if avg_loss[i] == 0:
             rsi[i] = 100.0
-        elif np.isnan(avg_gain[i]):
-            rsi[i] = 0.0
         else:
             rs = avg_gain[i] / avg_loss[i]
             rsi[i] = 100.0 - (100.0 / (1.0 + rs))
     
     return rsi
+
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    
+    tr = np.zeros(n)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    tr[0] = high[0] - low[0]
+    
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i - 1]),
+                    abs(low[i] - close[i - 1]))
+        
+        if high[i] - high[i - 1] > low[i - 1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i - 1], 0)
+        else:
+            plus_dm[i] = 0
+            
+        if low[i - 1] - low[i] > high[i] - high[i - 1]:
+            minus_dm[i] = max(low[i - 1] - low[i], 0)
+        else:
+            minus_dm[i] = 0
+    
+    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        if tr_smooth[i] > 0:
+            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
+            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
+    
+    dx = np.zeros(n)
+    for i in range(period - 1, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return adx, plus_di, minus_di
 
 
 def calculate_hma(close, period):
@@ -121,6 +128,19 @@ def calculate_hma(close, period):
     raw_hma = 2 * wma1 - wma2
     hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False, min_periods=int(np.sqrt(period))).mean()
     return hma.values
+
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (upper/lower bands)"""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -138,16 +158,16 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
-    kama = calculate_kama(close, period=10, fast_period=2, slow_period=30)
-    rsi = calculate_rsi(close, period=14)
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, period=14)
+    rsi = calculate_rsi(close, period=14)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.28  # Base position size (28% of capital)
-    MAX_SIZE = 0.35   # Max position size
-    MIN_SIZE = 0.20   # Min position size
+    BASE_SIZE = 0.25  # Base position size (25% of capital)
+    MAX_SIZE = 0.30   # Max position size
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -158,12 +178,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_atr = 0.0
     profit_target_hit = False
     
-    min_period = 50  # Wait for indicators to stabilize (shorter to get more trades)
+    min_period = 50  # Wait for indicators to stabilize (Donchian needs 20, ADX needs ~28)
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1d_aligned[i]) or np.isnan(kama[i]) or
-            np.isnan(rsi[i]) or np.isnan(atr[i]) or
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(atr[i]) or np.isnan(adx[i]) or
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
             atr[i] == 0):
             signals[i] = 0.0
             continue
@@ -172,29 +193,36 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         price_above_1d_hma = close[i] > hma_1d_aligned[i]
         hma_trend = 1 if price_above_1d_hma else -1
         
-        # KAMA trend direction
-        kama_trend = 1 if close[i] > kama[i] else -1
+        # ADX strength filter (ADX > 20 for more trades)
+        adx_strong = adx[i] > 20
         
-        # RSI entry conditions - LOOSE thresholds to ensure trades
-        rsi_oversold = rsi[i] < 35  # Loose threshold for long entries
-        rsi_overbought = rsi[i] > 65  # Loose threshold for short entries
+        # RSI filter (permissive: > 40 for longs, < 60 for shorts)
+        rsi_ok_long = rsi[i] > 40
+        rsi_ok_short = rsi[i] < 60
         
-        # Calculate position size
-        position_size = BASE_SIZE
+        # DI+ vs DI- for trend confirmation
+        di_bullish = plus_di[i] > minus_di[i]
+        di_bearish = minus_di[i] > plus_di[i]
         
-        # Determine target signal based on filters
+        # Donchian breakout signals
+        breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
+        breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
+        
+        # Calculate position size based on ADX strength
+        adx_multiplier = min(1.0 + (adx[i] - 20) / 60, 1.2)  # Max 1.2x
+        position_size = min(MAX_SIZE, max(BASE_SIZE, BASE_SIZE * adx_multiplier))
+        
+        # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: KAMA bullish + 1d HMA bullish + RSI oversold
-        # Only require 2 of 3 conditions for long (more trades)
-        long_conditions = [kama_trend == 1, hma_trend == 1, rsi_oversold]
-        if sum(long_conditions) >= 2:
+        # Long entry: Donchian breakout + 1d HMA bullish + ADX strong + RSI > 40 + DI+ > DI-
+        if (breakout_long and hma_trend == 1 and adx_strong and 
+            rsi_ok_long and di_bullish):
             target_signal = position_size
         
-        # Short entry: KAMA bearish + 1d HMA bearish + RSI overbought
-        # Only require 2 of 3 conditions for short (more trades)
-        short_conditions = [kama_trend == -1, hma_trend == -1, rsi_overbought]
-        if sum(short_conditions) >= 2:
+        # Short entry: Donchian breakout + 1d HMA bearish + ADX strong + RSI < 60 + DI- > DI+
+        elif (breakout_short and hma_trend == -1 and adx_strong and 
+              rsi_ok_short and di_bearish):
             target_signal = -position_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -254,13 +282,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if KAMA reverses OR 1d HMA alignment breaks
-                kama_reversal_long = kama_trend == -1
-                kama_reversal_short = kama_trend == 1
+                # Exit if 1d HMA alignment breaks
                 hma_alignment_broken = (position_side == 1 and hma_trend == -1) or \
                                        (position_side == -1 and hma_trend == 1)
                 
-                if kama_reversal_long or kama_reversal_short or hma_alignment_broken:
+                # Exit if ADX drops too low (trend weakening)
+                adx_weak = adx[i] < 15
+                
+                if hma_alignment_broken or adx_weak:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
