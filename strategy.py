@@ -1,109 +1,36 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #010 - Regime-Based HMA + Bollinger + RSI Strategy (4h)
-==================================================================
-Hypothesis: Combining HTF trend regime (1d HMA) with LTF volatility regime 
-(4h Bollinger Band Width) and momentum entry (4h RSI) will outperform pure 
-trend-following by avoiding choppy markets and entering on pullbacks within 
-established trends.
+EXPERIMENT #011 - HMA Crossover with Daily Trend Filter (12h)
+=============================================================
+Hypothesis: 12h HMA crossover provides cleaner signals than 4h/1h while maintaining
+responsiveness. Adding 1d HMA trend filter ensures we only trade in direction of 
+major trend, reducing whipsaws. ATR-based stoploss protects against adverse moves.
 
-Key components:
-1. 1d HMA(21) - Long-term trend regime filter (only trade with HTF trend)
-2. 4h BB Width percentile - Volatility regime (avoid squeeze, trade expansion)
-3. 4h RSI(14) - Entry timing on pullbacks within trend
-4. ATR(14) stoploss - Dynamic risk management at 2*ATR
-
-Position sizing: 0.30 (30% of capital), discrete levels
-Stoploss: Signal → 0 when price moves 2*ATR against position
-Take profit: Reduce to half at 2R profit
+Key features:
+- Primary TF: 12h (new for this experiment)
+- HTF filter: 1d HMA(21) for trend direction
+- Entry: HMA(8) crosses HMA(21) on 12h
+- Stoploss: 2*ATR(14) trailing
+- Position sizing: 0.25-0.30 discrete levels
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "regime_hma_bb_rsi_4h_v1"
-timeframe = "4h"
+name = "hma_crossover_daily_filter_12h_v1"
+timeframe = "12h"
 leverage = 1.0
 
 
-def calculate_hma(close: np.ndarray, period: int) -> np.ndarray:
+def calculate_hma(close, period):
     """Calculate Hull Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
     close_s = pd.Series(close)
-    wma_half = close_s.ewm(span=period // 2, min_periods=period // 2, adjust=False).mean()
-    wma_full = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    raw_hma = 2 * wma_half - wma_full
-    hma = raw_hma.ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
-    
+    wma1 = close_s.ewm(span=period//2, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, adjust=False).mean()
+    raw_hma = 2 * wma1 - wma2
+    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
     return hma.values
-
-
-def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
-    """Calculate Average True Range"""
-    n = len(close)
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    return atr
-
-
-def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
-    """Calculate RSI"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi.values
-
-
-def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_mult: float = 2.0) -> tuple:
-    """Calculate Bollinger Bands and Band Width"""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bw = (upper - lower) / sma  # Band width as % of price
-    
-    return upper.values, lower.values, bw.values
-
-
-def calculate_bb_percentile(bw: np.ndarray, lookback: int = 100) -> np.ndarray:
-    """Calculate BB Width percentile rank over lookback period"""
-    n = len(bw)
-    percentile = np.full(n, np.nan)
-    
-    for i in range(lookback, n):
-        window = bw[i-lookback:i+1]
-        valid = window[~np.isnan(window)]
-        if len(valid) > 0:
-            percentile[i] = np.sum(valid <= bw[i]) / len(valid)
-    
-    return percentile
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -112,115 +39,95 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # === LOAD HTF DATA ONCE (1d for trend regime) ===
+    # Load 1d HTF data ONCE before loop (Rule 1)
     df_1d = get_htf_data(prices, '1d')
     hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === CALCULATE 4h INDICATORS ===
-    hma_4h = calculate_hma(close, 21)
-    atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2.0)
-    bb_percentile = calculate_bb_percentile(bb_width, 100)
+    # Calculate 12h indicators
+    hma_fast = calculate_hma(close, 8)
+    hma_slow = calculate_hma(close, 21)
     
-    # === GENERATE SIGNALS ===
+    # Calculate ATR(14) for stoploss
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], 
+                    abs(high[i] - close[i-1]), 
+                    abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Generate signals
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.25  # Base position size
+    MAX_SIZE = 0.30
     
     # Track position state for stoploss
-    position_side = 0  # 0=flat, 1=long, -1=short
     entry_price = 0.0
+    position_side = 0  # 0=flat, 1=long, -1=short
     highest_since_entry = 0.0
-    lowest_since_entry = np.inf
+    lowest_since_entry = float('inf')
     
-    first_valid = max(100, 21)  # Wait for all indicators to warm up
+    min_period = 21  # Wait for indicators to stabilize
     
-    for i in range(first_valid, n):
-        # Skip if any indicator is NaN
-        if (np.isnan(hma_1d_aligned[i]) or np.isnan(hma_4h[i]) or 
-            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_percentile[i])):
+    for i in range(min_period, n):
+        # Check for NaN in any indicator
+        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]) or np.isnan(atr[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
-            position_side = 0
             continue
         
-        # === HTF TREND REGIME (1d HMA slope) ===
-        hma_1d_slope = hma_1d_aligned[i] - hma_1d_aligned[i-1] if i > 0 else 0
-        long_regime = hma_1d_slope > 0  # 1d trend is up
-        short_regime = hma_1d_slope < 0  # 1d trend is down
+        # Daily trend filter
+        daily_trend = 1 if close[i] > hma_1d_aligned[i] else -1
         
-        # === VOLATILITY REGIME (BB Width percentile) ===
-        # Only trade when BB width is expanding (percentile > 0.5)
-        vol_expansion = bb_percentile[i] > 0.50
+        # HMA crossover signal
+        crossover_signal = 0
+        if hma_fast[i] > hma_slow[i] and hma_fast[i-1] <= hma_slow[i-1]:
+            crossover_signal = 1  # Bullish crossover
+        elif hma_fast[i] < hma_slow[i] and hma_fast[i-1] >= hma_slow[i-1]:
+            crossover_signal = -1  # Bearish crossover
         
-        # === ENTRY SIGNALS ===
-        # Long: HTF uptrend + vol expansion + RSI pullback (30-50)
-        long_signal = (long_regime and vol_expansion and 
-                       30 <= rsi[i] <= 50 and 
-                       close[i] > hma_4h[i])
+        # Determine target signal based on trend filter
+        target_signal = 0.0
+        if crossover_signal == daily_trend and crossover_signal != 0:
+            target_signal = SIZE * crossover_signal
         
-        # Short: HTF downtrend + vol expansion + RSI rally (50-70)
-        short_signal = (short_regime and vol_expansion and 
-                        50 <= rsi[i] <= 70 and 
-                        close[i] < hma_4h[i])
-        
-        # === STOPLOSS LOGIC (2*ATR) ===
-        if position_side == 1:  # Long position
-            highest_since_entry = max(highest_since_entry, close[i])
-            stop_loss = entry_price - 2.0 * atr[i]
-            trail_stop = highest_since_entry - 2.0 * atr[i]
-            effective_stop = max(stop_loss, trail_stop)
-            
-            if close[i] < effective_stop:
-                signals[i] = 0.0
-                position_side = 0
-                continue
-        
-        elif position_side == -1:  # Short position
-            lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_loss = entry_price + 2.0 * atr[i]
-            trail_stop = lowest_since_entry + 2.0 * atr[i]
-            effective_stop = min(stop_loss, trail_stop)
-            
-            if close[i] > effective_stop:
-                signals[i] = 0.0
-                position_side = 0
-                continue
-        
-        # === TAKE PROFIT (reduce at 2R) ===
-        if position_side == 1:
-            profit = close[i] - entry_price
-            risk = entry_price - (entry_price - 2.0 * atr[entry_idx]) if 'entry_idx' in dir() else atr[i]
-            if profit >= 2.0 * atr[i] and signals[i-1] == SIZE:
-                signals[i] = SIZE / 2  # Reduce to half
-                continue
-        
-        elif position_side == -1:
-            profit = entry_price - close[i]
-            if profit >= 2.0 * atr[i] and signals[i-1] == -SIZE:
-                signals[i] = -SIZE / 2  # Reduce to half
-                continue
-        
-        # === GENERATE SIGNAL ===
-        if long_signal and position_side != 1:
-            signals[i] = SIZE
-            position_side = 1
-            entry_price = close[i]
-            highest_since_entry = close[i]
-            entry_idx = i
-        
-        elif short_signal and position_side != -1:
-            signals[i] = -SIZE
-            position_side = -1
-            entry_price = close[i]
-            lowest_since_entry = close[i]
-            entry_idx = i
-        
-        elif not long_signal and not short_signal:
-            # Hold existing position or stay flat
-            if position_side == 0:
-                signals[i] = 0.0
+        # Stoploss logic (Rule 6) - check BEFORE setting new signal
+        stoploss_triggered = False
+        if position_side != 0:
+            if position_side == 1:
+                # Long position - update highest
+                highest_since_entry = max(highest_since_entry, close[i])
+                trailing_stop = highest_since_entry - 2.0 * atr[i]
+                if close[i] < trailing_stop:
+                    stoploss_triggered = True
             else:
-                signals[i] = signals[i-1]  # Hold position
+                # Short position - update lowest
+                lowest_since_entry = min(lowest_since_entry, close[i])
+                trailing_stop = lowest_since_entry + 2.0 * atr[i]
+                if close[i] > trailing_stop:
+                    stoploss_triggered = True
+        
+        if stoploss_triggered:
+            signals[i] = 0.0
+            position_side = 0
+            entry_price = 0.0
+            highest_since_entry = 0.0
+            lowest_since_entry = float('inf')
+        else:
+            # Apply signal change
+            if target_signal != 0.0:
+                signals[i] = target_signal
+                if position_side == 0:
+                    # New entry
+                    position_side = 1 if target_signal > 0 else -1
+                    entry_price = close[i]
+                    highest_since_entry = close[i]
+                    lowest_since_entry = close[i]
+            elif position_side != 0:
+                # Maintain existing position
+                signals[i] = SIZE * position_side
+            else:
+                signals[i] = 0.0
     
     return signals
