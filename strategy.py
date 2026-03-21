@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #014 - MTF ROC+KAMA+RSI+ADX (15m+1h+4h v1)
+EXPERIMENT #016 - MTF KAMA_STOCH_RSI_ADX_15m_1h_4h_v1
 ==================================================================================================
-Hypothesis: Replace Supertrend/BBW with ROC momentum + ADX strength filter.
-Current best (#009) uses KAMA+Supertrend+RSI+BBW+ADX - this tests ROC instead of Supertrend.
+Hypothesis: Replace Supertrend/ROC with Stochastic oscillator for entry timing.
+KAMA(4h) proven trend filter + Stochastic(1h) for overbought/oversold entries + RSI(15m) pullback confirmation.
 
 Why this should work:
-- ROC(10) captures momentum changes faster than MACD histogram
-- KAMA(4h) adapts to volatility better than HMA/DEMA
-- RSI(1h) pullback entries proven in #009
-- ADX(4h) > 25 filters weak trends (reduces whipsaws)
-- 15m base timeframe has proven success in #006, #009
+- KAMA(4h) adapts to volatility better than HMA/DEMA (proven in #009, #014)
+- Stochastic(1h) captures momentum extremes better than MACD for entries
+- RSI(15m) confirms pullback hasn't gone too far
+- ADX(4h) > 20 filters weak trends (reduces whipsaws in ranging markets)
+- ATR trailing stop protects capital during reversals
 
 Key differences from #009:
-- ROC momentum instead of Supertrend for entry timing
-- Simpler BBW filter (just avoid extreme squeeze)
-- Same proven KAMA trend + RSI pullback + ADX strength
+- Stochastic instead of Supertrend for entry timing
+- RSI on 15m instead of 1h for faster pullback detection
+- Simpler ADX threshold (20 vs 25) for more trades
+- Same proven KAMA trend + ATR stoploss
 
 Risk management:
 - Position size: 0.30 max (discrete: 0.0, ±0.30)
@@ -27,7 +28,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_roc_kama_rsi_adx_15m_1h_4h_v1"
+name = "mtf_kama_stoch_rsi_adx_15m_1h_4h_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -113,20 +114,29 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_roc(close, period=10):
-    """Calculate Rate of Change"""
+def calculate_stochastic(high, low, close, k_period=14, d_period=3):
+    """Calculate Stochastic Oscillator (%K and %D)"""
     n = len(close)
-    if n < period:
-        return np.zeros(n)
+    if n < k_period + d_period:
+        return np.zeros(n), np.zeros(n)
     
-    roc = np.zeros(n)
-    for i in range(period, n):
-        if close[i - period] != 0:
-            roc[i] = (close[i] - close[i - period]) / close[i - period] * 100
+    k_percent = np.zeros(n)
+    d_percent = np.zeros(n)
+    
+    for i in range(k_period - 1, n):
+        lowest_low = np.min(low[max(0, i - k_period + 1):i + 1])
+        highest_high = np.max(high[max(0, i - k_period + 1):i + 1])
+        
+        if highest_high - lowest_low > 0:
+            k_percent[i] = 100 * (close[i] - lowest_low) / (highest_high - lowest_low)
         else:
-            roc[i] = 0
+            k_percent[i] = 50
     
-    return roc
+    # Calculate %D (SMA of %K)
+    for i in range(d_period - 1, n):
+        d_percent[i] = np.mean(k_percent[max(0, i - d_period + 1):i + 1])
+    
+    return k_percent, d_percent
 
 
 def calculate_adx(high, low, close, period=14):
@@ -196,28 +206,6 @@ def calculate_adx(high, low, close, period=14):
     return adx
 
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
-    
-    bbw = np.zeros(n)
-    for i in range(n):
-        if middle[i] > 0:
-            bbw[i] = (upper[i] - lower[i]) / middle[i]
-        else:
-            bbw[i] = 0
-    
-    return upper, middle, lower, bbw
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
@@ -226,21 +214,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # 15m indicators for entry timing
     atr_15m = calculate_atr(high, low, close, period=14)
-    roc_15m = calculate_roc(close, period=10)
-    _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    rsi_15m = calculate_rsi(close, period=14)
     
     # Get 1h data using mtf_data helper
     try:
         df_1h = get_htf_data(prices, '1h')
+        h_1h = df_1h['high'].values
+        l_1h = df_1h['low'].values
         c_1h = df_1h['close'].values
         
-        # 1h RSI for pullback entries
-        rsi_1h = calculate_rsi(c_1h, period=14)
+        # 1h Stochastic for overbought/oversold entries
+        stoch_k_1h, stoch_d_1h = calculate_stochastic(h_1h, l_1h, c_1h, k_period=14, d_period=3)
         
         # Align 1h indicators to 15m timeframe
-        rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
+        stoch_k_1h_aligned = align_htf_to_ltf(prices, df_1h, stoch_k_1h)
+        stoch_d_1h_aligned = align_htf_to_ltf(prices, df_1h, stoch_d_1h)
     except Exception:
-        rsi_1h_aligned = np.zeros(n)
+        stoch_k_1h_aligned = np.zeros(n)
+        stoch_d_1h_aligned = np.zeros(n)
     
     # Get 4h data using mtf_data helper for trend filter
     try:
@@ -280,21 +271,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     SIZE_FULL = 0.30
     SIZE_HALF = 0.15
     
-    # ROC thresholds for momentum confirmation
-    ROC_LONG_MIN = 0.5
-    ROC_SHORT_MAX = -0.5
+    # Stochastic thresholds for entry timing
+    STOCH_LONG_K_MAX = 35  # %K below 35 = oversold
+    STOCH_LONG_D_MAX = 35
+    STOCH_SHORT_K_MIN = 65  # %K above 65 = overbought
+    STOCH_SHORT_D_MIN = 65
     
-    # RSI thresholds for pullback entries
+    # RSI thresholds for pullback confirmation (15m)
     RSI_LONG_MIN = 35
     RSI_LONG_MAX = 55
     RSI_SHORT_MIN = 45
     RSI_SHORT_MAX = 65
     
     # ADX minimum for trend strength filter
-    ADX_MIN = 25
-    
-    # BBW minimum to avoid extreme squeeze
-    BBW_MIN = 0.01
+    ADX_MIN = 20
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.5
@@ -309,7 +299,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_15m[i]) or np.isnan(roc_15m[i]) or atr_15m[i] == 0:
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
             position_side[i] = 0
             continue
@@ -317,14 +307,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         # Get aligned MTF values
         trend_4h_val = trend_4h[i] if i < len(trend_4h) else 0
         adx_4h = adx_4h_aligned[i] if i < len(adx_4h_aligned) else 0
-        rsi_1h = rsi_1h_aligned[i] if i < len(rsi_1h_aligned) else 50
+        stoch_k_1h = stoch_k_1h_aligned[i] if i < len(stoch_k_1h_aligned) else 50
+        stoch_d_1h = stoch_d_1h_aligned[i] if i < len(stoch_d_1h_aligned) else 50
         kama_4h_val = kama_4h_aligned[i] if i < len(kama_4h_aligned) else 0
-        
-        # BBW filter - avoid extreme squeeze (15m)
-        if bbw_15m[i] < BBW_MIN:
-            signals[i] = 0.0
-            position_side[i] = 0
-            continue
         
         # ADX filter - require strong trend (4h)
         if adx_4h < ADX_MIN:
@@ -431,14 +416,15 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h trend + 4h ADX strength + 1h RSI pullback + 15m ROC momentum
+        # Entry logic: 4h trend + 4h ADX strength + 1h Stochastic + 15m RSI pullback
         price = close[i]
         
         if trend_4h_val == 1:  # Bullish trend on 4h
-            # ROC positive on 15m (momentum confirmation)
-            # RSI pullback on 1h (not overbought)
-            if (roc_15m[i] > ROC_LONG_MIN and 
-                RSI_LONG_MIN <= rsi_1h <= RSI_LONG_MAX):
+            # Stochastic oversold on 1h (entry timing)
+            # RSI pullback on 15m (not overbought)
+            if (stoch_k_1h < STOCH_LONG_K_MAX and 
+                stoch_d_1h < STOCH_LONG_D_MAX and
+                RSI_LONG_MIN <= rsi_15m[i] <= RSI_LONG_MAX):
                 signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = price
@@ -447,10 +433,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 lowest_since_entry[i] = price
                 
         elif trend_4h_val == -1:  # Bearish trend on 4h
-            # ROC negative on 15m (momentum confirmation)
-            # RSI pullback on 1h (not oversold)
-            if (roc_15m[i] < ROC_SHORT_MAX and 
-                RSI_SHORT_MIN <= rsi_1h <= RSI_SHORT_MAX):
+            # Stochastic overbought on 1h (entry timing)
+            # RSI pullback on 15m (not oversold)
+            if (stoch_k_1h > STOCH_SHORT_K_MIN and 
+                stoch_d_1h > STOCH_SHORT_D_MIN and
+                RSI_SHORT_MIN <= rsi_15m[i] <= RSI_SHORT_MAX):
                 signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = price
