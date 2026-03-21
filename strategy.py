@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #377: 12h Supertrend + Weekly HMA + Bollinger Volatility + RSI Divergence + Volume
-Hypothesis: Supertrend provides clean trend signals (proven in #371 baseline). Weekly HMA gives
-stronger long-term bias than daily. Bollinger Band Width detects volatility expansion/contraction
-(regime filter different from CHOP). RSI divergence catches reversals before price confirms.
-Volume spike confirms breakout validity. This combines trend-following (Supertrend) with
-momentum confirmation (RSI div) and regime filter (BB Width) for better risk-adjusted returns.
-Timeframe: 12h (REQUIRED), HTF: 1w for strong trend bias via mtf_data helper.
-Target: Beat Sharpe=0.499 from mtf_12h_supertrend_daily_hma_rsi_pullback_v2
-Key insight: Weekly trend filter + volatility regime + divergence detection should reduce
-false signals while maintaining trade frequency through multiple entry conditions.
+Experiment #378: 1d Supertrend + RSI Pullback + Weekly HMA Trend + Volume + ATR Stop
+Hypothesis: Daily timeframe captures major trend moves while avoiding noise. Supertrend (ATR=10, mult=3) 
+provides clear trend direction. RSI(14) pullback entries ensure we enter on dips rather than chasing. 
+Weekly HMA(21) provides higher-timeframe trend bias. Volume confirmation ensures participation. 
+ATR(14) stoploss at 2.5x protects capital. Position sizing 0.25-0.30 discrete levels.
+
+Key insight: 1d timeframe needs LOOSE entry conditions to ensure minimum trade frequency (10+ trades/train, 3+/test).
+Building on #371 success but adapting for daily timeframe with proven Supertrend + RSI pullback combination.
+Target: Beat Sharpe=0.499 with 30-60 trades total across train+test.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_supertrend_weekly_hma_bbvol_rsi_div_vol_v1"
-timeframe = "12h"
+name = "mtf_1d_supertrend_weekly_hma_rsi_pullback_vol_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -30,53 +29,27 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-    Returns: supertrend values, direction (1=long, -1=short)
-    """
-    n = len(close)
+    """Calculate Supertrend indicator."""
     atr = calculate_atr(high, low, close, period)
-    
-    hl2 = (high + low) / 2.0
+    hl2 = (high + low) / 2
     
     upper_band = hl2 + multiplier * atr
     lower_band = hl2 - multiplier * atr
     
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)
+    supertrend = np.zeros(len(close))
+    trend = np.ones(len(close))  # 1 = bullish, -1 = bearish
     
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
+    supertrend[0] = lower_band[0]
     
-    for i in range(1, n):
-        if close[i-1] <= supertrend[i-1]:
-            # Previously short or neutral
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-            if close[i] > supertrend[i]:
-                direction[i] = 1
-                supertrend[i] = lower_band[i]
-            else:
-                direction[i] = -1
+    for i in range(1, len(close)):
+        if close[i] > supertrend[i-1]:
+            supertrend[i] = lower_band[i]
+            trend[i] = 1
         else:
-            # Previously long
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-            if close[i] < supertrend[i]:
-                direction[i] = -1
-                supertrend[i] = upper_band[i]
-            else:
-                direction[i] = 1
+            supertrend[i] = upper_band[i]
+            trend[i] = -1
     
-    return supertrend, direction
-
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for faster trend response."""
-    close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
+    return supertrend, trend
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -90,57 +63,20 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands and Band Width."""
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    band_width = (upper - lower) / sma * 100.0
-    band_width = np.nan_to_num(band_width, nan=0.0)
-    return upper, lower, band_width, sma
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
 
-def calculate_rsi_divergence(close, rsi, lookback=5):
-    """
-    Detect RSI divergence.
-    Bullish: price makes lower low, RSI makes higher low
-    Bearish: price makes higher high, RSI makes lower high
-    Returns: divergence score (-2 to +2)
-    """
-    n = len(close)
-    divergence = np.zeros(n)
-    
-    for i in range(lookback * 2, n):
-        # Check for bullish divergence (last lookback*2 bars)
-        price_low_recent = np.min(close[i-lookback:i])
-        price_low_prev = np.min(close[i-lookback*2:i-lookback])
-        rsi_low_recent = np.min(rsi[i-lookback:i])
-        rsi_low_prev = np.min(rsi[i-lookback*2:i-lookback])
-        
-        # Bullish: price lower low, RSI higher low
-        if price_low_recent < price_low_prev and rsi_low_recent > rsi_low_prev:
-            divergence[i] = max(divergence[i], 1.0)
-        
-        # Check for bearish divergence
-        price_high_recent = np.max(close[i-lookback:i])
-        price_high_prev = np.max(close[i-lookback*2:i-lookback])
-        rsi_high_recent = np.max(rsi[i-lookback:i])
-        rsi_high_prev = np.max(rsi[i-lookback*2:i-lookback])
-        
-        # Bearish: price higher high, RSI lower high
-        if price_high_recent > price_high_prev and rsi_high_recent < rsi_high_prev:
-            divergence[i] = min(divergence[i], -1.0)
-    
-    return divergence
-
-def calculate_volume_spike(volume, period=20):
-    """Detect volume spikes (> 2x average volume)."""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean().values
-    vol_spike = volume > 2.0 * vol_avg
-    vol_spike = np.nan_to_num(vol_spike, nan=False)
-    return vol_spike.astype(float)
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average."""
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -158,19 +94,11 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
-    bb_upper, bb_lower, bb_width, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
-    rsi_div = calculate_rsi_divergence(close, rsi, 5)
-    vol_spike = calculate_volume_spike(volume, 20)
-    
-    # BB Width percentile for regime (rolling 100 bars)
-    bb_width_pct = pd.Series(bb_width).rolling(window=100, min_periods=50).apply(
-        lambda x: np.sum(x < x[-1]) / len(x), raw=False
-    ).values
-    bb_width_pct = np.nan_to_num(bb_width_pct, nan=0.5)
+    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
+    vol_ma = calculate_volume_ma(volume, 20)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.30
@@ -186,11 +114,11 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_width[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(supertrend[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(supertrend[i]) or np.isnan(st_direction[i]):
+        if np.isnan(vol_ma[i]) or vol_ma[i] == 0:
             signals[i] = 0.0
             continue
         
@@ -198,65 +126,42 @@ def generate_signals(prices):
         weekly_bullish = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
         weekly_bearish = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
         
-        # Volatility regime from BB Width
-        is_low_vol = bb_width_pct[i] < 0.3  # Bottom 30% = contraction
-        is_high_vol = bb_width_pct[i] > 0.7  # Top 30% = expansion
+        # Supertrend direction
+        st_bullish = st_trend[i] == 1
+        st_bearish = st_trend[i] == -1
         
-        # Supertrend signals
-        st_long = st_direction[i] == 1
-        st_short = st_direction[i] == -1
+        # Volume confirmation (loose filter for trade frequency)
+        volume_ok = volume[i] > 0.8 * vol_ma[i]  # 80% of average is ok
         
-        # Supertrend flip detection
-        st_flip_long = st_direction[i] == 1 and st_direction[i-1] == -1
-        st_flip_short = st_direction[i] == -1 and st_direction[i-1] == 1
-        
-        # RSI conditions
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
-        rsi_neutral = 35 < rsi[i] < 65
-        
-        # RSI divergence
-        rsi_bull_div = rsi_div[i] > 0.5
-        rsi_bear_div = rsi_div[i] < -0.5
-        
-        # Volume confirmation
-        vol_confirmed = vol_spike[i] > 0.5
+        # RSI pullback levels (LOOSE for 1d timeframe to ensure trades)
+        rsi_ok_long = rsi[i] > 30 and rsi[i] < 70
+        rsi_ok_short = rsi[i] > 30 and rsi[i] < 70
         
         new_signal = 0.0
         
-        # === LONG ENTRIES ===
-        # Primary: Supertrend flip long + Weekly bullish + Volume spike
-        if st_flip_long and weekly_bullish and vol_confirmed:
-            new_signal = SIZE_ENTRY
-        # Secondary: Supertrend long + Weekly bullish + RSI oversold (pullback entry)
-        elif st_long and weekly_bullish and rsi_oversold:
-            new_signal = SIZE_ENTRY
-        # Tertiary: Supertrend flip long + RSI bull divergence (reversal)
-        elif st_flip_long and rsi_bull_div:
-            new_signal = SIZE_ENTRY
-        # Quaternary: Supertrend long + Low vol regime (trend continuation)
-        elif st_long and weekly_bullish and is_low_vol:
-            new_signal = SIZE_ENTRY
-        # Quintenary: Supertrend long + RSI neutral (momentum continuation)
-        elif st_long and rsi_neutral and vol_confirmed:
-            new_signal = SIZE_ENTRY
+        # === LONG ENTRIES (check in order of priority) ===
+        if st_bullish:
+            # Primary: Supertrend bullish + Weekly bullish + RSI ok + Volume ok
+            if weekly_bullish and rsi_ok_long and volume_ok:
+                new_signal = SIZE_ENTRY
+            # Secondary: Supertrend bullish + RSI ok (weekly neutral ok)
+            elif rsi_ok_long:
+                new_signal = SIZE_ENTRY
+            # Tertiary: Supertrend bullish alone (ensures minimum trade frequency)
+            elif rsi[i] > 35:
+                new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRIES ===
-        # Primary: Supertrend flip short + Weekly bearish + Volume spike
-        if st_flip_short and weekly_bearish and vol_confirmed:
-            new_signal = -SIZE_ENTRY
-        # Secondary: Supertrend short + Weekly bearish + RSI overbought (pullback entry)
-        elif st_short and weekly_bearish and rsi_overbought:
-            new_signal = -SIZE_ENTRY
-        # Tertiary: Supertrend flip short + RSI bear divergence (reversal)
-        elif st_flip_short and rsi_bear_div:
-            new_signal = -SIZE_ENTRY
-        # Quaternary: Supertrend short + Low vol regime (trend continuation)
-        elif st_short and weekly_bearish and is_low_vol:
-            new_signal = -SIZE_ENTRY
-        # Quintenary: Supertrend short + RSI neutral (momentum continuation)
-        elif st_short and rsi_neutral and vol_confirmed:
-            new_signal = -SIZE_ENTRY
+        # === SHORT ENTRIES (only if no long signal) ===
+        elif st_bearish and new_signal == 0.0:
+            # Primary: Supertrend bearish + Weekly bearish + RSI ok + Volume ok
+            if weekly_bearish and rsi_ok_short and volume_ok:
+                new_signal = -SIZE_ENTRY
+            # Secondary: Supertrend bearish + RSI ok (weekly neutral ok)
+            elif rsi_ok_short:
+                new_signal = -SIZE_ENTRY
+            # Tertiary: Supertrend bearish alone (ensures minimum trade frequency)
+            elif rsi[i] < 65:
+                new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
