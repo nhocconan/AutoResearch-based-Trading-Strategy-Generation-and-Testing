@@ -1,276 +1,373 @@
 commit	strategy	symbol	sharpe	return_pct	cagr_pct	max_dd_pct	win_rate	profit_factor	trades	sortino	calmar	status	description	period
-e00dff2	supertrend_4h_v1	ETHUSDT	0.0977	16.67	3.93	-32.88	36.4	1.21	209	0.1305	0.1196	keep	revalidated supertrend_4h_v1	train
-e00dff2	supertrend_4h_v1	SOLUSDT	0.533	111.37	20.67	-44.92	33.7	1.54	205	0.7521	0.4601	keep	revalidated supertrend_4h_v1	train
-612bbeb	supertrend_rsi_4h_filter_15m_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#001 supertrend_rsi_4h_filter_15m_v1	train
-612bbeb	supertrend_rsi_4h_filter_15m_v1	ETHUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#001 supertrend_rsi_4h_filter_15m_v1	train
-612bbeb	supertrend_rsi_4h_filter_15m_v1	SOLUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#001 supertrend_rsi_4h_filter_15m_v1	train
-cf2faa4	hma_rsi_4h_trend_1h_v1	BTCUSDT	-3.0225	-51.07	-16.37	-53.51	44.4	0.9	2614	-2.14	-0.306	discard	exp#003 hma_rsi_4h_trend_1h_v1	train
-cf2faa4	hma_rsi_4h_trend_1h_v1	ETHUSDT	-3.3759	-63.43	-22.25	-63.65	44.0	0.81	2574	-2.1754	-0.3495	discard	exp#003 hma_rsi_4h_trend_1h_v1	train
-cf2faa4	hma_rsi_4h_trend_1h_v1	SOLUSDT	-1.531	-50.99	-16.39	-51.98	47.8	0.96	2649	-1.0402	-0.3154	discard	exp#003 hma_rsi_4h_trend_1h_v1	train
-4ed0688	kama_bb_daily_filter_4h_v1	BTCUSDT	-0.266	3.84	0.95	-20.08	30.7	1.16	166	-0.261	0.0471	discard	exp#004 kama_bb_daily_filter_4h_v1	train
-4ed0688	kama_bb_daily_filter_4h_v1	ETHUSDT	-0.2527	0.6	0.15	-28.03	31.8	1.14	154	-0.2341	0.0054	discard	exp#004 kama_bb_daily_filter_4h_v1	train
-4ed0688	kama_bb_daily_filter_4h_v1	SOLUSDT	0.6434	103.38	19.5	-27.72	38.9	1.72	162	0.6473	0.7036	discard	exp#004 kama_bb_daily_filter_4h_v1	train
-bfa1ded	donchian_hma_adx_daily_v1	BTCUSDT	-0.0919	13.12	3.13	-17.53	33.3	1.47	30	-0.1054	0.1785	discard	exp#006 donchian_hma_adx_daily_v1	train
-bfa1ded	donchian_hma_adx_daily_v1	ETHUSDT	-0.6474	-20.05	-5.44	-35.42	36.4	0.69	33	-0.6831	-0.1536	discard	exp#006 donchian_hma_adx_daily_v1	train
-bfa1ded	donchian_hma_adx_daily_v1	SOLUSDT	0.4032	59.14	12.36	-29.53	36.7	2.41	30	0.4748	0.4186	discard	exp#006 donchian_hma_adx_daily_v1	train
-dceee0f	supertrend_rsi_4h_filter_15m_v2	BTCUSDT	-1.3165	-28.53	-8.06	-38.36	54.0	1.96	2125	-0.9603	-0.2101	discard	exp#007 supertrend_rsi_4h_filter_15m_v2	train
-dceee0f	supertrend_rsi_4h_filter_15m_v2	ETHUSDT	-1.3284	-39.89	-11.96	-43.43	53.5	1.87	2137	-0.964	-0.2753	discard	exp#007 supertrend_rsi_4h_filter_15m_v2	train
-dceee0f	supertrend_rsi_4h_filter_15m_v2	SOLUSDT	0.0429	17.75	4.19	-35.91	57.9	2.38	2233	0.0331	0.1166	discard	exp#007 supertrend_rsi_4h_filter_15m_v2	train
-e135484	kama_rsi_12h_zscore_1h_v1	BTCUSDT	-0.9568	-18.41	-4.96	-26.98	32.5	0.93	548	-0.8447	-0.1839	discard	exp#009 kama_rsi_12h_zscore_1h_v1	train
-e135484	kama_rsi_12h_zscore_1h_v1	ETHUSDT	0.2338	33.35	7.47	-21.85	39.1	1.27	516	0.206	0.3418	discard	exp#009 kama_rsi_12h_zscore_1h_v1	train
-e135484	kama_rsi_12h_zscore_1h_v1	SOLUSDT	0.2221	34.54	7.73	-25.93	38.7	1.19	527	0.1945	0.2982	discard	exp#009 kama_rsi_12h_zscore_1h_v1	train
-ba7f26d	supertrend_daily_rsi_4h_v1	BTCUSDT	-2.1259	-25.63	-7.14	-33.57	45.0	0.83	837	-1.3923	-0.2127	discard	exp#010 supertrend_daily_rsi_4h_v1	train
-ba7f26d	supertrend_daily_rsi_4h_v1	ETHUSDT	-0.5669	-0.61	-0.15	-18.24	46.8	1.14	782	-0.3832	-0.0084	discard	exp#010 supertrend_daily_rsi_4h_v1	train
-ba7f26d	supertrend_daily_rsi_4h_v1	SOLUSDT	-0.0921	9.92	2.4	-39.86	44.7	1.24	865	-0.0748	0.0603	discard	exp#010 supertrend_daily_rsi_4h_v1	train
-3d4f22b	supertrend_rsi_4h_filter_15m_v1	BTCUSDT	-1.9572	1.62	0.4	-3.48	54.5	1.24	145	-0.4253	0.1157	discard	exp#001 supertrend_rsi_4h_filter_15m_v1	train
-3d4f22b	supertrend_rsi_4h_filter_15m_v1	ETHUSDT	-1.3801	3.41	0.84	-4.86	50.5	1.31	111	-0.2591	0.1733	discard	exp#001 supertrend_rsi_4h_filter_15m_v1	train
-3d4f22b	supertrend_rsi_4h_filter_15m_v1	SOLUSDT	-1.3144	-8.91	-2.32	-10.45	48.1	0.84	133	-0.2538	-0.2215	discard	exp#001 supertrend_rsi_4h_filter_15m_v1	train
-a79d068	kama_bollinger_regime_4h_30m_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#002 kama_bollinger_regime_4h_30m_v1	train
-a79d068	kama_bollinger_regime_4h_30m_v1	ETHUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#002 kama_bollinger_regime_4h_30m_v1	train
-a79d068	kama_bollinger_regime_4h_30m_v1	SOLUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#002 kama_bollinger_regime_4h_30m_v1	train
-12d2a01	hma_macd_rsi_pullback_1h_v1	BTCUSDT	-0.8207	-16.24	-4.34	-23.89	40.3	1.0	943	-0.7231	-0.1815	discard	exp#003 hma_macd_rsi_pullback_1h_v1	train
-12d2a01	hma_macd_rsi_pullback_1h_v1	ETHUSDT	-0.4438	-6.89	-1.77	-23.01	41.8	1.05	952	-0.403	-0.0769	discard	exp#003 hma_macd_rsi_pullback_1h_v1	train
-12d2a01	hma_macd_rsi_pullback_1h_v1	SOLUSDT	0.5944	83.43	16.45	-26.32	45.7	1.22	929	0.5216	0.625	discard	exp#003 hma_macd_rsi_pullback_1h_v1	train
-9179561	supertrend_daily_volume_4h_v1	BTCUSDT	-0.8271	-5.1	-1.3	-14.11	47.4	0.98	95	-0.5652	-0.0922	discard	exp#004 supertrend_daily_volume_4h_v1	train
-9179561	supertrend_daily_volume_4h_v1	ETHUSDT	-0.1224	13.61	3.24	-18.19	45.5	1.32	99	-0.0906	0.1783	discard	exp#004 supertrend_daily_volume_4h_v1	train
-9179561	supertrend_daily_volume_4h_v1	SOLUSDT	1.0409	143.16	24.99	-13.39	53.3	2.12	90	0.8237	1.8656	discard	exp#004 supertrend_daily_volume_4h_v1	train
-e926ae1	kama_rsi_pullback_daily_filter_12h_v1	BTCUSDT	-1.0525	-17.57	-4.72	-23.48	36.2	0.76	58	-0.8038	-0.201	discard	exp#005 kama_rsi_pullback_daily_filter_12h_v1	train
-e926ae1	kama_rsi_pullback_daily_filter_12h_v1	ETHUSDT	-0.439	0.1	0.03	-18.48	48.9	1.28	47	-0.324	0.0014	discard	exp#005 kama_rsi_pullback_daily_filter_12h_v1	train
-e926ae1	kama_rsi_pullback_daily_filter_12h_v1	SOLUSDT	-0.3507	-4.68	-1.19	-23.51	41.5	1.19	53	-0.2357	-0.0508	discard	exp#005 kama_rsi_pullback_daily_filter_12h_v1	train
-d2cb899	ema_crossover_weekly_rsi_1d_v1	BTCUSDT	-0.5323	3.86	0.95	-10.83	33.3	1.36	18	-0.3782	0.0878	discard	exp#006 ema_crossover_weekly_rsi_1d_v1	train
-d2cb899	ema_crossover_weekly_rsi_1d_v1	ETHUSDT	-1.3352	-22.87	-6.29	-26.82	30.8	0.43	26	-1.0518	-0.2344	discard	exp#006 ema_crossover_weekly_rsi_1d_v1	train
-d2cb899	ema_crossover_weekly_rsi_1d_v1	SOLUSDT	0.2546	35.73	7.97	-12.23	52.6	2.44	19	0.2181	0.6516	discard	exp#006 ema_crossover_weekly_rsi_1d_v1	train
-73528b5	mr_15m_4h_trend_zscore_v1	BTCUSDT	-1.4311	-10.95	-2.86	-13.15	51.1	1.01	976	-0.6654	-0.2174	discard	exp#007 mr_15m_4h_trend_zscore_v1	train
-73528b5	mr_15m_4h_trend_zscore_v1	ETHUSDT	-1.2756	-14.18	-3.75	-22.38	48.6	0.98	962	-0.5888	-0.1677	discard	exp#007 mr_15m_4h_trend_zscore_v1	train
-73528b5	mr_15m_4h_trend_zscore_v1	SOLUSDT	0.1537	27.57	6.3	-19.64	50.3	1.17	985	0.0727	0.3209	discard	exp#007 mr_15m_4h_trend_zscore_v1	train
-edbccbb	kama_adaptive_4h_rsi_pullback_30m_v1	BTCUSDT	-3.1082	-6.19	-1.59	-6.5	39.7	0.61	63	-0.5973	-0.244	discard	exp#008 kama_adaptive_4h_rsi_pullback_30m_v1	train
-edbccbb	kama_adaptive_4h_rsi_pullback_30m_v1	ETHUSDT	-2.465	-11.73	-3.07	-14.19	46.4	0.53	69	-0.4485	-0.2167	discard	exp#008 kama_adaptive_4h_rsi_pullback_30m_v1	train
-edbccbb	kama_adaptive_4h_rsi_pullback_30m_v1	SOLUSDT	0.0066	21.48	5.01	-6.79	59.7	2.18	72	0.0014	0.7372	discard	exp#008 kama_adaptive_4h_rsi_pullback_30m_v1	train
-701c9f5	hma_rsi_adx_pullback_1h_v1	BTCUSDT	-1.378	-35.29	-10.32	-42.5	47.6	0.87	827	-1.3164	-0.2427	discard	exp#009 hma_rsi_adx_pullback_1h_v1	train
-701c9f5	hma_rsi_adx_pullback_1h_v1	ETHUSDT	-0.3689	-1.94	-0.49	-24.0	54.4	1.05	883	-0.3401	-0.0204	discard	exp#009 hma_rsi_adx_pullback_1h_v1	train
-701c9f5	hma_rsi_adx_pullback_1h_v1	SOLUSDT	-0.8379	-44.9	-13.89	-55.76	50.1	0.89	900	-0.7621	-0.2492	discard	exp#009 hma_rsi_adx_pullback_1h_v1	train
-01fee66	donchian_adx_daily_4h_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#010 donchian_adx_daily_4h_v1	train
-01fee66	donchian_adx_daily_4h_v1	ETHUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#010 donchian_adx_daily_4h_v1	train
-01fee66	donchian_adx_daily_4h_v1	SOLUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#010 donchian_adx_daily_4h_v1	train
-a24832c	kama_rsi_pullback_daily_12h_v1	BTCUSDT	-0.8523	-19.23	-5.2	-35.53	34.9	0.85	86	-0.9072	-0.1464	discard	exp#011 kama_rsi_pullback_daily_12h_v1	train
-a24832c	kama_rsi_pullback_daily_12h_v1	ETHUSDT	0.6406	70.98	14.36	-13.26	54.6	1.97	97	0.7981	1.0826	discard	exp#011 kama_rsi_pullback_daily_12h_v1	train
-a24832c	kama_rsi_pullback_daily_12h_v1	SOLUSDT	0.2351	35.94	8.01	-20.14	49.4	1.63	81	0.235	0.3977	discard	exp#011 kama_rsi_pullback_daily_12h_v1	train
-d783039	hma_crossover_4h_volume_1d_v1	BTCUSDT	-1.2785	-15.02	-3.99	-22.34	42.1	0.56	19	-0.8454	-0.1785	discard	exp#012 hma_crossover_4h_volume_1d_v1	train
-d783039	hma_crossover_4h_volume_1d_v1	ETHUSDT	-0.997	-28.45	-8.03	-35.55	32.0	0.51	25	-0.8075	-0.2258	discard	exp#012 hma_crossover_4h_volume_1d_v1	train
-d783039	hma_crossover_4h_volume_1d_v1	SOLUSDT	-0.6178	-19.93	-5.42	-40.74	41.2	0.71	17	-0.3796	-0.1331	discard	exp#012 hma_crossover_4h_volume_1d_v1	train
-fd72ff6	mtf_rsi_pullback_4h_1h_15m_v1	BTCUSDT	-2.5421	-57.18	-19.12	-58.4	37.1	0.86	2878	-2.1664	-0.3274	discard	exp#013 mtf_rsi_pullback_4h_1h_15m_v1	train
-fd72ff6	mtf_rsi_pullback_4h_1h_15m_v1	ETHUSDT	-2.0122	-58.01	-19.51	-62.11	38.3	0.9	3029	-1.7007	-0.3142	discard	exp#013 mtf_rsi_pullback_4h_1h_15m_v1	train
-fd72ff6	mtf_rsi_pullback_4h_1h_15m_v1	SOLUSDT	-0.4973	-27.09	-7.62	-41.37	40.9	1.03	3104	-0.4272	-0.1843	discard	exp#013 mtf_rsi_pullback_4h_1h_15m_v1	train
-3ea74f8	supertrend_rsi_4h_filter_30m_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#014 supertrend_rsi_4h_filter_30m_v1	train
-3ea74f8	supertrend_rsi_4h_filter_30m_v1	ETHUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#014 supertrend_rsi_4h_filter_30m_v1	train
-3ea74f8	supertrend_rsi_4h_filter_30m_v1	SOLUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#014 supertrend_rsi_4h_filter_30m_v1	train
-90eb2de	macd_bb_squeeze_4h_trend_1h_v1	BTCUSDT	-1.2616	-34.0	-9.87	-35.93	44.2	0.92	1103	-1.3	-0.2748	discard	exp#015 macd_bb_squeeze_4h_trend_1h_v1	train
-90eb2de	macd_bb_squeeze_4h_trend_1h_v1	ETHUSDT	-0.9471	-33.28	-9.63	-39.63	45.2	0.96	1152	-1.0002	-0.2429	discard	exp#015 macd_bb_squeeze_4h_trend_1h_v1	train
-90eb2de	macd_bb_squeeze_4h_trend_1h_v1	SOLUSDT	0.2425	37.22	8.27	-20.82	50.2	1.13	1106	0.2488	0.397	discard	exp#015 macd_bb_squeeze_4h_trend_1h_v1	train
-ac4553b	kama_volume_momentum_daily_4h_v1	BTCUSDT	-1.0156	-3.94	-1.0	-13.18	47.9	0.95	73	-0.6254	-0.0758	discard	exp#016 kama_volume_momentum_daily_4h_v1	train
-ac4553b	kama_volume_momentum_daily_4h_v1	ETHUSDT	-0.2576	12.27	2.94	-8.08	54.4	1.49	68	-0.1272	0.3637	discard	exp#016 kama_volume_momentum_daily_4h_v1	train
-ac4553b	kama_volume_momentum_daily_4h_v1	SOLUSDT	0.8395	67.56	13.83	-10.41	71.4	3.69	49	0.4063	1.3286	discard	exp#016 kama_volume_momentum_daily_4h_v1	train
-9048341	hma_rsi_pullback_daily_12h_v2	BTCUSDT	-1.3516	-41.81	-12.66	-43.05	31.6	0.6	114	-1.4839	-0.2942	discard	exp#017 hma_rsi_pullback_daily_12h_v2	train
-9048341	hma_rsi_pullback_daily_12h_v2	ETHUSDT	0.3108	42.07	9.18	-14.89	50.0	1.61	116	0.3949	0.6166	discard	exp#017 hma_rsi_pullback_daily_12h_v2	train
-9048341	hma_rsi_pullback_daily_12h_v2	SOLUSDT	-0.6714	-42.44	-12.94	-55.99	40.0	0.85	110	-0.7054	-0.2312	discard	exp#017 hma_rsi_pullback_daily_12h_v2	train
-374b6b2	bb_squeeze_adx_4h_trend_1d_v1	BTCUSDT	-1.1407	-22.99	-6.32	-28.73	38.0	0.97	100	-1.1267	-0.22	discard	exp#018 bb_squeeze_adx_4h_trend_1d_v1	train
-374b6b2	bb_squeeze_adx_4h_trend_1d_v1	ETHUSDT	0.6205	59.83	12.44	-9.76	52.5	2.21	99	0.7094	1.2745	discard	exp#018 bb_squeeze_adx_4h_trend_1d_v1	train
-374b6b2	bb_squeeze_adx_4h_trend_1d_v1	SOLUSDT	-0.1865	-4.59	-1.17	-29.51	40.2	1.02	92	-0.2273	-0.0397	discard	exp#018 bb_squeeze_adx_4h_trend_1d_v1	train
-676c9c8	macd_bb_4h_trend_15m_v1	BTCUSDT	-2.7579	-70.72	-26.46	-72.89	45.4	0.96	3936	-2.7805	-0.3629	discard	exp#019 macd_bb_4h_trend_15m_v1	train
-676c9c8	macd_bb_4h_trend_15m_v1	ETHUSDT	-2.3943	-75.39	-29.58	-76.56	46.7	0.99	4049	-2.3461	-0.3864	discard	exp#019 macd_bb_4h_trend_15m_v1	train
-676c9c8	macd_bb_4h_trend_15m_v1	SOLUSDT	-1.1765	-65.87	-23.65	-72.49	48.4	1.04	4022	-1.168	-0.3262	discard	exp#019 macd_bb_4h_trend_15m_v1	train
-f963f07	kama_rsi_pullback_4h_30m_v1	BTCUSDT	-2.0628	-45.81	-14.21	-50.58	40.7	0.84	1513	-1.9042	-0.2809	discard	exp#020 kama_rsi_pullback_4h_30m_v1	train
-f963f07	kama_rsi_pullback_4h_30m_v1	ETHUSDT	-1.0004	-27.32	-7.67	-30.76	44.7	0.97	1481	-0.9025	-0.2495	discard	exp#020 kama_rsi_pullback_4h_30m_v1	train
-f963f07	kama_rsi_pullback_4h_30m_v1	SOLUSDT	0.1864	30.75	6.96	-27.9	47.4	1.1	1543	0.1759	0.2495	discard	exp#020 kama_rsi_pullback_4h_30m_v1	train
-9c44c81	macd_momentum_4h_trend_1h_v1	BTCUSDT	-0.5724	-5.26	-1.34	-20.4	45.3	1.04	750	-0.5596	-0.0658	discard	exp#021 macd_momentum_4h_trend_1h_v1	train
-9c44c81	macd_momentum_4h_trend_1h_v1	ETHUSDT	-0.1266	10.69	2.57	-23.22	47.2	1.12	773	-0.1268	0.1108	discard	exp#021 macd_momentum_4h_trend_1h_v1	train
-9c44c81	macd_momentum_4h_trend_1h_v1	SOLUSDT	0.6033	81.72	16.18	-28.39	50.6	1.23	811	0.6191	0.5698	discard	exp#021 macd_momentum_4h_trend_1h_v1	train
-f39c31c	supertrend_rsi_regime_4h_1d_v1	BTCUSDT	0.3224	32.74	7.34	-10.95	51.8	1.84	112	0.2512	0.6707	discard	exp#022 supertrend_rsi_regime_4h_1d_v1	train
-f39c31c	supertrend_rsi_regime_4h_1d_v1	ETHUSDT	0.705	56.09	11.78	-8.4	52.9	2.25	102	0.5501	1.4022	discard	exp#022 supertrend_rsi_regime_4h_1d_v1	train
-f39c31c	supertrend_rsi_regime_4h_1d_v1	SOLUSDT	1.1384	154.98	26.48	-21.17	50.0	2.21	112	0.9929	1.2508	discard	exp#022 supertrend_rsi_regime_4h_1d_v1	train
-f39c31c	supertrend_rsi_regime_4h_1d_v1	BTCUSDT	-0.937	0.51	0.44	-4.7	45.2	1.11	31	-0.6443	0.093	discard	exp#022 supertrend_rsi_regime_4h_1d_v1	test
-f39c31c	supertrend_rsi_regime_4h_1d_v1	ETHUSDT	-1.0317	-3.44	-2.97	-8.89	35.5	0.92	31	-0.6359	-0.3342	discard	exp#022 supertrend_rsi_regime_4h_1d_v1	test
-f39c31c	supertrend_rsi_regime_4h_1d_v1	SOLUSDT	-1.673	-10.5	-9.12	-14.15	30.0	0.48	30	-1.0749	-0.644	discard	exp#022 supertrend_rsi_regime_4h_1d_v1	test
-d410845	donchian_adx_volume_12h_1d_v1	BTCUSDT	-0.7222	-8.02	-2.07	-14.72	37.5	0.92	48	-0.5627	-0.1406	discard	exp#023 donchian_adx_volume_12h_1d_v1	train
-d410845	donchian_adx_volume_12h_1d_v1	ETHUSDT	0.1683	28.85	6.55	-11.46	52.9	1.82	51	0.1588	0.5713	discard	exp#023 donchian_adx_volume_12h_1d_v1	train
-d410845	donchian_adx_volume_12h_1d_v1	SOLUSDT	0.6641	94.91	18.23	-18.67	50.9	2.47	55	0.5517	0.9763	discard	exp#023 donchian_adx_volume_12h_1d_v1	train
-5eab472	donchian_adx_volume_1d_1w_v1	BTCUSDT	-0.9299	-8.94	-2.31	-13.27	44.4	0.76	18	-0.7	-0.1745	discard	exp#024 donchian_adx_volume_1d_1w_v1	train
-5eab472	donchian_adx_volume_1d_1w_v1	ETHUSDT	-0.6818	-9.43	-2.45	-24.53	35.3	0.7	17	-0.4106	-0.0998	discard	exp#024 donchian_adx_volume_1d_1w_v1	train
-5eab472	donchian_adx_volume_1d_1w_v1	SOLUSDT	-0.0768	7.12	1.74	-35.43	37.5	1.35	24	-0.0594	0.0491	discard	exp#024 donchian_adx_volume_1d_1w_v1	train
-00f95e9	supertrend_volume_adx_15m_1h_v1	BTCUSDT	-2.7528	-49.04	-15.52	-51.39	42.1	0.88	3073	-2.1804	-0.302	discard	exp#025 supertrend_volume_adx_15m_1h_v1	train
-00f95e9	supertrend_volume_adx_15m_1h_v1	ETHUSDT	-1.5196	-34.38	-10.0	-41.5	45.2	0.99	3114	-1.1976	-0.241	discard	exp#025 supertrend_volume_adx_15m_1h_v1	train
-00f95e9	supertrend_volume_adx_15m_1h_v1	SOLUSDT	-0.4962	-14.2	-3.77	-36.3	45.5	1.05	2933	-0.4051	-0.1039	discard	exp#025 supertrend_volume_adx_15m_1h_v1	train
-5f69814	kama_rsi_volume_30m_4h_v1	BTCUSDT	-2.0855	-22.79	-6.27	-28.11	29.8	0.84	705	-0.9054	-0.2229	discard	exp#026 kama_rsi_volume_30m_4h_v1	train
-5f69814	kama_rsi_volume_30m_4h_v1	ETHUSDT	-2.0372	-25.67	-7.15	-26.74	30.4	0.79	639	-0.8648	-0.2674	discard	exp#026 kama_rsi_volume_30m_4h_v1	train
-5f69814	kama_rsi_volume_30m_4h_v1	SOLUSDT	-0.2267	9.58	2.32	-24.67	33.9	1.14	516	-0.0897	0.0941	discard	exp#026 kama_rsi_volume_30m_4h_v1	train
-ec466d0	hma_rsi_zscore_volume_1h_12h_v1	BTCUSDT	-1.604	-10.15	-2.64	-14.47	39.4	0.87	221	-0.7319	-0.1826	discard	exp#027 hma_rsi_zscore_volume_1h_12h_v1	train
-ec466d0	hma_rsi_zscore_volume_1h_12h_v1	ETHUSDT	0.2858	30.09	6.8	-4.23	47.9	1.66	238	0.1413	1.6078	discard	exp#027 hma_rsi_zscore_volume_1h_12h_v1	train
-ec466d0	hma_rsi_zscore_volume_1h_12h_v1	SOLUSDT	-0.3949	5.49	1.35	-12.94	45.0	1.13	191	-0.1815	0.1044	discard	exp#027 hma_rsi_zscore_volume_1h_12h_v1	train
-e924c9e	kama_adx_volume_4h_1d_v1	BTCUSDT	-1.2471	-19.7	-5.34	-23.81	38.3	0.85	287	-0.9397	-0.2243	discard	exp#028 kama_adx_volume_4h_1d_v1	train
-e924c9e	kama_adx_volume_4h_1d_v1	ETHUSDT	-1.0785	-19.06	-5.15	-22.6	38.6	0.85	254	-0.735	-0.2279	discard	exp#028 kama_adx_volume_4h_1d_v1	train
-e924c9e	kama_adx_volume_4h_1d_v1	SOLUSDT	0.0497	20.11	4.71	-24.49	42.4	1.17	255	0.0386	0.1921	discard	exp#028 kama_adx_volume_4h_1d_v1	train
-4a89fa3	kama_adx_volatility_12h_1d_v1	BTCUSDT	-0.6348	-8.86	-2.29	-13.06	54.4	1.1	305	-0.6199	-0.1757	discard	exp#029 kama_adx_volatility_12h_1d_v1	train
-4a89fa3	kama_adx_volatility_12h_1d_v1	ETHUSDT	-0.7888	-18.18	-4.89	-25.81	50.6	1.03	344	-0.8074	-0.1896	discard	exp#029 kama_adx_volatility_12h_1d_v1	train
-4a89fa3	kama_adx_volatility_12h_1d_v1	SOLUSDT	-0.2241	2.07	0.52	-24.11	54.1	1.23	399	-0.2293	0.0214	discard	exp#029 kama_adx_volatility_12h_1d_v1	train
-0ebfc8b	donchian_weekly_trend_1d_1w_v1	BTCUSDT	-0.9299	-8.94	-2.31	-13.27	44.4	0.76	18	-0.7	-0.1745	discard	exp#030 donchian_weekly_trend_1d_1w_v1	train
-0ebfc8b	donchian_weekly_trend_1d_1w_v1	ETHUSDT	-0.6818	-9.43	-2.45	-24.53	35.3	0.7	17	-0.4106	-0.0998	discard	exp#030 donchian_weekly_trend_1d_1w_v1	train
-0ebfc8b	donchian_weekly_trend_1d_1w_v1	SOLUSDT	-0.0768	7.12	1.74	-35.43	37.5	1.35	24	-0.0594	0.0491	discard	exp#030 donchian_weekly_trend_1d_1w_v1	train
-e53bb87	hma_adx_macd_rsi_15m_1h_4h_v1	BTCUSDT	-4.2555	-88.22	-41.43	-88.69	29.9	0.87	7375	-4.6556	-0.4671	discard	exp#031 hma_adx_macd_rsi_15m_1h_4h_v1	train
-e53bb87	hma_adx_macd_rsi_15m_1h_4h_v1	ETHUSDT	-3.4721	-89.11	-42.57	-89.63	32.2	0.85	7448	-3.7988	-0.475	discard	exp#031 hma_adx_macd_rsi_15m_1h_4h_v1	train
-e53bb87	hma_adx_macd_rsi_15m_1h_4h_v1	SOLUSDT	-2.0889	-88.71	-42.16	-92.3	34.0	0.96	7477	-2.2826	-0.4568	discard	exp#031 hma_adx_macd_rsi_15m_1h_4h_v1	train
-3ab0c91	hma_kama_volume_zscore_30m_4h_v1	BTCUSDT	-2.5874	-59.81	-20.39	-61.53	30.1	0.86	3180	-2.3874	-0.3314	discard	exp#032 hma_kama_volume_zscore_30m_4h_v1	train
-3ab0c91	hma_kama_volume_zscore_30m_4h_v1	ETHUSDT	-2.3638	-66.07	-23.69	-69.58	32.2	0.88	3237	-2.1851	-0.3405	discard	exp#032 hma_kama_volume_zscore_30m_4h_v1	train
-3ab0c91	hma_kama_volume_zscore_30m_4h_v1	SOLUSDT	-0.694	-38.17	-11.37	-45.66	35.3	1.01	3347	-0.6574	-0.249	discard	exp#032 hma_kama_volume_zscore_30m_4h_v1	train
-2cbde18	dema_adx_zscore_1h_4h_v1	BTCUSDT	-1.9315	-26.67	-7.47	-30.76	37.2	0.84	822	-1.1657	-0.2427	discard	exp#033 dema_adx_zscore_1h_4h_v1	train
-2cbde18	dema_adx_zscore_1h_4h_v1	ETHUSDT	-1.0892	-17.42	-4.68	-21.58	36.9	0.97	848	-0.6902	-0.2167	discard	exp#033 dema_adx_zscore_1h_4h_v1	train
-2cbde18	dema_adx_zscore_1h_4h_v1	SOLUSDT	-0.7126	-19.11	-5.19	-39.3	43.5	0.98	823	-0.4204	-0.1319	discard	exp#033 dema_adx_zscore_1h_4h_v1	train
-cbfa926	kama_adx_dual_htf_4h_1d_1w_v1	BTCUSDT	-1.0342	4.1	1.01	-9.21	41.6	1.39	77	-0.395	0.1096	discard	exp#034 kama_adx_dual_htf_4h_1d_1w_v1	train
-cbfa926	kama_adx_dual_htf_4h_1d_1w_v1	ETHUSDT	-0.9527	1.11	0.28	-9.34	30.2	1.12	86	-0.4157	0.0297	discard	exp#034 kama_adx_dual_htf_4h_1d_1w_v1	train
-cbfa926	kama_adx_dual_htf_4h_1d_1w_v1	SOLUSDT	-0.1469	15.66	3.72	-10.17	50.7	1.36	75	-0.0645	0.3657	discard	exp#034 kama_adx_dual_htf_4h_1d_1w_v1	train
-ca0ca60	kama_rsi_volume_12h_1d_v1	BTCUSDT	-1.1883	-7.58	-1.95	-17.8	26.8	0.77	41	-0.6273	-0.1096	discard	exp#035 kama_rsi_volume_12h_1d_v1	train
-ca0ca60	kama_rsi_volume_12h_1d_v1	ETHUSDT	0.0533	22.47	5.2	-15.2	51.9	1.93	52	0.0389	0.3422	discard	exp#035 kama_rsi_volume_12h_1d_v1	train
-ca0ca60	kama_rsi_volume_12h_1d_v1	SOLUSDT	0.6599	70.42	14.31	-12.56	62.9	4.8	35	0.3346	1.1398	discard	exp#035 kama_rsi_volume_12h_1d_v1	train
-567eda4	kama_weekly_hma_rsi_1d_1w_v1	BTCUSDT	-0.8336	2.7	0.67	-8.12	42.9	1.53	14	-0.3532	0.0824	discard	exp#036 kama_weekly_hma_rsi_1d_1w_v1	train
-567eda4	kama_weekly_hma_rsi_1d_1w_v1	ETHUSDT	-1.1753	4.21	1.04	-4.74	42.9	2.6	7	-0.4643	0.2186	discard	exp#036 kama_weekly_hma_rsi_1d_1w_v1	train
-567eda4	kama_weekly_hma_rsi_1d_1w_v1	SOLUSDT	0.1902	28.02	6.39	-7.81	83.3	11.13	6	0.1024	0.8187	discard	exp#036 kama_weekly_hma_rsi_1d_1w_v1	train
-6a29200	supertrend_vol_adx_15m_4h_v1	BTCUSDT	-1.703	-32.81	-9.47	-44.4	41.1	0.96	2419	-1.418	-0.2133	discard	exp#037 supertrend_vol_adx_15m_4h_v1	train
-6a29200	supertrend_vol_adx_15m_4h_v1	ETHUSDT	-0.9736	-21.48	-5.87	-31.39	42.3	1.02	2471	-0.7946	-0.187	discard	exp#037 supertrend_vol_adx_15m_4h_v1	train
-6a29200	supertrend_vol_adx_15m_4h_v1	SOLUSDT	-0.3666	-9.79	-2.55	-38.02	42.0	1.05	2328	-0.3047	-0.0672	discard	exp#037 supertrend_vol_adx_15m_4h_v1	train
-4d1c631	donchian_volume_hma_30m_4h_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#038 donchian_volume_hma_30m_4h_v1	train
-4d1c631	donchian_volume_hma_30m_4h_v1	ETHUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#038 donchian_volume_hma_30m_4h_v1	train
-4d1c631	donchian_volume_hma_30m_4h_v1	SOLUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#038 donchian_volume_hma_30m_4h_v1	train
-63a70aa	kama_rsi_adx_zscore_1h_4h_v1	BTCUSDT	-2.5712	-53.34	-17.36	-55.19	27.2	0.76	1353	-2.0271	-0.3146	discard	exp#039 kama_rsi_adx_zscore_1h_4h_v1	train
-63a70aa	kama_rsi_adx_zscore_1h_4h_v1	ETHUSDT	-1.349	-36.14	-10.61	-37.33	30.6	0.9	1361	-1.0971	-0.2844	discard	exp#039 kama_rsi_adx_zscore_1h_4h_v1	train
-63a70aa	kama_rsi_adx_zscore_1h_4h_v1	SOLUSDT	-0.6417	-31.81	-9.16	-37.52	31.0	1.0	1434	-0.5127	-0.2442	discard	exp#039 kama_rsi_adx_zscore_1h_4h_v1	train
-948ddc2	hma_crossover_adx_volume_4h_1d_v1	BTCUSDT	-0.9146	-11.19	-2.92	-17.46	35.6	0.95	348	-0.7102	-0.1675	discard	exp#040 hma_crossover_adx_volume_4h_1d_v1	train
-948ddc2	hma_crossover_adx_volume_4h_1d_v1	ETHUSDT	-0.8356	-16.42	-4.39	-21.45	37.5	0.91	323	-0.6071	-0.2045	discard	exp#040 hma_crossover_adx_volume_4h_1d_v1	train
-948ddc2	hma_crossover_adx_volume_4h_1d_v1	SOLUSDT	-0.0075	14.19	3.39	-35.06	40.1	1.15	334	-0.0059	0.0966	discard	exp#040 hma_crossover_adx_volume_4h_1d_v1	train
-f352656	dual_hma_mtf_volume_12h_1d_1w_v1	BTCUSDT	-0.1099	16.22	3.83	-11.61	47.8	1.73	46	-0.0837	0.33	discard	exp#041 dual_hma_mtf_volume_12h_1d_1w_v1	train
-f352656	dual_hma_mtf_volume_12h_1d_1w_v1	ETHUSDT	-0.5103	-0.75	-0.19	-11.27	46.5	1.07	43	-0.3778	-0.0166	discard	exp#041 dual_hma_mtf_volume_12h_1d_1w_v1	train
-f352656	dual_hma_mtf_volume_12h_1d_1w_v1	SOLUSDT	0.6286	71.61	14.51	-26.9	44.7	2.59	38	0.4746	0.5395	discard	exp#041 dual_hma_mtf_volume_12h_1d_1w_v1	train
-5912784	kama_adx_rsi_weekly_1d_1w_v1	BTCUSDT	-0.2849	4.9	1.2	-15.64	36.0	1.29	50	-0.2452	0.0769	discard	exp#042 kama_adx_rsi_weekly_1d_1w_v1	train
-5912784	kama_adx_rsi_weekly_1d_1w_v1	ETHUSDT	0.0368	20.88	4.85	-19.15	36.6	1.58	41	0.0337	0.2535	discard	exp#042 kama_adx_rsi_weekly_1d_1w_v1	train
-5912784	kama_adx_rsi_weekly_1d_1w_v1	SOLUSDT	0.4843	63.11	13.06	-22.58	31.7	2.12	41	0.3864	0.5783	discard	exp#042 kama_adx_rsi_weekly_1d_1w_v1	train
-7f59d3c	kama_rsi_adx_vol_15m_4h_v1	BTCUSDT	-6.1019	-93.43	-49.39	-93.69	25.3	0.78	10431	-6.2693	-0.5271	discard	exp#043 kama_rsi_adx_vol_15m_4h_v1	train
-7f59d3c	kama_rsi_adx_vol_15m_4h_v1	ETHUSDT	-4.0899	-89.73	-43.42	-89.85	27.2	0.87	10393	-4.2786	-0.4832	discard	exp#043 kama_rsi_adx_vol_15m_4h_v1	train
-7f59d3c	kama_rsi_adx_vol_15m_4h_v1	SOLUSDT	-2.1151	-84.72	-37.6	-88.61	30.4	0.98	10018	-2.2379	-0.4243	discard	exp#043 kama_rsi_adx_vol_15m_4h_v1	train
-22d1ff4	supertrend_rsi_15m_4h_v1	BTCUSDT	-2.637	-43.89	-13.46	-47.11	39.5	0.84	1992	-1.7949	-0.2857	discard	exp#001 supertrend_rsi_15m_4h_v1 early:BTCUSDT Sharpe=-2.637 trades=1992 DD=-47	train
-b57d625	hma_kama_volume_30m_4h_v1	BTCUSDT	-3.0175	-68.85	-25.31	-70.08	34.5	0.97	4763	-2.525	-0.3611	discard	exp#002 hma_kama_volume_30m_4h_v1 early:BTCUSDT Sharpe=-3.017 trades=4763 DD=-70	train
-a888960	kama_zscore_volume_1h_12h_v1	BTCUSDT	-1.7861	-27.81	-7.83	-32.43	24.4	0.83	798	-1.0765	-0.2414	discard	exp#003 kama_zscore_volume_1h_12h_v1 early:BTCUSDT Sharpe=-1.786 trades=798 DD=-	train
-4e2c9cf	donchian_adx_zscore_4h_1d_v1	BTCUSDT	0.0053	20.55	4.79	-16.94	53.6	1.67	84	0.0037	0.2826	discard	exp#004 donchian_adx_zscore_4h_1d_v1 early:SOLUSDT Sharpe=-1.027 trades=97 DD=-4	train
-4e2c9cf	donchian_adx_zscore_4h_1d_v1	ETHUSDT	0.0975	24.4	5.61	-18.36	51.1	1.49	94	0.0707	0.3057	discard	exp#004 donchian_adx_zscore_4h_1d_v1 early:SOLUSDT Sharpe=-1.027 trades=97 DD=-4	train
-4e2c9cf	donchian_adx_zscore_4h_1d_v1	SOLUSDT	-1.0265	-36.81	-10.88	-42.92	33.0	0.64	97	-0.6781	-0.2535	discard	exp#004 donchian_adx_zscore_4h_1d_v1 early:SOLUSDT Sharpe=-1.027 trades=97 DD=-4	train
-b2e286e	kama_volume_htf_12h_1d_v1	BTCUSDT	-0.2209	9.24	2.23	-10.19	50.9	1.38	57	-0.2147	0.2193	discard	exp#005 kama_volume_htf_12h_1d_v1 early:BTCUSDT Sharpe=-0.221 trades=57 DD=-10.2	train
-8263581	hma_rsi_weekly_1d_1w_v1	BTCUSDT	-2.003	-16.25	-4.34	-18.77	20.0	0.09	15	-0.6743	-0.2311	discard	exp#006 hma_rsi_weekly_1d_1w_v1 early:BTCUSDT Sharpe=-2.003 trades=15 DD=-18.8	train
-f2321c3	mr_rsi_bb_15m_4h_v1	BTCUSDT	-2.1842	-31.6	-9.06	-35.02	39.6	0.9	1618	-1.1806	-0.2588	discard	exp#007 mr_rsi_bb_15m_4h_v1 early:BTCUSDT Sharpe=-2.184 trades=1618 DD=-35	train
-1bd791c	kama_macd_volume_30m_4h_v1	BTCUSDT	-2.3942	-65.79	-23.53	-66.44	32.2	0.9	3493	-2.2079	-0.3542	discard	exp#008 kama_macd_volume_30m_4h_v1 early:BTCUSDT Sharpe=-2.394 trades=3493 DD=-6	train
-82f8eb7	kama_macd_adx_1h_4h_v1	BTCUSDT	-0.9826	-16.08	-4.29	-22.44	39.0	0.95	634	-0.6759	-0.1912	discard	exp#009 kama_macd_adx_1h_4h_v1 early:BTCUSDT Sharpe=-0.983 trades=634 DD=-22.	train
-eb3d8ce	kama_adx_zscore_4h_1d_v1	BTCUSDT	-0.0723	17.98	4.22	-9.39	29.8	1.38	295	-0.0576	0.4496	discard	exp#010 kama_adx_zscore_4h_1d_v1 early:BTCUSDT Sharpe=-0.072 trades=295 DD=-9.4	train
-0c297d7	kama_rsi_volume_12h_1d_v1	BTCUSDT	-1.3663	-26.57	-7.43	-26.93	26.2	0.53	80	-1.0609	-0.276	discard	exp#011 kama_rsi_volume_12h_1d_v1 early:BTCUSDT Sharpe=-1.366 trades=80 DD=-26.9	train
-2abae6c	kama_rsi_weekly_1d_1w_v2	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#012 kama_rsi_weekly_1d_1w_v2 early:BTCUSDT Sharpe=0.000 trades=0 DD=0.0% — 	train
-dc7d992	kama_macd_volume_adx_15m_4h_v1	BTCUSDT	-2.2385	-51.07	-16.37	-52.16	39.4	0.82	1704	-1.487	-0.3139	discard	exp#013 kama_macd_volume_adx_15m_4h_v1 early:BTCUSDT Sharpe=-2.239 trades=1704 D	train
-7c4d136	kama_rsi_regime_30m_4h_v1	BTCUSDT	-1.2466	-5.68	-1.45	-9.45	33.5	1.03	472	-0.5266	-0.1537	discard	exp#014 kama_rsi_regime_30m_4h_v1 early:BTCUSDT Sharpe=-1.247 trades=472 DD=-9.4	train
-3776567	macd_volume_htf_1h_12h_v1	BTCUSDT	-0.0803	16.16	3.82	-14.04	44.6	1.24	433	-0.0594	0.272	discard	exp#015 macd_volume_htf_1h_12h_v1 early:BTCUSDT Sharpe=-0.080 trades=433 DD=-14.	train
-8e27008	donchian_adx_htf_4h_1d_v2	BTCUSDT	-0.2986	2.96	0.73	-25.86	49.1	1.21	731	-0.2792	0.0283	discard	exp#016 donchian_adx_htf_4h_1d_v2 early:BTCUSDT Sharpe=-0.299 trades=731 DD=-25.	train
-1f39cbb	donchian_adx_htf_12h_1d_1w_v1	BTCUSDT	-0.2091	9.04	2.19	-17.08	61.6	2.54	159	-0.2033	0.1281	discard	exp#017 donchian_adx_htf_12h_1d_1w_v1 early:BTCUSDT Sharpe=-0.209 trades=159 DD=	train
-6d4646f	ema_cross_volume_weekly_1d_1w_v1	BTCUSDT	-0.1595	15.03	3.56	-6.14	62.5	3.84	8	-0.0866	0.5804	discard	exp#018 ema_cross_volume_weekly_1d_1w_v1 early:BTCUSDT Sharpe=-0.159 trades=8 DD	train
-f2ca72f	hma_supertrend_adx_15m_1h_4h_v1	BTCUSDT	-2.1277	-41.01	-12.37	-45.82	37.2	0.9	2287	-1.6782	-0.27	discard	exp#019 hma_supertrend_adx_15m_1h_4h_v1 early:BTCUSDT Sharpe=-2.128 trades=2287 	train
-5f9366e	donchian_volume_regime_30m_4h_v1	BTCUSDT	-2.4391	-39.35	-11.76	-41.47	32.2	0.8	1027	-1.3311	-0.2836	discard	exp#020 donchian_volume_regime_30m_4h_v1 early:BTCUSDT Sharpe=-2.439 trades=1027	train
-9f5474c	kama_macd_volume_adx_1h_4h_v2	BTCUSDT	-0.6938	-5.42	-1.38	-16.38	42.9	1.02	361	-0.4514	-0.0845	discard	exp#021 kama_macd_volume_adx_1h_4h_v2 early:BTCUSDT Sharpe=-0.694 trades=361 DD=	train
-50e12d7	kama_volume_htf_triple_4h_1d_1w_v1	BTCUSDT	-1.4105	-8.92	-2.31	-14.82	33.8	0.75	68	-0.5816	-0.1558	discard	exp#022 kama_volume_htf_triple_4h_1d_1w_v1 early:BTCUSDT Sharpe=-1.410 trades=68	train
-c210a22	dual_htf_trend_pullback_12h_1d_1w_v1	BTCUSDT	0.0946	24.29	5.59	-10.4	52.0	1.77	50	0.0928	0.5375	discard	exp#023 dual_htf_trend_pullback_12h_1d_1w_v1	train
-c210a22	dual_htf_trend_pullback_12h_1d_1w_v1	ETHUSDT	0.2785	37.44	8.28	-15.78	55.9	1.73	59	0.2793	0.5245	discard	exp#023 dual_htf_trend_pullback_12h_1d_1w_v1	train
-c210a22	dual_htf_trend_pullback_12h_1d_1w_v1	SOLUSDT	0.5726	77.05	15.41	-24.82	54.0	2.0	50	0.6092	0.621	discard	exp#023 dual_htf_trend_pullback_12h_1d_1w_v1	train
-7c1de4b	supertrend_rsi_weekly_1d_1w_v1	BTCUSDT	0.0896	24.11	5.55	-17.12	43.8	2.18	32	0.0876	0.3241	discard	exp#024 supertrend_rsi_weekly_1d_1w_v1 early:ETHUSDT Sharpe=-0.098 trades=36 DD=	train
-7c1de4b	supertrend_rsi_weekly_1d_1w_v1	ETHUSDT	-0.0979	12.26	2.93	-23.5	38.9	1.43	36	-0.0851	0.1248	discard	exp#024 supertrend_rsi_weekly_1d_1w_v1 early:ETHUSDT Sharpe=-0.098 trades=36 DD=	train
-8a0195e	hma_rsi_volume_zscore_15m_1h_v1	BTCUSDT	-4.1513	-72.85	-27.83	-75.89	35.6	0.86	5100	-3.1458	-0.3667	discard	exp#025 hma_rsi_volume_zscore_15m_1h_v1 early:BTCUSDT Sharpe=-4.151 trades=5100 	train
-5901c85	hma_crossover_rsi_30m_4h_v1	BTCUSDT	-1.7767	-34.18	-9.93	-39.29	32.1	0.89	1458	-0.9912	-0.2529	discard	exp#026 hma_crossover_rsi_30m_4h_v1 early:BTCUSDT Sharpe=-1.777 trades=1458 DD=-	train
-efaa55e	htf_rsi_pullback_adx_1h_4h_v1	BTCUSDT	-1.1303	-7.68	-1.98	-11.14	29.4	0.98	401	-0.5957	-0.1778	discard	exp#027 htf_rsi_pullback_adx_1h_4h_v1 early:BTCUSDT Sharpe=-1.130 trades=401 DD=	train
-13d85b0	kama_donchian_adx_dualhtf_4h_1d_1w_v1	BTCUSDT	-0.9726	-7.33	-1.89	-21.92	44.2	0.93	154	-0.5938	-0.086	discard	exp#028 kama_donchian_adx_dualhtf_4h_1d_1w_v1 early:BTCUSDT Sharpe=-0.973 trades	train
-c5de018	kama_donchian_adx_triplehtf_12h_1d_1w_v1	BTCUSDT	-0.3861	5.44	1.33	-13.13	44.9	1.25	69	-0.3084	0.1016	discard	exp#029 kama_donchian_adx_triplehtf_12h_1d_1w_v1 early:BTCUSDT Sharpe=-0.386 tra	train
-2f995a0	donchian_weekly_adx_1d_1w_v1	BTCUSDT	-0.8176	-7.14	-1.84	-13.25	41.2	0.79	17	-0.6242	-0.1386	discard	exp#030 donchian_weekly_adx_1d_1w_v1 early:BTCUSDT Sharpe=-0.818 trades=17 DD=-1	train
-b70fa96	kama_dual_htf_adx_15m_1h_4h_v1	BTCUSDT	-3.19	-61.17	-21.08	-64.13	37.9	0.86	3840	-2.489	-0.3287	discard	exp#031 kama_dual_htf_adx_15m_1h_4h_v1 early:BTCUSDT Sharpe=-3.190 trades=3840 D	train
-b739ae7	hma_rsi_volatility_30m_4h_v1	BTCUSDT	-2.9467	-66.09	-23.7	-68.06	50.4	1.73	4502	-3.0147	-0.3483	discard	exp#032 hma_rsi_volatility_30m_4h_v1 early:BTCUSDT Sharpe=-2.947 trades=4502 DD=	train
-2b7f8b0	kama_rsi_dualhtf_volume_1h_4h_12h_v1	BTCUSDT	-1.5331	-8.21	-2.12	-12.36	28.0	0.91	289	-0.644	-0.1715	discard	exp#033 kama_rsi_dualhtf_volume_1h_4h_12h_v1 early:BTCUSDT Sharpe=-1.533 trades=	train
-9e322b0	donchian_triple_htf_volume_4h_1d_1w_v1	BTCUSDT	-0.7453	0.19	0.05	-15.81	45.9	1.06	157	-0.4459	0.003	discard	exp#034 donchian_triple_htf_volume_4h_1d_1w_v1 early:BTCUSDT Sharpe=-0.745 trade	train
-7e37f0c	kama_donchian_dualhtf_volume_12h_1d_1w_v1	BTCUSDT	-0.5149	2.57	0.64	-11.57	43.2	1.26	37	-0.3777	0.055	discard	exp#035 kama_donchian_dualhtf_volume_12h_1d_1w_v1 early:BTCUSDT Sharpe=-0.515 tr	train
-b811639	hma_rsi_momentum_1d_1w_v1	BTCUSDT	-0.0897	14.22	3.38	-15.39	34.3	1.45	70	-0.0882	0.2197	discard	exp#036 hma_rsi_momentum_1d_1w_v1 early:BTCUSDT Sharpe=-0.090 trades=70 DD=-15.4	train
-349485f	vwmomentum_dual_htf_15m_1h_4h_v1	BTCUSDT	-3.1496	-73.8	-28.47	-75.6	38.5	0.87	4756	-3.2128	-0.3766	discard	exp#037 vwmomentum_dual_htf_15m_1h_4h_v1 early:BTCUSDT Sharpe=-3.150 trades=4756	train
-c8def4e	macd_rsi_4htrend_30m_v1	BTCUSDT	-2.1686	-31.31	-8.97	-33.01	30.4	0.76	681	-1.1575	-0.2717	discard	exp#038 macd_rsi_4htrend_30m_v1 early:BTCUSDT Sharpe=-2.169 trades=681 DD=-33.	train
-4fff5f2	hma_rsi_vol_dualhtf_1h_4h_12h_v1	BTCUSDT	-1.605	-5.11	-1.3	-7.63	41.1	0.91	175	-0.4907	-0.171	discard	exp#039 hma_rsi_vol_dualhtf_1h_4h_12h_v1 early:BTCUSDT Sharpe=-1.605 trades=175 	train
-e62f832	hma_adx_rsi_4h_1d_v1	BTCUSDT	-0.4991	-3.84	-0.98	-29.58	44.9	1.04	236	-0.4499	-0.033	discard	exp#040 hma_adx_rsi_4h_1d_v1 early:BTCUSDT Sharpe=-0.499 trades=236 DD=-29.	train
-865a83c	kama_triple_htf_adx_regime_12h_1d_1w_v1	BTCUSDT	-2.0508	-11.29	-2.95	-14.55	17.4	0.18	23	-0.7846	-0.2028	discard	exp#041 kama_triple_htf_adx_regime_12h_1d_1w_v1 early:BTCUSDT Sharpe=-2.051 trad	train
-6475ea2	hma_rsi_weekly_filter_1d_1w_v1	BTCUSDT	-0.3773	6.04	1.48	-11.74	36.7	1.46	30	-0.2636	0.1259	discard	exp#042 hma_rsi_weekly_filter_1d_1w_v1 early:BTCUSDT Sharpe=-0.377 trades=30 DD=	train
-7b6a30d	supertrend_dualhtf_regime_15m_1h_4h_v1	BTCUSDT	-2.3856	-41.0	-12.37	-45.15	39.6	0.85	1974	-1.8418	-0.2739	discard	exp#043 supertrend_dualhtf_regime_15m_1h_4h_v1 early:BTCUSDT Sharpe=-2.386 trade	train
-e9baa57	multi_filter_trend_pullback_30m_4h_1d_v1	BTCUSDT	-1.257	-14.94	-3.97	-16.97	38.9	0.94	1279	-0.7197	-0.2339	discard	exp#044 multi_filter_trend_pullback_30m_4h_1d_v1 early:BTCUSDT Sharpe=-1.257 tra	train
-b38ef85	kama_rsi_volume_1h_12h_v2	BTCUSDT	-1.4149	-15.28	-4.06	-18.39	25.0	0.91	539	-0.713	-0.221	discard	exp#045 kama_rsi_volume_1h_12h_v2 early:BTCUSDT Sharpe=-1.415 trades=539 DD=-18.	train
-6c77d50	kama_trend_4h_1d_v1	BTCUSDT	-0.8535	-20.55	-5.59	-28.27	33.8	0.95	619	-0.9997	-0.1978	discard	exp#046 kama_trend_4h_1d_v1 early:BTCUSDT Sharpe=-0.854 trades=619 DD=-28.	train
-1a25c14	donchian_adx_triplehtf_12h_1d_1w_v1	BTCUSDT	0.3612	37.4	8.27	-9.73	49.1	2.68	112	0.268	0.8502	discard	exp#047 donchian_adx_triplehtf_12h_1d_1w_v1	train
-1a25c14	donchian_adx_triplehtf_12h_1d_1w_v1	ETHUSDT	0.1184	25.61	5.87	-15.08	52.1	2.03	142	0.0863	0.3892	discard	exp#047 donchian_adx_triplehtf_12h_1d_1w_v1	train
-1a25c14	donchian_adx_triplehtf_12h_1d_1w_v1	SOLUSDT	0.9911	141.85	24.81	-21.58	40.4	3.88	136	0.769	1.1498	discard	exp#047 donchian_adx_triplehtf_12h_1d_1w_v1	train
-60cb570	hma_rsi_bb_regime_1d_1w_v1	BTCUSDT	-13.0507	0.27	0.07	-0.49	66.7	1.66	3	-1.2816	0.1403	discard	exp#048 hma_rsi_bb_regime_1d_1w_v1 early:BTCUSDT Sharpe=-13.051 trades=3 DD=-0.5	train
-d15ab2d	bb_mr_rsi_4htrend_15m_v1	BTCUSDT	-2.1491	-8.08	-2.09	-12.2	50.3	0.85	1130	-0.5497	-0.1711	discard	exp#049 bb_mr_rsi_4htrend_15m_v1 early:BTCUSDT Sharpe=-2.149 trades=1130 DD=-12	train
-46ad95a	hma_rsi_bb_regime_30m_4h_1d_v1	BTCUSDT	-1.8773	-46.9	-14.64	-54.21	39.6	0.91	2160	-1.5775	-0.2701	discard	exp#050 hma_rsi_bb_regime_30m_4h_1d_v1 early:BTCUSDT Sharpe=-1.877 trades=2160 D	train
-28fb1ef	supertrend_rsi_pullback_1h_4h_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#051 supertrend_rsi_pullback_1h_4h_v1 early:BTCUSDT Sharpe=0.000 trades=0 DD=	train
-dbb4178	kama_rsi_volume_pullback_4h_1d_v1	BTCUSDT	-2.003	2.23	0.55	-4.57	48.3	1.27	207	-0.7011	0.1207	discard	exp#052 kama_rsi_volume_pullback_4h_1d_v1 early:BTCUSDT Sharpe=-2.003 trades=207	train
-3a0b697	keltner_volregime_triplehtf_12h_1d_1w_v1	BTCUSDT	-5.8787	-0.9	-0.23	-1.63	47.6	0.81	21	-0.8027	-0.1382	discard	exp#053 keltner_volregime_triplehtf_12h_1d_1w_v1 early:BTCUSDT Sharpe=-5.879 tra	train
-e849e1b	hma_rsi_pullback_weekly_1d_1w_v1	BTCUSDT	-0.1291	15.2	3.6	-10.63	46.2	1.85	39	-0.1017	0.3387	discard	exp#054 hma_rsi_pullback_weekly_1d_1w_v1 early:BTCUSDT Sharpe=-0.129 trades=39 D	train
-d227fd1	supertrend_rsi_volume_15m_1h_4h_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#055 supertrend_rsi_volume_15m_1h_4h_v1 early:BTCUSDT Sharpe=0.000 trades=0 D	train
-a6136cb	kama_rsi_pullback_30m_4h_v1	BTCUSDT	-7.9229	-69.6	-25.76	-69.8	48.2	0.69	3914	-3.0992	-0.3691	discard	exp#056 kama_rsi_pullback_30m_4h_v1 early:BTCUSDT Sharpe=-7.923 trades=3914 DD=-	train
-ad3c2b7	hma_rsi_bb_regime_1h_4h_1d_v1	BTCUSDT	-3.826	-32.19	-9.26	-32.64	46.5	0.78	1207	-1.2597	-0.2838	discard	exp#057 hma_rsi_bb_regime_1h_4h_1d_v1 early:BTCUSDT Sharpe=-3.826 trades=1207 DD	train
-38191b7	hma_rsi_pullback_dualhtf_4h_1d_1w_v1	BTCUSDT	-3.0179	-4.45	-1.13	-7.65	55.0	0.81	120	-0.5464	-0.1479	discard	exp#058 hma_rsi_pullback_dualhtf_4h_1d_1w_v1 early:BTCUSDT Sharpe=-3.018 trades=	train
-569ab96	kama_supertrend_volume_triplehtf_12h_1d_1w_v1	BTCUSDT	-0.4355	1.15	0.29	-13.53	52.2	1.96	157	-0.2651	0.0211	discard	exp#059 kama_supertrend_volume_triplehtf_12h_1d_1w_v1 early:BTCUSDT Sharpe=-0.43	train
-abb785c	hma_rsi_pullback_weekly_1d_1w_v2	BTCUSDT	-1.6488	0.81	0.2	-5.47	50.0	1.14	42	-0.5549	0.0369	discard	exp#060 hma_rsi_pullback_weekly_1d_1w_v2 early:BTCUSDT Sharpe=-1.649 trades=42 D	train
-afde711	hma_rsi_vol_pullback_15m_1h_4h_v1	BTCUSDT	-2.8338	-10.5	-2.74	-11.24	59.7	0.88	1499	-0.7022	-0.2435	discard	exp#061 hma_rsi_vol_pullback_15m_1h_4h_v1 early:BTCUSDT Sharpe=-2.834 trades=149	train
-595ef67	kama_rsi_pullback_dualhtf_30m_4h_1d_v1	BTCUSDT	-3.0472	-34.88	-10.18	-36.75	43.4	0.75	1701	-1.1331	-0.2769	discard	exp#062 kama_rsi_pullback_dualhtf_30m_4h_1d_v1 early:BTCUSDT Sharpe=-3.047 trade	train
-d59c386	hma_rsi_zscore_pullback_1h_4h_v1	BTCUSDT	-1.8813	-14.06	-3.72	-17.86	61.1	1.17	1719	-0.9142	-0.2083	discard	exp#063 hma_rsi_zscore_pullback_1h_4h_v1 early:BTCUSDT Sharpe=-1.881 trades=1719	train
-041d731	hma_rsi_pullback_triplehtf_4h_1d_1w_v1	BTCUSDT	-1.5218	1.84	0.46	-7.07	55.7	1.19	348	-0.5555	0.0646	discard	exp#064 hma_rsi_pullback_triplehtf_4h_1d_1w_v1 early:BTCUSDT Sharpe=-1.522 trade	train
-8c16f0d	bb_squeeze_kama_volume_triplehtf_12h_1d_1w_v1	BTCUSDT	-2.3567	3.18	0.79	-3.42	81.0	1.77	21	-0.3974	0.2299	discard	exp#065 bb_squeeze_kama_volume_triplehtf_12h_1d_1w_v1 early:BTCUSDT Sharpe=-2.35	train
-f3372bf	hma_rsi_pullback_weekly_1d_1w_v3	BTCUSDT	-1.3103	-2.59	-0.65	-9.62	53.0	0.97	66	-0.5013	-0.068	discard	exp#066 hma_rsi_pullback_weekly_1d_1w_v3 early:BTCUSDT Sharpe=-1.310 trades=66 D	train
-ca46d69	supertrend_vol_bbregime_4hhtf_15m_v1	BTCUSDT	-2.358	-51.34	-16.49	-53.97	52.2	1.11	4593	-1.6743	-0.3055	discard	exp#067 supertrend_vol_bbregime_4hhtf_15m_v1 early:BTCUSDT Sharpe=-2.358 trades=	train
-66fb64d	kama_bbregime_dualhtf_30m_4h_1d_v1	BTCUSDT	-2.3712	-1.94	-0.49	-6.62	41.6	1.12	269	-0.4015	-0.0739	discard	exp#068 kama_bbregime_dualhtf_30m_4h_1d_v1 early:BTCUSDT Sharpe=-2.371 trades=26	train
-0d440b3	macd_bbregime_4htrend_1h_v1	BTCUSDT	-3.289	-21.15	-5.77	-21.38	37.9	0.74	562	-0.7713	-0.2699	discard	exp#069 macd_bbregime_4htrend_1h_v1 early:BTCUSDT Sharpe=-3.289 trades=562 DD=-2	train
-30b2db8	kama_bbregime_dualhtf_4h_1d_1w_v1	BTCUSDT	-1.1117	-15.48	-4.12	-26.5	33.4	0.87	326	-0.8479	-0.1555	discard	exp#070 kama_bbregime_dualhtf_4h_1d_1w_v1 early:BTCUSDT Sharpe=-1.112 trades=326	train
-75c3309	dema_atrregime_dualhtf_12h_1d_1w_v1	BTCUSDT	-6.4335	0.76	0.19	-1.26	54.5	1.67	11	-0.7853	0.1511	discard	exp#071 dema_atrregime_dualhtf_12h_1d_1w_v1 early:BTCUSDT Sharpe=-6.433 trades=1	train
-8cbe091	kama_rsi_bbregime_weekly_1d_1w_v1	BTCUSDT	-1.6926	-10.75	-2.8	-15.42	39.2	0.72	79	-0.7065	-0.1818	discard	exp#072 kama_rsi_bbregime_weekly_1d_1w_v1 early:BTCUSDT Sharpe=-1.693 trades=79 	train
-c47ebf8	kama_volume_dualhtf_15m_1h_4h_v1	BTCUSDT	-9.0013	-92.42	-47.55	-92.59	39.0	0.8	8713	-4.6943	-0.5135	discard	exp#073 kama_volume_dualhtf_15m_1h_4h_v1 early:BTCUSDT Sharpe=-9.001 trades=8713	train
-8e0d430	kama_rsi_pullback_vol_30m_4h_v1	BTCUSDT	-2.0224	-10.46	-2.73	-11.67	30.2	0.97	771	-1.0249	-0.2336	discard	exp#074 kama_rsi_pullback_vol_30m_4h_v1 early:BTCUSDT Sharpe=-2.022 trades=771 D	train
-34a377f	hma_rsi_pullback_vol_1h_4h_v1	BTCUSDT	-4.3351	-3.86	-0.98	-5.48	47.1	0.94	208	-0.6501	-0.1789	discard	exp#075 hma_rsi_pullback_vol_1h_4h_v1 early:BTCUSDT Sharpe=-4.335 trades=208 DD=	train
-e0dd3b0	kama_rsi_pullback_dualhtf_4h_1d_1w_v1	BTCUSDT	-2.3085	-1.39	-0.35	-6.48	51.6	1.05	159	-0.5713	-0.0539	discard	exp#076 kama_rsi_pullback_dualhtf_4h_1d_1w_v1 early:BTCUSDT Sharpe=-2.308 trades	train
-ff302c4	kama_supertrend_ensemble_triplehtf_12h_1d_1w_v1	BTCUSDT	-0.8635	-12.22	-3.21	-19.15	40.6	0.87	106	-0.5942	-0.1674	discard	exp#077 kama_supertrend_ensemble_triplehtf_12h_1d_1w_v1 early:BTCUSDT Sharpe=-0.	train
-68eb0a0	kama_rsi_pullback_weekly_1d_1w_v1	BTCUSDT	-1.181	1.29	0.32	-7.44	46.0	1.12	63	-0.4812	0.0433	discard	exp#078 kama_rsi_pullback_weekly_1d_1w_v1 early:BTCUSDT Sharpe=-1.181 trades=63 	train
-eefd543	kama_zscore_pullback_dualhtf_15m_1h_4h_v1	BTCUSDT	-66.1938	-0.34	-0.09	-0.34	10.0	0.01	10	-1.0923	-0.2505	discard	exp#079 kama_zscore_pullback_dualhtf_15m_1h_4h_v1 early:BTCUSDT Sharpe=-66.194 t	train
-f4d86a3	supertrend_rsi_pullback_vol_30m_4h_v1	BTCUSDT	-2.1197	-31.45	-9.02	-34.55	31.9	0.84	1096	-1.4953	-0.2609	discard	exp#080 supertrend_rsi_pullback_vol_30m_4h_v1 early:BTCUSDT Sharpe=-2.120 trades	train
-e2b73ed	hma_rsi_vol_4hhtf_1h_v2	BTCUSDT	-7.0977	-2.89	-0.73	-2.97	22.2	0.24	18	-0.6525	-0.2465	discard	exp#081 hma_rsi_vol_4hhtf_1h_v2 early:BTCUSDT Sharpe=-7.098 trades=18 DD=-3.0%	train
-bb2b35a	kama_rsi_pullback_bbwregime_4h_1d_1w_v1	BTCUSDT	-3.4584	-1.59	-0.4	-4.48	54.5	1.02	55	-0.5349	-0.089	discard	exp#082 kama_rsi_pullback_bbwregime_4h_1d_1w_v1 early:BTCUSDT Sharpe=-3.458 trad	train
-0ed94c7	kama_rsi_pullback_bbwregime_12h_1d_1w_v1	BTCUSDT	-1.6054	0.95	0.24	-5.47	48.3	1.12	118	-0.7177	0.0434	discard	exp#083 kama_rsi_pullback_bbwregime_12h_1d_1w_v1 early:BTCUSDT Sharpe=-1.605 tra	train
-8359956	supertrend_vol_weeklyhtf_1d_1w_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#084 supertrend_vol_weeklyhtf_1d_1w_v1 early:BTCUSDT Sharpe=0.000 trades=0 DD	train
-57fe33d	supertrend_rsi_dualhtf_15m_1h_4h_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#085 supertrend_rsi_dualhtf_15m_1h_4h_v1 early:BTCUSDT Sharpe=0.000 trades=0 	train
-303f092	bb_rsi_meanreversion_30m_4h_v1	BTCUSDT	-2.8677	-10.81	-2.82	-14.9	50.1	0.94	629	-0.798	-0.1894	discard	exp#086 bb_rsi_meanreversion_30m_4h_v1 early:BTCUSDT Sharpe=-2.868 trades=629 DD	train
-07a2a94	kama_rsi_pullback_4hhtf_1h_v1	BTCUSDT	-4.3659	-42.77	-13.03	-43.6	45.9	0.88	2951	-2.5245	-0.2989	discard	exp#087 kama_rsi_pullback_4hhtf_1h_v1 early:BTCUSDT Sharpe=-4.366 trades=2951 DD	train
-6bd57a6	hma_kama_bbwregime_dualhtf_4h_1d_1w_v1	BTCUSDT	-1.4985	-18.63	-5.03	-23.41	43.3	0.94	809	-0.9129	-0.2147	discard	exp#088 hma_kama_bbwregime_dualhtf_4h_1d_1w_v1 early:BTCUSDT Sharpe=-1.499 trade	train
-fd15703	supertrend_rsi_pullback_4hfilter_15m_v1	BTCUSDT	-15.0495	-90.21	-44.09	-90.38	42.0	0.71	8720	-6.8175	-0.4878	discard	exp#001 supertrend_rsi_pullback_4hfilter_15m_v1 early:BTCUSDT Sharpe=-15.049 tra	train
-1bb9262	supertrend_rsi_4hfilter_15m_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#001 supertrend_rsi_4hfilter_15m_v1 early:BTCUSDT Sharpe=0.000 trades=0 DD=0.	train
-a84ae0f	hma_rsi_dualhtf_bollinger_30m_4h_1d_v1	BTCUSDT	-4.9766	-14.41	-3.82	-15.57	46.4	0.81	679	-0.836	-0.2452	discard	exp#002 hma_rsi_dualhtf_bollinger_30m_4h_1d_v1 early:BTCUSDT Sharpe=-4.977 trade	train
-7533b62	kama_macd_volume_4hfilter_1h_v1	BTCUSDT	-3.6129	-51.65	-16.62	-51.84	40.4	0.87	2837	-2.1172	-0.3206	discard	exp#003 kama_macd_volume_4hfilter_1h_v1 early:BTCUSDT Sharpe=-3.613 trades=2837 	train
-baf7f95	kama_rsi_triplehtf_4h_1d_1w_v1	BTCUSDT	-0.7656	2.57	0.64	-10.07	45.5	1.31	66	-0.2959	0.0632	discard	exp#004 kama_rsi_triplehtf_4h_1d_1w_v1 early:BTCUSDT Sharpe=-0.766 trades=66 DD=	train
-0fb0629	kama_bollinger_rsi_triplehtf_12h_1d_1w_v1	BTCUSDT	-1.5427	1.03	0.26	-3.38	44.4	1.14	81	-0.5944	0.0759	discard	exp#005 kama_bollinger_rsi_triplehtf_12h_1d_1w_v1 early:BTCUSDT Sharpe=-1.543 tr	train
-0536b23	donchian_adx_weekly_1d_1w_v1	BTCUSDT	0.4693	41.25	9.02	-9.66	46.9	4.47	64	0.4261	0.9333	discard	exp#006 donchian_adx_weekly_1d_1w_v1 early:ETHUSDT Sharpe=-0.334 trades=58 DD=-2	train
-0536b23	donchian_adx_weekly_1d_1w_v1	ETHUSDT	-0.3343	4.94	1.21	-23.16	37.9	1.17	58	-0.2495	0.0524	discard	exp#006 donchian_adx_weekly_1d_1w_v1 early:ETHUSDT Sharpe=-0.334 trades=58 DD=-2	train
-retest	supertrend_4h_v1	BTCUSDT	-0.3437	-2.03	-1.67	-11.68	38.8	1.04	67	-0.4766	-0.1433	keep	retest supertrend_4h_v1	test
-retest	supertrend_4h_v1	ETHUSDT	-0.1222	-1.49	-1.22	-23.04	38.8	1.14	67	-0.1683	-0.0531	discard	retest supertrend_4h_v1	test
-retest	supertrend_4h_v1	SOLUSDT	0.1842	7.81	6.38	-24.3	40.0	1.17	65	0.2777	0.2626	discard	retest supertrend_4h_v1	test
-retest	dual_htf_trend_pullback_12h_1d_1w_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	retest dual_htf_trend_pullback_12h_1d_1w_v1	test
-retest	dual_htf_trend_pullback_12h_1d_1w_v1	ETHUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	retest dual_htf_trend_pullback_12h_1d_1w_v1	test
-retest	dual_htf_trend_pullback_12h_1d_1w_v1	SOLUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	retest dual_htf_trend_pullback_12h_1d_1w_v1	test
-retest	donchian_adx_triplehtf_12h_1d_1w_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	retest donchian_adx_triplehtf_12h_1d_1w_v1	test
-retest	donchian_adx_triplehtf_12h_1d_1w_v1	ETHUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	retest donchian_adx_triplehtf_12h_1d_1w_v1	test
-retest	donchian_adx_triplehtf_12h_1d_1w_v1	SOLUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	retest donchian_adx_triplehtf_12h_1d_1w_v1	test
-2618738	rsi_meanrev_dualhtf_15m_1h_4h_v1	BTCUSDT	-5.1336	-1.82	-0.46	-2.83	58.1	0.94	105	-0.4284	-0.1614	discard	exp#007 rsi_meanrev_dualhtf_15m_1h_4h_v1 early:BTCUSDT Sharpe=-5.134 trades=105 	train
-dc26877	supertrend_rsi_dualhtf_15m_1h_4h_v1	BTCUSDT	-12.648	-3.41	-0.86	-3.49	47.4	0.65	137	-0.7286	-0.2477	discard	exp#001 supertrend_rsi_dualhtf_15m_1h_4h_v1 early:BTCUSDT Sharpe=-12.648 trades=	train
-37b6173	vol_momentum_volume_30m_4h_1d_v1	BTCUSDT	-4.3713	-4.61	-1.17	-5.83	48.9	0.75	133	-0.3184	-0.2011	discard	exp#008 vol_momentum_volume_30m_4h_1d_v1 early:BTCUSDT Sharpe=-4.371 trades=133 	train
-b63bfe3	kama_rsi_pullback_4hhtf_30m_v1	BTCUSDT	-9.1397	-83.73	-36.51	-84.28	40.9	0.71	5393	-4.9172	-0.4332	discard	exp#002 kama_rsi_pullback_4hhtf_30m_v1 early:BTCUSDT Sharpe=-9.140 trades=5393 D	train
-f0e862b	keltner_volume_dualhtf_1h_4h_1d_v1	BTCUSDT	-2.5954	-31.35	-8.98	-33.25	41.5	0.87	1259	-1.0468	-0.2701	discard	exp#009 keltner_volume_dualhtf_1h_4h_1d_v1 early:BTCUSDT Sharpe=-2.595 trades=12	train
-d29e484	ema_rsi_pullback_4hhtf_1h_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#003 ema_rsi_pullback_4hhtf_1h_v1 early:BTCUSDT Sharpe=0.000 trades=0 DD=0.0%	train
-83e987e	kama_rsi_pullback_bollinger_4h_1d_v1	BTCUSDT	-1.1403	-5.1	-1.3	-9.66	43.0	1.09	214	-0.5562	-0.1346	discard	exp#010 kama_rsi_pullback_bollinger_4h_1d_v1 early:BTCUSDT Sharpe=-1.140 trades=	train
-6579abf	supertrend_rsi_pullback_4h_1d_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	discard	exp#004 supertrend_rsi_pullback_4h_1d_v1 early:BTCUSDT Sharpe=0.000 trades=0 DD=	train
+73c4650	adaptive_regime_trend_v1	BTCUSDT	-0.1361	-64.10	-22.61	-80.84	51.0	1.87	6534	-0.1544	-0.2796	discard	revalidated adaptive_regime_trend_v1	train
+73c4650	adaptive_regime_trend_v1	ETHUSDT	0.4177	32.85	7.36	-72.13	54.0	2.22	7114	0.4868	0.1021	discard	revalidated adaptive_regime_trend_v1	train
+73c4650	adaptive_regime_trend_v1	SOLUSDT	1.2095	1989.72	114.47	-80.71	59.2	2.72	7793	1.4361	1.4184	discard	revalidated adaptive_regime_trend_v1	train
+73c4650	adaptive_regime_trend_v1	BTCUSDT	-1.7904	-71.90	-64.81	-77.31	45.7	1.29	1938	-2.0365	-0.8382	discard	revalidated adaptive_regime_trend_v1	test
+73c4650	adaptive_regime_trend_v1	ETHUSDT	-0.3094	-43.92	-37.86	-69.62	52.3	2.51	2337	-0.3818	-0.5438	discard	revalidated adaptive_regime_trend_v1	test
+73c4650	adaptive_regime_trend_v1	SOLUSDT	0.0213	-31.30	-26.57	-79.23	52.8	1.95	2424	0.0260	-0.3354	discard	revalidated adaptive_regime_trend_v1	test
+73c4650	adaptive_regime_trend_v11	BTCUSDT	0.0000	0.00	0.00	0.00	0.0	0.00	0	0.0000	0.0000	discard	revalidated adaptive_regime_trend_v11	train
+73c4650	adaptive_regime_trend_v11	ETHUSDT	0.0000	0.00	0.00	0.00	0.0	0.00	0	0.0000	0.0000	discard	revalidated adaptive_regime_trend_v11	train
+73c4650	adaptive_regime_trend_v11	SOLUSDT	0.0000	0.00	0.00	0.00	0.0	0.00	0	0.0000	0.0000	discard	revalidated adaptive_regime_trend_v11	train
+73c4650	adaptive_regime_trend_v11	BTCUSDT	0.0000	0.00	0.00	0.00	0.0	0.00	0	0.0000	0.0000	discard	revalidated adaptive_regime_trend_v11	test
+73c4650	adaptive_regime_trend_v11	ETHUSDT	0.0000	0.00	0.00	0.00	0.0	0.00	0	0.0000	0.0000	discard	revalidated adaptive_regime_trend_v11	test
+73c4650	adaptive_regime_trend_v11	SOLUSDT	0.0000	0.00	0.00	0.00	0.0	0.00	0	0.0000	0.0000	discard	revalidated adaptive_regime_trend_v11	test
+73c4650	adaptive_regime_trend_v2	BTCUSDT	-0.0634	-69.37	-25.62	-89.89	53.5	2.83	9526	-0.0732	-0.2850	discard	revalidated adaptive_regime_trend_v2	train
+73c4650	adaptive_regime_trend_v2	ETHUSDT	0.3489	-14.01	-3.70	-87.06	56.7	2.93	9910	0.4189	-0.0426	discard	revalidated adaptive_regime_trend_v2	train
+73c4650	adaptive_regime_trend_v2	SOLUSDT	1.2136	2141.33	118.28	-73.09	61.8	3.37	10459	1.4595	1.6182	discard	revalidated adaptive_regime_trend_v2	train
+73c4650	adaptive_regime_trend_v2	BTCUSDT	-1.1853	-68.26	-61.10	-79.81	51.6	2.40	2906	-1.3996	-0.7656	discard	revalidated adaptive_regime_trend_v2	test
+73c4650	adaptive_regime_trend_v2	ETHUSDT	0.2004	-18.90	-15.83	-70.86	56.7	3.32	3097	0.2533	-0.2234	discard	revalidated adaptive_regime_trend_v2	test
+73c4650	adaptive_regime_trend_v2	SOLUSDT	0.1086	-33.30	-28.33	-82.45	57.2	2.49	3245	0.1370	-0.3436	discard	revalidated adaptive_regime_trend_v2	test
+73c4650	adaptive_regime_trend_v3	BTCUSDT	-0.0565	-30.77	-8.79	-72.25	53.0	2.20	7990	-0.0546	-0.1217	discard	revalidated adaptive_regime_trend_v3	train
+73c4650	adaptive_regime_trend_v3	ETHUSDT	0.4146	66.19	13.55	-52.83	57.4	2.37	8335	0.4248	0.2565	discard	revalidated adaptive_regime_trend_v3	train
+73c4650	adaptive_regime_trend_v3	SOLUSDT	1.2347	1211.92	90.82	-59.58	63.0	2.53	8188	1.3024	1.5244	discard	revalidated adaptive_regime_trend_v3	train
+73c4650	adaptive_regime_trend_v3	BTCUSDT	-1.8247	-60.89	-53.81	-65.12	52.2	1.56	2440	-1.8426	-0.8263	discard	revalidated adaptive_regime_trend_v3	test
+73c4650	adaptive_regime_trend_v3	ETHUSDT	0.3018	7.74	6.33	-50.48	56.4	2.28	2652	0.3464	0.1253	discard	revalidated adaptive_regime_trend_v3	test
+73c4650	adaptive_regime_trend_v3	SOLUSDT	0.3781	11.90	9.69	-53.37	58.3	1.94	2779	0.4247	0.1815	discard	revalidated adaptive_regime_trend_v3	test
+73c4650	adaptive_regime_trend_v7	BTCUSDT	-0.1103	-64.51	-22.83	-88.12	49.8	1.98	7916	-0.1092	-0.2591	discard	revalidated adaptive_regime_trend_v7	train
+73c4650	adaptive_regime_trend_v7	ETHUSDT	0.5845	121.74	22.04	-67.06	56.8	2.44	8327	0.6147	0.3287	discard	revalidated adaptive_regime_trend_v7	train
+73c4650	adaptive_regime_trend_v7	SOLUSDT	1.6907	10913.16	225.51	-61.35	62.5	2.66	7871	1.8050	3.6759	discard	revalidated adaptive_regime_trend_v7	train
+73c4650	adaptive_regime_trend_v7	BTCUSDT	-1.7147	-74.11	-67.10	-77.40	49.1	1.57	2396	-1.7413	-0.8669	discard	revalidated adaptive_regime_trend_v7	test
+73c4650	adaptive_regime_trend_v7	ETHUSDT	0.1509	-17.87	-14.95	-68.11	52.9	2.18	2693	0.1766	-0.2195	discard	revalidated adaptive_regime_trend_v7	test
+73c4650	adaptive_regime_trend_v7	SOLUSDT	0.4348	4.82	3.95	-68.57	54.6	1.89	2752	0.4967	0.0576	discard	revalidated adaptive_regime_trend_v7	test
+73c4650	adaptive_regime_trend_v9	BTCUSDT	0.1503	-31.72	-9.10	-73.32	49.9	1.92	8943	0.1585	-0.1242	discard	revalidated adaptive_regime_trend_v9	train
+73c4650	adaptive_regime_trend_v9	ETHUSDT	0.7317	253.03	37.10	-65.82	53.3	2.25	9179	0.8134	0.5637	discard	revalidated adaptive_regime_trend_v9	train
+73c4650	adaptive_regime_trend_v9	SOLUSDT	1.3900	3722.97	149.59	-59.54	55.8	2.30	8614	1.5463	2.5125	discard	revalidated adaptive_regime_trend_v9	train
+73c4650	adaptive_regime_trend_v9	BTCUSDT	-0.6899	-48.46	-42.03	-64.77	52.3	1.92	2732	-0.7678	-0.6488	discard	revalidated adaptive_regime_trend_v9	test
+73c4650	adaptive_regime_trend_v9	ETHUSDT	1.1532	126.99	96.27	-58.43	55.7	2.56	2765	1.3985	1.6477	discard	revalidated adaptive_regime_trend_v9	test
+73c4650	adaptive_regime_trend_v9	SOLUSDT	0.5155	10.80	8.80	-72.62	55.2	1.82	2913	0.5712	0.1212	discard	revalidated adaptive_regime_trend_v9	test
+73c4650	adx_kama_rsi_volume_30m_4h_v1	BTCUSDT	-0.5788	-2.60	-0.66	-23.66	46.5	1.23	172	-0.6742	-0.0277	discard	revalidated adx_kama_rsi_volume_30m_4h_v1	train
+73c4650	adx_kama_rsi_volume_30m_4h_v1	ETHUSDT	-0.3164	2.36	0.59	-26.85	46.6	1.06	58	-0.3660	0.0218	discard	revalidated adx_kama_rsi_volume_30m_4h_v1	train
+73c4650	adx_kama_rsi_volume_30m_4h_v1	SOLUSDT	0.9243	116.30	21.37	-29.18	50.0	71.59	24	1.1965	0.7324	keep	revalidated adx_kama_rsi_volume_30m_4h_v1	train
+73c4650	adx_kama_rsi_volume_30m_4h_v1	BTCUSDT	-1.2380	-2.79	-2.30	-8.38	0.0	0.00	1	-1.5806	-0.2749	discard	revalidated adx_kama_rsi_volume_30m_4h_v1	test
+73c4650	adx_kama_rsi_volume_30m_4h_v1	ETHUSDT	-0.7561	-2.67	-2.20	-11.14	0.0	0.00	1	-0.9601	-0.1975	discard	revalidated adx_kama_rsi_volume_30m_4h_v1	test
+73c4650	adx_kama_rsi_volume_30m_4h_v1	SOLUSDT	-0.7751	-4.50	-3.72	-13.44	0.0	0.00	1	-1.0321	-0.2768	discard	revalidated adx_kama_rsi_volume_30m_4h_v1	test
+73c4650	bb_regime_supertrend_rsi_ensemble_1h_4h_v1	BTCUSDT	0.0612	21.96	5.09	-23.05	41.7	3.31	72	0.0743	0.2210	keep	revalidated bb_regime_supertrend_rsi_ensemble_1h_4h_v1	train
+73c4650	bb_regime_supertrend_rsi_ensemble_1h_4h_v1	ETHUSDT	0.2941	40.20	8.82	-25.70	65.6	3.04	32	0.3613	0.3432	keep	revalidated bb_regime_supertrend_rsi_ensemble_1h_4h_v1	train
+73c4650	bb_regime_supertrend_rsi_ensemble_1h_4h_v1	SOLUSDT	1.3335	313.81	42.83	-42.85	100.0	inf	6	1.8236	0.9997	keep	revalidated bb_regime_supertrend_rsi_ensemble_1h_4h_v1	train
+73c4650	bb_regime_supertrend_rsi_ensemble_1h_4h_v1	BTCUSDT	-0.9393	-4.80	-3.96	-12.72	0.0	0.00	1	-1.2003	-0.3117	discard	revalidated bb_regime_supertrend_rsi_ensemble_1h_4h_v1	test
+73c4650	bb_regime_supertrend_rsi_ensemble_1h_4h_v1	ETHUSDT	-0.5615	-4.86	-4.02	-17.03	0.0	0.00	1	-0.7106	-0.2360	discard	revalidated bb_regime_supertrend_rsi_ensemble_1h_4h_v1	test
+73c4650	bb_regime_supertrend_rsi_ensemble_1h_4h_v1	SOLUSDT	-0.6114	-7.91	-6.55	-19.96	0.0	0.00	1	-0.8268	-0.3282	discard	revalidated bb_regime_supertrend_rsi_ensemble_1h_4h_v1	test
+73c4650	bollinger_squeeze_breakout	BTCUSDT	-1.9065	-1.90	-0.48	-6.86	46.2	1.06	78	-0.1937	-0.0696	discard	revalidated bollinger_squeeze_breakout	train
+73c4650	bollinger_squeeze_breakout	ETHUSDT	-0.7437	10.08	2.43	-5.49	54.6	1.86	97	-0.1000	0.4426	discard	revalidated bollinger_squeeze_breakout	train
+73c4650	bollinger_squeeze_breakout	SOLUSDT	-1.0114	-4.30	-1.10	-12.76	52.7	1.14	186	-0.1523	-0.0859	discard	revalidated bollinger_squeeze_breakout	train
+73c4650	bollinger_squeeze_breakout	BTCUSDT	-1.4898	2.47	2.03	-0.54	66.7	6.77	9	-0.1677	3.7700	discard	revalidated bollinger_squeeze_breakout	test
+73c4650	bollinger_squeeze_breakout	ETHUSDT	-0.8523	1.79	1.47	-3.03	44.4	1.86	27	-0.0879	0.4851	discard	revalidated bollinger_squeeze_breakout	test
+73c4650	bollinger_squeeze_breakout	SOLUSDT	-2.0525	-3.40	-2.80	-4.31	40.0	0.80	40	-0.2379	-0.6504	discard	revalidated bollinger_squeeze_breakout	test
+73c4650	cross_asset_kama_supertrend_volume_mtf_15m_4h_v1	BTCUSDT	-0.2234	10.32	2.49	-23.58	35.5	2.61	279	-0.2740	0.1055	discard	revalidated cross_asset_kama_supertrend_volume_mtf_15m_4h_v1	train
+73c4650	cross_asset_kama_supertrend_volume_mtf_15m_4h_v1	ETHUSDT	0.2641	35.00	7.80	-20.42	100.0	inf	1	0.3270	0.3818	keep	revalidated cross_asset_kama_supertrend_volume_mtf_15m_4h_v1	train
+73c4650	cross_asset_kama_supertrend_volume_mtf_15m_4h_v1	SOLUSDT	1.2298	197.13	31.44	-34.38	61.5	969.65	13	1.6264	0.9146	keep	revalidated cross_asset_kama_supertrend_volume_mtf_15m_4h_v1	train
+73c4650	cross_asset_kama_supertrend_volume_mtf_15m_4h_v1	BTCUSDT	-1.0791	-3.34	-2.76	-10.21	0.0	0.00	1	-1.3989	-0.2702	discard	revalidated cross_asset_kama_supertrend_volume_mtf_15m_4h_v1	test
+73c4650	cross_asset_kama_supertrend_volume_mtf_15m_4h_v1	ETHUSDT	-0.6563	-3.24	-2.68	-13.38	0.0	0.00	1	-0.8590	-0.2001	discard	revalidated cross_asset_kama_supertrend_volume_mtf_15m_4h_v1	test
+73c4650	cross_asset_kama_supertrend_volume_mtf_15m_4h_v1	SOLUSDT	-0.6809	-5.38	-4.45	-16.10	0.0	0.00	1	-0.9290	-0.2763	discard	revalidated cross_asset_kama_supertrend_volume_mtf_15m_4h_v1	test
+73c4650	donchian_adx_triplehtf_12h_1d_1w_v1	BTCUSDT	0.3612	37.40	8.27	-9.73	49.1	2.68	112	0.2680	0.8502	keep	revalidated donchian_adx_triplehtf_12h_1d_1w_v1	train
+73c4650	donchian_adx_triplehtf_12h_1d_1w_v1	ETHUSDT	0.1184	25.61	5.87	-15.08	52.1	2.03	142	0.0863	0.3892	keep	revalidated donchian_adx_triplehtf_12h_1d_1w_v1	train
+73c4650	donchian_adx_triplehtf_12h_1d_1w_v1	SOLUSDT	0.9911	141.85	24.81	-21.58	40.4	3.88	136	0.7690	1.1498	keep	revalidated donchian_adx_triplehtf_12h_1d_1w_v1	train
+73c4650	donchian_adx_triplehtf_12h_1d_1w_v1	BTCUSDT	-1.7897	-2.79	-2.30	-5.36	62.5	0.68	24	-1.0153	-0.4283	discard	revalidated donchian_adx_triplehtf_12h_1d_1w_v1	test
+73c4650	donchian_adx_triplehtf_12h_1d_1w_v1	ETHUSDT	-0.7698	-4.23	-3.49	-8.78	58.6	0.85	29	-0.4463	-0.3974	discard	revalidated donchian_adx_triplehtf_12h_1d_1w_v1	test
+73c4650	donchian_adx_triplehtf_12h_1d_1w_v1	SOLUSDT	-0.5476	-1.87	-1.54	-6.99	68.4	0.80	38	-0.3403	-0.2205	discard	revalidated donchian_adx_triplehtf_12h_1d_1w_v1	test
+73c4650	donchian_macd_bbw_regime_1h_4h_v1	BTCUSDT	-0.5542	-0.45	-0.11	-19.73	40.9	1.32	93	-0.6575	-0.0058	discard	revalidated donchian_macd_bbw_regime_1h_4h_v1	train
+73c4650	donchian_macd_bbw_regime_1h_4h_v1	ETHUSDT	-0.4295	-1.26	-0.32	-18.79	44.1	1.04	59	-0.4873	-0.0169	discard	revalidated donchian_macd_bbw_regime_1h_4h_v1	train
+73c4650	donchian_macd_bbw_regime_1h_4h_v1	SOLUSDT	1.0584	130.80	23.36	-29.01	50.0	133.64	8	1.4464	0.8053	keep	revalidated donchian_macd_bbw_regime_1h_4h_v1	train
+73c4650	donchian_macd_bbw_regime_1h_4h_v1	BTCUSDT	-1.2661	-2.91	-2.40	-8.12	0.0	0.00	1	-1.6179	-0.2956	discard	revalidated donchian_macd_bbw_regime_1h_4h_v1	test
+73c4650	donchian_macd_bbw_regime_1h_4h_v1	ETHUSDT	-0.7703	-2.78	-2.29	-10.93	0.0	0.00	1	-0.9748	-0.2100	discard	revalidated donchian_macd_bbw_regime_1h_4h_v1	test
+73c4650	donchian_macd_bbw_regime_1h_4h_v1	SOLUSDT	-0.7887	-4.63	-3.82	-12.90	0.0	0.00	1	-1.0666	-0.2964	discard	revalidated donchian_macd_bbw_regime_1h_4h_v1	test
+73c4650	donchian_rsi_adx_mtf_1h_4h_v1	BTCUSDT	-0.4789	-7.26	-1.87	-26.60	49.5	1.19	91	-0.5713	-0.0702	discard	revalidated donchian_rsi_adx_mtf_1h_4h_v1	train
+73c4650	donchian_rsi_adx_mtf_1h_4h_v1	ETHUSDT	-0.3518	-6.30	-1.61	-33.36	35.1	0.93	74	-0.4096	-0.0484	discard	revalidated donchian_rsi_adx_mtf_1h_4h_v1	train
+73c4650	donchian_rsi_adx_mtf_1h_4h_v1	SOLUSDT	1.2149	267.68	38.66	-42.85	83.3	1271.73	6	1.6416	0.9023	keep	revalidated donchian_rsi_adx_mtf_1h_4h_v1	train
+73c4650	donchian_rsi_adx_mtf_1h_4h_v1	BTCUSDT	-0.9393	-4.80	-3.96	-12.72	0.0	0.00	1	-1.2003	-0.3117	discard	revalidated donchian_rsi_adx_mtf_1h_4h_v1	test
+73c4650	donchian_rsi_adx_mtf_1h_4h_v1	ETHUSDT	-0.5615	-4.86	-4.02	-17.03	0.0	0.00	1	-0.7106	-0.2360	discard	revalidated donchian_rsi_adx_mtf_1h_4h_v1	test
+73c4650	donchian_rsi_adx_mtf_1h_4h_v1	SOLUSDT	-0.6114	-7.91	-6.55	-19.96	0.0	0.00	1	-0.8268	-0.3282	discard	revalidated donchian_rsi_adx_mtf_1h_4h_v1	test
+73c4650	dual_htf_trend_pullback_12h_1d_1w_v1	BTCUSDT	0.0946	24.29	5.59	-10.40	52.0	1.77	50	0.0928	0.5375	keep	revalidated dual_htf_trend_pullback_12h_1d_1w_v1	train
+73c4650	dual_htf_trend_pullback_12h_1d_1w_v1	ETHUSDT	0.2785	37.44	8.28	-15.78	55.9	1.73	59	0.2793	0.5245	keep	revalidated dual_htf_trend_pullback_12h_1d_1w_v1	train
+73c4650	dual_htf_trend_pullback_12h_1d_1w_v1	SOLUSDT	0.5726	77.05	15.41	-24.82	54.0	2.00	50	0.6092	0.6210	keep	revalidated dual_htf_trend_pullback_12h_1d_1w_v1	train
+73c4650	dual_htf_trend_pullback_12h_1d_1w_v1	BTCUSDT	-1.3495	-6.65	-5.50	-9.60	23.5	0.58	17	-1.3586	-0.5733	discard	revalidated dual_htf_trend_pullback_12h_1d_1w_v1	test
+73c4650	dual_htf_trend_pullback_12h_1d_1w_v1	ETHUSDT	-1.5140	-15.23	-12.71	-18.12	18.2	0.16	11	-1.2115	-0.7016	discard	revalidated dual_htf_trend_pullback_12h_1d_1w_v1	test
+73c4650	dual_htf_trend_pullback_12h_1d_1w_v1	SOLUSDT	-1.0724	-9.74	-8.08	-15.69	50.0	0.74	16	-0.9660	-0.5151	discard	revalidated dual_htf_trend_pullback_12h_1d_1w_v1	test
+73c4650	ensemble_regime_confidence_voting_15m_v2	BTCUSDT	-0.7813	-22.35	-6.13	-36.97	45.0	0.76	200	-0.9581	-0.1659	discard	revalidated ensemble_regime_confidence_voting_15m_v2	train
+73c4650	ensemble_regime_confidence_voting_15m_v2	ETHUSDT	0.3646	47.16	10.15	-26.42	66.7	159.77	3	0.4515	0.3841	keep	revalidated ensemble_regime_confidence_voting_15m_v2	train
+73c4650	ensemble_regime_confidence_voting_15m_v2	SOLUSDT	1.1052	242.02	36.16	-43.43	56.8	143.59	44	1.4465	0.8327	keep	revalidated ensemble_regime_confidence_voting_15m_v2	train
+73c4650	ensemble_regime_confidence_voting_15m_v2	BTCUSDT	-0.9005	-4.56	-3.77	-13.41	0.0	0.00	1	-1.1674	-0.2808	discard	revalidated ensemble_regime_confidence_voting_15m_v2	test
+73c4650	ensemble_regime_confidence_voting_15m_v2	ETHUSDT	-0.5412	-4.61	-3.80	-17.51	0.0	0.00	1	-0.7083	-0.2172	discard	revalidated ensemble_regime_confidence_voting_15m_v2	test
+73c4650	ensemble_regime_confidence_voting_15m_v2	SOLUSDT	-0.5834	-7.52	-6.23	-20.97	0.0	0.00	1	-0.7960	-0.2970	discard	revalidated ensemble_regime_confidence_voting_15m_v2	test
+73c4650	ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1	BTCUSDT	-0.5702	-7.32	-1.88	-26.13	47.3	1.23	355	-0.6983	-0.0721	discard	revalidated ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1	train
+73c4650	ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1	ETHUSDT	0.0798	23.69	5.46	-14.03	100.0	inf	2	0.0988	0.3894	keep	revalidated ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1	train
+73c4650	ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1	SOLUSDT	1.0580	107.07	20.05	-24.18	55.6	296.31	9	1.3803	0.8292	keep	revalidated ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1	train
+73c4650	ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1	BTCUSDT	-0.9770	-3.95	-3.26	-11.82	0.0	0.00	1	-1.2666	-0.2755	discard	revalidated ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1	test
+73c4650	ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1	ETHUSDT	-0.8867	-2.02	-1.66	-9.08	0.0	0.00	1	-1.1605	-0.1832	discard	revalidated ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1	test
+73c4650	ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1	SOLUSDT	-0.8759	-3.41	-2.81	-10.98	0.0	0.00	1	-1.1951	-0.2558	discard	revalidated ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1	test
+73c4650	hma_rsi_pullback_daily_trend_4h_v1	BTCUSDT	0.1271	26.13	5.98	-23.26	55.6	3.47	54	0.1607	0.2570	keep	revalidated hma_rsi_pullback_daily_trend_4h_v1	train
+73c4650	hma_rsi_pullback_daily_trend_4h_v1	ETHUSDT	0.3692	46.79	10.08	-21.00	70.8	4.00	24	0.4702	0.4800	keep	revalidated hma_rsi_pullback_daily_trend_4h_v1	train
+73c4650	hma_rsi_pullback_daily_trend_4h_v1	SOLUSDT	1.1138	219.20	33.82	-41.35	66.7	623.86	3	1.6068	0.8179	keep	revalidated hma_rsi_pullback_daily_trend_4h_v1	train
+73c4650	hma_rsi_pullback_daily_trend_4h_v1	BTCUSDT	-0.9467	-4.72	-3.90	-12.65	0.0	0.00	1	-1.2241	-0.3086	discard	revalidated hma_rsi_pullback_daily_trend_4h_v1	test
+73c4650	hma_rsi_pullback_daily_trend_4h_v1	ETHUSDT	-0.5581	-4.81	-3.97	-16.69	0.0	0.00	1	-0.7197	-0.2378	discard	revalidated hma_rsi_pullback_daily_trend_4h_v1	test
+73c4650	hma_rsi_pullback_daily_trend_4h_v1	SOLUSDT	-0.6491	-8.10	-6.71	-19.37	0.0	0.00	1	-0.9019	-0.3464	discard	revalidated hma_rsi_pullback_daily_trend_4h_v1	test
+73c4650	hma_rsi_pullback_mtf_1h_4h_v3	BTCUSDT	-0.0995	17.01	4.01	-13.20	52.6	2.23	57	-0.0999	0.3038	discard	revalidated hma_rsi_pullback_mtf_1h_4h_v3	train
+73c4650	hma_rsi_pullback_mtf_1h_4h_v3	ETHUSDT	0.2486	33.02	7.40	-21.94	61.1	2.36	36	0.3064	0.3373	keep	revalidated hma_rsi_pullback_mtf_1h_4h_v3	train
+73c4650	hma_rsi_pullback_mtf_1h_4h_v3	SOLUSDT	1.0828	137.62	24.27	-29.01	50.0	340.35	4	1.4851	0.8365	keep	revalidated hma_rsi_pullback_mtf_1h_4h_v3	train
+73c4650	hma_rsi_pullback_mtf_1h_4h_v3	BTCUSDT	-1.2661	-2.91	-2.40	-8.12	0.0	0.00	1	-1.6179	-0.2956	discard	revalidated hma_rsi_pullback_mtf_1h_4h_v3	test
+73c4650	hma_rsi_pullback_mtf_1h_4h_v3	ETHUSDT	-0.7703	-2.78	-2.29	-10.93	0.0	0.00	1	-0.9748	-0.2100	discard	revalidated hma_rsi_pullback_mtf_1h_4h_v3	test
+73c4650	hma_rsi_pullback_mtf_1h_4h_v3	SOLUSDT	-0.7887	-4.63	-3.82	-12.90	0.0	0.00	1	-1.0666	-0.2964	discard	revalidated hma_rsi_pullback_mtf_1h_4h_v3	test
+73c4650	hma_rsi_supertrend_pullback_15m_1h_v1	BTCUSDT	-0.8165	-7.07	-1.82	-17.27	54.2	0.75	144	-0.8438	-0.1052	discard	revalidated hma_rsi_supertrend_pullback_15m_1h_v1	train
+73c4650	hma_rsi_supertrend_pullback_15m_1h_v1	ETHUSDT	0.2070	30.22	6.83	-17.27	100.0	inf	2	0.2564	0.3954	keep	revalidated hma_rsi_supertrend_pullback_15m_1h_v1	train
+73c4650	hma_rsi_supertrend_pullback_15m_1h_v1	SOLUSDT	1.2955	174.62	28.86	-29.43	81.8	1453.76	11	1.7203	0.9809	keep	revalidated hma_rsi_supertrend_pullback_15m_1h_v1	train
+73c4650	hma_rsi_supertrend_pullback_15m_1h_v1	BTCUSDT	0.0000	0.00	0.00	0.00	0.0	0.00	0	0.0000	0.0000	discard	revalidated hma_rsi_supertrend_pullback_15m_1h_v1	test
+73c4650	hma_rsi_supertrend_pullback_15m_1h_v1	ETHUSDT	-0.7485	-2.61	-2.16	-11.25	0.0	0.00	1	-0.9796	-0.1916	discard	revalidated hma_rsi_supertrend_pullback_15m_1h_v1	test
+73c4650	hma_rsi_supertrend_pullback_15m_1h_v1	SOLUSDT	-0.7589	-4.37	-3.61	-13.57	0.0	0.00	1	-1.0355	-0.2660	discard	revalidated hma_rsi_supertrend_pullback_15m_1h_v1	test
+73c4650	hma_rsi_volume_pullback_1h_4h_v1	BTCUSDT	0.1505	27.27	6.22	-16.06	55.2	5.29	29	0.1551	0.3873	keep	revalidated hma_rsi_volume_pullback_1h_4h_v1	train
+73c4650	hma_rsi_volume_pullback_1h_4h_v1	ETHUSDT	-0.0682	11.87	2.85	-28.35	48.6	1.47	70	-0.0811	0.1004	discard	revalidated hma_rsi_volume_pullback_1h_4h_v1	train
+73c4650	hma_rsi_volume_pullback_1h_4h_v1	SOLUSDT	1.1969	258.70	37.80	-42.85	60.0	481.13	10	1.6246	0.8822	keep	revalidated hma_rsi_volume_pullback_1h_4h_v1	train
+73c4650	hma_rsi_volume_pullback_1h_4h_v1	BTCUSDT	-0.9393	-4.80	-3.96	-12.72	0.0	0.00	1	-1.2003	-0.3117	discard	revalidated hma_rsi_volume_pullback_1h_4h_v1	test
+73c4650	hma_rsi_volume_pullback_1h_4h_v1	ETHUSDT	-0.5615	-4.86	-4.02	-17.03	0.0	0.00	1	-0.7106	-0.2360	discard	revalidated hma_rsi_volume_pullback_1h_4h_v1	test
+73c4650	hma_rsi_volume_pullback_1h_4h_v1	SOLUSDT	-0.6114	-7.91	-6.55	-19.96	0.0	0.00	1	-0.8268	-0.3282	discard	revalidated hma_rsi_volume_pullback_1h_4h_v1	test
+73c4650	kama_macd_momentum_mtf_1h_4h_1d_v1	BTCUSDT	-0.3259	9.86	2.38	-11.75	47.4	2.00	57	-0.3295	0.2026	discard	revalidated kama_macd_momentum_mtf_1h_4h_1d_v1	train
+73c4650	kama_macd_momentum_mtf_1h_4h_1d_v1	ETHUSDT	0.1494	27.15	6.19	-18.54	61.9	1.94	63	0.1850	0.3340	keep	revalidated kama_macd_momentum_mtf_1h_4h_1d_v1	train
+73c4650	kama_macd_momentum_mtf_1h_4h_1d_v1	SOLUSDT	1.0460	124.05	22.45	-29.01	55.6	333.01	9	1.4099	0.7737	keep	revalidated kama_macd_momentum_mtf_1h_4h_1d_v1	train
+73c4650	kama_macd_momentum_mtf_1h_4h_1d_v1	BTCUSDT	-1.2661	-2.91	-2.40	-8.12	0.0	0.00	1	-1.6179	-0.2956	discard	revalidated kama_macd_momentum_mtf_1h_4h_1d_v1	test
+73c4650	kama_macd_momentum_mtf_1h_4h_1d_v1	ETHUSDT	-0.7703	-2.78	-2.29	-10.93	0.0	0.00	1	-0.9748	-0.2100	discard	revalidated kama_macd_momentum_mtf_1h_4h_1d_v1	test
+73c4650	kama_macd_momentum_mtf_1h_4h_1d_v1	SOLUSDT	-0.7887	-4.63	-3.82	-12.90	0.0	0.00	1	-1.0666	-0.2964	discard	revalidated kama_macd_momentum_mtf_1h_4h_1d_v1	test
+73c4650	kama_stochrsi_adx_pullback_1h_4h_v1	BTCUSDT	-0.1858	14.68	3.49	-12.56	55.6	2.56	36	-0.1821	0.2774	discard	revalidated kama_stochrsi_adx_pullback_1h_4h_v1	train
+73c4650	kama_stochrsi_adx_pullback_1h_4h_v1	ETHUSDT	-0.0079	18.95	4.44	-16.96	58.3	1.75	48	-0.0092	0.2616	discard	revalidated kama_stochrsi_adx_pullback_1h_4h_v1	train
+73c4650	kama_stochrsi_adx_pullback_1h_4h_v1	SOLUSDT	1.1477	143.42	25.02	-29.01	83.3	128.47	12	1.5460	0.8625	keep	revalidated kama_stochrsi_adx_pullback_1h_4h_v1	train
+73c4650	kama_stochrsi_adx_pullback_1h_4h_v1	BTCUSDT	-1.2661	-2.91	-2.40	-8.12	0.0	0.00	1	-1.6179	-0.2956	discard	revalidated kama_stochrsi_adx_pullback_1h_4h_v1	test
+73c4650	kama_stochrsi_adx_pullback_1h_4h_v1	ETHUSDT	-0.7703	-2.78	-2.29	-10.93	0.0	0.00	1	-0.9748	-0.2100	discard	revalidated kama_stochrsi_adx_pullback_1h_4h_v1	test
+73c4650	kama_stochrsi_adx_pullback_1h_4h_v1	SOLUSDT	-0.7887	-4.63	-3.82	-12.90	0.0	0.00	1	-1.0666	-0.2964	discard	revalidated kama_stochrsi_adx_pullback_1h_4h_v1	test
+73c4650	kama_supertrend_momentum_1h_4h_v1	BTCUSDT	-0.0609	14.01	3.33	-24.00	45.1	2.32	71	-0.0623	0.1389	discard	revalidated kama_supertrend_momentum_1h_4h_v1	train
+73c4650	kama_supertrend_momentum_1h_4h_v1	ETHUSDT	0.3031	43.40	9.44	-27.12	56.2	2.46	64	0.3728	0.3480	keep	revalidated kama_supertrend_momentum_1h_4h_v1	train
+73c4650	kama_supertrend_momentum_1h_4h_v1	SOLUSDT	1.2335	379.10	48.18	-50.77	40.0	1119.31	5	1.6787	0.9491	discard	revalidated kama_supertrend_momentum_1h_4h_v1	train
+73c4650	kama_supertrend_momentum_1h_4h_v1	BTCUSDT	-0.8304	-6.11	-5.06	-15.68	0.0	0.00	1	-1.0612	-0.3225	discard	revalidated kama_supertrend_momentum_1h_4h_v1	test
+73c4650	kama_supertrend_momentum_1h_4h_v1	ETHUSDT	-0.4919	-6.41	-5.30	-20.91	0.0	0.00	1	-0.6225	-0.2537	discard	revalidated kama_supertrend_momentum_1h_4h_v1	test
+73c4650	kama_supertrend_momentum_1h_4h_v1	SOLUSDT	-0.5523	-10.27	-8.53	-24.40	0.0	0.00	1	-0.7469	-0.3496	discard	revalidated kama_supertrend_momentum_1h_4h_v1	test
+73c4650	kama_supertrend_pullback_mtf_4h_1d_v1	BTCUSDT	-0.1757	14.43	3.43	-12.02	47.4	2.95	38	-0.2120	0.2853	discard	revalidated kama_supertrend_pullback_mtf_4h_1d_v1	train
+73c4650	kama_supertrend_pullback_mtf_4h_1d_v1	ETHUSDT	0.3030	34.08	7.61	-10.92	69.2	3.80	26	0.3819	0.6968	keep	revalidated kama_supertrend_pullback_mtf_4h_1d_v1	train
+73c4650	kama_supertrend_pullback_mtf_4h_1d_v1	SOLUSDT	0.8161	78.44	15.64	-22.88	50.0	123.56	4	1.1379	0.6838	keep	revalidated kama_supertrend_pullback_mtf_4h_1d_v1	train
+73c4650	kama_supertrend_pullback_mtf_4h_1d_v1	BTCUSDT	-1.4990	-2.27	-1.87	-6.50	0.0	0.00	1	-1.9382	-0.2876	discard	revalidated kama_supertrend_pullback_mtf_4h_1d_v1	test
+73c4650	kama_supertrend_pullback_mtf_4h_1d_v1	ETHUSDT	-0.9062	-2.13	-1.75	-8.64	0.0	0.00	1	-1.1684	-0.2028	discard	revalidated kama_supertrend_pullback_mtf_4h_1d_v1	test
+73c4650	kama_supertrend_pullback_mtf_4h_1d_v1	SOLUSDT	-0.9549	-3.74	-3.09	-10.10	0.0	0.00	1	-1.3269	-0.3059	discard	revalidated kama_supertrend_pullback_mtf_4h_1d_v1	test
+73c4650	kama_supertrend_rsi_pullback_1h_4h_v1	BTCUSDT	0.0722	22.33	5.17	-20.45	52.3	2.71	44	0.0742	0.2528	keep	revalidated kama_supertrend_rsi_pullback_1h_4h_v1	train
+73c4650	kama_supertrend_rsi_pullback_1h_4h_v1	ETHUSDT	0.2738	40.30	8.84	-36.53	62.5	2.25	40	0.3361	0.2420	keep	revalidated kama_supertrend_rsi_pullback_1h_4h_v1	train
+73c4650	kama_supertrend_rsi_pullback_1h_4h_v1	SOLUSDT	1.2561	394.08	49.33	-50.77	60.0	547.88	10	1.7088	0.9718	discard	revalidated kama_supertrend_rsi_pullback_1h_4h_v1	train
+73c4650	kama_supertrend_rsi_pullback_1h_4h_v1	BTCUSDT	-0.8304	-6.11	-5.06	-15.68	0.0	0.00	1	-1.0612	-0.3225	discard	revalidated kama_supertrend_rsi_pullback_1h_4h_v1	test
+73c4650	kama_supertrend_rsi_pullback_1h_4h_v1	ETHUSDT	-0.4919	-6.41	-5.30	-20.91	0.0	0.00	1	-0.6225	-0.2537	discard	revalidated kama_supertrend_rsi_pullback_1h_4h_v1	test
+73c4650	kama_supertrend_rsi_pullback_1h_4h_v1	SOLUSDT	-0.5523	-10.27	-8.53	-24.40	0.0	0.00	1	-0.7469	-0.3496	discard	revalidated kama_supertrend_rsi_pullback_1h_4h_v1	test
+73c4650	kama_supertrend_rsi_pullback_1h_4h_v2	BTCUSDT	-0.0417	17.03	4.01	-16.97	46.2	2.46	39	-0.0414	0.2365	discard	revalidated kama_supertrend_rsi_pullback_1h_4h_v2	train
+73c4650	kama_supertrend_rsi_pullback_1h_4h_v2	ETHUSDT	0.0993	23.78	5.48	-19.28	31.8	2.05	22	0.1212	0.2844	keep	revalidated kama_supertrend_rsi_pullback_1h_4h_v2	train
+73c4650	kama_supertrend_rsi_pullback_1h_4h_v2	SOLUSDT	1.2051	261.19	38.04	-42.85	100.0	inf	1	1.6349	0.8878	keep	revalidated kama_supertrend_rsi_pullback_1h_4h_v2	train
+73c4650	kama_supertrend_rsi_pullback_1h_4h_v2	BTCUSDT	-0.9393	-4.80	-3.96	-12.72	0.0	0.00	1	-1.2003	-0.3117	discard	revalidated kama_supertrend_rsi_pullback_1h_4h_v2	test
+73c4650	kama_supertrend_rsi_pullback_1h_4h_v2	ETHUSDT	-0.5615	-4.86	-4.02	-17.03	0.0	0.00	1	-0.7106	-0.2360	discard	revalidated kama_supertrend_rsi_pullback_1h_4h_v2	test
+73c4650	kama_supertrend_rsi_pullback_1h_4h_v2	SOLUSDT	-0.6114	-7.91	-6.55	-19.96	0.0	0.00	1	-0.8268	-0.3282	discard	revalidated kama_supertrend_rsi_pullback_1h_4h_v2	test
+73c4650	kama_supertrend_rsi_pullback_30m_4h_v1	BTCUSDT	0.2615	34.43	7.68	-15.69	54.2	5.42	72	0.3017	0.4897	keep	revalidated kama_supertrend_rsi_pullback_30m_4h_v1	train
+73c4650	kama_supertrend_rsi_pullback_30m_4h_v1	ETHUSDT	0.1046	23.97	5.52	-30.75	52.7	1.55	131	0.1277	0.1796	keep	revalidated kama_supertrend_rsi_pullback_30m_4h_v1	train
+73c4650	kama_supertrend_rsi_pullback_30m_4h_v1	SOLUSDT	1.3007	312.50	42.72	-43.10	66.7	2011.70	6	1.7260	0.9911	keep	revalidated kama_supertrend_rsi_pullback_30m_4h_v1	train
+73c4650	kama_supertrend_rsi_pullback_30m_4h_v1	BTCUSDT	-0.9138	-4.62	-3.81	-13.11	0.0	0.00	1	-1.1668	-0.2908	discard	revalidated kama_supertrend_rsi_pullback_30m_4h_v1	test
+73c4650	kama_supertrend_rsi_pullback_30m_4h_v1	ETHUSDT	-0.5482	-4.69	-3.87	-17.35	0.0	0.00	1	-0.6961	-0.2233	discard	revalidated kama_supertrend_rsi_pullback_30m_4h_v1	test
+73c4650	kama_supertrend_rsi_pullback_30m_4h_v1	SOLUSDT	-0.5984	-7.72	-6.39	-20.77	0.0	0.00	1	-0.7968	-0.3078	discard	revalidated kama_supertrend_rsi_pullback_30m_4h_v1	test
+73c4650	kama_supertrend_rsi_volfilter_1h_4h_v1	BTCUSDT	-0.5953	1.95	0.48	-14.31	37.2	1.56	43	-0.5841	0.0339	discard	revalidated kama_supertrend_rsi_volfilter_1h_4h_v1	train
+73c4650	kama_supertrend_rsi_volfilter_1h_4h_v1	ETHUSDT	-0.1988	9.72	2.35	-16.23	54.4	1.27	68	-0.2285	0.1447	discard	revalidated kama_supertrend_rsi_volfilter_1h_4h_v1	train
+73c4650	kama_supertrend_rsi_volfilter_1h_4h_v1	SOLUSDT	1.2004	152.05	26.12	-29.01	100.0	inf	2	1.6493	0.9004	keep	revalidated kama_supertrend_rsi_volfilter_1h_4h_v1	train
+73c4650	kama_supertrend_rsi_volfilter_1h_4h_v1	BTCUSDT	-1.2661	-2.91	-2.40	-8.12	0.0	0.00	1	-1.6179	-0.2956	discard	revalidated kama_supertrend_rsi_volfilter_1h_4h_v1	test
+73c4650	kama_supertrend_rsi_volfilter_1h_4h_v1	ETHUSDT	-0.7703	-2.78	-2.29	-10.93	0.0	0.00	1	-0.9748	-0.2100	discard	revalidated kama_supertrend_rsi_volfilter_1h_4h_v1	test
+73c4650	kama_supertrend_rsi_volfilter_1h_4h_v1	SOLUSDT	-0.7887	-4.63	-3.82	-12.90	0.0	0.00	1	-1.0666	-0.2964	discard	revalidated kama_supertrend_rsi_volfilter_1h_4h_v1	test
+73c4650	kama_supertrend_rsi_volume_1h_4h_v1	BTCUSDT	-0.4352	7.28	1.77	-13.65	52.6	1.92	38	-0.4329	0.1299	discard	revalidated kama_supertrend_rsi_volume_1h_4h_v1	train
+73c4650	kama_supertrend_rsi_volume_1h_4h_v1	ETHUSDT	-0.0326	18.16	4.26	-16.96	51.0	1.71	51	-0.0386	0.2514	discard	revalidated kama_supertrend_rsi_volume_1h_4h_v1	train
+73c4650	kama_supertrend_rsi_volume_1h_4h_v1	SOLUSDT	1.1326	140.17	24.60	-29.01	66.7	749.50	3	1.5481	0.8480	keep	revalidated kama_supertrend_rsi_volume_1h_4h_v1	train
+73c4650	kama_supertrend_rsi_volume_1h_4h_v1	BTCUSDT	-1.2661	-2.91	-2.40	-8.12	0.0	0.00	1	-1.6179	-0.2956	discard	revalidated kama_supertrend_rsi_volume_1h_4h_v1	test
+73c4650	kama_supertrend_rsi_volume_1h_4h_v1	ETHUSDT	-0.7703	-2.78	-2.29	-10.93	0.0	0.00	1	-0.9748	-0.2100	discard	revalidated kama_supertrend_rsi_volume_1h_4h_v1	test
+73c4650	kama_supertrend_rsi_volume_1h_4h_v1	SOLUSDT	-0.7887	-4.63	-3.82	-12.90	0.0	0.00	1	-1.0666	-0.2964	discard	revalidated kama_supertrend_rsi_volume_1h_4h_v1	test
+73c4650	kama_supertrend_volume_mtf_1h_4h_v1	BTCUSDT	-0.1554	12.61	3.01	-23.61	25.8	3.22	31	-0.1221	0.1277	discard	revalidated kama_supertrend_volume_mtf_1h_4h_v1	train
+73c4650	kama_supertrend_volume_mtf_1h_4h_v1	ETHUSDT	-0.1355	6.31	1.54	-24.82	36.4	1.35	77	-0.1513	0.0621	discard	revalidated kama_supertrend_volume_mtf_1h_4h_v1	train
+73c4650	kama_supertrend_volume_mtf_1h_4h_v1	SOLUSDT	1.2975	417.40	51.07	-50.77	66.7	5827.78	3	1.7668	1.0060	discard	revalidated kama_supertrend_volume_mtf_1h_4h_v1	train
+73c4650	kama_supertrend_volume_mtf_1h_4h_v1	BTCUSDT	-0.8304	-6.11	-5.06	-15.68	0.0	0.00	1	-1.0612	-0.3225	discard	revalidated kama_supertrend_volume_mtf_1h_4h_v1	test
+73c4650	kama_supertrend_volume_mtf_1h_4h_v1	ETHUSDT	-0.4919	-6.41	-5.30	-20.91	0.0	0.00	1	-0.6225	-0.2537	discard	revalidated kama_supertrend_volume_mtf_1h_4h_v1	test
+73c4650	kama_supertrend_volume_mtf_1h_4h_v1	SOLUSDT	-0.5523	-10.27	-8.53	-24.40	0.0	0.00	1	-0.7469	-0.3496	discard	revalidated kama_supertrend_volume_mtf_1h_4h_v1	test
+73c4650	kama_triple_mtf_bbw_zscore_1h_v1	BTCUSDT	-0.4440	10.04	2.42	-8.57	58.8	2.35	34	-0.4378	0.2827	discard	revalidated kama_triple_mtf_bbw_zscore_1h_v1	train
+73c4650	kama_triple_mtf_bbw_zscore_1h_v1	ETHUSDT	0.0948	24.29	5.59	-13.18	69.0	2.92	29	0.1160	0.4242	keep	revalidated kama_triple_mtf_bbw_zscore_1h_v1	train
+73c4650	kama_triple_mtf_bbw_zscore_1h_v1	SOLUSDT	1.0077	97.34	18.61	-23.83	75.0	316.26	8	1.3500	0.7807	keep	revalidated kama_triple_mtf_bbw_zscore_1h_v1	train
+73c4650	kama_triple_mtf_bbw_zscore_1h_v1	BTCUSDT	-1.4840	-2.30	-1.90	-6.54	0.0	0.00	1	-1.8963	-0.2903	discard	revalidated kama_triple_mtf_bbw_zscore_1h_v1	test
+73c4650	kama_triple_mtf_bbw_zscore_1h_v1	ETHUSDT	-0.9095	-2.16	-1.78	-8.82	0.0	0.00	1	-1.1510	-0.2014	discard	revalidated kama_triple_mtf_bbw_zscore_1h_v1	test
+73c4650	kama_triple_mtf_bbw_zscore_1h_v1	SOLUSDT	-0.9069	-3.62	-2.98	-10.43	0.0	0.00	1	-1.2265	-0.2860	discard	revalidated kama_triple_mtf_bbw_zscore_1h_v1	test
+73c4650	keltner_squeeze_breakout_4h_trend_1h_v1	BTCUSDT	-0.2704	13.45	3.21	-10.71	42.9	3.33	28	-0.2510	0.2994	discard	revalidated keltner_squeeze_breakout_4h_trend_1h_v1	train
+73c4650	keltner_squeeze_breakout_4h_trend_1h_v1	ETHUSDT	-0.2763	9.25	2.24	-14.70	49.3	1.41	69	-0.3016	0.1523	discard	revalidated keltner_squeeze_breakout_4h_trend_1h_v1	train
+73c4650	keltner_squeeze_breakout_4h_trend_1h_v1	SOLUSDT	1.0512	127.24	22.88	-29.01	57.1	317.06	7	1.4256	0.7888	keep	revalidated keltner_squeeze_breakout_4h_trend_1h_v1	train
+73c4650	keltner_squeeze_breakout_4h_trend_1h_v1	BTCUSDT	-1.2661	-2.91	-2.40	-8.12	0.0	0.00	1	-1.6179	-0.2956	discard	revalidated keltner_squeeze_breakout_4h_trend_1h_v1	test
+73c4650	keltner_squeeze_breakout_4h_trend_1h_v1	ETHUSDT	-0.7703	-2.78	-2.29	-10.93	0.0	0.00	1	-0.9748	-0.2100	discard	revalidated keltner_squeeze_breakout_4h_trend_1h_v1	test
+73c4650	keltner_squeeze_breakout_4h_trend_1h_v1	SOLUSDT	-0.7887	-4.63	-3.82	-12.90	0.0	0.00	1	-1.0666	-0.2964	discard	revalidated keltner_squeeze_breakout_4h_trend_1h_v1	test
+73c4650	macd_rsi_zscore_mtf_1h_4h_v1	BTCUSDT	-0.1947	15.22	3.61	-10.70	46.9	2.27	49	-0.1909	0.3371	discard	revalidated macd_rsi_zscore_mtf_1h_4h_v1	train
+73c4650	macd_rsi_zscore_mtf_1h_4h_v1	ETHUSDT	0.2713	32.42	7.28	-17.26	65.7	2.85	35	0.3293	0.4217	keep	revalidated macd_rsi_zscore_mtf_1h_4h_v1	train
+73c4650	macd_rsi_zscore_mtf_1h_4h_v1	SOLUSDT	0.9208	90.32	17.53	-23.83	57.1	126.24	7	1.2314	0.7357	keep	revalidated macd_rsi_zscore_mtf_1h_4h_v1	train
+73c4650	macd_rsi_zscore_mtf_1h_4h_v1	BTCUSDT	-1.4840	-2.30	-1.90	-6.54	0.0	0.00	1	-1.8963	-0.2903	discard	revalidated macd_rsi_zscore_mtf_1h_4h_v1	test
+73c4650	macd_rsi_zscore_mtf_1h_4h_v1	ETHUSDT	-0.9095	-2.16	-1.78	-8.82	0.0	0.00	1	-1.1510	-0.2014	discard	revalidated macd_rsi_zscore_mtf_1h_4h_v1	test
+73c4650	macd_rsi_zscore_mtf_1h_4h_v1	SOLUSDT	-0.9069	-3.62	-2.98	-10.43	0.0	0.00	1	-1.2265	-0.2860	discard	revalidated macd_rsi_zscore_mtf_1h_4h_v1	test
+73c4650	macd_supertrend_zscore_mtf_1h_4h_v1	BTCUSDT	-0.0299	17.04	4.01	-22.52	49.5	2.93	107	-0.0356	0.1783	discard	revalidated macd_supertrend_zscore_mtf_1h_4h_v1	train
+73c4650	macd_supertrend_zscore_mtf_1h_4h_v1	ETHUSDT	0.2742	38.01	8.39	-21.26	64.7	2.64	51	0.3353	0.3948	keep	revalidated macd_supertrend_zscore_mtf_1h_4h_v1	train
+73c4650	macd_supertrend_zscore_mtf_1h_4h_v1	SOLUSDT	1.2202	267.74	38.66	-42.85	77.8	991.26	9	1.6576	0.9024	keep	revalidated macd_supertrend_zscore_mtf_1h_4h_v1	train
+73c4650	macd_supertrend_zscore_mtf_1h_4h_v1	BTCUSDT	-0.9393	-4.80	-3.96	-12.72	0.0	0.00	1	-1.2003	-0.3117	discard	revalidated macd_supertrend_zscore_mtf_1h_4h_v1	test
+73c4650	macd_supertrend_zscore_mtf_1h_4h_v1	ETHUSDT	-0.5615	-4.86	-4.02	-17.03	0.0	0.00	1	-0.7106	-0.2360	discard	revalidated macd_supertrend_zscore_mtf_1h_4h_v1	test
+73c4650	macd_supertrend_zscore_mtf_1h_4h_v1	SOLUSDT	-0.6114	-7.91	-6.55	-19.96	0.0	0.00	1	-0.8268	-0.3282	discard	revalidated macd_supertrend_zscore_mtf_1h_4h_v1	test
+73c4650	macd_zscore_volume_mtf_1h_4h_v1	BTCUSDT	-0.3037	11.42	2.74	-13.08	40.4	2.67	47	-0.2490	0.2097	discard	revalidated macd_zscore_volume_mtf_1h_4h_v1	train
+73c4650	macd_zscore_volume_mtf_1h_4h_v1	ETHUSDT	-0.4277	-1.46	-0.37	-27.50	44.4	1.06	81	-0.4927	-0.0134	discard	revalidated macd_zscore_volume_mtf_1h_4h_v1	train
+73c4650	macd_zscore_volume_mtf_1h_4h_v1	SOLUSDT	1.1797	180.14	29.51	-33.90	66.7	1753.12	3	1.6097	0.8706	keep	revalidated macd_zscore_volume_mtf_1h_4h_v1	train
+73c4650	macd_zscore_volume_mtf_1h_4h_v1	BTCUSDT	-1.1209	-3.53	-2.91	-9.67	0.0	0.00	1	-1.4323	-0.3010	discard	revalidated macd_zscore_volume_mtf_1h_4h_v1	test
+73c4650	macd_zscore_volume_mtf_1h_4h_v1	ETHUSDT	-0.6775	-3.44	-2.84	-13.00	0.0	0.00	1	-0.8574	-0.2186	discard	revalidated macd_zscore_volume_mtf_1h_4h_v1	test
+73c4650	macd_zscore_volume_mtf_1h_4h_v1	SOLUSDT	-0.7099	-5.68	-4.70	-15.31	0.0	0.00	1	-0.9601	-0.3070	discard	revalidated macd_zscore_volume_mtf_1h_4h_v1	test
+73c4650	mtf_hma_rsi_1h_4h_simplified_v4	BTCUSDT	-0.7022	-11.04	-2.88	-26.44	49.0	0.96	143	-0.8498	-0.1091	discard	revalidated mtf_hma_rsi_1h_4h_simplified_v4	train
+73c4650	mtf_hma_rsi_1h_4h_simplified_v4	ETHUSDT	-0.1858	7.40	1.80	-21.73	56.0	1.16	166	-0.2226	0.0829	discard	revalidated mtf_hma_rsi_1h_4h_simplified_v4	train
+73c4650	mtf_hma_rsi_1h_4h_simplified_v4	SOLUSDT	1.1943	183.91	29.95	-33.90	60.0	978.67	5	1.6215	0.8834	keep	revalidated mtf_hma_rsi_1h_4h_simplified_v4	train
+73c4650	mtf_hma_rsi_1h_4h_simplified_v4	BTCUSDT	-1.1209	-3.53	-2.91	-9.67	0.0	0.00	1	-1.4323	-0.3010	discard	revalidated mtf_hma_rsi_1h_4h_simplified_v4	test
+73c4650	mtf_hma_rsi_1h_4h_simplified_v4	ETHUSDT	-2.2203	-22.70	-19.08	-25.38	39.4	0.30	66	-2.5934	-0.7519	discard	revalidated mtf_hma_rsi_1h_4h_simplified_v4	test
+73c4650	mtf_hma_rsi_1h_4h_simplified_v4	SOLUSDT	-0.7099	-5.68	-4.70	-15.31	0.0	0.00	1	-0.9601	-0.3070	discard	revalidated mtf_hma_rsi_1h_4h_simplified_v4	test
+73c4650	mtf_hma_supertrend_rsi_atr_15m_4h_v1	BTCUSDT	-0.8212	-20.40	-5.55	-35.76	50.8	0.93	437	-0.9903	-0.1551	discard	revalidated mtf_hma_supertrend_rsi_atr_15m_4h_v1	train
+73c4650	mtf_hma_supertrend_rsi_atr_15m_4h_v1	ETHUSDT	-0.2989	-1.95	-0.49	-36.71	49.4	0.99	265	-0.3582	-0.0134	discard	revalidated mtf_hma_supertrend_rsi_atr_15m_4h_v1	train
+73c4650	mtf_hma_supertrend_rsi_atr_15m_4h_v1	SOLUSDT	1.1951	224.78	34.41	-39.04	66.7	4569.95	3	1.5719	0.8814	keep	revalidated mtf_hma_supertrend_rsi_atr_15m_4h_v1	train
+73c4650	mtf_hma_supertrend_rsi_atr_15m_4h_v1	BTCUSDT	-0.9770	-3.95	-3.26	-11.82	0.0	0.00	1	-1.2666	-0.2755	discard	revalidated mtf_hma_supertrend_rsi_atr_15m_4h_v1	test
+73c4650	mtf_hma_supertrend_rsi_atr_15m_4h_v1	ETHUSDT	-0.5905	-3.91	-3.23	-15.47	0.0	0.00	1	-0.7729	-0.2086	discard	revalidated mtf_hma_supertrend_rsi_atr_15m_4h_v1	test
+73c4650	mtf_hma_supertrend_rsi_atr_15m_4h_v1	SOLUSDT	-0.6252	-6.43	-5.32	-18.56	0.0	0.00	1	-0.8530	-0.2866	discard	revalidated mtf_hma_supertrend_rsi_atr_15m_4h_v1	test
+73c4650	mtf_kama_macd_rsi_daily_4h_1d_v1	BTCUSDT	-0.1856	7.00	1.71	-20.13	41.4	1.23	133	-0.2131	0.0847	discard	revalidated mtf_kama_macd_rsi_daily_4h_1d_v1	train
+73c4650	mtf_kama_macd_rsi_daily_4h_1d_v1	ETHUSDT	-0.4608	-14.96	-3.97	-25.88	36.6	0.97	161	-0.5014	-0.1535	discard	revalidated mtf_kama_macd_rsi_daily_4h_1d_v1	train
+73c4650	mtf_kama_macd_rsi_daily_4h_1d_v1	SOLUSDT	0.7346	124.34	22.48	-32.05	41.3	2.12	143	0.9096	0.7015	keep	revalidated mtf_kama_macd_rsi_daily_4h_1d_v1	train
+73c4650	mtf_kama_macd_rsi_daily_4h_1d_v1	BTCUSDT	0.0199	5.87	4.81	-6.86	46.3	1.39	54	0.0254	0.7008	keep	revalidated mtf_kama_macd_rsi_daily_4h_1d_v1	test
+73c4650	mtf_kama_macd_rsi_daily_4h_1d_v1	ETHUSDT	0.6794	19.69	15.93	-10.05	54.5	1.96	44	0.8346	1.5854	keep	revalidated mtf_kama_macd_rsi_daily_4h_1d_v1	test
+73c4650	mtf_kama_macd_rsi_daily_4h_1d_v1	SOLUSDT	0.8596	25.46	20.51	-12.14	51.1	2.20	45	1.1639	1.6904	keep	revalidated mtf_kama_macd_rsi_daily_4h_1d_v1	test
+73c4650	mtf_kama_rsi_adx_1h_4h_v1	BTCUSDT	-0.6024	-12.99	-3.42	-29.15	46.8	1.02	77	-0.7146	-0.1173	discard	revalidated mtf_kama_rsi_adx_1h_4h_v1	train
+73c4650	mtf_kama_rsi_adx_1h_4h_v1	ETHUSDT	-0.2092	1.69	0.42	-27.87	51.2	0.99	129	-0.2544	0.0150	discard	revalidated mtf_kama_rsi_adx_1h_4h_v1	train
+73c4650	mtf_kama_rsi_adx_1h_4h_v1	SOLUSDT	0.9549	168.71	28.16	-38.50	57.1	81.36	14	1.2447	0.7314	keep	revalidated mtf_kama_rsi_adx_1h_4h_v1	train
+73c4650	mtf_kama_rsi_adx_1h_4h_v1	BTCUSDT	-1.0171	-4.16	-3.43	-11.21	0.0	0.00	1	-1.2998	-0.3063	discard	revalidated mtf_kama_rsi_adx_1h_4h_v1	test
+73c4650	mtf_kama_rsi_adx_1h_4h_v1	ETHUSDT	-2.1240	-27.63	-23.35	-30.99	34.1	0.22	41	-2.4737	-0.7535	discard	revalidated mtf_kama_rsi_adx_1h_4h_v1	test
+73c4650	mtf_kama_rsi_adx_1h_4h_v1	SOLUSDT	-0.6536	-6.78	-5.61	-17.66	0.0	0.00	1	-0.8839	-0.3175	discard	revalidated mtf_kama_rsi_adx_1h_4h_v1	test
+73c4650	mtf_supertrend_kama_rsi_volume_15m_4h_v1	BTCUSDT	-1.5662	-46.65	-14.55	-56.06	38.1	0.45	197	-1.8377	-0.2595	discard	revalidated mtf_supertrend_kama_rsi_volume_15m_4h_v1	train
+73c4650	mtf_supertrend_kama_rsi_volume_15m_4h_v1	ETHUSDT	0.3410	42.68	9.30	-23.47	100.0	inf	2	0.4224	0.3962	keep	revalidated mtf_supertrend_kama_rsi_volume_15m_4h_v1	train
+73c4650	mtf_supertrend_kama_rsi_volume_15m_4h_v1	SOLUSDT	1.3129	272.57	39.12	-39.04	75.0	979.62	8	1.7359	1.0021	keep	revalidated mtf_supertrend_kama_rsi_volume_15m_4h_v1	train
+73c4650	mtf_supertrend_kama_rsi_volume_15m_4h_v1	BTCUSDT	-0.9770	-3.95	-3.26	-11.82	0.0	0.00	1	-1.2666	-0.2755	discard	revalidated mtf_supertrend_kama_rsi_volume_15m_4h_v1	test
+73c4650	mtf_supertrend_kama_rsi_volume_15m_4h_v1	ETHUSDT	-0.5905	-3.91	-3.23	-15.47	0.0	0.00	1	-0.7729	-0.2086	discard	revalidated mtf_supertrend_kama_rsi_volume_15m_4h_v1	test
+73c4650	mtf_supertrend_kama_rsi_volume_15m_4h_v1	SOLUSDT	-0.6252	-6.43	-5.32	-18.56	0.0	0.00	1	-0.8530	-0.2866	discard	revalidated mtf_supertrend_kama_rsi_volume_15m_4h_v1	test
+73c4650	mtf_supertrend_macd_zscore_4h_1d_v1	BTCUSDT	-0.1964	10.09	2.43	-17.10	48.3	2.18	29	-0.2076	0.1423	discard	revalidated mtf_supertrend_macd_zscore_4h_1d_v1	train
+73c4650	mtf_supertrend_macd_zscore_4h_1d_v1	ETHUSDT	-0.0660	13.80	3.29	-18.14	51.7	1.56	29	-0.0696	0.1811	discard	revalidated mtf_supertrend_macd_zscore_4h_1d_v1	train
+73c4650	mtf_supertrend_macd_zscore_4h_1d_v1	SOLUSDT	0.8331	128.60	23.06	-37.11	75.0	13.03	12	1.1011	0.6214	keep	revalidated mtf_supertrend_macd_zscore_4h_1d_v1	train
+73c4650	mtf_supertrend_macd_zscore_4h_1d_v1	BTCUSDT	-1.0256	-4.09	-3.38	-11.14	0.0	0.00	1	-1.3261	-0.3033	discard	revalidated mtf_supertrend_macd_zscore_4h_1d_v1	test
+73c4650	mtf_supertrend_macd_zscore_4h_1d_v1	ETHUSDT	-0.6079	-4.09	-3.37	-14.73	0.0	0.00	1	-0.7838	-0.2290	discard	revalidated mtf_supertrend_macd_zscore_4h_1d_v1	test
+73c4650	mtf_supertrend_macd_zscore_4h_1d_v1	SOLUSDT	-0.6928	-6.96	-5.76	-17.13	0.0	0.00	1	-0.9626	-0.3362	discard	revalidated mtf_supertrend_macd_zscore_4h_1d_v1	test
+73c4650	mtf_supertrend_rsi_adx_zscore_4h_1h_15m_v1	BTCUSDT	-1.3842	-34.76	-10.13	-43.24	38.4	0.59	224	-1.6296	-0.2344	discard	revalidated mtf_supertrend_rsi_adx_zscore_4h_1h_15m_v1	train
+73c4650	mtf_supertrend_rsi_adx_zscore_4h_1h_15m_v1	ETHUSDT	0.2838	36.33	8.06	-20.42	100.0	inf	2	0.3515	0.3948	keep	revalidated mtf_supertrend_rsi_adx_zscore_4h_1h_15m_v1	train
+73c4650	mtf_supertrend_rsi_adx_zscore_4h_1h_15m_v1	SOLUSDT	1.3349	227.06	34.64	-34.38	83.3	25101.16	6	1.7675	1.0078	keep	revalidated mtf_supertrend_rsi_adx_zscore_4h_1h_15m_v1	train
+73c4650	mtf_supertrend_rsi_adx_zscore_4h_1h_15m_v1	BTCUSDT	-1.0791	-3.34	-2.76	-10.21	0.0	0.00	1	-1.3989	-0.2702	discard	revalidated mtf_supertrend_rsi_adx_zscore_4h_1h_15m_v1	test
+73c4650	mtf_supertrend_rsi_adx_zscore_4h_1h_15m_v1	ETHUSDT	-0.6563	-3.24	-2.68	-13.38	0.0	0.00	1	-0.8590	-0.2001	discard	revalidated mtf_supertrend_rsi_adx_zscore_4h_1h_15m_v1	test
+73c4650	mtf_supertrend_rsi_adx_zscore_4h_1h_15m_v1	SOLUSDT	-0.6809	-5.38	-4.45	-16.10	0.0	0.00	1	-0.9290	-0.2763	discard	revalidated mtf_supertrend_rsi_adx_zscore_4h_1h_15m_v1	test
+73c4650	mtf_supertrend_rsi_atr_scale_15m_4h_v1	BTCUSDT	-1.1010	-31.29	-8.96	-41.57	34.7	0.77	372	-1.3251	-0.2156	discard	revalidated mtf_supertrend_rsi_atr_scale_15m_4h_v1	train
+73c4650	mtf_supertrend_rsi_atr_scale_15m_4h_v1	ETHUSDT	0.3474	43.21	9.40	-23.47	100.0	inf	2	0.4304	0.4005	keep	revalidated mtf_supertrend_rsi_atr_scale_15m_4h_v1	train
+73c4650	mtf_supertrend_rsi_atr_scale_15m_4h_v1	SOLUSDT	1.1891	230.25	34.97	-39.04	53.3	286.87	15	1.5460	0.8958	keep	revalidated mtf_supertrend_rsi_atr_scale_15m_4h_v1	train
+73c4650	mtf_supertrend_rsi_atr_scale_15m_4h_v1	BTCUSDT	-0.9770	-3.95	-3.26	-11.82	0.0	0.00	1	-1.2666	-0.2755	discard	revalidated mtf_supertrend_rsi_atr_scale_15m_4h_v1	test
+73c4650	mtf_supertrend_rsi_atr_scale_15m_4h_v1	ETHUSDT	-0.5905	-3.91	-3.23	-15.47	0.0	0.00	1	-0.7729	-0.2086	discard	revalidated mtf_supertrend_rsi_atr_scale_15m_4h_v1	test
+73c4650	mtf_supertrend_rsi_atr_scale_15m_4h_v1	SOLUSDT	-0.6252	-6.43	-5.32	-18.56	0.0	0.00	1	-0.8530	-0.2866	discard	revalidated mtf_supertrend_rsi_atr_scale_15m_4h_v1	test
+73c4650	mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_v1	BTCUSDT	-0.6820	-8.84	-2.29	-27.34	44.8	0.96	154	-0.8117	-0.0837	discard	revalidated mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_v1	train
+73c4650	mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_v1	ETHUSDT	-0.0963	18.32	4.30	-10.68	100.0	inf	2	-0.1193	0.4026	discard	revalidated mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_v1	train
+73c4650	mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_v1	SOLUSDT	1.0126	176.58	29.10	-39.04	43.5	142.14	23	1.3190	0.7453	keep	revalidated mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_v1	train
+73c4650	mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_v1	BTCUSDT	-1.2220	-2.75	-2.27	-8.57	0.0	0.00	1	-1.5841	-0.2649	discard	revalidated mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_v1	test
+73c4650	mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_v1	ETHUSDT	-1.1170	-1.46	-1.20	-6.87	0.0	0.00	1	-1.4619	-0.1749	discard	revalidated mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_v1	test
+73c4650	mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_v1	SOLUSDT	-0.6252	-6.43	-5.32	-18.56	0.0	0.00	1	-0.8530	-0.2866	discard	revalidated mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_v1	test
+73c4650	mtf_supertrend_rsi_daily_1h_4h_1d_v1	BTCUSDT	-0.2850	3.88	0.96	-16.85	50.4	1.13	462	-0.2721	0.0567	discard	revalidated mtf_supertrend_rsi_daily_1h_4h_1d_v1	train
+73c4650	mtf_supertrend_rsi_daily_1h_4h_1d_v1	ETHUSDT	-0.2749	-0.32	-0.08	-24.89	46.6	1.09	425	-0.2709	-0.0033	discard	revalidated mtf_supertrend_rsi_daily_1h_4h_1d_v1	train
+73c4650	mtf_supertrend_rsi_daily_1h_4h_1d_v1	SOLUSDT	0.7541	120.12	21.90	-31.05	51.4	1.45	451	0.7556	0.7054	keep	revalidated mtf_supertrend_rsi_daily_1h_4h_1d_v1	train
+73c4650	mtf_supertrend_rsi_daily_1h_4h_1d_v1	BTCUSDT	-0.6545	-1.55	-1.28	-8.57	49.6	1.04	133	-0.6466	-0.1491	discard	revalidated mtf_supertrend_rsi_daily_1h_4h_1d_v1	test
+73c4650	mtf_supertrend_rsi_daily_1h_4h_1d_v1	ETHUSDT	0.5353	15.03	12.21	-9.27	55.1	1.43	147	0.5556	1.3168	keep	revalidated mtf_supertrend_rsi_daily_1h_4h_1d_v1	test
+73c4650	mtf_supertrend_rsi_daily_1h_4h_1d_v1	SOLUSDT	-0.3560	-3.14	-2.59	-16.14	50.7	1.01	152	-0.3674	-0.1605	discard	revalidated mtf_supertrend_rsi_daily_1h_4h_1d_v1	test
+73c4650	multi_factor_trend_following	BTCUSDT	0.0000	0.00	0.00	0.00	0.0	0.00	0	0.0000	0.0000	discard	revalidated multi_factor_trend_following	train
+73c4650	multi_factor_trend_following	ETHUSDT	0.0000	0.00	0.00	0.00	0.0	0.00	0	0.0000	0.0000	discard	revalidated multi_factor_trend_following	train
+73c4650	multi_factor_trend_following	SOLUSDT	0.0000	0.00	0.00	0.00	0.0	0.00	0	0.0000	0.0000	discard	revalidated multi_factor_trend_following	train
+73c4650	multi_factor_trend_following	BTCUSDT	0.0000	0.00	0.00	0.00	0.0	0.00	0	0.0000	0.0000	discard	revalidated multi_factor_trend_following	test
+73c4650	multi_factor_trend_following	ETHUSDT	0.0000	0.00	0.00	0.00	0.0	0.00	0	0.0000	0.0000	discard	revalidated multi_factor_trend_following	test
+73c4650	multi_factor_trend_following	SOLUSDT	-12.5370	-0.54	-0.44	-0.54	0.0	0.00	1	-0.2834	-0.8230	discard	revalidated multi_factor_trend_following	test
+73c4650	multi_tf_trend_momentum	BTCUSDT	-0.6816	-92.72	-48.07	-93.39	51.1	1.45	4270	-0.6471	-0.5148	discard	revalidated multi_tf_trend_momentum	train
+73c4650	multi_tf_trend_momentum	ETHUSDT	0.3685	15.63	3.70	-76.24	56.6	1.72	5006	0.3791	0.0485	discard	revalidated multi_tf_trend_momentum	train
+73c4650	multi_tf_trend_momentum	SOLUSDT	1.1871	1639.06	104.81	-61.01	62.2	2.15	6425	1.3096	1.7180	discard	revalidated multi_tf_trend_momentum	train
+73c4650	multi_tf_trend_momentum	BTCUSDT	-0.5850	-42.43	-36.50	-63.12	51.7	1.24	1212	-0.5585	-0.5783	discard	revalidated multi_tf_trend_momentum	test
+73c4650	multi_tf_trend_momentum	ETHUSDT	-0.7436	-62.77	-55.64	-76.85	53.8	1.23	1521	-0.7697	-0.7240	discard	revalidated multi_tf_trend_momentum	test
+73c4650	multi_tf_trend_momentum	SOLUSDT	0.1489	-20.68	-17.36	-69.93	63.4	1.75	1825	0.1571	-0.2482	discard	revalidated multi_tf_trend_momentum	test
+73c4650	multi_tf_trend_volume	BTCUSDT	-0.9948	-97.14	-58.92	-97.68	56.2	3.32	6371	-0.9538	-0.6031	discard	revalidated multi_tf_trend_volume	train
+73c4650	multi_tf_trend_volume	ETHUSDT	-0.7070	-97.13	-58.87	-98.98	55.8	4.92	6788	-0.7018	-0.5947	discard	revalidated multi_tf_trend_volume	train
+73c4650	multi_tf_trend_volume	SOLUSDT	-0.4307	-97.58	-60.69	-98.22	60.1	2.89	7742	-0.4767	-0.6179	discard	revalidated multi_tf_trend_volume	train
+73c4650	multi_tf_trend_volume	BTCUSDT	-1.7611	-70.31	-63.17	-71.98	53.2	3.38	1770	-1.5217	-0.8776	discard	revalidated multi_tf_trend_volume	test
+73c4650	multi_tf_trend_volume	ETHUSDT	-1.3453	-83.63	-77.43	-85.70	50.9	3.97	2120	-1.4204	-0.9035	discard	revalidated multi_tf_trend_volume	test
+73c4650	multi_tf_trend_volume	SOLUSDT	-0.8061	-78.19	-71.43	-88.67	58.1	4.18	2144	-0.8996	-0.8056	discard	revalidated multi_tf_trend_volume	test
+73c4650	regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1	BTCUSDT	-0.6639	-13.35	-3.52	-29.74	50.5	0.94	283	-0.8182	-0.1184	discard	revalidated regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1	train
+73c4650	regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1	ETHUSDT	0.3372	42.36	9.24	-23.47	100.0	inf	2	0.4176	0.3936	keep	revalidated regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1	train
+73c4650	regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1	SOLUSDT	1.1572	220.85	34.00	-39.04	45.5	318.50	11	1.5087	0.8709	keep	revalidated regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1	train
+73c4650	regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1	BTCUSDT	-0.9770	-3.95	-3.26	-11.82	0.0	0.00	1	-1.2666	-0.2755	discard	revalidated regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1	test
+73c4650	regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1	ETHUSDT	-0.5905	-3.91	-3.23	-15.47	0.0	0.00	1	-0.7729	-0.2086	discard	revalidated regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1	test
+73c4650	regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1	SOLUSDT	-0.6252	-6.43	-5.32	-18.56	0.0	0.00	1	-0.8530	-0.2866	discard	revalidated regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1	test
+73c4650	regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1	BTCUSDT	-1.1402	-34.15	-9.93	-40.73	36.0	0.35	164	-1.3853	-0.2437	discard	revalidated regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1	train
+73c4650	regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1	ETHUSDT	0.3734	48.02	10.31	-26.42	100.0	inf	1	0.4624	0.3901	keep	revalidated regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1	train
+73c4650	regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1	SOLUSDT	1.2598	297.87	41.43	-43.43	62.5	1551.24	8	1.6556	0.9541	keep	revalidated regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1	train
+73c4650	regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1	BTCUSDT	-1.5274	-10.79	-8.97	-17.26	23.3	0.12	30	-1.9426	-0.5197	discard	revalidated regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1	test
+73c4650	regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1	ETHUSDT	-0.5412	-4.61	-3.80	-17.51	0.0	0.00	1	-0.7083	-0.2172	discard	revalidated regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1	test
+73c4650	regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1	SOLUSDT	-0.5834	-7.52	-6.23	-20.97	0.0	0.00	1	-0.7960	-0.2970	discard	revalidated regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1	test
+73c4650	regime_adaptive_mtf_trend_mr_15m_4h_v1	BTCUSDT	-0.6959	-13.96	-3.69	-31.51	36.8	0.93	212	-0.8221	-0.1171	discard	revalidated regime_adaptive_mtf_trend_mr_15m_4h_v1	train
+73c4650	regime_adaptive_mtf_trend_mr_15m_4h_v1	ETHUSDT	0.3358	42.24	9.22	-23.47	100.0	inf	2	0.4159	0.3926	keep	revalidated regime_adaptive_mtf_trend_mr_15m_4h_v1	train
+73c4650	regime_adaptive_mtf_trend_mr_15m_4h_v1	SOLUSDT	0.9032	154.75	26.46	-39.04	43.5	81.49	23	1.1632	0.6777	keep	revalidated regime_adaptive_mtf_trend_mr_15m_4h_v1	train
+73c4650	regime_adaptive_mtf_trend_mr_15m_4h_v1	BTCUSDT	-0.9770	-3.95	-3.26	-11.82	0.0	0.00	1	-1.2666	-0.2755	discard	revalidated regime_adaptive_mtf_trend_mr_15m_4h_v1	test
+73c4650	regime_adaptive_mtf_trend_mr_15m_4h_v1	ETHUSDT	-0.5905	-3.91	-3.23	-15.47	0.0	0.00	1	-0.7729	-0.2086	discard	revalidated regime_adaptive_mtf_trend_mr_15m_4h_v1	test
+73c4650	regime_adaptive_mtf_trend_mr_15m_4h_v1	SOLUSDT	-0.6252	-6.43	-5.32	-18.56	0.0	0.00	1	-0.8530	-0.2866	discard	revalidated regime_adaptive_mtf_trend_mr_15m_4h_v1	test
+73c4650	regime_adaptive_mtf_voting_15m_4h_v1	BTCUSDT	-0.8350	-21.52	-5.88	-36.69	50.7	0.84	286	-1.0095	-0.1603	discard	revalidated regime_adaptive_mtf_voting_15m_4h_v1	train
+73c4650	regime_adaptive_mtf_voting_15m_4h_v1	ETHUSDT	0.3427	42.82	9.33	-23.47	100.0	inf	2	0.4245	0.3973	keep	revalidated regime_adaptive_mtf_voting_15m_4h_v1	train
+73c4650	regime_adaptive_mtf_voting_15m_4h_v1	SOLUSDT	1.0916	201.54	31.93	-39.04	37.5	283.75	8	1.4125	0.8178	keep	revalidated regime_adaptive_mtf_voting_15m_4h_v1	train
+73c4650	regime_adaptive_mtf_voting_15m_4h_v1	BTCUSDT	-0.9770	-3.95	-3.26	-11.82	0.0	0.00	1	-1.2666	-0.2755	discard	revalidated regime_adaptive_mtf_voting_15m_4h_v1	test
+73c4650	regime_adaptive_mtf_voting_15m_4h_v1	ETHUSDT	-0.5905	-3.91	-3.23	-15.47	0.0	0.00	1	-0.7729	-0.2086	discard	revalidated regime_adaptive_mtf_voting_15m_4h_v1	test
+73c4650	regime_adaptive_mtf_voting_15m_4h_v1	SOLUSDT	-0.6252	-6.43	-5.32	-18.56	0.0	0.00	1	-0.8530	-0.2866	discard	revalidated regime_adaptive_mtf_voting_15m_4h_v1	test
+73c4650	regime_ensemble_voting_mtf_proper_15m_4h_v1	BTCUSDT	-0.8826	-24.20	-6.70	-39.02	31.5	0.70	232	-1.0868	-0.1716	discard	revalidated regime_ensemble_voting_mtf_proper_15m_4h_v1	train
+73c4650	regime_ensemble_voting_mtf_proper_15m_4h_v1	ETHUSDT	0.3717	47.85	10.28	-26.42	100.0	inf	1	0.4603	0.3889	keep	revalidated regime_ensemble_voting_mtf_proper_15m_4h_v1	train
+73c4650	regime_ensemble_voting_mtf_proper_15m_4h_v1	SOLUSDT	1.0621	220.33	33.94	-43.43	38.9	185.04	36	1.3894	0.7816	keep	revalidated regime_ensemble_voting_mtf_proper_15m_4h_v1	train
+73c4650	regime_ensemble_voting_mtf_proper_15m_4h_v1	BTCUSDT	-0.9005	-4.56	-3.77	-13.41	0.0	0.00	1	-1.1674	-0.2808	discard	revalidated regime_ensemble_voting_mtf_proper_15m_4h_v1	test
+73c4650	regime_ensemble_voting_mtf_proper_15m_4h_v1	ETHUSDT	-0.5412	-4.61	-3.80	-17.51	0.0	0.00	1	-0.7083	-0.2172	discard	revalidated regime_ensemble_voting_mtf_proper_15m_4h_v1	test
+73c4650	regime_ensemble_voting_mtf_proper_15m_4h_v1	SOLUSDT	-0.5834	-7.52	-6.23	-20.97	0.0	0.00	1	-0.7960	-0.2970	discard	revalidated regime_ensemble_voting_mtf_proper_15m_4h_v1	test
+73c4650	simplified_mtf_ensemble_proper_htf_15m_4h_v1	BTCUSDT	-1.0838	-20.51	-5.58	-30.79	50.6	0.78	330	-1.2814	-0.1812	discard	revalidated simplified_mtf_ensemble_proper_htf_15m_4h_v1	train
+73c4650	simplified_mtf_ensemble_proper_htf_15m_4h_v1	ETHUSDT	0.1991	29.80	6.74	-17.27	100.0	inf	2	0.2466	0.3904	keep	revalidated simplified_mtf_ensemble_proper_htf_15m_4h_v1	train
+73c4650	simplified_mtf_ensemble_proper_htf_15m_4h_v1	SOLUSDT	0.9688	122.36	22.21	-29.43	55.6	85.27	36	1.2517	0.7549	keep	revalidated simplified_mtf_ensemble_proper_htf_15m_4h_v1	train
+73c4650	simplified_mtf_ensemble_proper_htf_15m_4h_v1	BTCUSDT	-1.2220	-2.75	-2.27	-8.57	0.0	0.00	1	-1.5841	-0.2649	discard	revalidated simplified_mtf_ensemble_proper_htf_15m_4h_v1	test
+73c4650	simplified_mtf_ensemble_proper_htf_15m_4h_v1	ETHUSDT	-0.7485	-2.61	-2.16	-11.25	0.0	0.00	1	-0.9796	-0.1916	discard	revalidated simplified_mtf_ensemble_proper_htf_15m_4h_v1	test
+73c4650	simplified_mtf_ensemble_proper_htf_15m_4h_v1	SOLUSDT	-0.7589	-4.37	-3.61	-13.57	0.0	0.00	1	-1.0355	-0.2660	discard	revalidated simplified_mtf_ensemble_proper_htf_15m_4h_v1	test
+73c4650	simplified_mtf_trend_volume_15m_1h_v1	BTCUSDT	-0.8840	-17.47	-4.69	-33.33	50.5	0.92	400	-1.0351	-0.1408	discard	revalidated simplified_mtf_trend_volume_15m_1h_v1	train
+73c4650	simplified_mtf_trend_volume_15m_1h_v1	ETHUSDT	0.2725	35.57	7.91	-20.42	100.0	inf	2	0.3375	0.3874	keep	revalidated simplified_mtf_trend_volume_15m_1h_v1	train
+73c4650	simplified_mtf_trend_volume_15m_1h_v1	SOLUSDT	1.0898	167.78	28.05	-34.38	55.6	206.93	18	1.4222	0.8160	keep	revalidated simplified_mtf_trend_volume_15m_1h_v1	train
+73c4650	simplified_mtf_trend_volume_15m_1h_v1	BTCUSDT	-1.0791	-3.34	-2.76	-10.21	0.0	0.00	1	-1.3989	-0.2702	discard	revalidated simplified_mtf_trend_volume_15m_1h_v1	test
+73c4650	simplified_mtf_trend_volume_15m_1h_v1	ETHUSDT	-0.6563	-3.24	-2.68	-13.38	0.0	0.00	1	-0.8590	-0.2001	discard	revalidated simplified_mtf_trend_volume_15m_1h_v1	test
+73c4650	simplified_mtf_trend_volume_15m_1h_v1	SOLUSDT	-0.6809	-5.38	-4.45	-16.10	0.0	0.00	1	-0.9290	-0.2763	discard	revalidated simplified_mtf_trend_volume_15m_1h_v1	test
+73c4650	simplified_trend_momentum	BTCUSDT	-0.3516	-91.58	-46.15	-97.09	44.6	1.27	3070	-0.3805	-0.4754	discard	revalidated simplified_trend_momentum	train
+73c4650	simplified_trend_momentum	ETHUSDT	0.1097	-75.05	-29.34	-94.61	48.3	1.43	4210	0.1248	-0.3101	discard	revalidated simplified_trend_momentum	train
+73c4650	simplified_trend_momentum	SOLUSDT	0.8645	268.42	38.73	-77.53	55.3	1.56	7388	1.1001	0.4995	discard	revalidated simplified_trend_momentum	train
+73c4650	simplified_trend_momentum	BTCUSDT	-1.3436	-72.12	-65.03	-84.80	36.9	0.91	632	-1.3759	-0.7670	discard	revalidated simplified_trend_momentum	test
+73c4650	simplified_trend_momentum	ETHUSDT	-1.2858	-86.94	-81.26	-91.29	40.6	0.90	1122	-1.4968	-0.8901	discard	revalidated simplified_trend_momentum	test
+73c4650	simplified_trend_momentum	SOLUSDT	-0.5839	-78.10	-71.33	-91.84	48.9	1.23	1485	-0.7161	-0.7767	discard	revalidated simplified_trend_momentum	test
+73c4650	supertrend_4h_v1	BTCUSDT	-0.0394	7.10	1.73	-20.81	32.5	1.19	209	-0.0536	0.0832	discard	revalidated supertrend_4h_v1	train
+73c4650	supertrend_4h_v1	ETHUSDT	0.0977	16.67	3.93	-32.88	36.4	1.21	209	0.1305	0.1196	keep	revalidated supertrend_4h_v1	train
+73c4650	supertrend_4h_v1	SOLUSDT	0.5330	111.37	20.67	-44.92	33.7	1.54	205	0.7521	0.4601	keep	revalidated supertrend_4h_v1	train
+73c4650	supertrend_4h_v1	BTCUSDT	-0.1771	1.15	0.95	-11.68	40.3	1.12	67	-0.2468	0.0811	discard	revalidated supertrend_4h_v1	test
+73c4650	supertrend_4h_v1	ETHUSDT	-0.0600	0.40	0.33	-23.04	38.8	1.17	67	-0.0829	0.0143	discard	revalidated supertrend_4h_v1	test
+73c4650	supertrend_4h_v1	SOLUSDT	0.4104	16.63	13.49	-24.30	42.2	1.27	64	0.6198	0.5550	keep	revalidated supertrend_4h_v1	test
+73c4650	supertrend_macd_atr_mtf_1h_4h_v1	BTCUSDT	-0.4124	9.26	2.24	-10.85	50.0	1.85	54	-0.4088	0.2065	discard	revalidated supertrend_macd_atr_mtf_1h_4h_v1	train
+73c4650	supertrend_macd_atr_mtf_1h_4h_v1	ETHUSDT	-0.1522	14.43	3.43	-17.43	57.7	1.83	26	-0.1847	0.1967	discard	revalidated supertrend_macd_atr_mtf_1h_4h_v1	train
+73c4650	supertrend_macd_atr_mtf_1h_4h_v1	SOLUSDT	1.0004	96.88	18.54	-23.83	50.0	420.92	4	1.3607	0.7778	keep	revalidated supertrend_macd_atr_mtf_1h_4h_v1	train
+73c4650	supertrend_macd_atr_mtf_1h_4h_v1	BTCUSDT	-1.4840	-2.30	-1.90	-6.54	0.0	0.00	1	-1.8963	-0.2903	discard	revalidated supertrend_macd_atr_mtf_1h_4h_v1	test
+73c4650	supertrend_macd_atr_mtf_1h_4h_v1	ETHUSDT	-0.9095	-2.16	-1.78	-8.82	0.0	0.00	1	-1.1510	-0.2014	discard	revalidated supertrend_macd_atr_mtf_1h_4h_v1	test
+73c4650	supertrend_macd_atr_mtf_1h_4h_v1	SOLUSDT	-0.9069	-3.62	-2.98	-10.43	0.0	0.00	1	-1.2265	-0.2860	discard	revalidated supertrend_macd_atr_mtf_1h_4h_v1	test
+73c4650	supertrend_rsi_regime_4h_1d_v1	BTCUSDT	0.3224	32.74	7.34	-10.95	51.8	1.84	112	0.2512	0.6707	keep	revalidated supertrend_rsi_regime_4h_1d_v1	train
+73c4650	supertrend_rsi_regime_4h_1d_v1	ETHUSDT	0.7050	56.09	11.78	-8.40	52.9	2.25	102	0.5501	1.4022	keep	revalidated supertrend_rsi_regime_4h_1d_v1	train
+73c4650	supertrend_rsi_regime_4h_1d_v1	SOLUSDT	1.1384	154.98	26.48	-21.17	50.0	2.21	112	0.9929	1.2508	keep	revalidated supertrend_rsi_regime_4h_1d_v1	train
+73c4650	supertrend_rsi_regime_4h_1d_v1	BTCUSDT	-0.6473	1.58	1.30	-4.91	47.1	1.22	34	-0.4661	0.2642	discard	revalidated supertrend_rsi_regime_4h_1d_v1	test
+73c4650	supertrend_rsi_regime_4h_1d_v1	ETHUSDT	-1.0929	-4.59	-3.79	-9.97	35.3	0.87	34	-0.7095	-0.3800	discard	revalidated supertrend_rsi_regime_4h_1d_v1	test
+73c4650	supertrend_rsi_regime_4h_1d_v1	SOLUSDT	-1.5544	-11.10	-9.22	-14.53	28.1	0.47	32	-1.0783	-0.6346	discard	revalidated supertrend_rsi_regime_4h_1d_v1	test
+73c4650	trend_momentum_rsi_filter	BTCUSDT	-2.6200	-99.83	-79.69	-99.83	43.1	0.92	4889	-2.3927	-0.7982	discard	revalidated trend_momentum_rsi_filter	train
+73c4650	trend_momentum_rsi_filter	ETHUSDT	-0.5954	-91.65	-46.26	-96.40	47.7	1.15	4889	-0.5809	-0.4799	discard	revalidated trend_momentum_rsi_filter	train
+73c4650	trend_momentum_rsi_filter	SOLUSDT	0.2450	-54.19	-17.80	-91.94	52.8	1.23	5291	0.2536	-0.1936	discard	revalidated trend_momentum_rsi_filter	train
+73c4650	trend_momentum_rsi_filter	BTCUSDT	-2.9383	-77.91	-71.13	-80.89	49.8	0.89	1606	-2.6775	-0.8793	discard	revalidated trend_momentum_rsi_filter	test
+73c4650	trend_momentum_rsi_filter	ETHUSDT	-1.0723	-64.07	-56.92	-74.84	47.1	1.06	1421	-1.0690	-0.7605	discard	revalidated trend_momentum_rsi_filter	test
+73c4650	trend_momentum_rsi_filter	SOLUSDT	0.2708	-7.84	-6.49	-71.33	49.6	1.20	1380	0.2654	-0.0910	discard	revalidated trend_momentum_rsi_filter	test
+73c4650	trend_momentum_v2	BTCUSDT	0.0743	-25.23	-7.01	-72.51	67.5	6.49	9771	0.0870	-0.0967	discard	revalidated trend_momentum_v2	train
+73c4650	trend_momentum_v2	ETHUSDT	0.3402	25.37	5.82	-71.30	72.2	7.68	10785	0.4139	0.0816	discard	revalidated trend_momentum_v2	train
+73c4650	trend_momentum_v2	SOLUSDT	0.5746	121.89	22.15	-65.03	72.0	5.77	12614	0.7470	0.3406	discard	revalidated trend_momentum_v2	train
+73c4650	trend_momentum_v2	BTCUSDT	-1.5124	-60.41	-53.34	-67.57	64.1	3.23	2761	-1.7041	-0.7894	discard	revalidated trend_momentum_v2	test
+73c4650	trend_momentum_v2	ETHUSDT	-0.7553	-56.53	-49.61	-69.91	69.0	6.30	3483	-0.8997	-0.7096	discard	revalidated trend_momentum_v2	test
+73c4650	trend_momentum_v2	SOLUSDT	-0.1820	-34.06	-29.00	-73.52	74.6	5.70	3730	-0.2331	-0.3945	discard	revalidated trend_momentum_v2	test
+73c4650	vol_adjusted_mtf_hma_rsi_15m_4h_v1	BTCUSDT	-0.5318	-10.62	-2.77	-34.65	48.1	1.15	337	-0.6624	-0.0800	discard	revalidated vol_adjusted_mtf_hma_rsi_15m_4h_v1	train
+73c4650	vol_adjusted_mtf_hma_rsi_15m_4h_v1	ETHUSDT	-0.3195	-5.85	-1.50	-37.81	51.6	0.93	306	-0.3893	-0.0396	discard	revalidated vol_adjusted_mtf_hma_rsi_15m_4h_v1	train
+73c4650	vol_adjusted_mtf_hma_rsi_15m_4h_v1	SOLUSDT	1.0266	109.94	20.46	-26.07	62.5	417.62	8	1.3447	0.7849	keep	revalidated vol_adjusted_mtf_hma_rsi_15m_4h_v1	train
+73c4650	vol_adjusted_mtf_hma_rsi_15m_4h_v1	BTCUSDT	-0.9005	-4.56	-3.77	-13.41	0.0	0.00	1	-1.1674	-0.2808	discard	revalidated vol_adjusted_mtf_hma_rsi_15m_4h_v1	test
+73c4650	vol_adjusted_mtf_hma_rsi_15m_4h_v1	ETHUSDT	-0.5412	-4.61	-3.80	-17.51	0.0	0.00	1	-0.7083	-0.2172	discard	revalidated vol_adjusted_mtf_hma_rsi_15m_4h_v1	test
+73c4650	vol_adjusted_mtf_hma_rsi_15m_4h_v1	SOLUSDT	-0.8284	-3.74	-3.09	-11.91	0.0	0.00	1	-1.1302	-0.2594	discard	revalidated vol_adjusted_mtf_hma_rsi_15m_4h_v1	test

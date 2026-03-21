@@ -365,27 +365,42 @@ def run_strategy_backtest(
     leverage = getattr(strategy, "leverage", 1.0)
     strategy_name = strategy.name
 
-    # Load price data
-    prices = load_klines(symbol, timeframe, start_date, end_date, config)
-    if len(prices) == 0:
+    # Load price data WITH WARMUP BUFFER for indicators
+    # Strategies need historical bars before the period for indicator warmup
+    # (EMA, HMA, ATR all need lookback). Load extra 500 bars before start.
+    warmup_start = "2020-01-01"  # Load from earliest available for full warmup
+    prices_full = load_klines(symbol, timeframe, warmup_start, end_date, config)
+    if len(prices_full) == 0:
         raise ValueError(f"No data for {symbol} {timeframe} in {period} period")
 
-    # Load funding data
+    # Find where the actual period starts in the full data
+    start_ts = pd.Timestamp(start_date, tz="UTC")
+    period_mask = prices_full["open_time"] >= start_ts
+    period_start_idx = period_mask.idxmax() if period_mask.any() else 0
+
+    # Generate signals on FULL data (with warmup) so indicators are warm
+    if hasattr(strategy, "generate_signals_multi") and hasattr(strategy, "extra_timeframes"):
+        data = {timeframe: prices_full}
+        for tf in strategy.extra_timeframes:
+            data[tf] = load_klines(symbol, tf, warmup_start, end_date, config)
+        signals_full = strategy.generate_signals_multi(data)
+    else:
+        signals_full = strategy.generate_signals(prices_full)
+
+    # Trim to period: only use prices and signals from period_start_idx onwards
+    prices = prices_full.iloc[period_start_idx:].reset_index(drop=True)
+    signals = signals_full[period_start_idx:]
+
+    if len(prices) == 0:
+        raise ValueError(f"No data for {symbol} {timeframe} in {period} period after warmup trim")
+
+    # Load funding data for the actual period only
     funding_df = None
     if bt_config.include_funding:
         try:
             funding_df = load_funding_rate(symbol, start_date, end_date, config)
         except FileNotFoundError:
             pass  # Proceed without funding data
-
-    # Check for multi-timeframe strategy
-    if hasattr(strategy, "generate_signals_multi") and hasattr(strategy, "extra_timeframes"):
-        data = {timeframe: prices}
-        for tf in strategy.extra_timeframes:
-            data[tf] = load_klines(symbol, tf, start_date, end_date, config)
-        signals = strategy.generate_signals_multi(data)
-    else:
-        signals = strategy.generate_signals(prices)
 
     # Validate signals
     assert len(signals) == len(prices), \

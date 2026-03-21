@@ -76,10 +76,10 @@ def get_htf_data(prices: pd.DataFrame, htf: str = "4h") -> pd.DataFrame:
 
     df = pd.read_parquet(htf_path)
 
-    # Filter to same time range (with some buffer for lookback)
-    min_time = prices["open_time"].min()
+    # Load ALL data up to prices max time (includes warmup before period start)
+    # This ensures indicators on HTF have full warmup regardless of period
     max_time = prices["open_time"].max()
-    df = df[(df["open_time"] >= min_time) & (df["open_time"] <= max_time)]
+    df = df[df["open_time"] <= max_time]
 
     return df.reset_index(drop=True)
 
