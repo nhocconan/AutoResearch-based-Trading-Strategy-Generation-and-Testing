@@ -1,64 +1,94 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #003 - Bollinger Mean Reversion + SMA Trend Filter + Volume Confirmation
-====================================================================================
-Hypothesis: Mean reversion strategies work well in crypto's ranging periods (60-70% of time).
-Using 4h SMA(50) for trend direction + 1h Bollinger Band extremes for entries + volume
-confirmation should capture reversions while avoiding counter-trend trades.
+EXPERIMENT #004 - Keltner Channel Trend + DEMA Crossover + Stochastic Entry + Volume Filter
+============================================================================================
+Hypothesis: Keltner Channels (volatility-based) provide cleaner trend signals than Donchian
+(price-based). DEMA crossover gives faster response than HMA. Stochastic entry timing
+catches pullbacks better than RSI. Volume filter confirms breakout validity.
 
-Key innovations vs current best (mtf_supertrend_macd_adx_v1):
-- Mean reversion instead of momentum (different market regime)
-- Bollinger Band position (%B) for entry timing at extremes
-- Volume spike filter confirms genuine reversals vs fakeouts
-- SMA(50) trend filter prevents counter-trend mean reversion
-- ATR trailing stop at 2.0*ATR with position reduction at 1.5R profit
+Key differences from mtf_donchian_hma_rsi_zscore_v1:
+- Keltner (EMA+ATR) instead of Donchian - smoother volatility-adaptive channels
+- DEMA(8/21) instead of HMA(21) - faster trend response with less lag
+- Stochastic(14,3,3) instead of RSI(14) - better for identifying pullback extremes
+- Volume filter (20-period MA) to confirm breakout validity
+- Discrete position sizing (0.0, ±0.25, ±0.35) to minimize churn costs
+- ATR trailing stop at 2.5*ATR with proper entry price tracking
 
 Why this might beat Sharpe=1.278:
-- Crypto spends more time ranging than trending (mean reversion edge)
-- Bollinger %B at extremes has statistical edge for reversions
-- Volume confirmation reduces false signals
-- Multi-timeframe trend filter protects against strong trends
-- Discrete position sizing (0.0, ±0.25, ±0.35) reduces churn costs
+- Keltner adapts to volatility regimes better than fixed Donchian periods
+- DEMA responds faster to trend changes than HMA
+- Stochastic oversold/overbought levels clearer for pullback entries
+- Volume confirmation reduces false breakout entries
+- Multi-signal confluence reduces whipsaw trades
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_bollinger_sma_volume_v1"
+name = "mtf_keltner_dema_stoch_volume_v1"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_sma(close, period=50):
-    """Calculate Simple Moving Average"""
+def calculate_dema(close, period=21):
+    """Calculate Double Exponential Moving Average - faster response than EMA"""
     n = len(close)
-    sma = np.zeros(n)
-    for i in range(period - 1, n):
-        sma[i] = np.mean(close[i - period + 1:i + 1])
-    return sma
+    if n < period:
+        return np.zeros(n)
+    
+    ema1 = pd.Series(close).ewm(span=period, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, adjust=False).mean().values
+    
+    dema = 2 * ema1 - ema2
+    dema[:period] = np.nan
+    
+    return dema
 
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands with %B indicator"""
+def calculate_keltner(high, low, close, ema_period=20, atr_period=10, multiplier=2.0):
+    """Calculate Keltner Channel - volatility-adaptive trend channel"""
     n = len(close)
-    sma = np.zeros(n)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    pct_b = np.zeros(n)
     
-    for i in range(period - 1, n):
-        sma[i] = np.mean(close[i - period + 1:i + 1])
-        std = np.std(close[i - period + 1:i + 1])
-        upper[i] = sma[i] + std_mult * std
-        lower[i] = sma[i] - std_mult * std
-        
-        band_width = upper[i] - lower[i]
-        if band_width > 0:
-            pct_b[i] = (close[i] - lower[i]) / band_width
-        else:
-            pct_b[i] = 0.5
+    # EMA for center line
+    ema = pd.Series(close).ewm(span=ema_period, adjust=False).mean().values
     
-    return upper, lower, pct_b
+    # ATR calculation
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+    
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False).mean().values
+    
+    # Keltner bands
+    upper = ema + multiplier * atr
+    lower = ema - multiplier * atr
+    
+    return upper, lower, ema, atr
+
+
+def calculate_stochastic(high, low, close, k_period=14, d_period=3):
+    """Calculate Stochastic Oscillator for entry timing"""
+    n = len(close)
+    
+    lowest_low = pd.Series(low).rolling(window=k_period, min_periods=k_period).min().values
+    highest_high = pd.Series(high).rolling(window=k_period, min_periods=k_period).max().values
+    
+    stoch_k = np.zeros(n)
+    mask = highest_high > lowest_low
+    stoch_k[mask] = 100 * (close[mask] - lowest_low[mask]) / (highest_high[mask] - lowest_low[mask])
+    
+    stoch_d = pd.Series(stoch_k).rolling(window=d_period, min_periods=d_period).mean().values
+    
+    return stoch_k, stoch_d
+
+
+def calculate_volume_sma(volume, period=20):
+    """Calculate volume SMA for volume filter"""
+    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
 
 
 def calculate_atr(high, low, close, period=14):
@@ -73,146 +103,59 @@ def calculate_atr(high, low, close, period=14):
             abs(low[i] - close[i - 1])
         )
     
-    atr = np.zeros(n)
-    atr[period - 1] = np.mean(tr[1:period])
-    
-    for i in range(period, n):
-        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    atr = pd.Series(tr).ewm(span=period, adjust=False).mean().values
     
     return atr
-
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI with proper min_periods"""
-    n = len(close)
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)
-    
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=period, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).rolling(window=period, min_periods=period).mean().values
-    
-    rs = np.zeros(n)
-    mask = avg_loss > 0
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    
-    rsi = np.zeros(n)
-    rsi[mask] = 100 - (100 / (1 + rs[mask]))
-    
-    return rsi
-
-
-def calculate_volume_spike(volume, period=20):
-    """Detect volume spikes (>1.5x average)"""
-    n = len(volume)
-    avg_volume = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    volume_ratio = np.zeros(n)
-    mask = avg_volume > 0
-    volume_ratio[mask] = volume[mask] / avg_volume[mask]
-    return volume_ratio
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values if "volume" in prices.columns else np.ones(len(close))
+    volume = prices.get("volume", np.ones(len(close))).values
     n = len(close)
     
-    # 1h indicators for entry timing
-    rsi_1h = calculate_rsi(close, period=14)
-    atr_1h = calculate_atr(high, low, close, period=14)
-    bb_upper, bb_lower, pct_b = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    volume_ratio = calculate_volume_spike(volume, period=20)
-    
-    # 4h SMA for trend filter (resample 1h → 4h)
-    df_1h = pd.DataFrame({
-        'open': close,
-        'high': high,
-        'low': low,
-        'close': close,
-        'volume': volume
-    })
-    df_1h.index = pd.date_range(start='2021-01-01', periods=n, freq='1h')
-    
-    # Resample to 4h
-    df_4h = df_1h.resample('4h').agg({
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
-        'volume': 'sum'
-    }).dropna()
-    
-    c_4h = df_4h['close'].values
-    sma_4h = calculate_sma(c_4h, period=50)
-    
-    # 4h trend direction based on SMA position
-    trend_4h = np.zeros(len(c_4h))
-    for i in range(50, len(c_4h)):
-        if sma_4h[i] > 0:
-            price_vs_sma = (c_4h[i] - sma_4h[i]) / sma_4h[i]
-            if price_vs_sma > 0.01:  # Price > 1% above SMA
-                trend_4h[i] = 1  # Bullish
-            elif price_vs_sma < -0.01:  # Price < 1% below SMA
-                trend_4h[i] = -1  # Bearish
-    
-    # Map 4h trend back to 1h timeframe
-    trend_1h = np.zeros(n)
-    idx_1h_to_4h = np.arange(n) // 4
-    
-    for i in range(n):
-        idx_4h = idx_1h_to_4h[i]
-        if idx_4h < len(trend_4h):
-            trend_1h[i] = trend_4h[idx_4h]
-    
-    # Generate signals with mean reversion logic
-    signals = np.zeros(n)
+    # Primary indicators
+    dema_fast = calculate_dema(close, period=8)
+    dema_slow = calculate_dema(close, period=21)
+    keltner_upper, keltner_lower, keltner_mid, atr = calculate_keltner(high, low, close, ema_period=20, atr_period=10, multiplier=2.0)
+    stoch_k, stoch_d = calculate_stochastic(high, low, close, k_period=14, d_period=3)
+    volume_sma = calculate_volume_sma(volume, period=20)
+    atr_14 = calculate_atr(high, low, close, period=14)
     
     # Position sizing - DISCRETE levels to reduce churn
-    SIZE_FULL = 0.35   # Full position at extreme reversions
-    SIZE_HALF = 0.25   # Reduced position at moderate reversions
+    SIZE_FULL = 0.35   # Full position in strong conditions
+    SIZE_HALF = 0.25   # Reduced position in marginal conditions
     
-    # Bollinger %B thresholds for mean reversion
-    BB_LONG_ENTRY = 0.15   # Enter long when %B < 0.15 (near lower band)
-    BB_SHORT_ENTRY = 0.85  # Enter short when %B > 0.85 (near upper band)
-    BB_EXIT = 0.50         # Exit when price reverts to middle
-    
-    # RSI confirmation thresholds
-    RSI_LONG_CONFIRM = 35   # RSI oversold for long entries
-    RSI_SHORT_CONFIRM = 65  # RSI overbought for short entries
-    
-    # Volume confirmation
-    VOLUME_SPIKE = 1.5      # Volume must be >1.5x average
+    # Entry thresholds
+    STOCH_OVERSOLD = 25   # Enter long when stochastic oversold
+    STOCH_OVERBOUGHT = 75  # Enter short when stochastic overbought
+    VOLUME_RATIO = 1.2     # Volume must be 20% above average for confirmation
     
     # ATR stoploss multiplier
-    ATR_STOP_MULT = 2.0
-    ATR_PROFIT_MULT = 1.5   # Take partial profit at 1.5R
+    ATR_STOP_MULT = 2.5
     
-    first_valid = max(80, 50, 20, 14)  # Wait for all indicators
+    # Minimum periods for all indicators
+    first_valid = max(21, 20, 14, 20)  # DEMA slow, Keltner, Stochastic, Volume
     
-    # Track entry prices and position state for trailing stop logic
+    signals = np.zeros(n)
+    
+    # Track position state for trailing stop
     entry_price = np.zeros(n)
     position_side = np.zeros(n)  # 1 for long, -1 for short, 0 for flat
-    highest_since_entry = np.zeros(n)
-    lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(pct_b[i]):
+        # Check for NaN values
+        if np.isnan(dema_fast[i]) or np.isnan(dema_slow[i]) or np.isnan(keltner_upper[i]):
             signals[i] = 0.0
             continue
         
-        trend = trend_1h[i]
-        rsi_val = rsi_1h[i]
-        pct_b_val = pct_b[i]
-        atr = atr_1h[i]
         price = close[i]
-        vol_ratio = volume_ratio[i]
+        atr_val = atr_14[i] if not np.isnan(atr_14[i]) else 0
+        vol_ratio = volume[i] / volume_sma[i] if volume_sma[i] > 0 else 1.0
         
-        # ATR filter - avoid trading when ATR is extremely high
-        if atr > 0 and atr / price > 0.05:  # ATR > 5% of price = too volatile
+        # ATR filter - avoid trading when extremely volatile
+        if atr_val > 0 and atr_val / price > 0.05:
             signals[i] = 0.0
             position_side[i] = 0
             continue
@@ -221,147 +164,88 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if i > 0 and position_side[i - 1] != 0:
             prev_side = position_side[i - 1]
             prev_entry = entry_price[i - 1] if entry_price[i - 1] > 0 else price
-            prev_highest = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else price
-            prev_lowest = lowest_since_entry[i - 1] if lowest_since_entry[i - 1] > 0 else price
             
-            # Update highest/lowest since entry
-            if prev_side == 1:  # Long
-                current_highest = max(prev_highest, price)
-                current_lowest = prev_lowest
-                trailing_stop = current_highest - ATR_STOP_MULT * atr
-                
-                if price < trailing_stop:
+            if prev_side == 1:  # Long position
+                stoploss_price = prev_entry - ATR_STOP_MULT * atr_val
+                if price < stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
                     continue
-                
-                # Check for profit target (reduce position at 1.5R)
-                profit_r = (price - prev_entry) / (ATR_STOP_MULT * atr) if atr > 0 else 0
-                if profit_r >= ATR_PROFIT_MULT and signals[i - 1] > 0.30:
-                    signals[i] = SIZE_HALF  # Reduce to half
-                    position_side[i] = 1
-                    entry_price[i] = prev_entry
-                    highest_since_entry[i] = current_highest
-                    lowest_since_entry[i] = current_lowest
-                    continue
-                
-                # Exit at mean reversion (%B > 0.50)
-                if pct_b_val > BB_EXIT:
+            elif prev_side == -1:  # Short position
+                stoploss_price = prev_entry + ATR_STOP_MULT * atr_val
+                if price > stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
                     continue
-                
-                signals[i] = signals[i - 1]
-                position_side[i] = 1
-                entry_price[i] = prev_entry
-                highest_since_entry[i] = current_highest
-                lowest_since_entry[i] = current_lowest
-                continue
-                
-            elif prev_side == -1:  # Short
-                current_highest = prev_highest
-                current_lowest = min(prev_lowest, price)
-                trailing_stop = current_lowest + ATR_STOP_MULT * atr
-                
-                if price > trailing_stop:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    continue
-                
-                # Check for profit target (reduce position at 1.5R)
-                profit_r = (prev_entry - price) / (ATR_STOP_MULT * atr) if atr > 0 else 0
-                if profit_r >= ATR_PROFIT_MULT and signals[i - 1] < -0.30:
-                    signals[i] = -SIZE_HALF  # Reduce to half
-                    position_side[i] = -1
-                    entry_price[i] = prev_entry
-                    highest_since_entry[i] = current_highest
-                    lowest_since_entry[i] = current_lowest
-                    continue
-                
-                # Exit at mean reversion (%B < 0.50)
-                if pct_b_val < BB_EXIT:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    continue
-                
-                signals[i] = signals[i - 1]
-                position_side[i] = -1
-                entry_price[i] = prev_entry
-                highest_since_entry[i] = current_highest
-                lowest_since_entry[i] = current_lowest
-                continue
         
-        # Mean reversion entry logic with trend filter
-        if trend == 1:  # 4h uptrend - only look for long mean reversion
-            if pct_b_val < BB_LONG_ENTRY and rsi_val < RSI_LONG_CONFIRM:
-                # Volume confirmation required for entry
-                if vol_ratio >= VOLUME_SPIKE:
-                    signals[i] = SIZE_FULL
-                    position_side[i] = 1
-                    entry_price[i] = price
-                    highest_since_entry[i] = price
-                    lowest_since_entry[i] = price
-                elif vol_ratio >= 1.0:  # Accept normal volume with smaller size
-                    signals[i] = SIZE_HALF
-                    position_side[i] = 1
-                    entry_price[i] = price
-                    highest_since_entry[i] = price
-                    lowest_since_entry[i] = price
-                else:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-            else:
-                signals[i] = 0.0
-                position_side[i] = 0
-                
-        elif trend == -1:  # 4h downtrend - only look for short mean reversion
-            if pct_b_val > BB_SHORT_ENTRY and rsi_val > RSI_SHORT_CONFIRM:
-                # Volume confirmation required for entry
-                if vol_ratio >= VOLUME_SPIKE:
-                    signals[i] = -SIZE_FULL
-                    position_side[i] = -1
-                    entry_price[i] = price
-                    highest_since_entry[i] = price
-                    lowest_since_entry[i] = price
-                elif vol_ratio >= 1.0:  # Accept normal volume with smaller size
-                    signals[i] = -SIZE_HALF
-                    position_side[i] = -1
-                    entry_price[i] = price
-                    highest_since_entry[i] = price
-                    lowest_since_entry[i] = price
-                else:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-            else:
-                signals[i] = 0.0
-                position_side[i] = 0
-        else:  # No clear trend - reduce position size or stay flat
-            if pct_b_val < BB_LONG_ENTRY and rsi_val < RSI_LONG_CONFIRM:
-                signals[i] = SIZE_HALF * 0.7  # Smaller position in no-trend
+        # Determine trend from Keltner position and DEMA crossover
+        keltner_bullish = price > keltner_mid[i]
+        keltner_bearish = price < keltner_mid[i]
+        dema_bullish = dema_fast[i] > dema_slow[i]
+        dema_bearish = dema_fast[i] < dema_slow[i]
+        
+        # Strong trend requires both Keltner and DEMA agreement
+        strong_bullish = keltner_bullish and dema_bullish
+        strong_bearish = keltner_bearish and dema_bearish
+        
+        # Volume confirmation for entries
+        volume_confirmed = vol_ratio >= VOLUME_RATIO
+        
+        if strong_bullish:
+            # Long entry conditions
+            stoch_oversold = stoch_k[i] < STOCH_OVERSOLD or stoch_d[i] < STOCH_OVERSOLD
+            
+            if stoch_oversold and volume_confirmed:
+                # Full position on strong pullback with volume
+                signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = price
-                highest_since_entry[i] = price
-                lowest_since_entry[i] = price
-            elif pct_b_val > BB_SHORT_ENTRY and rsi_val > RSI_SHORT_CONFIRM:
-                signals[i] = -SIZE_HALF * 0.7  # Smaller position in no-trend
+            elif stoch_k[i] < 50:
+                # Half position on moderate pullback
+                signals[i] = SIZE_HALF
+                position_side[i] = 1
+                entry_price[i] = price
+            else:
+                # Hold existing long or exit
+                if i > 0 and position_side[i - 1] == 1:
+                    signals[i] = signals[i - 1]
+                    position_side[i] = 1
+                    entry_price[i] = entry_price[i - 1]
+                else:
+                    signals[i] = 0.0
+                    position_side[i] = 0
+                    entry_price[i] = 0
+                    
+        elif strong_bearish:
+            # Short entry conditions
+            stoch_overbought = stoch_k[i] > STOCH_OVERBOUGHT or stoch_d[i] > STOCH_OVERBOUGHT
+            
+            if stoch_overbought and volume_confirmed:
+                # Full short on strong rally with volume
+                signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = price
-                highest_since_entry[i] = price
-                lowest_since_entry[i] = price
+            elif stoch_k[i] > 50:
+                # Half short on moderate rally
+                signals[i] = -SIZE_HALF
+                position_side[i] = -1
+                entry_price[i] = price
             else:
-                signals[i] = 0.0
-                position_side[i] = 0
+                # Hold existing short or exit
+                if i > 0 and position_side[i - 1] == -1:
+                    signals[i] = signals[i - 1]
+                    position_side[i] = -1
+                    entry_price[i] = entry_price[i - 1]
+                else:
+                    signals[i] = 0.0
+                    position_side[i] = 0
+                    entry_price[i] = 0
+        else:
+            # No clear trend - exit positions
+            signals[i] = 0.0
+            position_side[i] = 0
+            entry_price[i] = 0
     
     return signals
