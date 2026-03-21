@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #057 - VOLATILITY_CLUSTERING_ENSEMBLE_WITH_MACD_MOMENTUM_1H_4H_V1
+EXPERIMENT #058 - KAMA_DONCHIAN_ADX_ZSCORE_REGIME_15M_4H_V1
 ==================================================================================================
-Hypothesis: Volatility clusters (consecutive high/low vol bars) predict regime persistence better
-than single-bar BBW readings. Combining this with MACD histogram momentum + RSI divergence gives
-earlier entry signals than pure trend-following. Cross-asset BTC 4h trend filter improves ETH/SOL
-entries by avoiding counter-trend trades. Signal confidence scaling based on regime certainty
-reduces position size in uncertain conditions.
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adjusts its smoothing based on market efficiency,
+making it superior to HMA/EMA in both trending and ranging markets. Combining KAMA with Donchian
+channel breakouts (pure price action) + ADX trend strength filter + Z-score mean reversion creates
+a robust regime-adaptive system. 15m entries with 4h trend filter proven in experiments #047, #049,
+#053, #054, #056 (all Sharpe > 7.0).
 
 Key innovations:
-- VOLATILITY CLUSTERING: 3-bar vol sequence detection (expanding/contracting)
-- MACD HISTOGRAM MOMENTUM: Early momentum shift detection before price breaks
-- RSI DIVERGENCE: Price makes new low/high but RSI doesn't = reversal signal
-- CROSS-ASSET FILTER: BTC 4h trend must agree for ETH/SOL entries (BTC is market leader)
-- CONFIDENCE SIZING: Position size = base_size * regime_confidence (0.5-1.0 multiplier)
-- 1H/4H MULTI-TF: Less noise than 15m, still responsive enough for crypto
+- KAMA EFFICIENCY RATIO: Adaptive smoothing that speeds up in trends, slows in noise
+- DONCHIAN BREAKOUTS: Pure price action - 20-bar high/low breaks with ADX confirmation
+- Z-SCORE MEAN REVERSION: Enter counter-trend when Z-score > 2.0 in low-ADX regimes
+- ADX REGIME FILTER: ADX > 25 = trend follow, ADX < 20 = mean revert
+- 15M/4H MULTI-TF: Proven combination from top-performing strategies
+- CONFIDENCE SIZING: Position size scales with signal agreement (3+ signals = max size)
 
-Why this should beat #056 (Sharpe=7.760):
-- Volatility clustering is more predictive than single-bar BBW percentile
-- MACD histogram leads price action, giving earlier entries
-- RSI divergence catches reversals before trend indicators flip
-- Cross-asset filter removes 20-30% of losing ETH/SOL trades
-- Based on #049's success (Sharpe=13.974) but with momentum enhancements
+Why this should beat #057 (Sharpe=3.043) and approach #049 (Sharpe=13.974):
+- KAMA is more adaptive than HMA in changing volatility regimes
+- Donchian breakouts capture pure momentum without lag
+- Z-score provides mean reversion entries that HMA/Supertrend miss
+- ADX regime filter prevents trend-following in choppy markets
+- Based on winning multi-TF architecture from experiments #047, #049, #053, #054, #056
 
 Position sizing rules (CRITICAL):
 - MAX signal: 0.35 (proven to control drawdown in 2022 crash)
@@ -34,8 +34,8 @@ Position sizing rules (CRITICAL):
 import numpy as np
 import pandas as pd
 
-name = "volatility_clustering_ensemble_macd_momentum_1h_4h_v1"
-timeframe = "1h"
+name = "kama_donchian_adx_zscore_regime_15m_4h_v1"
+timeframe = "15m"
 leverage = 1.0
 
 
@@ -62,74 +62,143 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average"""
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA)
+    KAMA adapts smoothing based on market efficiency ratio
+    """
+    n = len(close)
+    if n < period + slow_period:
+        return np.zeros(n)
+    
+    kama = np.zeros(n)
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(period, n):
+        price_change = abs(close[i] - close[i - period])
+        volatility = np.sum(np.abs(np.diff(close[i - period:i + 1])))
+        if volatility > 0:
+            er[i] = price_change / volatility
+        else:
+            er[i] = 0
+    
+    # Calculate smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    for i in range(period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
+
+
+def calculate_donchian_channels(high, low, period=20):
+    """Calculate Donchian Channel (highest high, lowest low over period)"""
+    n = len(high)
+    if n < period:
+        return np.zeros(n), np.zeros(n)
+    
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    if n < period * 2:
+        return np.zeros(n)
+    
+    # Calculate +DM and -DM
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        plus_move = high[i] - high[i - 1]
+        minus_move = low[i - 1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    # Calculate TR
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+    
+    # Smooth +DM, -DM, and TR
+    plus_dm_smooth = np.zeros(n)
+    minus_dm_smooth = np.zeros(n)
+    tr_smooth = np.zeros(n)
+    
+    plus_dm_smooth[period] = np.sum(plus_dm[1:period + 1])
+    minus_dm_smooth[period] = np.sum(minus_dm[1:period + 1])
+    tr_smooth[period] = np.sum(tr[1:period + 1])
+    
+    for i in range(period + 1, n):
+        plus_dm_smooth[i] = plus_dm_smooth[i - 1] - plus_dm_smooth[i - 1] / period + plus_dm[i]
+        minus_dm_smooth[i] = minus_dm_smooth[i - 1] - minus_dm_smooth[i - 1] / period + minus_dm[i]
+        tr_smooth[i] = tr_smooth[i - 1] - tr_smooth[i - 1] / period + tr[i]
+    
+    # Calculate +DI and -DI
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    for i in range(period, n):
+        if tr_smooth[i] > 0:
+            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
+            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
+    
+    # Calculate DX
+    dx = np.zeros(n)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    # Calculate ADX (smoothed DX)
+    adx = np.zeros(n)
+    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
+    
+    for i in range(period * 2, n):
+        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+    
+    return adx
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score (standardized deviation from mean)"""
     n = len(close)
     if n < period:
         return np.zeros(n)
     
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    wma1 = np.zeros(n)
-    wma2 = np.zeros(n)
-    hma = np.zeros(n)
-    
-    for i in range(half_period - 1, n):
-        weights = np.arange(1, half_period + 1)
-        wma1[i] = np.sum(close[i - half_period + 1:i + 1] * weights) / np.sum(weights)
+    zscore = np.zeros(n)
     
     for i in range(period - 1, n):
-        weights = np.arange(1, period + 1)
-        wma2[i] = np.sum(close[i - period + 1:i + 1] * weights) / np.sum(weights)
-    
-    for i in range(period - 1 + sqrt_period - 1, n):
-        start_idx = i - sqrt_period + 1
-        weights = np.arange(1, sqrt_period + 1)
-        raw_vals = 2 * wma1[start_idx:i + 1] - wma2[start_idx:i + 1]
-        hma[i] = np.sum(raw_vals * weights) / np.sum(weights)
-    
-    return hma
-
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n)
-    
-    atr = calculate_atr(high, low, close, period)
-    
-    supertrend = np.zeros(n)
-    trend_direction = np.ones(n)
-    
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
-    
-    for i in range(period, n):
-        mid = (high[i] + low[i]) / 2
-        upper_band[i] = mid + multiplier * atr[i]
-        lower_band[i] = mid - multiplier * atr[i]
-    
-    supertrend[period] = lower_band[period]
-    
-    for i in range(period + 1, n):
-        if trend_direction[i - 1] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i - 1])
-            if close[i] < supertrend[i]:
-                supertrend[i] = upper_band[i]
-                trend_direction[i] = -1
-            else:
-                trend_direction[i] = 1
+        window = close[i - period + 1:i + 1]
+        mean = np.mean(window)
+        std = np.std(window)
+        if std > 0:
+            zscore[i] = (close[i] - mean) / std
         else:
-            supertrend[i] = min(upper_band[i], supertrend[i - 1])
-            if close[i] > supertrend[i]:
-                supertrend[i] = lower_band[i]
-                trend_direction[i] = 1
-            else:
-                trend_direction[i] = -1
+            zscore[i] = 0
     
-    return supertrend, trend_direction
+    return zscore
 
 
 def calculate_rsi(close, period=14):
@@ -164,39 +233,6 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_macd(close, fast=12, slow=26, signal_period=9):
-    """Calculate MACD line, signal line, and histogram"""
-    n = len(close)
-    if n < slow + signal_period:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    # Calculate EMAs
-    ema_fast = np.zeros(n)
-    ema_slow = np.zeros(n)
-    
-    ema_fast[fast - 1] = np.mean(close[:fast])
-    for i in range(fast, n):
-        ema_fast[i] = ema_fast[i - 1] + (2.0 / (fast + 1)) * (close[i] - ema_fast[i - 1])
-    
-    ema_slow[slow - 1] = np.mean(close[:slow])
-    for i in range(slow, n):
-        ema_slow[i] = ema_slow[i - 1] + (2.0 / (slow + 1)) * (close[i] - ema_slow[i - 1])
-    
-    macd_line = ema_fast - ema_slow
-    
-    # Calculate signal line (EMA of MACD)
-    signal_line = np.zeros(n)
-    first_signal_idx = slow + signal_period - 1
-    signal_line[first_signal_idx] = np.mean(macd_line[slow:first_signal_idx + 1])
-    
-    for i in range(first_signal_idx + 1, n):
-        signal_line[i] = signal_line[i - 1] + (2.0 / (signal_period + 1)) * (macd_line[i] - signal_line[i - 1])
-    
-    histogram = macd_line - signal_line
-    
-    return macd_line, signal_line, histogram
-
-
 def calculate_bollinger_bands(close, period=20, std_mult=2.0):
     """Calculate Bollinger Bands and Band Width"""
     n = len(close)
@@ -219,62 +255,6 @@ def calculate_bollinger_bands(close, period=20, std_mult=2.0):
     return upper, lower, bbw
 
 
-def calculate_volatility_clustering(atr, window=5):
-    """
-    Detect volatility clustering patterns
-    Returns: 1 (expanding), 0 (neutral), -1 (contracting)
-    """
-    n = len(atr)
-    clustering = np.zeros(n)
-    
-    for i in range(window, n):
-        recent_atr = atr[i - window + 1:i + 1]
-        if len(recent_atr) < window:
-            continue
-        
-        # Check if volatility is expanding (consecutive increases)
-        increases = np.sum(np.diff(recent_atr) > 0)
-        decreases = np.sum(np.diff(recent_atr) < 0)
-        
-        if increases >= window - 1:
-            clustering[i] = 1  # Expanding
-        elif decreases >= window - 1:
-            clustering[i] = -1  # Contracting
-        else:
-            clustering[i] = 0  # Neutral
-    
-    return clustering
-
-
-def calculate_rsi_divergence(close, rsi, lookback=5):
-    """
-    Detect RSI divergence (price makes new low/high but RSI doesn't)
-    Returns: 1 (bullish div), -1 (bearish div), 0 (none)
-    """
-    n = len(close)
-    divergence = np.zeros(n)
-    
-    for i in range(lookback + 1, n):
-        # Check for bullish divergence (price lower low, RSI higher low)
-        price_low = np.min(close[i - lookback:i + 1])
-        price_low_idx = i - lookback + np.argmin(close[i - lookback:i + 1])
-        
-        rsi_low = np.min(rsi[i - lookback:i + 1])
-        rsi_low_idx = i - lookback + np.argmin(rsi[i - lookback:i + 1])
-        
-        if close[i] < price_low and rsi[i] > rsi_low:
-            divergence[i] = 1  # Bullish divergence
-        
-        # Check for bearish divergence (price higher high, RSI lower high)
-        price_high = np.max(close[i - lookback:i + 1])
-        rsi_high = np.max(rsi[i - lookback:i + 1])
-        
-        if close[i] > price_high and rsi[i] < rsi_high:
-            divergence[i] = -1  # Bearish divergence
-    
-    return divergence
-
-
 def calculate_percentile_rank(values, window=100):
     """Calculate rolling percentile rank"""
     n = len(values)
@@ -290,10 +270,13 @@ def calculate_percentile_rank(values, window=100):
     return percentile
 
 
-def resample_to_higher_tf(close, high, low, bars_per_tf=4):
-    """Resample data to higher timeframe"""
+def resample_to_higher_tf(close, high, low, bars_per_tf=16):
+    """Resample 15m data to 4h (16 x 15m = 4h)"""
     n = len(close)
     n_tf = n // bars_per_tf
+    
+    if n_tf < 1:
+        return close.copy(), high.copy(), low.copy()
     
     c_tf = np.zeros(n_tf)
     h_tf = np.zeros(n_tf)
@@ -302,9 +285,10 @@ def resample_to_higher_tf(close, high, low, bars_per_tf=4):
     for i in range(n_tf):
         start_idx = i * bars_per_tf
         end_idx = start_idx + bars_per_tf
-        c_tf[i] = close[end_idx - 1]
-        h_tf[i] = np.max(high[start_idx:end_idx])
-        l_tf[i] = np.min(low[start_idx:end_idx])
+        if end_idx <= n:
+            c_tf[i] = close[end_idx - 1]
+            h_tf[i] = np.max(high[start_idx:end_idx])
+            l_tf[i] = np.min(low[start_idx:end_idx])
     
     return c_tf, h_tf, l_tf
 
@@ -315,72 +299,75 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # 1h indicators for entry timing
-    atr_1h = calculate_atr(high, low, close, period=14)
-    rsi_1h = calculate_rsi(close, period=14)
-    hma_1h = calculate_hma(close, period=21)
-    supertrend_1h, st_direction_1h = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    macd_1h, macd_signal_1h, macd_hist_1h = calculate_macd(close, fast=12, slow=26, signal_period=9)
-    _, _, bbw_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    rsi_div_1h = calculate_rsi_divergence(close, rsi_1h, lookback=5)
-    vol_cluster_1h = calculate_volatility_clustering(atr_1h, window=5)
+    # 15m indicators for entry timing
+    atr_15m = calculate_atr(high, low, close, period=14)
+    rsi_15m = calculate_rsi(close, period=14)
+    kama_15m = calculate_kama(close, period=10, fast_period=2, slow_period=30)
+    adx_15m = calculate_adx(high, low, close, period=14)
+    zscore_15m = calculate_zscore(close, period=20)
+    donchian_upper_15m, donchian_lower_15m = calculate_donchian_channels(high, low, period=20)
+    _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     
-    # Resample to 4h for trend (4 x 1h = 4h)
-    bars_per_4h = 4
+    # Resample to 4h for trend (16 x 15m = 4h)
+    bars_per_4h = 16
     c_4h, h_4h, l_4h = resample_to_higher_tf(close, high, low, bars_per_4h)
     
     # 4h indicators for trend
     atr_4h = calculate_atr(h_4h, l_4h, c_4h, period=14)
-    hma_4h = calculate_hma(c_4h, period=21)
-    supertrend_4h, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
-    macd_4h, macd_signal_4h, macd_hist_4h = calculate_macd(c_4h, fast=12, slow=26, signal_period=9)
+    kama_4h = calculate_kama(c_4h, period=10, fast_period=2, slow_period=30)
+    adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
+    donchian_upper_4h, donchian_lower_4h = calculate_donchian_channels(h_4h, l_4h, period=20)
     _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
     bbw_percentile_4h = calculate_percentile_rank(bbw_4h, window=50)
     
-    # Map 4h indicators back to 1h timeframe
+    # Map 4h indicators back to 15m timeframe
     trend_4h = np.zeros(n)
-    st_trend_4h = np.zeros(n)
-    macd_trend_4h = np.zeros(n)
+    adx_4h_mapped = np.zeros(n)
     bbw_4h_mapped = np.zeros(n)
     atr_4h_mapped = np.zeros(n)
+    donchian_trend_4h = np.zeros(n)
     
     n_4h = len(c_4h)
     for i in range(n):
         idx_4h = i // bars_per_4h
         
         if idx_4h < n_4h and idx_4h >= 40:
-            # HMA trend
-            if c_4h[idx_4h] > hma_4h[idx_4h]:
+            # KAMA trend
+            if c_4h[idx_4h] > kama_4h[idx_4h]:
                 trend_4h[i] = 1
-            elif c_4h[idx_4h] < hma_4h[idx_4h]:
+            elif c_4h[idx_4h] < kama_4h[idx_4h]:
                 trend_4h[i] = -1
             
-            st_trend_4h[i] = st_direction_4h[idx_4h]
-            
-            # MACD trend
-            if macd_hist_4h[idx_4h] > 0:
-                macd_trend_4h[i] = 1
-            elif macd_hist_4h[idx_4h] < 0:
-                macd_trend_4h[i] = -1
-            
+            adx_4h_mapped[i] = adx_4h[idx_4h]
             bbw_4h_mapped[i] = bbw_4h[idx_4h]
             atr_4h_mapped[i] = atr_4h[idx_4h]
+            
+            # Donchian trend (price position in channel)
+            channel_width = donchian_upper_4h[idx_4h] - donchian_lower_4h[idx_4h]
+            if channel_width > 0:
+                price_position = (c_4h[idx_4h] - donchian_lower_4h[idx_4h]) / channel_width
+                if price_position > 0.6:
+                    donchian_trend_4h[i] = 1
+                elif price_position < 0.4:
+                    donchian_trend_4h[i] = -1
     
     # Position sizing parameters (DISCRETE levels)
     SIZE_LEVELS = np.array([0.0, 0.20, 0.28, 0.35])
     BASE_SIZE = 0.28
     
     # Signal thresholds
+    ADX_TREND_THRESHOLD = 25
+    ADX_RANGE_THRESHOLD = 20
+    ZSCORE_EXTREME = 2.0
     RSI_LONG_MAX = 55
     RSI_SHORT_MIN = 45
-    MACD_HIST_THRESHOLD = 0.0001  # Relative threshold
     
     # Stoploss multipliers
     ATR_STOP = 2.5
     
     # Regime thresholds
-    BBW_LOW = 0.30
-    BBW_HIGH = 0.70
+    BBW_LOW_PERCENTILE = 0.30
+    BBW_HIGH_PERCENTILE = 0.70
     
     first_valid = max(200, 40 * bars_per_4h, 50)
     
@@ -399,136 +386,140 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     short_confirm_count = np.zeros(n, dtype=int)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_1h[i]) or np.isnan(rsi_1h[i]) or atr_1h[i] == 0:
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
             continue
         
         trend = trend_4h[i]
-        st_trend = st_trend_4h[i]
-        macd_trend = macd_trend_4h[i]
-        rsi_val = rsi_1h[i]
-        atr = atr_1h[i]
-        price = close[i]
+        adx_4h = adx_4h_mapped[i]
         bbw_4h_val = bbw_4h_mapped[i]
-        macd_hist = macd_hist_1h[i]
-        st_1h = st_direction_1h[i]
-        hma_1h_val = hma_1h[i]
-        rsi_div = rsi_div_1h[i]
-        vol_cluster = vol_cluster_1h[i]
+        atr = atr_15m[i]
+        price = close[i]
+        
+        # 15m signals
+        kama_15m_val = kama_15m[i]
+        adx_15m_val = adx_15m[i]
+        zscore_val = zscore_15m[i]
+        rsi_val = rsi_15m[i]
+        donchian_upper = donchian_upper_15m[i]
+        donchian_lower = donchian_lower_15m[i]
+        donchian_trend = donchian_trend_4h[i]
         
         # Determine regime
-        is_low_vol = bbw_4h_val < BBW_LOW
-        is_high_vol = bbw_4h_val > BBW_HIGH
-        is_vol_expanding = vol_cluster == 1
-        is_vol_contracting = vol_cluster == -1
+        is_trend_regime = adx_4h > ADX_TREND_THRESHOLD
+        is_range_regime = adx_4h < ADX_RANGE_THRESHOLD
+        bbw_pct = bbw_percentile_4h[i // bars_per_4h] if i // bars_per_4h < len(bbw_percentile_4h) else 0.5
+        is_low_vol = bbw_pct < BBW_LOW_PERCENTILE
+        is_high_vol = bbw_pct > BBW_HIGH_PERCENTILE
         
         # Calculate signal scores
-        # Signal 1: 4h HMA trend
-        hma_signal = 0
+        # Signal 1: 4h KAMA trend
+        kama_signal = 0
         if trend == 1:
-            hma_signal = 1
+            kama_signal = 1
         elif trend == -1:
-            hma_signal = -1
+            kama_signal = -1
         
-        # Signal 2: 4h Supertrend
-        st_signal = 0
-        if st_trend == 1:
-            st_signal = 1
-        elif st_trend == -1:
-            st_signal = -1
+        # Signal 2: 4h Donchian position
+        donchian_signal = 0
+        if donchian_trend == 1:
+            donchian_signal = 1
+        elif donchian_trend == -1:
+            donchian_signal = -1
         
-        # Signal 3: 4h MACD histogram
-        macd_signal = 0
-        if macd_trend == 1:
-            macd_signal = 1
-        elif macd_trend == -1:
-            macd_signal = -1
+        # Signal 3: 15m KAMA
+        kama_15m_signal = 0
+        if price > kama_15m_val:
+            kama_15m_signal = 1
+        elif price < kama_15m_val:
+            kama_15m_signal = -1
         
-        # Signal 4: 1h RSI + MACD momentum combo
-        momentum_signal = 0
-        if macd_hist > MACD_HIST_THRESHOLD and rsi_val < RSI_LONG_MAX:
-            momentum_signal = 1
-        elif macd_hist < -MACD_HIST_THRESHOLD and rsi_val > RSI_SHORT_MIN:
-            momentum_signal = -1
+        # Signal 4: Donchian breakout
+        breakout_signal = 0
+        if price > donchian_upper * 0.999:  # Near upper break
+            breakout_signal = 1
+        elif price < donchian_lower * 1.001:  # Near lower break
+            breakout_signal = -1
         
-        # Signal 5: 1h Supertrend
-        st_1h_signal = 0
-        if st_1h == 1:
-            st_1h_signal = 1
-        elif st_1h == -1:
-            st_1h_signal = -1
+        # Signal 5: Z-score mean reversion
+        zscore_signal = 0
+        if zscore_val < -ZSCORE_EXTREME:
+            zscore_signal = 1  # Oversold, expect mean reversion up
+        elif zscore_val > ZSCORE_EXTREME:
+            zscore_signal = -1  # Overbought, expect mean reversion down
         
-        # Signal 6: 1h HMA
-        hma_1h_signal = 0
-        if price > hma_1h_val:
-            hma_1h_signal = 1
-        elif price < hma_1h_val:
-            hma_1h_signal = -1
+        # Signal 6: RSI
+        rsi_signal = 0
+        if rsi_val < RSI_LONG_MAX:
+            rsi_signal = 1
+        elif rsi_val > RSI_SHORT_MIN:
+            rsi_signal = -1
         
-        # Signal 7: RSI divergence (strong reversal signal)
-        div_signal = 0
-        if rsi_div == 1:
-            div_signal = 1
-        elif rsi_div == -1:
-            div_signal = -1
+        # Signal 7: 15m ADX trend strength
+        adx_signal = 0
+        if adx_15m_val > ADX_TREND_THRESHOLD:
+            if price > kama_15m_val:
+                adx_signal = 1
+            elif price < kama_15m_val:
+                adx_signal = -1
         
         # Calculate weighted signal score based on regime
-        if is_low_vol and is_vol_expanding:
-            # Breakout regime: weight trend signals highest
+        if is_trend_regime:
+            # Trend-following regime: weight trend signals highest
             long_score = (
-                0.25 * (hma_signal == 1) +
-                0.25 * (st_signal == 1) +
-                0.20 * (macd_signal == 1) +
-                0.15 * (st_1h_signal == 1) +
-                0.15 * (hma_1h_signal == 1)
+                0.25 * (kama_signal == 1) +
+                0.20 * (donchian_signal == 1) +
+                0.20 * (kama_15m_signal == 1) +
+                0.15 * (breakout_signal == 1) +
+                0.10 * (rsi_signal == 1) +
+                0.10 * (adx_signal == 1)
             )
             short_score = (
-                0.25 * (hma_signal == -1) +
-                0.25 * (st_signal == -1) +
-                0.20 * (macd_signal == -1) +
-                0.15 * (st_1h_signal == -1) +
-                0.15 * (hma_1h_signal == -1)
+                0.25 * (kama_signal == -1) +
+                0.20 * (donchian_signal == -1) +
+                0.20 * (kama_15m_signal == -1) +
+                0.15 * (breakout_signal == -1) +
+                0.10 * (rsi_signal == -1) +
+                0.10 * (adx_signal == -1)
             )
-        elif is_high_vol and is_vol_contracting:
-            # Mean reversion regime: weight RSI/divergence higher
+        elif is_range_regime:
+            # Mean reversion regime: weight Z-score/RSI higher
             long_score = (
-                0.30 * (div_signal == 1) +
-                0.25 * (momentum_signal == 1) +
-                0.20 * (st_1h_signal == 1) +
-                0.15 * (hma_1h_signal == 1) +
-                0.10 * (st_signal == 1)
+                0.30 * (zscore_signal == 1) +
+                0.25 * (rsi_signal == 1) +
+                0.15 * (kama_15m_signal == 1) +
+                0.15 * (breakout_signal == -1) +  # False breakout long
+                0.10 * (kama_signal == 1) +
+                0.05 * (donchian_signal == 1)
             )
             short_score = (
-                0.30 * (div_signal == -1) +
-                0.25 * (momentum_signal == -1) +
-                0.20 * (st_1h_signal == -1) +
-                0.15 * (hma_1h_signal == -1) +
-                0.10 * (st_signal == -1)
+                0.30 * (zscore_signal == -1) +
+                0.25 * (rsi_signal == -1) +
+                0.15 * (kama_15m_signal == -1) +
+                0.15 * (breakout_signal == 1) +  # False breakout short
+                0.10 * (kama_signal == -1) +
+                0.05 * (donchian_signal == -1)
             )
         else:
             # Neutral regime: balanced weights
             long_score = (
-                0.20 * (hma_signal == 1) +
-                0.20 * (st_signal == 1) +
-                0.15 * (macd_signal == 1) +
-                0.15 * (momentum_signal == 1) +
-                0.15 * (st_1h_signal == 1) +
-                0.15 * (hma_1h_signal == 1)
+                0.20 * (kama_signal == 1) +
+                0.15 * (donchian_signal == 1) +
+                0.15 * (kama_15m_signal == 1) +
+                0.15 * (breakout_signal == 1) +
+                0.15 * (zscore_signal == 1) +
+                0.10 * (rsi_signal == 1) +
+                0.10 * (adx_signal == 1)
             )
             short_score = (
-                0.20 * (hma_signal == -1) +
-                0.20 * (st_signal == -1) +
-                0.15 * (macd_signal == -1) +
-                0.15 * (momentum_signal == -1) +
-                0.15 * (st_1h_signal == -1) +
-                0.15 * (hma_1h_signal == -1)
+                0.20 * (kama_signal == -1) +
+                0.15 * (donchian_signal == -1) +
+                0.15 * (kama_15m_signal == -1) +
+                0.15 * (breakout_signal == -1) +
+                0.15 * (zscore_signal == -1) +
+                0.10 * (rsi_signal == -1) +
+                0.10 * (adx_signal == -1)
             )
-        
-        # Boost score if RSI divergence agrees (strong signal)
-        if div_signal == 1:
-            long_score = min(1.0, long_score + 0.15)
-        elif div_signal == -1:
-            short_score = min(1.0, short_score + 0.15)
         
         # HYSTERESIS: Update confirmation counters
         if long_score >= 0.45:
@@ -648,12 +639,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     
                     # Regime confidence multiplier
                     regime_conf = 1.0
-                    if is_low_vol and is_vol_expanding:
+                    if is_trend_regime:
                         regime_conf = 1.0
-                    elif is_high_vol:
-                        regime_conf = 0.7
+                    elif is_range_regime:
+                        regime_conf = 0.8
                     else:
-                        regime_conf = 0.85
+                        regime_conf = 0.9
                     
                     target_size = base_target_size * regime_conf
                     target_size = max(min(target_size, 0.35), 0.20)
@@ -682,12 +673,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     
                     # Regime confidence multiplier
                     regime_conf = 1.0
-                    if is_low_vol and is_vol_expanding:
+                    if is_trend_regime:
                         regime_conf = 1.0
-                    elif is_high_vol:
-                        regime_conf = 0.7
+                    elif is_range_regime:
+                        regime_conf = 0.8
                     else:
-                        regime_conf = 0.85
+                        regime_conf = 0.9
                     
                     target_size = base_target_size * regime_conf
                     target_size = max(min(target_size, 0.35), 0.20)
@@ -719,12 +710,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             
             # Regime confidence multiplier
             regime_conf = 1.0
-            if is_low_vol and is_vol_expanding:
+            if is_trend_regime:
                 regime_conf = 1.0
-            elif is_high_vol:
-                regime_conf = 0.7
+            elif is_range_regime:
+                regime_conf = 0.8
             else:
-                regime_conf = 0.85
+                regime_conf = 0.9
             
             target_size = base_target_size * regime_conf
             target_size = max(min(target_size, 0.35), 0.20)
@@ -744,12 +735,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             
             # Regime confidence multiplier
             regime_conf = 1.0
-            if is_low_vol and is_vol_expanding:
+            if is_trend_regime:
                 regime_conf = 1.0
-            elif is_high_vol:
-                regime_conf = 0.7
+            elif is_range_regime:
+                regime_conf = 0.8
             else:
-                regime_conf = 0.85
+                regime_conf = 0.9
             
             target_size = base_target_size * regime_conf
             target_size = max(min(target_size, 0.35), 0.20)
