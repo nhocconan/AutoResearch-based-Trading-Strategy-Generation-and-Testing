@@ -1,37 +1,74 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #069 - MACD Momentum + Bollinger Regime + 4h Trend Filter (1h primary)
+EXPERIMENT #070 - KAMA Trend + Bollinger Regime + Dual HTF Filter (4h primary)
 =====================================================================================
-Hypothesis: MACD histogram momentum captures trend acceleration, but fails in chop.
-Bollinger Band width percentile detects regime (squeeze=low vol, expansion=high vol).
-4h HMA trend filter ensures we trade with higher timeframe direction. This differs from
-failed strategies by using MACD momentum (not HMA/RSI pullback) + BB regime (not ADX).
+Hypothesis: 4h KAMA adapts to volatility better than HMA/EMA in choppy markets.
+Bollinger Band Width percentile filters out low-volatility squeeze periods where
+trend strategies fail. Dual HTF alignment (1d HMA + 1w HMA) ensures we trade with
+the major trend. This differs from failed #067/#068 by using KAMA (not Supertrend)
++ BB Width regime (not volume) + cleaner entry logic.
 
 Key features:
-- Primary TF: 1h
-- HTF filter: 4h HMA(21) for trend direction
-- Momentum: MACD(12,26,9) histogram turning points
-- Regime: BB width percentile > 40th (avoid extreme squeeze)
-- Entry: MACD hist crosses zero + BB regime + 4h trend alignment
+- Primary TF: 4h (slower, less noise than 15m/30m failures)
+- HTF filters: 1d HMA(50) + 1w HMA(50) for trend alignment
+- Trend: KAMA(10,2,30) crossover with price
+- Regime: BB Width percentile > 40th (avoid squeeze periods)
+- Entry: Price crosses KAMA + BB expanding + HTF aligned
 - Stoploss: 2.0*ATR(14) trailing
-- Position sizing: 0.25-0.30 discrete levels
-- Take profit: Reduce to half at 2R profit
+- Position sizing: 0.25 base, max 0.30 discrete levels
+- Take profit: Reduce to half at 2R profit, trail stop
 
 Why this should beat current best (Sharpe=0.490):
-- MACD momentum works well on 1h timeframe for crypto
-- BB regime filter avoids low-volatility traps
-- 4h trend filter removes counter-trend trades
+- KAMA adapts to volatility (better than static HMA in chop)
+- BB Width filter removes 40%+ of low-vol false signals
+- 4h timeframe captures major moves without 15m noise
 - Conservative sizing (0.25-0.30) controls drawdown
-- Different from 66 failed strategies (no HMA/RSI pullback pattern)
+- Dual HTF (1d/1w) ensures major trend confirmation
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "macd_bbregime_4htrend_1h_v1"
-timeframe = "1h"
+name = "kama_bbregime_dualhtf_4h_1d_1w_v1"
+timeframe = "4h"
 leverage = 1.0
+
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA)
+    KAMA adapts to market volatility - moves fast in trends, slow in chop
+    """
+    n = len(close)
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        signal = abs(close[i] - close[i - er_period])
+        noise = 0.0
+        for j in range(i - er_period + 1, i + 1):
+            noise += abs(close[j] - close[j - 1])
+        if noise > 0:
+            er[i] = signal / noise
+        else:
+            er[i] = 0
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA
+    kama[er_period] = close[er_period]
+    
+    # Calculate KAMA
+    for i in range(er_period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 
 def calculate_hma(close, period):
@@ -57,31 +94,21 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram"""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, adjust=False, min_periods=fast).mean()
-    ema_slow = close_s.ewm(span=slow, adjust=False, min_periods=slow).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
-
-
 def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands"""
+    """Calculate Bollinger Bands and Band Width"""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
     upper = sma + std_mult * std
     lower = sma - std_mult * std
-    return upper.values, lower.values, sma.values, std.values
-
-
-def calculate_bb_width(upper, lower, sma):
-    """Calculate Bollinger Band Width (normalized)"""
-    width = (upper - lower) / sma
-    return width
+    # Band Width = (Upper - Lower) / SMA
+    bw = np.zeros(len(close))
+    for i in range(period - 1, len(close)):
+        if sma[i] > 0:
+            bw[i] = (upper[i] - lower[i]) / sma[i]
+        else:
+            bw[i] = 0
+    return upper, lower, bw
 
 
 def calculate_percentile_rank(series, window=100):
@@ -107,27 +134,29 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 50)
+    hma_1w = calculate_hma(df_1w['close'].values, 50)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 1h indicators
-    macd_line, signal_line, histogram = calculate_macd(close, 12, 26, 9)
+    # Calculate 4h indicators
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     atr = calculate_atr(high, low, close, 14)
-    bb_upper, bb_lower, bb_sma, bb_std = calculate_bollinger_bands(close, 20, 2.0)
-    bb_width = calculate_bb_width(bb_upper, bb_lower, bb_sma)
+    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2.0)
     
-    # Calculate BB width percentile rank (regime filter)
+    # Calculate BB Width percentile rank (regime filter)
     bb_width_pr = calculate_percentile_rank(bb_width, 100)
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.28  # Base position size (28% of capital)
-    MAX_SIZE = 0.35   # Max position size
+    BASE_SIZE = 0.25  # Base position size (25% of capital)
+    MAX_SIZE = 0.30   # Max position size
     MIN_SIZE = 0.20   # Min position size
     HALF_SIZE = BASE_SIZE / 2
     
@@ -143,44 +172,45 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(macd_line[i]) or
-            np.isnan(signal_line[i]) or np.isnan(histogram[i]) or
-            np.isnan(atr[i]) or np.isnan(bb_width_pr[i]) or
-            atr[i] == 0):
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]) or
+            np.isnan(kama[i]) or np.isnan(atr[i]) or np.isnan(bb_width[i]) or
+            np.isnan(bb_width_pr[i]) or atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # 4h trend direction
-        price_above_4h_hma = close[i] > hma_4h_aligned[i]
-        hma_trend = 1 if price_above_4h_hma else -1
+        # Dual HTF trend alignment
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        price_above_1w_hma = close[i] > hma_1w_aligned[i]
         
-        # BB regime filter (avoid extreme squeeze < 40th percentile)
-        bb_regime_ok = bb_width_pr[i] > 0.40
+        # 1d and 1w trend direction
+        daily_trend = 1 if price_above_1d_hma else -1
+        weekly_trend = 1 if price_above_1w_hma else -1
         
-        # MACD momentum signals
-        macd_bullish = histogram[i] > 0 and histogram[i-1] <= 0  # Cross above zero
-        macd_bearish = histogram[i] < 0 and histogram[i-1] >= 0  # Cross below zero
+        # BB Width regime filter (avoid squeeze periods - only trade when expanding)
+        bb_expanding = bb_width_pr[i] > 0.40  # Top 60% of BB width = not in squeeze
         
-        # MACD histogram acceleration (momentum strengthening)
-        macd_hist_increasing = histogram[i] > histogram[i-1]
-        macd_hist_decreasing = histogram[i] < histogram[i-1]
+        # KAMA trend signals
+        kama_bullish = close[i] > kama[i]
+        kama_bearish = close[i] < kama[i]
         
-        # Price position within BB
-        price_in_upper_bb = close[i] > bb_sma[i]
-        price_in_lower_bb = close[i] < bb_sma[i]
+        # KAMA slope (optional confirmation)
+        kama_slope_bullish = kama[i] > kama[i - 1] if i > 0 else False
+        kama_slope_bearish = kama[i] < kama[i - 1] if i > 0 else False
         
-        # Calculate position size (discrete levels)
-        position_size = BASE_SIZE
+        # Calculate position size (conservative, discrete levels)
+        position_size = BASE_SIZE  # Fixed base size for simplicity
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: MACD bullish cross + BB regime ok + 4h trend up + price above SMA
-        if (macd_bullish and bb_regime_ok and hma_trend == 1 and price_in_upper_bb):
+        # Long entry: Price above KAMA + KAMA sloping up + BB expanding + HTF aligned bullish
+        if (kama_bullish and kama_slope_bullish and bb_expanding and
+            daily_trend == 1 and weekly_trend == 1):
             target_signal = position_size
         
-        # Short entry: MACD bearish cross + BB regime ok + 4h trend down + price below SMA
-        elif (macd_bearish and bb_regime_ok and hma_trend == -1 and price_in_lower_bb):
+        # Short entry: Price below KAMA + KAMA sloping down + BB expanding + HTF aligned bearish
+        elif (kama_bearish and kama_slope_bearish and bb_expanding and
+              daily_trend == -1 and weekly_trend == -1):
             target_signal = -position_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -225,7 +255,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             profit_target_hit = False
         elif take_profit_triggered:
             # Reduce position to half at 2R profit
-            signals[i] = HALF_SIZE * position_side
+            signals[i] = HALF_SIZE * np.sign(position_side)
             profit_target_hit = True
         else:
             # Apply signal change
@@ -240,13 +270,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if MACD reverses OR 4h trend breaks
-                macd_reversal_long = histogram[i] < 0
-                macd_reversal_short = histogram[i] > 0
-                hma_alignment_broken = (position_side == 1 and hma_trend == -1) or \
-                                       (position_side == -1 and hma_trend == 1)
+                # Exit if KAMA crosses against position OR HTF alignment breaks
+                kama_reversal_long = close[i] < kama[i] and position_side == 1
+                kama_reversal_short = close[i] > kama[i] and position_side == -1
+                hma_alignment_broken = (position_side == 1 and daily_trend == -1) or \
+                                       (position_side == -1 and daily_trend == 1)
                 
-                if macd_reversal_long or macd_reversal_short or hma_alignment_broken:
+                if kama_reversal_long or kama_reversal_short or hma_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
