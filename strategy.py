@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #324: 1d HMA Trend + Weekly Bias + RSI Momentum + ATR Stop
-Hypothesis: Daily timeframe needs SIMPLE logic with LOOSE filters to generate trades.
-Previous 1d strategies failed with 0 trades due to too many conflicting conditions.
-This uses: HMA(21/42) crossover for trend, weekly HMA for macro bias, RSI(14) for momentum
-(loose thresholds: >40 for long, <60 for short), and ATR(14) trailing stop at 2.5x.
-Timeframe: 1d (REQUIRED), HTF: 1w for trend bias.
-Target: Beat Sharpe=0.499 by generating 15-30 trades/year with clean trend following.
-Key insight: Fewer filters = more trades = better statistical significance on daily TF.
+Experiment #325: 15m Mean Reversion + 4h Trend Filter + BB/RSI Entries
+Hypothesis: 15m timeframe needs mean-reversion logic (not trend-following) with HTF trend filter.
+Previous 15m strategies failed because they tried trend-following on noisy data.
+This uses: 4h HMA for macro trend, 15m RSI(7) extremes for entries, Bollinger(20,2) for confirmation,
+ATR(14) trailing stop at 2.5x. LOOSE entry thresholds to ensure trades generate.
+Timeframe: 15m (REQUIRED), HTF: 4h for trend bias.
+Target: Beat Sharpe=0.499 by catching 15m pullbacks in direction of 4h trend.
+Key insight: Mean reversion works better on 15m than trend-following (less whipsaw).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_crossover_weekly_bias_rsi_momentum_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_mean_reversion_4h_hma_bb_rsi_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -37,8 +37,8 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI indicator."""
+def calculate_rsi(close, period=7):
+    """Calculate RSI indicator with shorter period for 15m."""
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
@@ -49,8 +49,17 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_sma(close, period=200):
-    """Calculate Simple Moving Average for long-term trend."""
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return upper, lower, sma
+
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average for trend filter."""
     return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
@@ -60,24 +69,23 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    hma_fast = calculate_hma(close, 21)
-    hma_slow = calculate_hma(close, 42)
-    sma_200 = calculate_sma(close, 200)
+    rsi = calculate_rsi(close, 7)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
+    sma_50 = calculate_sma(close, 50)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -87,54 +95,51 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(250, n):  # Start after 250 bars for SMA200 + HMA42
+    for i in range(100, n):  # Start after warmup
         # Skip if indicators not ready
-        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]) or np.isnan(atr[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             continue
         
-        # Weekly macro trend bias (LOOSE - just directional)
-        weekly_bullish = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
-        weekly_bearish = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
+        # 4h macro trend bias
+        hma_4h_valid = not np.isnan(hma_4h_aligned[i])
+        trend_bullish = hma_4h_valid and close[i] > hma_4h_aligned[i]
+        trend_bearish = hma_4h_valid and close[i] < hma_4h_aligned[i]
         
-        # HMA crossover signals
-        hma_cross_long = hma_fast[i] > hma_slow[i] and hma_fast[i-1] <= hma_slow[i-1]
-        hma_cross_short = hma_fast[i] < hma_slow[i] and hma_fast[i-1] >= hma_slow[i-1]
+        # RSI extreme signals (LOOSE thresholds for 15m)
+        rsi_oversold = rsi[i] < 35  # Long entry
+        rsi_overbought = rsi[i] > 65  # Short entry
         
-        # HMA trend state (already crossed)
-        hma_trend_long = hma_fast[i] > hma_slow[i]
-        hma_trend_short = hma_fast[i] < hma_slow[i]
+        # Bollinger Band confirmation
+        at_lower_bb = close[i] <= bb_lower[i]
+        at_upper_bb = close[i] >= bb_upper[i]
         
-        # RSI momentum filter (LOOSE - not extreme values)
-        rsi_ok_long = rsi[i] > 40  # Not too weak
-        rsi_ok_short = rsi[i] < 60  # Not too strong
-        
-        # Price above/below SMA200 (long-term trend)
-        above_sma = close[i] > sma_200[i]
-        below_sma = close[i] < sma_200[i]
+        # Price vs SMA50 filter
+        above_sma50 = close[i] > sma_50[i]
+        below_sma50 = close[i] < sma_50[i]
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (loose conditions for 1d timeframe) ===
-        # Primary: HMA crossover + Weekly bullish + RSI ok
-        if hma_cross_long and weekly_bullish and rsi_ok_long:
+        # === LONG ENTRIES (mean reversion in uptrend) ===
+        # Primary: RSI oversold + at lower BB + 4h bullish
+        if rsi_oversold and at_lower_bb and trend_bullish:
             new_signal = SIZE_ENTRY
-        # Secondary: HMA trend long + Weekly bullish + Above SMA200
-        elif hma_trend_long and weekly_bullish and above_sma and rsi_ok_long:
+        # Secondary: RSI oversold + above SMA50 + 4h bullish
+        elif rsi_oversold and above_sma50 and trend_bullish:
             new_signal = SIZE_ENTRY
-        # Tertiary: Strong momentum (RSI > 55 + HMA trend + Weekly bullish)
-        elif rsi[i] > 55 and hma_trend_long and weekly_bullish:
+        # Tertiary: At lower BB + 4h bullish (loosest)
+        elif at_lower_bb and trend_bullish:
             new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRIES (loose conditions for 1d timeframe) ===
-        # Primary: HMA crossover + Weekly bearish + RSI ok
-        if hma_cross_short and weekly_bearish and rsi_ok_short:
+        # === SHORT ENTRIES (mean reversion in downtrend) ===
+        # Primary: RSI overbought + at upper BB + 4h bearish
+        if rsi_overbought and at_upper_bb and trend_bearish:
             new_signal = -SIZE_ENTRY
-        # Secondary: HMA trend short + Weekly bearish + Below SMA200
-        elif hma_trend_short and weekly_bearish and below_sma and rsi_ok_short:
+        # Secondary: RSI overbought + below SMA50 + 4h bearish
+        elif rsi_overbought and below_sma50 and trend_bearish:
             new_signal = -SIZE_ENTRY
-        # Tertiary: Strong momentum (RSI < 45 + HMA trend + Weekly bearish)
-        elif rsi[i] < 45 and hma_trend_short and weekly_bearish:
+        # Tertiary: At upper BB + 4h bearish (loosest)
+        elif at_upper_bb and trend_bearish:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
