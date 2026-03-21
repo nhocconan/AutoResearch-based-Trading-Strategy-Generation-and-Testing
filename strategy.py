@@ -1,39 +1,57 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 30m primary with 4h HMA trend filter + RSI pullback entries + regime detection.
-The 4h trend provides directional bias, 30m RSI finds pullback entries in trend direction.
-Bollinger BandWidth percentile detects regime (trend vs range) to adjust entry thresholds.
-ATR-based stoploss protects against large drawdowns. Discrete sizing minimizes fee churn.
-Timeframe: 30m (required for experiment #002)
+Experiment #002: 30m Supertrend + 4h HMA Trend Filter + RSI Pullback
+Hypothesis: 4h HMA defines primary trend, 30m Supertrend gives entry timing,
+RSI pullback entries reduce false signals. ATR stoploss protects capital.
+This should work across BTC/ETH/SOL by adapting to regime (trend vs range).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_hma_rsi_regime_30m_v1"
+name = "mtf_supertrend_rsi_30m_v1"
 timeframe = "30m"
 leverage = 1.0
-
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average."""
-    close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period//2, min_periods=period//2, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    diff = 2 * wma1 - wma2
-    hma = diff.ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
-    return hma.values
 
 def calculate_atr(high, low, close, period=14):
     """Calculate ATR using Wilder's smoothing."""
     tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_supertrend(high, low, close, atr, multiplier=3.0):
+    """Calculate Supertrend indicator."""
+    n = len(close)
+    hl2 = (high + low) / 2
+    upper = hl2 + multiplier * atr
+    lower = hl2 - multiplier * atr
+    
+    supertrend = np.zeros(n)
+    direction = np.ones(n)  # 1 = bullish, -1 = bearish
+    
+    supertrend[0] = upper[0]
+    for i in range(1, n):
+        if close[i] > supertrend[i-1]:
+            supertrend[i] = lower[i]
+            direction[i] = 1
+        elif close[i] < supertrend[i-1]:
+            supertrend[i] = upper[i]
+            direction[i] = -1
+        else:
+            supertrend[i] = supertrend[i-1]
+            if direction[i-1] == 1:
+                supertrend[i] = max(supertrend[i], lower[i])
+            else:
+                supertrend[i] = min(supertrend[i], upper[i])
+    
+    return supertrend, direction
+
 def calculate_rsi(close, period=14):
-    """Calculate RSI."""
+    """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
@@ -43,15 +61,23 @@ def calculate_rsi(close, period=14):
     rsi = 100 - 100 / (1 + rs)
     return rsi
 
-def calculate_bollinger_bandwidth(close, period=20, std_mult=2.0):
+def calculate_bollinger_bw(close, period=20, std_mult=2.0):
     """Calculate Bollinger Band Width for regime detection."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     upper = sma + std_mult * std
     lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma
-    return bandwidth, sma, std
+    bw = (upper - lower) / sma
+    bw = np.nan_to_num(bw, nan=0.0)
+    return bw, sma
+
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average."""
+    close_s = pd.Series(close)
+    wma1 = close_s.ewm(span=period//2, min_periods=period//2, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
+    return wma3.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -59,92 +85,92 @@ def generate_signals(prices):
     low = prices["low"].values
     n = len(close)
     
-    # Load 4h HTF data ONCE before loop ( Rule 1 )
+    # Load 4h HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
     hma_4h = calculate_hma(df_4h['close'].values, 21)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
     # Calculate 30m indicators
-    hma_30m = calculate_hma(close, 21)
-    rsi = calculate_rsi(close, 14)
     atr = calculate_atr(high, low, close, 14)
-    bb_width, bb_sma, bb_std = calculate_bollinger_bandwidth(close, 20, 2.0)
+    supertrend, st_direction = calculate_supertrend(high, low, close, atr, 3.0)
+    rsi = calculate_rsi(close, 14)
+    bb_bw, bb_sma = calculate_bollinger_bw(close, 20, 2.0)
     
-    # Calculate BB width percentile for regime detection (rolling 100 bars)
-    bb_width_series = pd.Series(bb_width)
-    bb_percentile = bb_width_series.rolling(window=100, min_periods=50).apply(
-        lambda x: np.searchsorted(np.sort(x.values), x.iloc[-1]) / len(x), raw=False
-    ).values
-    bb_percentile = np.nan_to_num(bb_percentile, 0.5)
+    # Calculate BB percentile for regime detection
+    bb_percentile = np.zeros(n)
+    for i in range(50, n):
+        bb_percentile[i] = np.percentile(bb_bw[max(0,i-100):i+1], 50)
     
     signals = np.zeros(n)
-    SIZE_LONG = 0.30
-    SIZE_SHORT = 0.25
-    prev_signal = 0.0
-    entry_price = 0.0
-    position_side = 0
+    SIZE = 0.30
+    HALF_SIZE = 0.15
     
-    for i in range(100, n):
-        # HTF trend from 4h HMA
-        hma_4h_val = hma_4h_aligned[i]
-        hma_4h_prev = hma_4h_aligned[i-1] if i > 0 else hma_4h_val
-        htf_trend = 1.0 if hma_4h_val > hma_4h_prev else -1.0
+    # Track positions for stoploss
+    entry_price = np.zeros(n)
+    position_side = 0
+    highest_price = np.zeros(n)
+    lowest_price = np.zeros(n)
+    
+    for i in range(50, n):
+        # 4h trend filter
+        hma_trend = 1 if hma_4h_aligned[i] > 0 and close[i] > hma_4h_aligned[i] else -1
         
-        # LTF trend from 30m HMA
-        ltf_trend = 1.0 if hma_30m[i] > hma_30m[i-1] else -1.0
+        # Supertrend direction
+        st_trend = st_direction[i]
         
-        # Regime: low BB width = range, high BB width = trend
-        is_trend_regime = bb_percentile[i] > 0.6
-        is_range_regime = bb_percentile[i] < 0.4
+        # RSI condition
+        rsi_long = rsi[i] < 60  # Not overbought for long
+        rsi_short = rsi[i] > 40  # Not oversold for short
         
-        # RSI levels adjusted by regime
-        if is_trend_regime:
-            rsi_long_threshold = 45
-            rsi_short_threshold = 55
-        elif is_range_regime:
-            rsi_long_threshold = 35
-            rsi_short_threshold = 65
-        else:
-            rsi_long_threshold = 40
-            rsi_short_threshold = 60
+        # Regime detection (low BW = range, high BW = trend)
+        is_trending = bb_bw[i] > bb_percentile[i] * 1.2
         
-        current_signal = 0.0
+        # Entry logic
+        new_signal = 0.0
         
-        # Long entry: HTF bullish + LTF pullback + RSI not overbought
-        if htf_trend > 0 and ltf_trend > 0:
-            if rsi[i] < rsi_long_threshold and rsi[i] > 25:
-                current_signal = SIZE_LONG
-                entry_price = close[i]
-                position_side = 1
-        
-        # Short entry: HTF bearish + LTF pullback + RSI not oversold
-        elif htf_trend < 0 and ltf_trend < 0:
-            if rsi[i] > rsi_short_threshold and rsi[i] < 75:
-                current_signal = -SIZE_SHORT
-                entry_price = close[i]
-                position_side = -1
+        if hma_trend > 0 and st_trend > 0 and rsi_long:
+            # Bullish: 4h uptrend + Supertrend bullish + RSI not overbought
+            new_signal = SIZE
+        elif hma_trend < 0 and st_trend < 0 and rsi_short:
+            # Bearish: 4h downtrend + Supertrend bearish + RSI not oversold
+            new_signal = -SIZE
         
         # Stoploss logic (Rule 6)
-        if position_side == 1 and prev_signal > 0:
-            if close[i] < entry_price - 2.5 * atr[i]:
-                current_signal = 0.0
-                position_side = 0
-            elif rsi[i] > 70:  # Take profit on overbought
-                current_signal = SIZE_LONG / 2
+        if position_side > 0 and entry_price[i-1] > 0:
+            if close[i] < entry_price[i-1] - 2.0 * atr[i]:
+                new_signal = 0.0  # Stoploss hit
+            elif close[i] > highest_price[i-1]:
+                # Trail stop for longs
+                if close[i] > entry_price[i-1] + 2.0 * atr[i]:
+                    new_signal = HALF_SIZE  # Take partial profit
         
-        if position_side == -1 and prev_signal < 0:
-            if close[i] > entry_price + 2.5 * atr[i]:
-                current_signal = 0.0
-                position_side = 0
-            elif rsi[i] < 30:  # Take profit on oversold
-                current_signal = -SIZE_SHORT / 2
+        if position_side < 0 and entry_price[i-1] > 0:
+            if close[i] > entry_price[i-1] + 2.0 * atr[i]:
+                new_signal = 0.0  # Stoploss hit
+            elif close[i] < lowest_price[i-1]:
+                # Trail stop for shorts
+                if close[i] < entry_price[i-1] - 2.0 * atr[i]:
+                    new_signal = -HALF_SIZE  # Take partial profit
         
-        # Smooth signal changes to reduce churn
-        if abs(current_signal - prev_signal) > 0.01:
-            signals[i] = current_signal
+        # Update position tracking
+        if new_signal != 0 and position_side == 0:
+            entry_price[i] = close[i]
+            position_side = np.sign(new_signal)
+            highest_price[i] = close[i]
+            lowest_price[i] = close[i]
+        elif new_signal != 0 and position_side != 0:
+            if np.sign(new_signal) != position_side:
+                entry_price[i] = close[i]
+                position_side = np.sign(new_signal)
+            highest_price[i] = max(highest_price[i-1], close[i])
+            lowest_price[i] = min(lowest_price[i-1], close[i])
         else:
-            signals[i] = prev_signal
+            entry_price[i] = entry_price[i-1] if i > 0 else 0
+            highest_price[i] = highest_price[i-1] if i > 0 else close[i]
+            lowest_price[i] = lowest_price[i-1] if i > 0 else close[i]
+            if position_side != 0 and new_signal == 0:
+                position_side = 0  # Position closed
         
-        prev_signal = signals[i]
+        signals[i] = new_signal
     
     return signals
