@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #008 - MTF HMA+RSI+Daily Regime (1h+4h+1d v1)
+EXPERIMENT #009 - MTF Supertrend+KAMA+RSI+Volume 15m/4h Clean v1
 ==================================================================================================
-Hypothesis: Current best #004 uses 15m base with Supertrend+MACD+BBW+RSI (Sharpe=3.653).
-This experiment tries a DIFFERENT combination:
-- 1h as base timeframe (less noise than 15m, more responsive than 4h)
-- 4h HMA(21/55) crossover for trend (smoother than Supertrend, adaptive)
-- Daily SMA-50 for regime filter (only trade with daily trend - NEW)
-- 1h RSI(14) pullback for entries (proven in #004)
-- 1h ATR(14) for stoploss and position sizing
-- Position size: 0.30 (conservative, discrete levels)
-- Stoploss: 2.0*ATR (tighter than #007's 2.5*ATR)
+Hypothesis: Current #040 has too many conflicting trend filters (HMA+ST+KAMA+ADX+BBW all must agree).
+This reduces trade count and adds complexity. Let's simplify:
 
-Why this should beat #004:
-- Daily regime filter adds another layer of trend confirmation
-- HMA crossover is more responsive than Supertrend for trend changes
-- 1h base timeframe balances noise vs signal frequency better than 15m
-- Simpler indicator set (3 vs 4 in #004) may reduce overfitting
+Key changes from #040:
+- Use mtf_data helper properly (REQUIRED - #040 violated this rule!)
+- Trend: 4h Supertrend only (more stable than 1h)
+- Entry: 15m RSI pullback (35-65 range for trend continuation)
+- Filter: 15m KAMA adaptive trend + Volume spike confirmation
+- Remove: ADX, BBW, HMA, Z-score (too many filters kill opportunities)
+- Stoploss: 2.5*ATR (wider for 15m noise)
+- Position size: 0.35 (proven safe)
+
+Why this should work better:
+- Proper MTF alignment via mtf_data helper (critical for SOL gaps)
+- Fewer conflicting filters = more trades, less churn
+- Volume confirmation adds entry quality without overfiltering
+- 4h trend is more stable than 1h for direction
+- Based on #004 winning formula (Supertrend+RSI) but cleaner
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_hma_rsi_daily_regime_1h_4h_1d_v1"
-timeframe = "1h"
+name = "mtf_supertrend_kama_rsi_volume_15m_4h_v1"
+timeframe = "15m"
 leverage = 1.0
 
 
@@ -49,6 +52,30 @@ def calculate_atr(high, low, close, period=14):
         atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
     
     return atr
+
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    n = len(close)
+    if n < er_period + slow_period:
+        return np.zeros(n)
+    
+    kama = np.zeros(n)
+    kama[er_period] = close[er_period]
+    
+    for i in range(er_period + 1, n):
+        change = abs(close[i] - close[i - er_period])
+        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        
+        if volatility > 0:
+            er = change / volatility
+        else:
+            er = 0
+        
+        sc = (er * (2.0 / (fast_period + 1) - 2.0 / (slow_period + 1)) + 2.0 / (slow_period + 1)) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 
 def calculate_rsi(close, period=14):
@@ -83,108 +110,116 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average"""
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
     n = len(close)
+    if n < period:
+        return np.zeros(n), np.zeros(n)
+    
+    atr = calculate_atr(high, low, close, period)
+    
+    supertrend = np.zeros(n)
+    trend_direction = np.ones(n)
+    
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    
+    for i in range(period, n):
+        mid = (high[i] + low[i]) / 2
+        upper_band[i] = mid + multiplier * atr[i]
+        lower_band[i] = mid - multiplier * atr[i]
+    
+    supertrend[period] = lower_band[period]
+    
+    for i in range(period + 1, n):
+        if trend_direction[i - 1] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i - 1])
+            if close[i] < supertrend[i]:
+                supertrend[i] = upper_band[i]
+                trend_direction[i] = -1
+            else:
+                trend_direction[i] = 1
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i - 1])
+            if close[i] > supertrend[i]:
+                supertrend[i] = lower_band[i]
+                trend_direction[i] = 1
+            else:
+                trend_direction[i] = -1
+    
+    return supertrend, trend_direction
+
+
+def calculate_volume_ratio(volume, period=20):
+    """Calculate relative volume ratio (current vol / avg vol)"""
+    n = len(volume)
     if n < period:
         return np.zeros(n)
     
-    half_period = int(period / 2)
-    sqrt_period = int(np.sqrt(period))
+    vol_ratio = np.zeros(n)
     
-    # WMA helper
-    def wma(series, w_period):
-        result = np.zeros(len(series))
-        weights = np.arange(1, w_period + 1)
-        for i in range(w_period - 1, len(series)):
-            window = series[i - w_period + 1:i + 1]
-            result[i] = np.sum(window * weights) / np.sum(weights)
-        return result
-    
-    wma_half = wma(close, half_period)
-    wma_full = wma(close, period)
-    
-    # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    raw_hma = 2 * wma_half - wma_full
-    
-    hma = wma(raw_hma, sqrt_period)
-    
-    return hma
-
-
-def calculate_sma(close, period=50):
-    """Calculate Simple Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    sma = np.zeros(n)
     for i in range(period - 1, n):
-        sma[i] = np.mean(close[i - period + 1:i + 1])
+        avg_vol = np.mean(volume[i - period + 1:i + 1])
+        if avg_vol > 0:
+            vol_ratio[i] = volume[i] / avg_vol
+        else:
+            vol_ratio[i] = 1.0
     
-    return sma
+    return vol_ratio
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values if "volume" in prices.columns else np.ones(len(close))
     n = len(close)
     
-    # 1h indicators for entry timing (local timeframe)
-    atr_1h = calculate_atr(high, low, close, period=14)
-    rsi_1h = calculate_rsi(close, period=14)
-    hma_21_1h = calculate_hma(close, period=21)
-    hma_55_1h = calculate_hma(close, period=55)
+    # 15m indicators for entry timing
+    atr_15m = calculate_atr(high, low, close, period=14)
+    rsi_15m = calculate_rsi(close, period=14)
+    kama_15m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    vol_ratio_15m = calculate_volume_ratio(volume, period=20)
     
-    # Get 4h data using mtf_data helper (MANDATORY - no manual resampling)
+    # 4h trend filter using mtf_data helper (MANDATORY)
     try:
         df_4h = get_htf_data(prices, '4h')
-        c_4h = df_4h['close'].values
+        close_4h = df_4h['close'].values
+        high_4h = df_4h['high'].values
+        low_4h = df_4h['low'].values
         
-        # 4h HMA for trend confirmation
-        hma_21_4h = calculate_hma(c_4h, period=21)
-        hma_55_4h = calculate_hma(c_4h, period=55)
+        # Calculate 4h Supertrend
+        _, st_direction_4h = calculate_supertrend(high_4h, low_4h, close_4h, period=10, multiplier=3.0)
         
-        # Align 4h indicators to 1h timeframe (auto shift for completed bars)
-        hma_21_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_21_4h)
-        hma_55_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_55_4h)
+        # Align 4h trend to 15m timeframe (auto shift for completed bars)
+        trend_4h = align_htf_to_ltf(prices, df_4h, st_direction_4h)
     except Exception:
         # Fallback if mtf_data fails
-        hma_21_4h_aligned = np.zeros(n)
-        hma_55_4h_aligned = np.zeros(n)
-    
-    # Get Daily data using mtf_data helper (MANDATORY)
-    try:
-        df_1d = get_htf_data(prices, '1d')
-        c_1d = df_1d['close'].values
-        
-        # Daily SMA-50 for regime filter
-        sma_50_1d = calculate_sma(c_1d, period=50)
-        
-        # Align Daily indicators to 1h timeframe
-        sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
-    except Exception:
-        # Fallback if mtf_data fails
-        sma_50_1d_aligned = np.zeros(n)
+        trend_4h = np.ones(n)
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.30
-    SIZE_HALF = 0.15
+    SIZE_FULL = 0.35
+    SIZE_HALF = 0.175
     
-    # RSI thresholds for pullback entries
+    # RSI thresholds for pullback entries (continuation, not reversal)
     RSI_LONG_MIN = 35
-    RSI_LONG_MAX = 55
-    RSI_SHORT_MIN = 45
+    RSI_LONG_MAX = 65
+    RSI_SHORT_MIN = 35
     RSI_SHORT_MAX = 65
     
-    # ATR stoploss multiplier
-    ATR_STOP_MULT = 2.0
+    # Volume ratio threshold for entry confirmation
+    VOL_RATIO_MIN = 0.8  # At least 80% of avg volume
     
-    first_valid = max(100, 55, 50)
+    # ATR stoploss multiplier
+    ATR_STOP_MULT = 2.5
+    
+    # KAMA confirmation - price must be on correct side
+    KAMA_CONFIRM = True
+    
+    first_valid = max(200, 14 * 2, 30, 20)
     
     # Track position state
     position_side = np.zeros(n)
@@ -194,37 +229,16 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_1h[i]) or np.isnan(rsi_1h[i]) or atr_1h[i] == 0:
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
             continue
         
-        # Get aligned MTF values
-        hma_21_4h_val = hma_21_4h_aligned[i]
-        hma_55_4h_val = hma_55_4h_aligned[i]
-        sma_50_1d_val = sma_50_1d_aligned[i]
-        
-        # 1h HMA values
-        hma_21_1h_val = hma_21_1h[i]
-        hma_55_1h_val = hma_55_1h[i]
-        
-        rsi_val = rsi_1h[i]
-        atr = atr_1h[i]
+        trend = trend_4h[i]
+        rsi_val = rsi_15m[i]
+        atr = atr_15m[i]
         price = close[i]
-        
-        # Determine 4h HMA trend direction
-        trend_4h = 0
-        if hma_21_4h_val > hma_55_4h_val and hma_21_4h_val > 0:
-            trend_4h = 1  # Bullish
-        elif hma_21_4h_val < hma_55_4h_val and hma_55_4h_val > 0:
-            trend_4h = -1  # Bearish
-        
-        # Determine Daily regime
-        daily_regime = 0
-        if sma_50_1d_val > 0:
-            if price > sma_50_1d_val:
-                daily_regime = 1  # Bullish regime
-            elif price < sma_50_1d_val:
-                daily_regime = -1  # Bearish regime
+        kama_val = kama_15m[i]
+        vol_ratio = vol_ratio_15m[i]
         
         # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
@@ -245,7 +259,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.0*ATR)
+            # Stoploss check (2.5*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -319,9 +333,21 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: Daily regime + 4h HMA trend + 1h RSI pullback
-        # LONG: Daily bullish + 4h HMA bullish + 1h RSI pullback
-        if daily_regime == 1 and trend_4h == 1:
+        # Entry logic: 4h Supertrend trend + 15m RSI pullback + KAMA + Volume
+        # Volume filter - only enter on reasonable volume
+        if vol_ratio < VOL_RATIO_MIN:
+            signals[i] = 0.0
+            position_side[i] = 0
+            continue
+        
+        if trend == 1:  # Bullish trend on 4h
+            # KAMA confirmation: price above KAMA
+            if KAMA_CONFIRM and price < kama_val:
+                signals[i] = 0.0
+                position_side[i] = 0
+                continue
+            
+            # RSI pullback entry (not overbought, not oversold)
             if RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX:
                 signals[i] = SIZE_FULL
                 position_side[i] = 1
@@ -329,9 +355,18 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
-        
-        # SHORT: Daily bearish + 4h HMA bearish + 1h RSI pullback
-        elif daily_regime == -1 and trend_4h == -1:
+            else:
+                signals[i] = 0.0
+                position_side[i] = 0
+                
+        elif trend == -1:  # Bearish trend on 4h
+            # KAMA confirmation: price below KAMA
+            if KAMA_CONFIRM and price > kama_val:
+                signals[i] = 0.0
+                position_side[i] = 0
+                continue
+            
+            # RSI pullback entry (not overbought, not oversold)
             if RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX:
                 signals[i] = -SIZE_FULL
                 position_side[i] = -1
@@ -339,7 +374,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
-        
+            else:
+                signals[i] = 0.0
+                position_side[i] = 0
         else:
             signals[i] = 0.0
             position_side[i] = 0
