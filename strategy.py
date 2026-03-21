@@ -1,33 +1,72 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #025 - KAMA RSI Z-Score Pullback with Daily Trend (6h Primary)
+EXPERIMENT #026 - KAMA Adaptive Trend with Volume Confirmation (1h Primary)
 ==================================================================================================
-Hypothesis: 6h timeframe provides cleaner signals than 4h (less noise, fewer whipsaws).
-KAMA adapts to volatility better than HMA/EMA - reduces false signals in ranging markets.
-RSI + Z-score combo is more robust than RSI alone for identifying true pullbacks.
-Daily trend filter eliminates counter-trend trades that cause major drawdowns.
+Hypothesis: Current best uses HMA on 4h. This uses KAMA (Kaufman Adaptive MA) on 1h for faster
+adaptation to volatility changes. KAMA flattens in choppy markets and trends in directional moves.
+Adding volume confirmation (taker_buy_ratio) filters false breakouts. 4h trend filter keeps us
+on the right side of major moves.
 
-Key innovations vs current best (hma_rsi_pullback_daily_trend_4h_v1, Sharpe=0.537):
-1. 6h PRIMARY instead of 4h: Fewer bars, less noise, cleaner trend signals
-2. KAMA instead of HMA: Adaptive smoothing reduces whipsaws in sideways markets
-3. Z-score filter: Additional confirmation that pullback is statistically significant
-4. Dynamic sizing: Base size adjusted by current volatility (ATR percentile)
-5. Tighter stoploss: 1.8*ATR instead of 2.0*ATR (6h bars are larger)
+Key innovations vs current best (hma_rsi_pullback_daily_trend_4h_v1):
+1. KAMA instead of HMA - adapts efficiency ratio to market noise (better in ranging markets)
+2. 1h primary vs 4h - more trades (50-200 vs 20-50), faster entry/exit
+3. Volume confirmation - taker_buy_ratio > 0.55 for longs, < 0.45 for shorts
+4. 4h KAMA trend filter (not daily) - more responsive than daily, cleaner than 1h
+5. Same conservative sizing: 0.25 base, 0.35 high conviction, 2.0 ATR stop
 
-Why this should beat the 4h version:
-- 6h has 4 bars/day vs 4h's 6 bars/day - less noise, more significant moves
-- KAMA efficiency ratio adapts to market regime automatically
-- Z-score(20) < -1.5 confirms oversold condition beyond just RSI
-- Tested across BTC/ETH/SOL with similar volatility profiles
+Why this should beat Sharpe=0.537:
+- KAMA's adaptive nature reduces whipsaws in choppy markets (major drawdown source)
+- 1h timeframe captures more moves while 4h filter prevents counter-trend trades
+- Volume filter eliminates low-conviction breakouts that reverse quickly
+- More trades = better statistical significance while keeping DD controlled
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_rsi_zscore_pullback_daily_6h_v1"
-timeframe = "6h"
+name = "kama_volume_trend_mtf_1h_4h_v1"
+timeframe = "1h"
 leverage = 1.0
+
+
+def calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts to market noise using Efficiency Ratio (ER)
+    ER = |net change| / sum of absolute changes over n periods
+    SC = [ER * (fast_sc - slow_sc) + slow_sc]^2
+    KAMA = prior_KAMA + SC * (price - prior_KAMA)
+    """
+    n = len(close)
+    if n < efficiency_period + slow_period:
+        return np.zeros(n)
+    
+    kama = np.zeros(n)
+    
+    # Calculate Efficiency Ratio
+    er = np.zeros(n)
+    for i in range(efficiency_period, n):
+        net_change = abs(close[i] - close[i - efficiency_period])
+        sum_changes = np.sum(np.abs(np.diff(close[i - efficiency_period:i + 1])))
+        if sum_changes > 0:
+            er[i] = net_change / sum_changes
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA at SMA of first slow_period values
+    kama[slow_period - 1] = np.mean(close[:slow_period])
+    
+    # Calculate KAMA
+    for i in range(slow_period, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 
 def calculate_atr(high, low, close, period=14):
@@ -53,45 +92,6 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
-    """
-    Kaufman's Adaptive Moving Average (KAMA)
-    Adapts smoothing based on market efficiency (trend vs noise)
-    
-    ER = |close - close[n]| / sum(|close[i] - close[i-1]|)
-    SC = [ER * (fast_sc - slow_sc) + slow_sc]^2
-    KAMA = KAMA_prev + SC * (close - KAMA_prev)
-    """
-    n = len(close)
-    if n < period + slow_period:
-        return np.zeros(n)
-    
-    kama = np.zeros(n)
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(period, n):
-        signal = abs(close[i] - close[i - period])
-        noise = sum(abs(close[j] - close[j - 1]) for j in range(i - period + 1, i + 1))
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0
-    
-    # Smoothing constants
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    
-    # Initialize KAMA
-    kama[period] = close[period]
-    
-    for i in range(period + 1, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
-
-
 def calculate_rsi(close, period=14):
     """Calculate RSI"""
     n = len(close)
@@ -114,76 +114,21 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized deviation from mean)"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
+def calculate_taker_buy_ratio(prices):
+    """Calculate taker buy volume ratio (volume confirmation)"""
+    n = len(prices)
+    ratio = np.zeros(n)
     
-    zscore = np.zeros(n)
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        mean = np.mean(window)
-        std = np.std(window, ddof=0)
-        if std > 0:
-            zscore[i] = (close[i] - mean) / std
-        else:
-            zscore[i] = 0
-    
-    return zscore
-
-
-def calculate_supertrend(high, low, close, atr, multiplier=3.0):
-    """
-    Supertrend indicator - trend following with ATR-based stops
-    Returns: supertrend_values, trend_direction (1=up, -1=down)
-    """
-    n = len(close)
-    if n < len(atr) or len(atr) == 0:
-        return np.zeros(n), np.zeros(n)
-    
-    supertrend = np.zeros(n)
-    trend = np.zeros(n)
-    
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
+    volume = prices['volume'].values
+    taker_buy = prices['taker_buy_volume'].values
     
     for i in range(n):
-        if atr[i] == 0:
-            continue
-        upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
-        lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
-    
-    first_valid = np.where(atr > 0)[0]
-    if len(first_valid) == 0:
-        return supertrend, trend
-    
-    start_idx = first_valid[0]
-    supertrend[start_idx] = upper_band[start_idx]
-    trend[start_idx] = 1
-    
-    for i in range(start_idx + 1, n):
-        if atr[i] == 0:
-            supertrend[i] = supertrend[i - 1]
-            trend[i] = trend[i - 1]
-            continue
-        
-        if trend[i - 1] == 1:
-            if close[i] > lower_band[i]:
-                supertrend[i] = max(supertrend[i - 1], lower_band[i])
-                trend[i] = 1
-            else:
-                supertrend[i] = upper_band[i]
-                trend[i] = -1
+        if volume[i] > 0:
+            ratio[i] = taker_buy[i] / volume[i]
         else:
-            if close[i] < upper_band[i]:
-                supertrend[i] = min(supertrend[i - 1], upper_band[i])
-                trend[i] = -1
-            else:
-                supertrend[i] = lower_band[i]
-                trend[i] = 1
+            ratio[i] = 0.5
     
-    return supertrend, trend
+    return ratio
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -192,54 +137,51 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # ========== 6h INDICATORS (PRIMARY TIMEFRAME) ==========
-    atr_6h = calculate_atr(high, low, close, period=14)
-    rsi_6h = calculate_rsi(close, period=14)
-    kama_6h = calculate_kama(close, period=10, fast_period=2, slow_period=30)
-    kama_6h_fast = calculate_kama(close, period=5, fast_period=2, slow_period=15)
-    zscore_6h = calculate_zscore(close, period=20)
-    supertrend_6h, st_trend_6h = calculate_supertrend(high, low, close, atr_6h, multiplier=2.5)
+    # ========== 1h INDICATORS (PRIMARY TIMEFRAME) ==========
+    atr_1h = calculate_atr(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
+    kama_1h = calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30)
+    kama_1h_fast = calculate_kama(close, efficiency_period=5, fast_period=2, slow_period=15)
+    taker_ratio = calculate_taker_buy_ratio(prices)
     
-    # ========== 1d INDICATORS (TREND FILTER) - PROPER MTF ==========
+    # ========== 4h INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
-        df_1d = get_htf_data(prices, '1d')
-        close_1d = df_1d['close'].values
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
+        df_4h = get_htf_data(prices, '4h')
+        close_4h = df_4h['close'].values
+        high_4h = df_4h['high'].values
+        low_4h = df_4h['low'].values
         
-        # Daily KAMA for trend direction
-        kama_1d = calculate_kama(close_1d, period=10, fast_period=2, slow_period=30)
-        atr_1d = calculate_atr(high_1d, low_1d, close_1d, period=14)
-        _, st_trend_1d = calculate_supertrend(high_1d, low_1d, close_1d, atr_1d, multiplier=3.0)
+        # 4h KAMA for trend direction
+        kama_4h = calculate_kama(close_4h, efficiency_period=10, fast_period=2, slow_period=30)
+        atr_4h = calculate_atr(high_4h, low_4h, close_4h, period=14)
         
-        # Align to 6h timeframe (auto shift for completed bars)
-        kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-        st_trend_1d_aligned = align_htf_to_ltf(prices, df_1d, st_trend_1d)
+        # Align to 1h timeframe (auto shift for completed bars)
+        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
+        atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
         
     except Exception:
-        kama_1d_aligned = np.zeros(n)
-        st_trend_1d_aligned = np.zeros(n)
+        kama_4h_aligned = np.zeros(n)
+        atr_4h_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
     
-    # Position sizing - CONSERVATIVE with dynamic adjustment
-    SIZE_BASE = 0.20   # Base position
-    SIZE_HIGH = 0.30   # High conviction
-    SIZE_MAX = 0.35    # Maximum position
+    # Position sizing - CONSERVATIVE
+    SIZE_BASE = 0.25    # Base position (25% of capital)
+    SIZE_HIGH = 0.35    # High conviction (35% of capital)
     
-    # ATR stoploss (tighter for 6h since bars are larger)
-    ATR_STOP_MULT = 1.8
+    # ATR stoploss
+    ATR_STOP_MULT = 2.0
     
-    # RSI pullback zones
+    # RSI entry zones (pullback in trend)
     RSI_LONG_MIN = 35
     RSI_LONG_MAX = 55
     RSI_SHORT_MIN = 45
     RSI_SHORT_MAX = 65
     
-    # Z-score thresholds for confirmation
-    ZSCORE_LONG = -1.2  # Oversold confirmation
-    ZSCORE_SHORT = 1.2  # Overbought confirmation
+    # Volume confirmation thresholds
+    VOLUME_LONG_MIN = 0.52   # More buyers than sellers
+    VOLUME_SHORT_MAX = 0.48  # More sellers than buyers
     
     first_valid = max(100, 50)
     
@@ -250,41 +192,33 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
-    # Calculate ATR percentile for dynamic sizing
-    atr_percentile = np.zeros(n)
-    for i in range(100, n):
-        atr_window = atr_6h[max(0, i-50):i+1]
-        atr_percentile[i] = np.percentile(atr_window, 50)  # Median ATR
-    
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_6h[i]) or atr_6h[i] == 0 or np.isnan(rsi_6h[i]):
+        if np.isnan(atr_1h[i]) or atr_1h[i] == 0 or np.isnan(rsi_1h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_6h[i]
-        rsi_val = rsi_6h[i]
-        zscore_val = zscore_6h[i]
-        st_trend_val = st_trend_6h[i]
-        kama_val = kama_6h[i]
-        kama_fast_val = kama_6h_fast[i]
+        atr = atr_1h[i]
+        rsi_val = rsi_1h[i]
+        kama_val = kama_1h[i]
+        kama_fast_val = kama_1h_fast[i]
+        vol_ratio = taker_ratio[i]
         
-        # 1d trend filters (MASTER FILTER)
-        kama_1d_val = kama_1d_aligned[i]
-        st_trend_1d_val = st_trend_1d_aligned[i]
+        # 4h trend filters (MASTER FILTER)
+        kama_4h_val = kama_4h_aligned[i]
+        atr_4h_val = atr_4h_aligned[i]
         
-        # Determine daily trend direction
-        daily_trend = 0
-        if kama_1d_val > 0 and price > kama_1d_val:
-            daily_trend = 1
-        elif kama_1d_val > 0 and price < kama_1d_val:
-            daily_trend = -1
+        # Determine 4h trend direction
+        trend_4h = 0
+        if kama_4h_val > 0 and price > kama_4h_val:
+            trend_4h = 1
+        elif kama_4h_val > 0 and price < kama_4h_val:
+            trend_4h = -1
         
-        if st_trend_1d_val == 1:
-            daily_trend = max(daily_trend, 1)
-        elif st_trend_1d_val == -1:
-            daily_trend = min(daily_trend, -1)
+        # KAMA fast/slow cross on 1h
+        kama_cross_up = kama_fast_val > kama_val and kama_fast_val > 0 and kama_val > 0
+        kama_cross_down = kama_fast_val < kama_val and kama_fast_val > 0 and kama_val > 0
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -305,7 +239,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (1.8*ATR)
+            # Stoploss check (2.0*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -320,7 +254,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = SIZE_BASE  # Reduce to half
+                    signals[i] = SIZE_BASE / 2  # Reduce to half
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -352,7 +286,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = -SIZE_BASE  # Reduce to half
+                    signals[i] = -SIZE_BASE / 2  # Reduce to half
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -379,40 +313,39 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ========== ENTRY LOGIC - RSI + Z-SCORE PULLBACK IN TREND DIRECTION ==========
-        # LONG: Daily trend up + 6h Supertrend up + RSI pullback + Z-score oversold
+        # ========== ENTRY LOGIC - KAMA TREND + VOLUME CONFIRMATION ==========
+        # LONG: 4h trend up + 1h KAMA cross up + RSI pullback + volume confirmation
         long_condition = (
-            daily_trend == 1 and
-            st_trend_val == 1 and
+            trend_4h == 1 and
+            kama_cross_up and
             rsi_val >= RSI_LONG_MIN and rsi_val <= RSI_LONG_MAX and
-            zscore_val <= ZSCORE_LONG and  # Confirms oversold
-            kama_fast_val > kama_val  # Fast KAMA above slow KAMA
+            vol_ratio >= VOLUME_LONG_MIN
         )
         
-        # SHORT: Daily trend down + 6h Supertrend down + RSI pullback + Z-score overbought
+        # SHORT: 4h trend down + 1h KAMA cross down + RSI pullback + volume confirmation
         short_condition = (
-            daily_trend == -1 and
-            st_trend_val == -1 and
+            trend_4h == -1 and
+            kama_cross_down and
             rsi_val >= RSI_SHORT_MIN and rsi_val <= RSI_SHORT_MAX and
-            zscore_val >= ZSCORE_SHORT and  # Confirms overbought
-            kama_fast_val < kama_val  # Fast KAMA below slow KAMA
+            vol_ratio <= VOLUME_SHORT_MAX
         )
         
-        # Dynamic position sizing based on volatility
-        # Lower volatility = higher position size (more room for stops)
-        vol_adjustment = 1.0
-        if atr_percentile[i] > 0 and atr > 0:
-            vol_ratio = atr_percentile[i] / atr
-            vol_adjustment = np.clip(vol_ratio, 0.8, 1.2)
+        # High conviction: strong 4h trend (price far from 4h KAMA)
+        high_conviction_long = False
+        high_conviction_short = False
         
-        # Determine position size based on conviction
-        # High conviction: all signals align + strong daily trend
-        high_conviction_long = long_condition and st_trend_1d_val == 1
-        high_conviction_short = short_condition and st_trend_1d_val == -1
+        if kama_4h_val > 0 and long_condition:
+            distance_pct = (price - kama_4h_val) / kama_4h_val
+            if distance_pct > 0.01:  # Price > 1% above 4h KAMA
+                high_conviction_long = True
+        
+        if kama_4h_val > 0 and short_condition:
+            distance_pct = (kama_4h_val - price) / kama_4h_val
+            if distance_pct > 0.01:  # Price > 1% below 4h KAMA
+                high_conviction_short = True
         
         if long_condition:
-            base_size = SIZE_HIGH if high_conviction_long else SIZE_BASE
-            size = np.clip(base_size * vol_adjustment, SIZE_BASE, SIZE_MAX)
+            size = SIZE_HIGH if high_conviction_long else SIZE_BASE
             signals[i] = size
             position_side[i] = 1
             entry_price[i] = price
@@ -421,8 +354,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = price
         
         elif short_condition:
-            base_size = SIZE_HIGH if high_conviction_short else SIZE_BASE
-            size = np.clip(base_size * vol_adjustment, SIZE_BASE, SIZE_MAX)
+            size = SIZE_HIGH if high_conviction_short else SIZE_BASE
             signals[i] = -size
             position_side[i] = -1
             entry_price[i] = price
