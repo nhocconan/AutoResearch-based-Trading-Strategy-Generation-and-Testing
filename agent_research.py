@@ -392,17 +392,31 @@ def validate_strategy(code: str) -> tuple[bool, str]:
         if 'get_htf_data' not in code and 'mtf_data' not in code:
             return False, "Manual .resample() detected. Use mtf_data.get_htf_data() instead."
 
-    # PERFORMANCE: Block get_htf_data inside for-loops (causes 45K file reads)
-    in_loop = False
+    # PERFORMANCE + CORRECTNESS: Block get_htf_data inside loops (AST-based)
+    try:
+        import ast as _ast
+        tree = _ast.parse(code)
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.For, _ast.While)):
+                for child in _ast.walk(node):
+                    if isinstance(child, _ast.Call):
+                        func = child.func
+                        fname = ""
+                        if isinstance(func, _ast.Name):
+                            fname = func.id
+                        elif isinstance(func, _ast.Attribute):
+                            fname = func.attr
+                        if fname in ('get_htf_data', 'load_klines', 'read_parquet'):
+                            return False, f"{fname}() inside loop! Call ONCE before loop, use aligned arrays inside."
+    except SyntaxError:
+        pass
+
+    # Also catch i//N MTF pattern via regex (simpler, catches idx_4h = i // 16)
     for line in code.split('\n'):
-        stripped = line.strip()
-        if stripped.startswith('for ') or stripped.startswith('while '):
-            in_loop = True
-        if in_loop and 'get_htf_data' in stripped:
-            return False, "PERFORMANCE: get_htf_data() inside loop! Call it ONCE before the loop, use aligned arrays inside."
-        # Simple heuristic: unindented non-empty line = out of loop
-        if in_loop and stripped and not line.startswith(' ') and not line.startswith('\t') and not stripped.startswith('#'):
-            in_loop = False
+        s = line.strip()
+        if re.search(r'i\s*//\s*\d+\s*[,\]]', s) or re.search(r'idx.*=.*i\s*//\s*\d+', s):
+            if 'period' not in s and 'half' not in s and 'sqrt' not in s:
+                return False, f"Manual MTF index (i//N) detected: {s[:60]}. Use align_htf_to_ltf() instead."
 
     return True, "ok"
 
