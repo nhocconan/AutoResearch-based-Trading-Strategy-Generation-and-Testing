@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #018 - HMA Crossover + RSI Pullback + 1w Trend Filter (1d primary)
+EXPERIMENT #005 - Supertrend + RSI Pullback + 1d HMA Trend Filter (12h primary)
 =====================================================================================
-Hypothesis: Daily timeframe captures major crypto trends while avoiding noise of lower TFs.
-Using 1w HMA(21) as the ultimate trend filter ensures we only trade with the macro direction.
-1d HMA(8/21) crossover provides entry signals, with RSI(14) pullback for better entry timing.
-ADX(14) > 20 (lower than typical 25) ensures we get enough signals on daily data.
+Hypothesis: 12h timeframe captures multi-day swings without the noise of lower TFs.
+Using 1d HMA(21) as trend filter ensures we trade with the daily direction.
+12h Supertrend(10,3) provides clear entry signals, while RSI(14) pullbacks
+(RSI < 50 in uptrend, RSI > 50 in downtrend) improve entry timing.
+ADX(14) > 20 filters weak trends (lower threshold than 15m strategies to ensure trades).
 
 Key features:
-- Primary TF: 1d (daily candles)
-- HTF filter: 1w HMA(21) for macro trend direction
-- Entry: HMA(8) crossing HMA(21) on daily
-- Confirmation: RSI pullback (RSI < 50 long, RSI > 50 short) within trend
-- Strength: ADX(14) > 20 filter (lower threshold for daily TF)
-- Stoploss: 2.5*ATR(14) trailing (wider for daily volatility)
+- Primary TF: 12h (REQUIRED for this experiment)
+- HTF filter: 1d HMA(21) for major trend direction
+- Trend: Supertrend(10, 3) for entry signals
+- Entry: RSI pullback within trend (RSI < 50 long, RSI > 50 short)
+- Strength: ADX(14) > 20 filter (lower threshold for 12h to ensure sufficient trades)
+- Stoploss: 2.5*ATR(14) trailing (wider for 12h timeframe)
 - Position sizing: 0.25-0.30 discrete levels
 - Take profit: Reduce to half at 2.5R profit
 
-Why this should work on 1d:
-- Daily captures major crypto moves (2021 bull, 2022 bear, 2023-24 recovery)
-- 1w HMA filter prevents trading against macro trend
-- HMA crossover is responsive but not as noisy as EMA
-- Lower ADX threshold (20 vs 25) ensures sufficient trade count on daily data
-- Conservative sizing (0.25-0.30) controls drawdown during 77% BTC crashes
+Why this should work on 12h:
+- 12h captures 2-5 day moves, good for crypto swing trading
+- 1d HMA filter removes counter-trend trades that fail
+- Lower ADX threshold (20 vs 25) ensures we get trades on all symbols
+- Conservative sizing (0.25-0.30) controls drawdown during crashes
+- Wider stoploss (2.5*ATR) accounts for 12h volatility
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "hma_cross_rsi_1wtrend_1d_v1"
-timeframe = "1d"
+name = "supertrend_rsi_1dhma_12h_v1"
+timeframe = "12h"
 leverage = 1.0
 
 
@@ -47,14 +48,45 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period // 2, adjust=False, min_periods=period // 2).mean()
-    wma2 = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
-    raw_hma = 2 * wma1 - wma2
-    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False, min_periods=int(np.sqrt(period))).mean()
-    return hma.values
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    supertrend = np.zeros(n)
+    supertrend_direction = np.zeros(n)  # 1 = bullish, -1 = bearish
+    
+    hl2 = (high + low) / 2.0
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    supertrend[0] = upper_band[0]
+    supertrend_direction[0] = -1
+    
+    for i in range(1, n):
+        if np.isnan(atr[i]) or atr[i] == 0:
+            supertrend[i] = supertrend[i - 1]
+            supertrend_direction[i] = supertrend_direction[i - 1]
+            continue
+        
+        if upper_band[i] < supertrend[i - 1] or close[i - 1] > supertrend[i - 1]:
+            upper_band[i] = hl2[i] + multiplier * atr[i]
+        else:
+            upper_band[i] = supertrend[i - 1]
+            
+        if lower_band[i] > supertrend[i - 1] or close[i - 1] < supertrend[i - 1]:
+            lower_band[i] = hl2[i] - multiplier * atr[i]
+        else:
+            lower_band[i] = supertrend[i - 1]
+        
+        if close[i] <= supertrend[i - 1]:
+            supertrend[i] = upper_band[i]
+            supertrend_direction[i] = -1
+        else:
+            supertrend[i] = lower_band[i]
+            supertrend_direction[i] = 1
+    
+    return supertrend, supertrend_direction
 
 
 def calculate_rsi(close, period=14):
@@ -70,12 +102,11 @@ def calculate_rsi(close, period=14):
     gain[1:] = np.where(delta > 0, delta, 0)
     loss[1:] = np.where(delta < 0, -delta, 0)
     
-    # Use EMA for smoothing (Wilder's method)
     avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
     avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
     
     for i in range(period, n):
-        if avg_loss[i] == 0:
+        if np.isnan(avg_loss[i]) or avg_loss[i] == 0:
             rsi[i] = 100.0
         else:
             rs = avg_gain[i] / avg_loss[i]
@@ -132,6 +163,16 @@ def calculate_adx(high, low, close, period=14):
     return adx, plus_di, minus_di
 
 
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
+    close_s = pd.Series(close)
+    wma1 = close_s.ewm(span=period // 2, adjust=False, min_periods=period // 2).mean()
+    wma2 = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
+    raw_hma = 2 * wma1 - wma2
+    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False, min_periods=int(np.sqrt(period))).mean()
+    return hma.values
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
@@ -139,17 +180,16 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HMA for macro trend filter
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    # Calculate 1d HMA for trend filter
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1d indicators
-    hma_8 = calculate_hma(close, 8)
-    hma_21 = calculate_hma(close, 21)
+    # Calculate 12h indicators
+    supertrend, st_direction = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
@@ -169,62 +209,50 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_atr = 0.0
     profit_target_hit = False
     
-    # Track HMA crossover for entry signals
-    prev_hma_8 = 0.0
-    prev_hma_21 = 0.0
-    
-    min_period = 50  # Wait for all indicators to stabilize (less than 100 for daily TF)
+    min_period = 50  # Wait for indicators to stabilize (lower for 12h to ensure trades)
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1w_aligned[i]) or np.isnan(hma_8[i]) or np.isnan(hma_21[i]) or
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(supertrend[i]) or
             np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(adx[i]) or
-            atr[i] == 0 or adx[i] == 0):
+            atr[i] == 0):
             signals[i] = 0.0
-            if i > min_period:
-                prev_hma_8 = hma_8[i - 1]
-                prev_hma_21 = hma_21[i - 1]
             continue
         
-        # 1w HMA macro trend filter
-        price_above_1w_hma = close[i] > hma_1w_aligned[i]
-        hma_1w_trend = 1 if price_above_1w_hma else -1
+        # 1d HMA trend filter
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        hma_trend = 1 if price_above_1d_hma else -1
         
-        # HMA crossover signals
-        hma_bullish_cross = (hma_8[i] > hma_21[i]) and (prev_hma_8 <= prev_hma_21)
-        hma_bearish_cross = (hma_8[i] < hma_21[i]) and (prev_hma_8 >= prev_hma_21)
+        # Supertrend direction
+        st_trend = st_direction[i]
         
-        # Current HMA alignment
-        hma_aligned_bullish = hma_8[i] > hma_21[i]
-        hma_aligned_bearish = hma_8[i] < hma_21[i]
-        
-        # ADX strength filter (lower threshold for daily: > 20)
+        # ADX strength filter (ADX > 20 for 12h - lower threshold to ensure trades)
         adx_strong = adx[i] > 20
         
-        # RSI pullback conditions (more lenient for daily)
-        rsi_pullback_long = rsi[i] < 55  # Pullback in uptrend
-        rsi_pullback_short = rsi[i] > 45  # Pullback in downtrend
+        # RSI pullback conditions (50 level for 12h - more relaxed than 15m)
+        rsi_pullback_long = rsi[i] < 52  # Slight pullback in uptrend
+        rsi_pullback_short = rsi[i] > 48  # Slight pullback in downtrend
         
         # DI+ vs DI- for trend confirmation
         di_bullish = plus_di[i] > minus_di[i]
         di_bearish = minus_di[i] > plus_di[i]
         
         # Calculate position size based on ADX strength (dynamic sizing)
-        adx_multiplier = min(1.0 + (adx[i] - 20) / 40, 1.25)  # Max 1.25x
+        adx_multiplier = min(1.0 + (adx[i] - 20) / 60, 1.25)  # Max 1.25x
         position_size = min(MAX_SIZE, max(MIN_SIZE, BASE_SIZE * adx_multiplier))
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: HMA bullish cross OR aligned + 1w HMA bullish + ADX strong + RSI pullback + DI+ > DI-
-        if (hma_1w_trend == 1 and adx_strong and rsi_pullback_long and di_bullish):
-            if hma_bullish_cross or (hma_aligned_bullish and hma_8[i] > hma_21[i]):
-                target_signal = position_size
+        # Long entry: Supertrend bullish + 1d HMA bullish + ADX strong + RSI pullback + DI+ > DI-
+        if (st_trend == 1 and hma_trend == 1 and adx_strong and 
+            rsi_pullback_long and di_bullish):
+            target_signal = position_size
         
-        # Short entry: HMA bearish cross OR aligned + 1w HMA bearish + ADX strong + RSI pullback + DI- > DI+
-        elif (hma_1w_trend == -1 and adx_strong and rsi_pullback_short and di_bearish):
-            if hma_bearish_cross or (hma_aligned_bearish and hma_8[i] < hma_21[i]):
-                target_signal = -position_size
+        # Short entry: Supertrend bearish + 1d HMA bearish + ADX strong + RSI pullback + DI- > DI+
+        elif (st_trend == -1 and hma_trend == -1 and adx_strong and 
+              rsi_pullback_short and di_bearish):
+            target_signal = -position_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
@@ -268,7 +296,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             profit_target_hit = False
         elif take_profit_triggered:
             # Reduce position to half at 2.5R profit
-            signals[i] = HALF_SIZE * position_side
+            signals[i] = HALF_SIZE * np.sign(position_side)
             profit_target_hit = True
         else:
             # Apply signal change
@@ -283,13 +311,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if HMA reverses OR 1w HMA alignment breaks
-                hma_reversal_long = hma_8[i] < hma_21[i]
-                hma_reversal_short = hma_8[i] > hma_21[i]
-                hma_1w_alignment_broken = (position_side == 1 and hma_1w_trend == -1) or \
-                                          (position_side == -1 and hma_1w_trend == 1)
+                # Exit if Supertrend reverses OR 1d HMA alignment breaks
+                st_reversal_long = st_trend == -1
+                st_reversal_short = st_trend == 1
+                hma_alignment_broken = (position_side == 1 and hma_trend == -1) or \
+                                       (position_side == -1 and hma_trend == 1)
                 
-                if hma_reversal_long or hma_reversal_short or hma_1w_alignment_broken:
+                if st_reversal_long or st_reversal_short or hma_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
@@ -302,9 +330,5 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     signals[i] = position_size * position_side if not profit_target_hit else HALF_SIZE * position_side
             else:
                 signals[i] = 0.0
-        
-        # Store previous HMA values for crossover detection
-        prev_hma_8 = hma_8[i]
-        prev_hma_21 = hma_21[i]
     
     return signals
