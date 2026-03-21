@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #332: 30m Supertrend + 4h/1d HMA Dual Trend + Choppiness Regime Filter + ATR Stop
-Hypothesis: 30m timeframe needs regime detection to avoid whipsaws. Using Choppiness Index
-to switch between trend-following (Supertrend) in trending markets and RSI mean-reversion
-in ranging markets. 4h HMA provides intermediate trend, 1d HMA provides macro bias.
-This should reduce false signals in 2022 crash while capturing trends in 2021 bull market.
-Timeframe: 30m (REQUIRED), HTF: 4h + 1d for dual trend confirmation via mtf_data helper.
-Target: Beat Sharpe=0.499 with regime-adaptive entries, 30-50 trades/year.
-Key insight: CHOP filter prevents trend-following in choppy markets (major cause of losses).
+Experiment #333: 1h CRSI Mean Reversion + Choppiness Regime + 4h HMA Trend
+Hypothesis: 1h strategies failed because they used single-regime logic. This strategy
+adapts to market conditions: CRSI mean reversion in choppy markets (CHOP>61.8),
+trend pullback in trending markets (CHOP<38.2). 4h HMA provides macro bias to avoid
+counter-trend mean reversion. CRSI combines RSI(3)+RSI_Streak+PercentRank for faster
+signals than standard RSI(14). Target: Beat Sharpe=0.499 with regime-adaptive logic.
+Timeframe: 1h (REQUIRED), HTF: 4h for trend bias via mtf_data helper.
+Key insight: Regime detection prevents mean reversion in strong trends (major failure mode).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_supertrend_4h_1d_hma_chop_regime_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_crsi_chop_regime_4h_hma_adaptive_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -49,46 +49,68 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_supertrend(high, low, close, atr, multiplier=3.0):
-    """Calculate Supertrend indicator."""
-    n = len(close)
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Calculate Connors RSI (CRSI).
+    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    Better for mean reversion than standard RSI(14).
+    """
+    # RSI(3) component
+    rsi_short = calculate_rsi(close, rsi_period)
     
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 = bullish, -1 = bearish
-    
-    supertrend[0] = lower_band[0]
-    
-    for i in range(1, n):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = lower_band[i]
-            direction[i] = 1
+    # RSI Streak component (consecutive up/down days)
+    delta = np.diff(close, prepend=close[0])
+    streak = np.zeros(len(close))
+    for i in range(1, len(close)):
+        if delta[i] > 0:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif delta[i] < 0:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
         else:
-            supertrend[i] = upper_band[i]
-            direction[i] = -1
+            streak[i] = 0
     
-    return supertrend, direction
+    # Convert streak to RSI-like scale (0-100)
+    streak_abs = np.abs(streak)
+    streak_rsi = np.zeros(len(close))
+    for i in range(streak_period, len(close)):
+        up_streaks = np.sum(streak[max(0, i-streak_period+1):i+1] > 0)
+        streak_rsi[i] = (up_streaks / streak_period) * 100 if streak_period > 0 else 50
+    
+    # Percent Rank component (where does current price rank in last 100 bars?)
+    percent_rank = np.zeros(len(close))
+    for i in range(rank_period, len(close)):
+        window = close[i-rank_period+1:i+1]
+        current = close[i]
+        rank = np.sum(window < current) / rank_period * 100
+        percent_rank[i] = rank
+    
+    # Combine components
+    crsi = (rsi_short + streak_rsi + percent_rank) / 3.0
+    crsi = np.clip(crsi, 0, 100)
+    return crsi
 
 def calculate_choppiness(high, low, close, period=14):
-    """Calculate Choppiness Index (CHOP)."""
-    n = len(close)
-    chop = np.zeros(n)
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    CHOP > 61.8 = range/choppy market
+    CHOP < 38.2 = trending market
+    """
+    atr = calculate_atr(high, low, close, period)
     
-    for i in range(period, n):
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        tr_sum = 0.0
-        for j in range(i-period+1, i+1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-            tr_sum += tr
+    chop = np.zeros(len(close))
+    for i in range(period, len(close)):
+        atr_sum = np.sum(atr[i-period+1:i+1])
+        highest = np.max(high[i-period+1:i+1])
+        lowest = np.min(low[i-period+1:i+1])
+        range_val = highest - lowest
         
-        if highest_high - lowest_low > 0 and tr_sum > 0:
-            chop[i] = 100 * np.log10(tr_sum / (highest_high - lowest_low)) / np.log10(period)
+        if range_val > 0 and atr_sum > 0:
+            chop[i] = 100 * np.log10(atr_sum / range_val) / np.log10(period)
         else:
-            chop[i] = 50  # neutral
+            chop[i] = 50.0
     
+    chop = np.clip(chop, 0, 100)
     return chop
 
 def generate_signals(prices):
@@ -99,20 +121,16 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    supertrend, supertrend_dir = calculate_supertrend(high, low, close, atr, 3.0)
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
     chop = calculate_choppiness(high, low, close, 14)
     
     signals = np.zeros(n)
@@ -129,58 +147,60 @@ def generate_signals(prices):
     
     for i in range(250, n):  # Start after 250 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(supertrend[i]) or np.isnan(chop[i]):
+        if np.isnan(atr[i]) or np.isnan(crsi[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        # Dual HTF trend bias
-        hma_4h_bullish = not np.isnan(hma_4h_aligned[i]) and close[i] > hma_4h_aligned[i]
-        hma_4h_bearish = not np.isnan(hma_4h_aligned[i]) and close[i] < hma_4h_aligned[i]
-        hma_1d_bullish = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
-        hma_1d_bearish = not np.isnan(hma_1d_aligned[i]) and close[i] < hma_1d_aligned[i]
+        # 4h macro trend bias
+        daily_bullish = not np.isnan(hma_4h_aligned[i]) and close[i] > hma_4h_aligned[i]
+        daily_bearish = not np.isnan(hma_4h_aligned[i]) and close[i] < hma_4h_aligned[i]
         
-        # Regime detection via Choppiness Index
-        trending_regime = chop[i] < 50  # More lenient threshold
-        ranging_regime = chop[i] > 50   # More lenient threshold
+        # Regime detection
+        is_choppy = chop[i] > 61.8  # Range market - use mean reversion
+        is_trending = chop[i] < 38.2  # Trend market - use trend follow
         
-        # Supertrend signals
-        supertrend_long = supertrend_dir[i] == 1 and close[i] > supertrend[i]
-        supertrend_short = supertrend_dir[i] == -1 and close[i] < supertrend[i]
-        
-        # RSI mean reversion signals (for ranging regime)
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
-        rsi_neutral_long = rsi[i] < 45
-        rsi_neutral_short = rsi[i] > 55
+        # CRSI extreme levels for mean reversion
+        crsi_oversold = crsi[i] < 15  # Very oversold
+        crsi_overbought = crsi[i] > 85  # Very overbought
+        crsi_moderate_oversold = crsi[i] < 25
+        crsi_moderate_overbought = crsi[i] > 75
         
         new_signal = 0.0
         
-        # === TRENDING REGIME: Follow Supertrend ===
-        if trending_regime:
-            # Long: Supertrend bullish + 4h HMA bullish
-            if supertrend_long and hma_4h_bullish:
+        # === REGIME 1: CHOPPY MARKET (Mean Reversion) ===
+        if is_choppy:
+            # Long: CRSI very oversold + 4h trend not strongly bearish
+            if crsi_oversold and not daily_bearish:
                 new_signal = SIZE_ENTRY
-            # Short: Supertrend bearish + 4h HMA bearish
-            elif supertrend_short and hma_4h_bearish:
+            # Short: CRSI very overbought + 4h trend not strongly bullish
+            elif crsi_overbought and not daily_bullish:
                 new_signal = -SIZE_ENTRY
-            # Fallback: Supertrend only with strong 1d confirmation
-            elif supertrend_long and hma_1d_bullish:
+            # Moderate entries with stronger 4h confirmation
+            elif crsi_moderate_oversold and daily_bullish:
                 new_signal = SIZE_ENTRY
-            elif supertrend_short and hma_1d_bearish:
+            elif crsi_moderate_overbought and daily_bearish:
                 new_signal = -SIZE_ENTRY
         
-        # === RANGING REGIME: Mean Reversion via RSI ===
-        elif ranging_regime:
-            # Long: RSI oversold + price above 1d HMA (macro support)
-            if rsi_oversold and (hma_1d_bullish or np.isnan(hma_1d_aligned[i])):
+        # === REGIME 2: TRENDING MARKET (Trend Following) ===
+        elif is_trending:
+            # Long pullback: 4h bullish + CRSI recovering from oversold
+            if daily_bullish and crsi[i] > 30 and crsi[i] < 50:
                 new_signal = SIZE_ENTRY
-            # Short: RSI overbought + price below 1d HMA (macro resistance)
-            elif rsi_overbought and (hma_1d_bearish or np.isnan(hma_1d_aligned[i])):
+            # Short pullback: 4h bearish + CRSI falling from overbought
+            elif daily_bearish and crsi[i] < 70 and crsi[i] > 50:
                 new_signal = -SIZE_ENTRY
-            # Fallback: RSI neutral entries
-            elif rsi_neutral_long and hma_4h_bullish:
+            # Strong trend continuation
+            elif daily_bullish and crsi[i] > 50:
                 new_signal = SIZE_ENTRY
-            elif rsi_neutral_short and hma_4h_bearish:
+            elif daily_bearish and crsi[i] < 50:
+                new_signal = -SIZE_ENTRY
+        
+        # === REGIME 3: NEUTRAL (No strong signal) ===
+        else:
+            # Only take high-probability setups
+            if crsi_oversold and daily_bullish:
+                new_signal = SIZE_ENTRY
+            elif crsi_overbought and daily_bearish:
                 new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
