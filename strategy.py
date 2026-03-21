@@ -1,67 +1,39 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #055 - HMA Trend + Z-Score Mean Reversion + Volume Confirmation (30m Primary)
+EXPERIMENT #056 - Donchian Breakout + ATR Volatility + Volume Confirmation (30m Primary)
 ==================================================================================================
-Hypothesis: Current best (Sharpe=0.563) uses BB regime + Supertrend + RSI on 1h.
-This strategy uses HMA for faster trend response + Z-score for precise mean-reversion entries
-with volume confirmation to filter false signals. 30m primary captures more opportunities than 1h.
+Hypothesis: Current best (#053) uses BB regime + Supertrend + RSI on 1h timeframe.
+This strategy tries Donchian Channel breakouts (Turtle Trading style) on 30m for more trade opportunities.
 
 Key innovations:
-1. HMA(21/55) - Hull MA is more responsive than EMA/KAMA, reduces lag significantly
-2. Z-score(20) entries at ±2.0 std with volume spike confirmation (>1.5x avg volume)
-3. 30m primary + 4h HMA trend filter (proven MTF combination from #047, #053)
-4. Volume confirmation: only enter when volume > 1.5x 20-bar average (institutional interest)
-5. Adaptive sizing: Z-score magnitude determines conviction (±2.0=0.20, ±2.5=0.30, ±3.0=0.35)
-6. ATR trailing stop with take-profit at 2R, trail at 1R
+1. Donchian Channel (20-period) breakout entries - proven trend-following system
+2. ATR-based position sizing - smaller positions in high volatility (risk control)
+3. Volume confirmation - breakouts must have 1.5x average volume to reduce false signals
+4. 4h HMA trend filter - only trade in direction of higher timeframe trend
+5. Volatility regime filter - reduce size in extreme volatility (BB width > 80th percentile)
+6. 30m primary timeframe - more trades than 1h, less noise than 5m/15m
 
 Why this should beat current best (Sharpe=0.563):
-- HMA responds faster to trend changes than Supertrend/EMA (less lag = better entries)
-- Z-score provides statistical edge for mean-reversion (proven in academic literature)
-- Volume confirmation filters 40%+ of false breakouts (institutional footprint detection)
-- 30m timeframe = 2x more trade opportunities than 1h while maintaining signal quality
-- Discrete sizing levels minimize fee churn while capturing conviction differences
+- Donchian breakouts capture strong trends early (Turtle Trading proved this)
+- Volume filter reduces false breakouts (major weakness of pure Donchian)
+- ATR sizing adapts to volatility (smaller positions when risk is higher)
+- 30m captures more opportunities than 1h while maintaining signal quality
+- 4h HMA filter prevents counter-trend trades (major source of drawdown)
+
+Risk Management:
+- Max signal: 0.35 (35% of capital)
+- Stoploss: 2*ATR from entry
+- Take profit: 2R, then trail at 1R
+- Volume confirmation required for entry
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "hma_zscore_volume_confirmation_30m_4h_v1"
+name = "donchian_atr_volume_breakout_30m_4h_v1"
 timeframe = "30m"
 leverage = 1.0
-
-
-def calculate_hma(close, period=21):
-    """
-    Hull Moving Average - reduces lag while maintaining smoothness
-    HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    """
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    close_series = pd.Series(close)
-    
-    # WMA helper
-    def wma(series, window):
-        weights = np.arange(1, window + 1)
-        return series.rolling(window=window, min_periods=window).apply(
-            lambda x: np.dot(x, weights) / weights.sum(), raw=True
-        )
-    
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    wma_half = wma(close_series, half_period)
-    wma_full = wma(close_series, period)
-    
-    # 2*WMA(n/2) - WMA(n)
-    diff = 2 * wma_half - wma_full
-    
-    # WMA of diff with sqrt(n) period
-    hma = wma(diff, sqrt_period)
-    
-    return hma.values
 
 
 def calculate_atr(high, low, close, period=14):
@@ -87,8 +59,53 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized deviation from mean)"""
+def calculate_donchian(high, low, period=20):
+    """
+    Donchian Channel - tracks highest high and lowest low over period
+    Returns: upper_channel, lower_channel, middle_channel
+    """
+    n = len(high)
+    if n < period:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    middle = (upper + lower) / 2
+    
+    return upper, lower, middle
+
+
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    close_series = pd.Series(close)
+    
+    # WMA with period/2
+    wma_half = close_series.ewm(span=period // 2, adjust=False, min_periods=period // 2).mean()
+    
+    # WMA with period
+    wma_full = close_series.ewm(span=period, adjust=False, min_periods=period).mean()
+    
+    # 2*WMA_half - WMA_full
+    raw_hma = 2 * wma_half - wma_full
+    
+    # WMA of raw_hma with sqrt(period)
+    sqrt_period = int(np.sqrt(period))
+    hma = raw_hma.ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean()
+    
+    return hma.values
+
+
+def calculate_bollinger_width(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Band Width for volatility regime"""
     n = len(close)
     if n < period:
         return np.zeros(n)
@@ -97,27 +114,40 @@ def calculate_zscore(close, period=20):
     sma = close_series.rolling(window=period, min_periods=period).mean().values
     std = close_series.rolling(window=period, min_periods=period).std().values
     
-    zscore = np.zeros(n)
-    mask = std > 0
-    zscore[mask] = (close[mask] - sma[mask]) / std[mask]
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / sma
     
-    return zscore
+    bandwidth = np.where(sma > 0, bandwidth, 0)
+    
+    return bandwidth
 
 
-def calculate_volume_spike(volume, period=20, threshold=1.5):
-    """Detect volume spikes (>threshold * average volume)"""
+def calculate_bb_percentile(bandwidth, lookback=100):
+    """Calculate BB Width percentile over lookback period"""
+    n = len(bandwidth)
+    percentile = np.zeros(n)
+    
+    for i in range(lookback - 1, n):
+        window = bandwidth[i - lookback + 1:i + 1]
+        valid_window = window[window > 0]
+        if len(valid_window) > 0:
+            rank = np.sum(valid_window < bandwidth[i])
+            percentile[i] = rank / len(valid_window) * 100
+    
+    return percentile
+
+
+def calculate_volume_sma(volume, period=20):
+    """Calculate SMA of volume"""
     n = len(volume)
     if n < period:
-        return np.zeros(n, dtype=bool)
+        return np.zeros(n)
     
-    volume_series = pd.Series(volume)
-    avg_volume = volume_series.rolling(window=period, min_periods=period).mean().values
+    vol_series = pd.Series(volume)
+    vol_sma = vol_series.rolling(window=period, min_periods=period).mean().values
     
-    spike = np.zeros(n, dtype=bool)
-    mask = avg_volume > 0
-    spike[mask] = volume[mask] > (threshold * avg_volume[mask])
-    
-    return spike
+    return vol_sma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -129,109 +159,79 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # ========== 30m INDICATORS (PRIMARY TIMEFRAME) ==========
     atr_30m = calculate_atr(high, low, close, period=14)
-    zscore_30m = calculate_zscore(close, period=20)
-    volume_spike_30m = calculate_volume_spike(volume, period=20, threshold=1.5)
-    
-    # HMA for trend direction
-    hma_fast_30m = calculate_hma(close, period=21)
-    hma_slow_30m = calculate_hma(close, period=55)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=20)
+    bb_width_30m = calculate_bollinger_width(close, period=20, std_mult=2.0)
+    bb_pct_30m = calculate_bb_percentile(bb_width_30m, lookback=100)
+    volume_sma_30m = calculate_volume_sma(volume, period=20)
     
     # ========== 4h INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
-        df_4h = get_htf_data(prices, '4h')  # Load ONCE before loop
+        df_4h = get_htf_data(prices, '4h')
         close_4h = df_4h['close'].values
         high_4h = df_4h['high'].values
         low_4h = df_4h['low'].values
         
-        # 4h HMA for trend filter
-        hma_fast_4h = calculate_hma(close_4h, period=21)
-        hma_slow_4h = calculate_hma(close_4h, period=55)
+        # 4h HMA for trend direction
+        hma_4h = calculate_hma(close_4h, period=21)
         
         # Align to 30m timeframe (auto shift for completed bars)
-        hma_fast_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_fast_4h)
-        hma_slow_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_slow_4h)
+        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
         
     except Exception:
-        hma_fast_4h_aligned = np.zeros(n)
-        hma_slow_4h_aligned = np.zeros(n)
+        hma_4h_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
     
-    # Position sizing - DISCRETE levels to minimize fee churn
-    SIZE_LOW = 0.20    # Low conviction (Z-score ±2.0)
-    SIZE_MED = 0.30    # Medium conviction (Z-score ±2.5)
-    SIZE_HIGH = 0.35   # High conviction (Z-score ±3.0)
-    MAX_SIZE = 0.40    # Absolute maximum
+    # Position sizing - CONSERVATIVE with ATR adjustment
+    SIZE_BASE = 0.20    # Base position (20% of capital)
+    SIZE_HIGH = 0.35    # High conviction (35% of capital) - MAX ALLOWED
     
     # ATR stoploss
     ATR_STOP_MULT = 2.0
     
-    # Z-score thresholds for mean reversion
-    ZSCORE_ENTRY = 2.0      # Enter at ±2.0 std
-    ZSCORE_MED = 2.5        # Medium conviction
-    ZSCORE_HIGH = 3.0       # High conviction
-    ZSCORE_EXIT = 0.5       # Exit when Z-score returns to ±0.5
+    # Volume confirmation threshold
+    VOLUME_MULT = 1.5   # Volume must be 1.5x average
     
-    # HMA trend confirmation
-    HMA_CONFIRM_BARS = 3    # Need 3 consecutive bars confirming trend
+    # BB volatility regime thresholds
+    BB_HIGH_VOL = 80    # Above 80th percentile = reduce size
     
-    first_valid = max(200, 100)
+    first_valid = max(150, 100)
     
     # Track position state
     position_side = np.zeros(n, dtype=int)
     entry_price = np.zeros(n)
-    entry_zscore = np.zeros(n)
     tp_triggered = np.zeros(n, dtype=bool)
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
-    # Track HMA trend confirmation
-    hma_trend_streak = np.zeros(n, dtype=int)
-    
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_30m[i]) or atr_30m[i] == 0 or np.isnan(zscore_30m[i]):
+        if np.isnan(atr_30m[i]) or atr_30m[i] == 0:
             signals[i] = 0.0
             continue
         
         price = close[i]
         atr = atr_30m[i]
-        zscore_val = zscore_30m[i]
-        vol_spike = volume_spike_30m[i]
+        bb_percentile = bb_pct_30m[i]
+        current_volume = volume[i]
+        avg_volume = volume_sma_30m[i]
         
-        # HMA trend on 30m
-        hma_fast = hma_fast_30m[i]
-        hma_slow = hma_slow_30m[i]
+        # 4h trend filter
+        hma_4h_val = hma_4h_aligned[i]
         
-        # HMA trend on 4h (aligned)
-        hma_fast_4h = hma_fast_4h_aligned[i]
-        hma_slow_4h = hma_slow_4h_aligned[i]
+        # Determine 4h trend direction
+        trend_4h = 0
+        if i > 0 and hma_4h_val > hma_4h_aligned[i - 1] and hma_4h_val > 0:
+            trend_4h = 1
+        elif i > 0 and hma_4h_val < hma_4h_aligned[i - 1] and hma_4h_val > 0:
+            trend_4h = -1
         
-        # Determine 30m HMA trend
-        hma_trend_30m = 0
-        if hma_fast > hma_slow and hma_fast > 0 and hma_slow > 0:
-            hma_trend_30m = 1
-        elif hma_fast < hma_slow and hma_fast > 0 and hma_slow > 0:
-            hma_trend_30m = -1
+        # Check volatility regime
+        is_high_vol = bb_percentile > BB_HIGH_VOL
         
-        # Determine 4h HMA trend (stronger filter)
-        hma_trend_4h = 0
-        if hma_fast_4h > hma_slow_4h and hma_fast_4h > 0 and hma_slow_4h > 0:
-            hma_trend_4h = 1
-        elif hma_fast_4h < hma_slow_4h and hma_fast_4h > 0 and hma_slow_4h > 0:
-            hma_trend_4h = -1
-        
-        # Update HMA trend streak
-        if i > first_valid:
-            if hma_trend_30m == 1 and hma_trend_30m == hma_trend_30m if i > first_valid else 0:
-                prev_trend = 1 if hma_fast_30m[i-1] > hma_slow_30m[i-1] else (-1 if hma_fast_30m[i-1] < hma_slow_30m[i-1] else 0)
-                if hma_trend_30m == prev_trend and hma_trend_30m != 0:
-                    hma_trend_streak[i] = hma_trend_streak[i-1] + 1
-                else:
-                    hma_trend_streak[i] = 1 if hma_trend_30m != 0 else 0
-            else:
-                hma_trend_streak[i] = 1 if hma_trend_30m != 0 else 0
+        # Volume confirmation
+        volume_confirmed = (avg_volume > 0) and (current_volume >= VOLUME_MULT * avg_volume)
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -267,7 +267,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = SIZE_LOW  # Reduce to half
+                    signals[i] = SIZE_BASE  # Reduce to half position
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -284,16 +284,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         continue
-                
-                # Z-score exit (mean reversion complete)
-                if zscore_val > -ZSCORE_EXIT and zscore_val < ZSCORE_EXIT:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = False
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    continue
                     
             elif prev_side == -1:
                 stoploss_price = prev_entry + ATR_STOP_MULT * atr
@@ -309,7 +299,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = -SIZE_LOW  # Reduce to half
+                    signals[i] = -SIZE_BASE  # Reduce to half position
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -326,16 +316,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         continue
-                
-                # Z-score exit (mean reversion complete)
-                if zscore_val > -ZSCORE_EXIT and zscore_val < ZSCORE_EXIT:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = False
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    continue
             
             # Hold position if no exit triggered
             signals[i] = signals[i - 1]
@@ -346,51 +326,57 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ========== ENTRY LOGIC - Z-SCORE MEAN REVERSION WITH HMA FILTER ==========
-        # 4h trend filter (must align or be neutral)
-        trend_filter_pass = (hma_trend_4h == 0) or (hma_trend_30m == hma_trend_4h)
+        # ========== ENTRY LOGIC - DONCHIAN BREAKOUT ==========
         
-        # LONG conditions (Z-score oversold + volume spike + trend filter)
-        long_zscore = zscore_val <= -ZSCORE_ENTRY
-        long_volume = vol_spike or (hma_trend_4h == 1)  # Volume spike OR strong 4h uptrend
-        long_trend = hma_trend_30m >= 0  # 30m trend neutral or up
-        long_condition = long_zscore and long_volume and long_trend and trend_filter_pass
+        # Donchian breakout signals
+        breakout_long = (price > donchian_upper[i]) and (donchian_upper[i] > 0)
+        breakout_short = (price < donchian_lower[i]) and (donchian_lower[i] > 0)
         
-        # SHORT conditions (Z-score overbought + volume spike + trend filter)
-        short_zscore = zscore_val >= ZSCORE_ENTRY
-        short_volume = vol_spike or (hma_trend_4h == -1)  # Volume spike OR strong 4h downtrend
-        short_trend = hma_trend_30m <= 0  # 30m trend neutral or down
-        short_condition = short_zscore and short_volume and short_trend and trend_filter_pass
+        # 4h trend filter (only trade in direction of 4h trend)
+        long_trend_filter = (trend_4h >= 0)  # 4h neutral or bullish
+        short_trend_filter = (trend_4h <= 0)  # 4h neutral or bearish
         
-        # Determine position size based on Z-score magnitude (adaptive sizing)
-        def get_size(zscore_abs):
-            if zscore_abs >= ZSCORE_HIGH:
-                return SIZE_HIGH
-            elif zscore_abs >= ZSCORE_MED:
-                return SIZE_MED
-            else:
-                return SIZE_LOW
+        # Determine position size based on volatility regime
+        if is_high_vol:
+            size = SIZE_BASE  # Reduce size in high volatility
+        else:
+            size = SIZE_HIGH  # Full size in normal/low volatility
+        
+        # LONG entry conditions
+        long_condition = (
+            breakout_long and
+            long_trend_filter and
+            volume_confirmed
+        )
+        
+        # SHORT entry conditions
+        short_condition = (
+            breakout_short and
+            short_trend_filter and
+            volume_confirmed
+        )
         
         if long_condition:
-            size = get_size(abs(zscore_val))
-            size = min(size, MAX_SIZE)  # Cap at max
             signals[i] = size
             position_side[i] = 1
             entry_price[i] = price
-            entry_zscore[i] = zscore_val
             tp_triggered[i] = False
             highest_since_entry[i] = price
             lowest_since_entry[i] = price
         
         elif short_condition:
-            size = get_size(abs(zscore_val))
-            size = min(size, MAX_SIZE)  # Cap at max
             signals[i] = -size
             position_side[i] = -1
             entry_price[i] = price
-            entry_zscore[i] = zscore_val
             tp_triggered[i] = False
             highest_since_entry[i] = price
             lowest_since_entry[i] = price
+        
+        # Track state for existing positions
+        if position_side[i] != 0 and entry_price[i] == 0:
+            entry_price[i] = entry_price[i - 1]
+            tp_triggered[i] = tp_triggered[i - 1]
+            highest_since_entry[i] = highest_since_entry[i - 1]
+            lowest_since_entry[i] = lowest_since_entry[i - 1]
     
     return signals
