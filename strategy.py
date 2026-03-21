@@ -1,91 +1,52 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #002 - KAMA Adaptive Trend + RSI Pullback with 4h Filter (30m)
+EXPERIMENT #003 - EMA Crossover + Bollinger Regime + 4h Trend Filter (1h)
 =========================================================================
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market regimes
-better than fixed EMAs. On 30m timeframe, we enter on RSI pullbacks in the
-direction of the 4h KAMA trend. This captures medium-term trends while
-avoiding chasing breakouts at extremes.
+Hypothesis: Simple EMA crossovers with Bollinger Band regime detection
+provide more reliable signals than adaptive averages. On 1h timeframe,
+we enter when fast EMA crosses slow EMA, confirmed by Bollinger Band
+expansion (trend regime) and aligned with 4h trend direction.
 
 Key features:
-- Primary TF: 30m (balances signal frequency vs noise)
-- HTF filter: 4h KAMA(21) for trend direction
-- Entry: RSI(14) pullback to 40-50 in uptrend, 50-60 in downtrend
-- Confirmation: KAMA slope + price above/below KAMA
+- Primary TF: 1h (required for this experiment)
+- HTF filter: 4h EMA(21) for trend direction
+- Entry: EMA(8) crosses EMA(21) with BB regime confirmation
+- Regime filter: Bollinger Width > median = trending market
 - Stoploss: 2.0*ATR(14) trailing
-- Position sizing: 0.25-0.30 discrete levels
+- Position sizing: 0.30 discrete levels
 
 Why different from failed strategies:
-- KAMA adapts to volatility (unlike fixed Supertrend)
-- RSI pullback entries (not breakout = more trades than Donchian)
-- 30m TF = more signals than 1d, less noise than 15m
+- Simpler EMA vs complex KAMA (less calculation errors)
+- 1h TF = more stable than 30m/15m, more trades than 4h+
+- BB regime filter avoids mean-reversion chop
+- Proven EMA crossover baseline with added filters
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_rsi_pullback_4hfilter_30m_v1"
-timeframe = "30m"
+name = "ema_bb_regime_4hfilter_1h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA)
-    KAMA adapts smoothing based on market efficiency (trend vs noise)
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Change = absolute price change over efficiency period
-    change = np.abs(close - np.roll(close, efficiency_period))
-    change[:efficiency_period] = np.nan
-    
-    # Volatility = sum of absolute single-period changes
-    volatility = np.zeros(n)
-    for i in range(efficiency_period, n):
-        volatility[i] = np.sum(np.abs(close[i-efficiency_period+1:i+1] - 
-                                       np.roll(close[i-efficiency_period+1:i+1], 1))[1:])
-    
-    # Efficiency Ratio (ER)
-    er = np.zeros(n)
-    er[volatility > 0] = change[volatility > 0] / volatility[volatility > 0]
-    er[:efficiency_period] = np.nan
-    
-    # Smoothing constants
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    
-    # Dynamic smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Initialize KAMA
-    valid_start = efficiency_period
-    kama[valid_start] = close[valid_start]
-    
-    # Calculate KAMA recursively
-    for i in range(valid_start + 1, n):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI with proper min_periods"""
+def calculate_ema(close, period):
+    """Calculate EMA with proper min_periods"""
     close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+    ema = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
+    return ema.values
+
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands with proper min_periods"""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + (std * std_mult)
+    lower = sma - (std * std_mult)
+    width = (upper - lower) / sma  # Bollinger Width (normalized)
+    return upper.values, lower.values, width.values
 
 
 def calculate_atr(high, low, close, period=14):
@@ -101,14 +62,17 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama_slope(kama, lookback=5):
-    """Calculate KAMA slope (rate of change)"""
-    slope = np.zeros(len(kama))
-    slope[:] = np.nan
-    for i in range(lookback, len(kama)):
-        if kama[i] > 0 and kama[i-lookback] > 0:
-            slope[i] = (kama[i] - kama[i-lookback]) / kama[i-lookback]
-    return slope
+def calculate_rsi(close, period=14):
+    """Calculate RSI with proper min_periods"""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -119,18 +83,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # Load 4h HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
-    kama_4h = calculate_kama(df_4h['close'].values, efficiency_period=10, fast_period=2, slow_period=30)
-    kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)  # auto shift(1)
+    ema_4h = calculate_ema(df_4h['close'].values, 21)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # auto shift(1)
     
-    # Calculate 30m indicators
-    kama_30m = calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30)
-    kama_slope_30m = calculate_kama_slope(kama_30m, lookback=5)
-    rsi = calculate_rsi(close, 14)
+    # Calculate 1h indicators
+    ema_fast = calculate_ema(close, 8)
+    ema_slow = calculate_ema(close, 21)
+    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2.0)
     atr = calculate_atr(high, low, close, 14)
+    rsi = calculate_rsi(close, 14)
+    
+    # Calculate Bollinger Width median for regime filter
+    bb_width_median = np.nanmedian(bb_width[50:])  # Skip initial NaN period
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.28  # Base position size (28% of capital)
+    BASE_SIZE = 0.30  # Base position size (30% of capital)
     
     # Track position state for stoploss
     position_side = 0  # 0=flat, 1=long, -1=short
@@ -140,43 +108,49 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     min_period = 50  # Wait for indicators to stabilize
     
+    # Track EMA crossover state
+    prev_ema_diff = 0.0
+    
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(kama_4h_aligned[i]) or np.isnan(kama_30m[i]) or 
-            np.isnan(kama_slope_30m[i]) or np.isnan(rsi[i]) or 
-            np.isnan(atr[i]) or atr[i] == 0):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_fast[i]) or 
+            np.isnan(ema_slow[i]) or np.isnan(bb_width[i]) or 
+            np.isnan(atr[i]) or np.isnan(rsi[i]) or atr[i] == 0):
             signals[i] = 0.0
+            prev_ema_diff = ema_fast[i] - ema_slow[i] if not np.isnan(ema_fast[i]) and not np.isnan(ema_slow[i]) else prev_ema_diff
             continue
         
         # 4h Trend filter (HTF)
         htf_trend = 0
-        if close[i] > kama_4h_aligned[i]:
+        if close[i] > ema_4h_aligned[i]:
             htf_trend = 1  # Bullish HTF
-        elif close[i] < kama_4h_aligned[i]:
+        elif close[i] < ema_4h_aligned[i]:
             htf_trend = -1  # Bearish HTF
         
-        # 30m KAMA trend confirmation
-        ltf_trend = 0
-        if kama_slope_30m[i] > 0.001 and close[i] > kama_30m[i]:
-            ltf_trend = 1  # Bullish LTF
-        elif kama_slope_30m[i] < -0.001 and close[i] < kama_30m[i]:
-            ltf_trend = -1  # Bearish LTF
+        # 1h EMA crossover signal
+        ema_diff = ema_fast[i] - ema_slow[i]
+        ema_cross_long = (prev_ema_diff <= 0) and (ema_diff > 0)  # Fast crosses above Slow
+        ema_cross_short = (prev_ema_diff >= 0) and (ema_diff < 0)  # Fast crosses below Slow
+        prev_ema_diff = ema_diff
         
-        # RSI pullback entry logic
-        # In uptrend: buy when RSI pulls back to 40-50 (not oversold, just dip)
-        # In downtrend: sell when RSI rallies to 50-60 (not overbought, just bounce)
-        rsi_long_signal = 40 <= rsi[i] <= 55
-        rsi_short_signal = 45 <= rsi[i] <= 60
+        # Bollinger Band regime filter (trending vs mean-reversion)
+        # Width > median = trending market (good for breakout strategies)
+        # Width < median = mean-reversion market (avoid trend trades)
+        regime_trending = bb_width[i] > bb_width_median
+        
+        # RSI filter to avoid extreme entries
+        rsi_valid_long = rsi[i] < 70  # Not overbought
+        rsi_valid_short = rsi[i] > 30  # Not oversold
         
         # Determine target signal
         target_signal = 0.0
         
-        # Long entry: HTF bullish + LTF bullish + RSI pullback
-        if htf_trend == 1 and ltf_trend == 1 and rsi_long_signal:
+        # Long entry: HTF bullish + EMA cross long + trending regime + RSI valid
+        if htf_trend == 1 and ema_cross_long and regime_trending and rsi_valid_long:
             target_signal = BASE_SIZE
         
-        # Short entry: HTF bearish + LTF bearish + RSI rally
-        elif htf_trend == -1 and ltf_trend == -1 and rsi_short_signal:
+        # Short entry: HTF bearish + EMA cross short + trending regime + RSI valid
+        elif htf_trend == -1 and ema_cross_short and regime_trending and rsi_valid_short:
             target_signal = -BASE_SIZE
         
         # Stoploss logic - check BEFORE setting new signal
@@ -213,8 +187,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     lowest_since_entry = close[i]
                     entry_price = close[i]
                 elif np.sign(target_signal) == position_side:
-                    # Same direction - maintain or scale
+                    # Same direction - maintain position
                     signals[i] = target_signal
+                    # Update extremes for trailing stop
+                    if position_side == 1:
+                        highest_since_entry = max(highest_since_entry, close[i])
+                    else:
+                        lowest_since_entry = min(lowest_since_entry, close[i])
                 else:
                     # Reversal - close old, open new
                     signals[i] = target_signal
@@ -223,8 +202,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     lowest_since_entry = close[i]
                     entry_price = close[i]
             elif position_side != 0:
-                # Maintain existing position
+                # Maintain existing position (no new signal but still in trade)
                 signals[i] = BASE_SIZE * position_side
+                # Update extremes for trailing stop
+                if position_side == 1:
+                    highest_since_entry = max(highest_since_entry, close[i])
+                else:
+                    lowest_since_entry = min(lowest_since_entry, close[i])
             else:
                 signals[i] = 0.0
     
