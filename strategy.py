@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #274: 4h Supertrend + Daily/Weekly HMA + Choppiness Regime Filter
-Hypothesis: Supertrend captures trends well but whipsaws in ranges. Adding Choppiness 
-Index (CHOP) regime filter avoids range markets. Daily HMA provides trend bias, Weekly 
-HMA confirms macro direction. RSI momentum filter ensures entries on pullbacks, not 
-chase. This differs from failed 4h strategies by adding CHOP regime detection to avoid 
-range whipsaw. Position sizing: 0.25 entry, 0.125 half at 2R. Stoploss: 2.5*ATR trailing.
-Target: Beat Sharpe=0.499 with better regime filtering on 4h timeframe.
+Experiment #275: 12h KAMA Adaptive Trend with Daily/Weekly HMA Filter
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to volatility better than fixed EMAs,
+reducing whipsaws in 2022 crash and 2025 bear market. Daily HMA provides primary trend bias,
+Weekly HMA confirms macro direction. RSI pullback entries in trending markets only.
+Simple logic with fewer filters to ensure sufficient trades (>10 train, >3 test).
+Position sizing: 0.28 entry, 0.14 half at 2R profit. Stoploss: 2.5*ATR trailing.
+Target: Beat Sharpe=0.499 from current best (mtf_12h_supertrend_daily_hma_rsi_pullback_v2)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_supertrend_daily_weekly_hma_chop_regime_rsi_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_kama_adaptive_daily_weekly_hma_rsi_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -36,32 +36,18 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator."""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.zeros(len(close))
-    trend = np.ones(len(close))  # 1 = bullish, -1 = bearish
-    
-    supertrend[0] = upper_band[0]
-    trend[0] = 1
-    
-    for i in range(1, len(close)):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = lower_band[i]
-            trend[i] = 1
-        elif close[i] < supertrend[i-1]:
-            supertrend[i] = upper_band[i]
-            trend[i] = -1
-        else:
-            supertrend[i] = supertrend[i-1]
-            trend[i] = trend[i-1]
-    
-    return supertrend, trend
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average - adapts to market noise."""
+    close_s = pd.Series(close)
+    change = np.abs(close_s.diff(period).values)
+    volatility = pd.Series(np.abs(close_s.diff().values)).rolling(window=period, min_periods=period).sum().values
+    er = np.where(volatility > 0, change / volatility, 0.0)
+    sc = (er * (2.0 / (fast + 1) - 2.0 / (slow + 1)) + 2.0 / (slow + 1)) ** 2
+    kama = np.zeros(len(close))
+    kama[period] = close[period]
+    for i in range(period + 1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -75,40 +61,22 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = range/choppy market
-    CHOP < 38.2 = trending market
-    """
-    n = len(close)
-    chop = np.zeros(n)
-    
-    for i in range(period, n):
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        if highest_high == lowest_low:
-            chop[i] = 100
+def calculate_kama_slope(kama, lookback=3):
+    """Calculate KAMA slope direction."""
+    slope = np.zeros(len(kama))
+    for i in range(lookback, len(kama)):
+        if kama[i] > kama[i-lookback]:
+            slope[i] = 1.0
+        elif kama[i] < kama[i-lookback]:
+            slope[i] = -1.0
         else:
-            atr_sum = np.sum(calculate_atr(high[i-period+1:i+1], low[i-period+1:i+1], close[i-period+1:i+1], 1))
-            price_range = highest_high - lowest_low
-            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    chop[:period] = chop[period] if period < n else 50
-    return chop
-
-def calculate_volume_ratio(taker_buy_volume, volume):
-    """Calculate taker buy volume ratio (0-1, >0.5 = bullish)."""
-    ratio = np.where(volume > 0, taker_buy_volume / volume, 0.5)
-    return ratio
+            slope[i] = 0.0
+    return slope
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
@@ -123,16 +91,21 @@ def generate_signals(prices):
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
-    chop = calculate_choppiness(high, low, close, 14)
-    vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
+    kama = calculate_kama(close, 10, 2, 30)
+    kama_slope = calculate_kama_slope(kama, 3)
+    
+    # Track previous values
+    prev_kama = np.roll(kama, 1)
+    prev_kama[0] = kama[0]
+    prev_rsi = np.roll(rsi, 1)
+    prev_rsi[0] = rsi[0]
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.125
+    SIZE_ENTRY = 0.28
+    SIZE_HALF = 0.14
     
     # Track positions for stoploss
     position_side = 0
@@ -143,55 +116,64 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filters
+        # HTF trend filters (simple - daily primary, weekly confirmation bonus)
         daily_bullish = close[i] > hma_1d_aligned[i]
         daily_bearish = close[i] < hma_1d_aligned[i]
         weekly_bullish = close[i] > hma_1w_aligned[i]
         weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # Supertrend signals
-        st_long = st_trend[i] == 1
-        st_short = st_trend[i] == -1
+        # KAMA trend signals
+        kama_bullish = kama_slope[i] > 0 and close[i] > kama[i]
+        kama_bearish = kama_slope[i] < 0 and close[i] < kama[i]
+        kama_cross_up = prev_kama[i] >= close[i] and kama[i] < close[i]
+        kama_cross_down = prev_kama[i] <= close[i] and kama[i] > close[i]
         
-        # Choppiness regime filter (CHOP < 50 = trending, trade; CHOP > 60 = range, avoid)
-        trending_regime = chop[i] < 55
-        range_regime = chop[i] > 60
-        
-        # RSI momentum filter (loose to ensure trades)
-        rsi_bullish = rsi[i] > 45
-        rsi_bearish = rsi[i] < 55
-        rsi_not_extreme = 35 < rsi[i] < 65
-        
-        # Volume confirmation
-        vol_bullish = vol_ratio[i] > 0.50
-        vol_bearish = vol_ratio[i] < 0.50
+        # RSI pullback signals (looser thresholds for more trades)
+        rsi_pullback_long = 35 < rsi[i] < 55 and prev_rsi[i] <= 35
+        rsi_pullback_short = 45 < rsi[i] < 65 and prev_rsi[i] >= 65
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Supertrend long with trend confirmation and regime filter
-        if st_long and trending_regime:
-            # Primary: Daily HMA bullish + RSI momentum
-            if daily_bullish and rsi_bullish:
+        # KAMA trend + Daily HMA bullish + RSI pullback
+        if kama_bullish and daily_bullish:
+            if rsi_pullback_long or rsi_oversold:
                 new_signal = SIZE_ENTRY
-            # Secondary: Weekly HMA bullish + volume
-            elif weekly_bullish and vol_bullish and rsi_not_extreme:
+            elif close[i] > kama[i] and rsi[i] > 45:
                 new_signal = SIZE_ENTRY
-            # Tertiary: Both HTF bullish (strong conviction)
-            elif daily_bullish and weekly_bullish:
+        
+        # KAMA cross up with trend confirmation
+        elif kama_cross_up:
+            if daily_bullish and rsi[i] > 40:
+                new_signal = SIZE_ENTRY
+            elif weekly_bullish and rsi[i] > 45:
+                new_signal = SIZE_ENTRY
+        
+        # Strong trend continuation (weekly confirmation)
+        elif daily_bullish and weekly_bullish:
+            if kama_slope[i] > 0 and rsi[i] > 50:
                 new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Supertrend short with trend confirmation and regime filter
-        if st_short and trending_regime:
-            # Primary: Daily HMA bearish + RSI momentum
-            if daily_bearish and rsi_bearish:
+        # KAMA trend + Daily HMA bearish + RSI pullback
+        if kama_bearish and daily_bearish:
+            if rsi_pullback_short or rsi_overbought:
                 new_signal = -SIZE_ENTRY
-            # Secondary: Weekly HMA bearish + volume
-            elif weekly_bearish and vol_bearish and rsi_not_extreme:
+            elif close[i] < kama[i] and rsi[i] < 55:
                 new_signal = -SIZE_ENTRY
-            # Tertiary: Both HTF bearish (strong conviction)
-            elif daily_bearish and weekly_bearish:
+        
+        # KAMA cross down with trend confirmation
+        elif kama_cross_down:
+            if daily_bearish and rsi[i] < 60:
+                new_signal = -SIZE_ENTRY
+            elif weekly_bearish and rsi[i] < 55:
+                new_signal = -SIZE_ENTRY
+        
+        # Strong trend continuation (weekly confirmation)
+        elif daily_bearish and weekly_bearish:
+            if kama_slope[i] < 0 and rsi[i] < 50:
                 new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
