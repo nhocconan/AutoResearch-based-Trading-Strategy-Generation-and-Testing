@@ -8,13 +8,21 @@
 - The strategy code does NOT need to handle this - just generate clean signals
 
 ### Signal Convention
+
+**CRITICAL: Signal value = position size as fraction of capital.**
+
 | Value | Meaning |
 |-------|---------|
-| +1.0 | Full long position |
-| -1.0 | Full short position |
+| +0.35 | 35% of capital long (recommended max) |
+| -0.35 | 35% of capital short |
+| +0.20 | 20% of capital long (conservative) |
 | 0.0 | Flat (no position) |
-| 0.5 | Half long position |
-| -0.5 | Half short position |
+
+**Rules:**
+- MAX signal magnitude: **0.40** (40% of capital). Never use 1.0.
+- Use **discrete levels** (0.0, ±0.20, ±0.35) to minimize fee churn
+- Every signal change triggers a trade with 0.10% round-trip cost
+- Signal=1.0 with BTC's 77% crash in 2022 → -77% equity. Signal=0.35 → only -27%.
 
 ### Position Changes
 - Position changes happen at bar open price
@@ -64,14 +72,33 @@
 
 ### Primary: Sharpe Ratio
 - Annualized, excess return over risk-free rate (5%)
-- Must be > 0.5 to be considered viable
+- Must be > 0 to be kept (target > 1.0)
 
 ### Secondary
 - Sortino Ratio (downside risk only)
 - Calmar Ratio (return / max drawdown)
-- Maximum Drawdown (< -30% is disqualifying)
-- Win Rate (> 40% preferred)
-- Profit Factor (gross wins / gross losses, > 1.0 required)
+- Return/DD ratio (exceptional if > 10 with Sharpe > 2)
+
+### Auto-Rejection Thresholds
+| Metric | Threshold | Reason |
+|--------|-----------|--------|
+| Max drawdown | > -50% avg across symbols | Too risky — capital preservation |
+| Trades | ≥ 10 | Trivial strategies don't count |
+| Sharpe | > 0 | Must beat doing nothing |
+| SOL-only | Must work across BTC/ETH/SOL | SOL rally 2021-2024 creates bias |
+| 1m timeframe | Banned | Too noisy, excessive costs |
+| Backtest time | < 120s per symbol | Prevents hung strategies |
+
+## Compliance Validation
+
+The [validator](../validator.py) checks every strategy for:
+1. **No lookahead** — scans for `.shift(-n)`, future index access
+2. **Required fields** — name, timeframe, leverage, generate_signals
+3. **Leverage bounds** — max 5.0x (warning above 3.0x)
+4. **Valid timeframe** — must be one of 5m, 15m, 1h, 4h, 1d
+5. **Syntax validity** — AST parsing
+
+Strategies failing compliance are auto-rejected before backtest.
 
 ## Last Updated
-2026-03-20
+2026-03-21
