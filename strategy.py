@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #400: 4h Donchian Breakout + Daily HMA Trend + RSI Momentum + ATR Stop
-Hypothesis: Donchian breakouts capture volatility expansions which are common in crypto.
-20-period Donchian (highest high / lowest low of last 20 bars) signals breakout when price
-exceeds these levels. Daily HMA provides longer-term trend bias to filter false breakouts.
-RSI(14) between 35-65 ensures we're not entering at extremes. ATR(14) stoploss at 2.5x
-for 4h timeframe balances whipsaw protection with allowing room for volatility.
-Position size 0.30 discrete with take-profit at 2R (reduce to 0.15).
-Key insight: Donchian worked on 12h (#395 Sharpe=0.105), should work better on 4h with
-more trade frequency. Daily HMA trend filter prevents counter-trend breakouts.
-Timeframe: 4h (REQUIRED for this experiment), HTF: 1d for trend bias via mtf_data helper.
+Experiment #401: 12h Donchian Breakout + Daily HMA Trend + RSI Filter + ATR Stop
+Hypothesis: 12h timeframe balances trade frequency and signal quality. Donchian breakout (20-bar)
+captures trend breakouts cleanly. Daily HMA provides HTF trend bias via mtf_data helper.
+RSI filter is kept LOOSE (30-70) to ensure trades on all symbols. ATR(14) stoploss at 2.5x.
+Position size 0.25 discrete. Key insight from failures: too many filters = 0 trades.
+This strategy prioritizes trade frequency while maintaining trend alignment via HTF.
+Timeframe: 12h (REQUIRED for this experiment), HTF: 1d for trend bias.
+Target: Beat Sharpe=0.499 (current best mtf_12h_supertrend_daily_hma_rsi_pullback_v2).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_daily_hma_rsi_momentum_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_daily_hma_rsi_atr_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -28,16 +26,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend with less lag."""
-    close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -51,9 +39,19 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average for smoother trend with less lag."""
+    close_s = pd.Series(close)
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
+
 def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low of last N periods)."""
-    n = len(close)
+    """Calculate Donchian Channel upper and lower bands."""
+    n = len(high)
     upper = np.zeros(n)
     lower = np.zeros(n)
     upper[:] = np.nan
@@ -80,14 +78,14 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -103,11 +101,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -119,42 +113,42 @@ def generate_signals(prices):
         breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
         breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
         
-        # RSI momentum filter (loose to ensure trade frequency on 4h)
-        rsi_ok_long = rsi[i] > 35 and rsi[i] < 70
-        rsi_ok_short = rsi[i] > 30 and rsi[i] < 65
+        # RSI filter - LOOSE to ensure trades on all symbols
+        rsi_ok_long = rsi[i] > 30 and rsi[i] < 75
+        rsi_ok_short = rsi[i] > 25 and rsi[i] < 70
         
-        # RSI not at extreme (avoid entering at tops/bottoms)
-        rsi_not_extreme_long = rsi[i] < 75
-        rsi_not_extreme_short = rsi[i] > 25
+        # RSI momentum confirmation
+        rsi_momentum_long = rsi[i] > 45
+        rsi_momentum_short = rsi[i] < 55
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (multiple conditions to ensure trades on 4h) ===
+        # === LONG ENTRIES (multiple conditions to ensure trades) ===
         # Primary: Donchian breakout + Daily bullish + RSI ok
-        if breakout_long and daily_bullish and rsi_ok_long and rsi_not_extreme_long:
+        if breakout_long and daily_bullish and rsi_ok_long:
             new_signal = SIZE_ENTRY
         # Secondary: Donchian breakout + RSI momentum (daily neutral ok)
-        elif breakout_long and rsi[i] > 45 and rsi[i] < 65:
+        elif breakout_long and rsi_momentum_long and rsi[i] > 40:
             new_signal = SIZE_ENTRY
-        # Tertiary: Price above Donchian mid + Daily bullish + RSI ok
-        elif close[i] > (donchian_upper[i] + donchian_lower[i]) / 2 and daily_bullish and rsi[i] > 40:
+        # Tertiary: Daily bullish + RSI ok + price near Donchian upper
+        elif daily_bullish and rsi_ok_long and close[i] > donchian_upper[i-1] * 0.98:
             new_signal = SIZE_ENTRY
-        # Quaternary: Donchian breakout alone (ensure some trades)
-        elif breakout_long and rsi[i] > 40 and rsi[i] < 70:
+        # Quaternary: Pure breakout with RSI filter (ensure trades)
+        elif breakout_long and rsi[i] > 35:
             new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRIES (multiple conditions to ensure trades on 4h) ===
+        # === SHORT ENTRIES (multiple conditions to ensure trades) ===
         # Primary: Donchian breakout + Daily bearish + RSI ok
-        if breakout_short and daily_bearish and rsi_ok_short and rsi_not_extreme_short:
+        if breakout_short and daily_bearish and rsi_ok_short:
             new_signal = -SIZE_ENTRY
         # Secondary: Donchian breakout + RSI momentum (daily neutral ok)
-        elif breakout_short and rsi[i] > 35 and rsi[i] < 55:
+        elif breakout_short and rsi_momentum_short and rsi[i] < 60:
             new_signal = -SIZE_ENTRY
-        # Tertiary: Price below Donchian mid + Daily bearish + RSI ok
-        elif close[i] < (donchian_upper[i] + donchian_lower[i]) / 2 and daily_bearish and rsi[i] < 60:
+        # Tertiary: Daily bearish + RSI ok + price near Donchian lower
+        elif daily_bearish and rsi_ok_short and close[i] < donchian_lower[i-1] * 1.02:
             new_signal = -SIZE_ENTRY
-        # Quaternary: Donchian breakout alone (ensure some trades)
-        elif breakout_short and rsi[i] > 30 and rsi[i] < 60:
+        # Quaternary: Pure breakout with RSI filter (ensure trades)
+        elif breakout_short and rsi[i] < 65:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -163,7 +157,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR from highest for 4h timeframe)
+            # Calculate trailing stop (2.5*ATR from highest)
             current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -184,7 +178,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR from lowest for 4h timeframe)
+            # Calculate trailing stop (2.5*ATR from lowest)
             current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
