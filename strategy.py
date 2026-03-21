@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #125: 12h KAMA Trend with Daily/Weekly HMA Filter + RSI Pullback
-Hypothesis: Current best uses Supertrend which can whipsaw in ranging markets.
-KAMA (Kaufman Adaptive Moving Average) adapts smoothing based on market efficiency,
-reducing false signals in choppy conditions while catching trends quickly.
-Add Weekly HMA as second HTF filter for stronger trend confirmation.
-Use RSI pullback (35-65 range) instead of extremes for more frequent entries.
-Volume confirmation via taker_buy_ratio ensures institutional participation.
-Position sizing: 0.25 entry, 0.15 at 2R profit, stoploss at 2.5*ATR trailing.
-Timeframe: 12h balances trade frequency (target 30-50/year) vs noise reduction.
+Experiment #126: 1d Fisher Transform + Weekly HMA Trend + Regime Filter
+Hypothesis: Daily timeframe needs reversal-catching capability for bear markets (2025).
+Fisher Transform excels at identifying turning points with normalized -1 to +1 range.
+Combine with Weekly HMA for major trend filter, Choppiness Index for regime detection.
+In trending regime (CHOP<38.2): follow Fisher signals with weekly trend.
+In ranging regime (CHOP>61.8): fade Fisher extremes (mean reversion).
+This adapts to both 2021-2024 bull/bear cycles and 2025 range market.
+Position sizing: 0.30 entry, 0.15 at 2R profit, stoploss at 2.5*ATR trailing.
+Timeframe: 1d naturally reduces trade frequency and fee drag.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_daily_weekly_hma_rsi_volume_v1"
-timeframe = "12h"
+name = "mtf_1d_fisher_weekly_hma_chop_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -27,41 +27,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """
-    Calculate Kaufman Adaptive Moving Average.
-    KAMA adapts smoothing based on market efficiency ratio.
-    ER = |net change| / sum of absolute changes (0 to 1)
-    SC = [ER * (fast_sc - slow_sc) + slow_sc]^2
-    """
-    close_s = pd.Series(close)
-    n = len(close)
-    
-    # Net change over period
-    net_change = close_s.diff(period).abs()
-    
-    # Sum of absolute changes over period
-    abs_changes = close_s.diff().abs()
-    sum_abs_changes = abs_changes.rolling(window=period, min_periods=period).sum()
-    
-    # Efficiency Ratio
-    er = net_change / sum_abs_changes.replace(0, np.nan)
-    er = er.fillna(0)
-    
-    # Smoothing Constant
-    fast_sc = 2 / (fast + 1)
-    slow_sc = 2 / (slow + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-    
-    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -77,6 +42,60 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_fisher_transform(high, low, close, period=9):
+    """
+    Calculate Ehlers Fisher Transform.
+    Normalizes price to -1 to +1 range, highlights turning points.
+    Long when Fisher crosses above -1.5, Short when crosses below +1.5
+    """
+    hl2 = (high + low) / 2
+    
+    # Calculate highest high and lowest low over period
+    hh = pd.Series(hl2).rolling(window=period, min_periods=period).max().values
+    ll = pd.Series(hl2).rolling(window=period, min_periods=period).min().values
+    
+    # Normalize to 0-1 range
+    range_val = hh - ll
+    range_val = np.where(range_val == 0, 0.001, range_val)  # avoid div by zero
+    norm = (hl2 - ll) / range_val
+    norm = np.clip(norm, 0.001, 0.999)  # keep within bounds for log
+    
+    # Fisher calculation
+    fisher = 0.5 * np.log((1 + norm) / (1 - norm + 0.0001))
+    fisher = np.nan_to_num(fisher, nan=0.0)
+    
+    # Signal line (previous Fisher)
+    fisher_signal = np.roll(fisher, 1)
+    fisher_signal[0] = fisher[0]
+    
+    return fisher, fisher_signal
+
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = ranging market (mean reversion)
+    CHOP < 38.2 = trending market (trend follow)
+    """
+    n = len(close)
+    chop = np.zeros(n)
+    
+    for i in range(period, n):
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        tr_sum = 0.0
+        for j in range(i-period+1, i+1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            tr_sum += tr
+        
+        range_val = highest_high - lowest_low
+        if range_val > 0 and tr_sum > 0:
+            chop[i] = 100 * np.log10(tr_sum / range_val) / np.log10(period)
+        else:
+            chop[i] = 50.0
+    
+    chop[:period] = 50.0
+    return chop
+
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -89,42 +108,30 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_taker_buy_ratio(volume, taker_buy_volume):
-    """Calculate taker buy volume ratio (institutional buying pressure)."""
-    ratio = np.zeros(len(volume))
-    mask = volume > 0
-    ratio[mask] = taker_buy_volume[mask] / volume[mask]
-    return ratio
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    kama_fast = calculate_kama(close, period=10, fast=2, slow=30)
-    kama_slow = calculate_kama(close, period=20, fast=2, slow=30)
-    taker_ratio = calculate_taker_buy_ratio(volume, taker_buy_volume)
+    fisher, fisher_signal = calculate_fisher_transform(high, low, close, 9)
+    chop = calculate_choppiness_index(high, low, close, 14)
+    hma_1d = calculate_hma(close, 21)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
+    SIZE_ENTRY = 0.30
     SIZE_HALF = 0.15
     
     # Track positions for stoploss
@@ -136,61 +143,69 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filters (Daily and Weekly HMA)
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        # Weekly trend filter
         weekly_bullish = close[i] > hma_1w_aligned[i]
         weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # KAMA trend (fast vs slow)
-        kama_trend_long = kama_fast[i] > kama_slow[i]
-        kama_trend_short = kama_fast[i] < kama_slow[i]
+        # Daily trend (HMA slope)
+        daily_trend_long = hma_1d[i] > hma_1d[i-1] if i > 0 else False
+        daily_trend_short = hma_1d[i] < hma_1d[i-1] if i > 0 else False
         
-        # KAMA slope (direction)
-        kama_slope_long = kama_fast[i] > kama_fast[i-1] if i > 0 else False
-        kama_slope_short = kama_fast[i] < kama_fast[i-1] if i > 0 else False
+        # Regime detection
+        trending_regime = chop[i] < 38.2
+        ranging_regime = chop[i] > 61.8
+        neutral_regime = not trending_regime and not ranging_regime
         
-        # RSI pullback zones (wider range for more trades)
-        rsi_pullback_long = 35 <= rsi[i] <= 65
-        rsi_pullback_short = 35 <= rsi[i] <= 65
+        # Fisher signals
+        fisher_bull_cross = fisher[i] > -1.5 and fisher_signal[i] <= -1.5
+        fisher_bear_cross = fisher[i] < 1.5 and fisher_signal[i] >= 1.5
+        fisher_extreme_long = fisher[i] < -1.8
+        fisher_extreme_short = fisher[i] > 1.8
         
-        # RSI momentum confirmation
-        rsi_momentum_long = rsi[i] > 45
-        rsi_momentum_short = rsi[i] < 55
-        
-        # Volume confirmation (institutional participation)
-        volume_bullish = taker_ratio[i] > 0.52
-        volume_bearish = taker_ratio[i] < 0.48
+        # RSI confirmation
+        rsi_long_ok = rsi[i] > 40
+        rsi_short_ok = rsi[i] < 60
         
         new_signal = 0.0
         
-        # LONG ENTRY conditions (multiple paths for trade frequency)
-        # Path 1: KAMA trend + Daily bullish + RSI ok + Volume
-        if kama_trend_long and kama_slope_long and daily_bullish and rsi_pullback_long and rsi_momentum_long:
-            new_signal = SIZE_ENTRY
-        # Path 2: KAMA trend + Weekly bullish + Volume confirmation
-        elif kama_trend_long and weekly_bullish and volume_bullish and rsi_momentum_long:
-            new_signal = SIZE_ENTRY
-        # Path 3: KAMA cross + Daily bullish (simpler entry)
-        elif kama_trend_long and kama_fast[i-1] <= kama_slow[i-1] and daily_bullish:
-            new_signal = SIZE_ENTRY
-        # Path 4: Strong weekly trend + KAMA alignment
-        elif weekly_bullish and daily_bullish and kama_trend_long and rsi[i] > 40:
-            new_signal = SIZE_ENTRY
+        # LONG ENTRY - Multiple paths for trade frequency
+        if trending_regime:
+            # Trend following: Fisher cross + weekly trend + daily trend
+            if fisher_bull_cross and weekly_bullish and daily_trend_long:
+                new_signal = SIZE_ENTRY
+            # Simpler: Fisher cross + weekly bullish
+            elif fisher_bull_cross and weekly_bullish and rsi_long_ok:
+                new_signal = SIZE_ENTRY
+        elif ranging_regime:
+            # Mean reversion: Fisher extreme + RSI confirmation
+            if fisher_extreme_long and rsi[i] < 50:
+                new_signal = SIZE_ENTRY
+            # Fisher cross in range
+            elif fisher_bull_cross and rsi[i] < 55:
+                new_signal = SIZE_ENTRY
+        else:
+            # Neutral regime: use both weekly filter and Fisher
+            if fisher_bull_cross and weekly_bullish:
+                new_signal = SIZE_ENTRY
+            elif fisher_extreme_long and weekly_bullish:
+                new_signal = SIZE_ENTRY
         
-        # SHORT ENTRY conditions
-        # Path 1: KAMA trend + Daily bearish + RSI ok + Volume
-        if kama_trend_short and kama_slope_short and daily_bearish and rsi_pullback_short and rsi_momentum_short:
-            new_signal = -SIZE_ENTRY
-        # Path 2: KAMA trend + Weekly bearish + Volume confirmation
-        elif kama_trend_short and weekly_bearish and volume_bearish and rsi_momentum_short:
-            new_signal = -SIZE_ENTRY
-        # Path 3: KAMA cross + Daily bearish (simpler entry)
-        elif kama_trend_short and kama_fast[i-1] >= kama_slow[i-1] and daily_bearish:
-            new_signal = -SIZE_ENTRY
-        # Path 4: Strong weekly trend + KAMA alignment
-        elif weekly_bearish and daily_bearish and kama_trend_short and rsi[i] < 60:
-            new_signal = -SIZE_ENTRY
+        # SHORT ENTRY
+        if trending_regime:
+            if fisher_bear_cross and weekly_bearish and daily_trend_short:
+                new_signal = -SIZE_ENTRY
+            elif fisher_bear_cross and weekly_bearish and rsi_short_ok:
+                new_signal = -SIZE_ENTRY
+        elif ranging_regime:
+            if fisher_extreme_short and rsi[i] > 50:
+                new_signal = -SIZE_ENTRY
+            elif fisher_bear_cross and rsi[i] > 45:
+                new_signal = -SIZE_ENTRY
+        else:
+            if fisher_bear_cross and weekly_bearish:
+                new_signal = -SIZE_ENTRY
+            elif fisher_extreme_short and weekly_bearish:
+                new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
