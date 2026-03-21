@@ -1,79 +1,16 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #005: 12h KAMA trend + 1d HMA filter + RSI pullback + ATR stoploss
-Hypothesis: 12h primary with 1d HTF trend filter captures medium-term swings
-while avoiding whipsaw. KAMA adapts to volatility better than EMA.
-RSI pullback entries in direction of HTF trend improve win rate.
-ATR-based stoploss limits drawdown. Discrete sizing reduces fee churn.
+Hypothesis: Daily timeframe with weekly trend filter reduces noise and improves risk-adjusted returns.
+Using 1w HTF trend direction to filter 1d EMA crossover entries. ATR stoploss for risk control.
+This should work across BTC/ETH/SOL as all follow multi-year trends.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_kama_rsi_12h_v1"
-timeframe = "12h"
+name = "mtf_ema_rsi_atr_1d_v1"
+timeframe = "1d"
 leverage = 1.0
-
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """Kaufman Adaptive Moving Average - adapts to market noise"""
-    n = len(close)
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    
-    for i in range(1, n):
-        # Efficiency Ratio
-        if i >= period:
-            signal = abs(close[i] - close[i - period])
-            noise = np.sum(np.abs(np.diff(close[i-period:i+1])))
-            er = signal / noise if noise > 0 else 0
-        else:
-            er = 0
-        
-        # Smoothing constants
-        fast_sc = (2 / (fast + 1)) ** 2
-        slow_sc = (2 / (slow + 1)) ** 2
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-        
-        kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
-    
-    return kama
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range for volatility and stoploss"""
-    n = len(close)
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
-    rsi = 100 - 100 / (1 + rs)
-    return rsi
-
-def calculate_hma(close, period=21):
-    """Hull Moving Average for HTF trend"""
-    close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period//2, min_periods=period//2, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    hma = (2 * wma1 - wma2).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
-    return hma.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -81,128 +18,114 @@ def generate_signals(prices):
     low = prices["low"].values
     n = len(close)
     
-    # Load 1d HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Load weekly HTF data ONCE before loop (Rule 1)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h indicators
-    kama_fast = calculate_kama(close, period=10, fast=2, slow=30)
-    kama_slow = calculate_kama(close, period=30, fast=2, slow=30)
-    rsi = calculate_rsi(close, 14)
-    atr = calculate_atr(high, low, close, 14)
+    # Calculate weekly trend (HMA21 on weekly close)
+    close_1w = df_1w['close'].values
+    hma_1w = calculate_hma(close_1w, 21)
     
-    # Signal parameters
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
-    STOPLOSS_MULT = 2.0
-    TAKEPROFIT_MULT = 2.0
+    # Align weekly trend to daily (auto shift(1) for completed bars only - Rule 2)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
+    # Daily indicators
+    close_s = pd.Series(close)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    # EMA crossover (12/26)
+    ema12 = close_s.ewm(span=12, min_periods=12, adjust=False).mean().values
+    ema26 = close_s.ewm(span=26, min_periods=26, adjust=False).mean().values
+    
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_g = pd.Series(gain).ewm(span=14, min_periods=14, adjust=False).mean().values
+    avg_l = pd.Series(loss).ewm(span=14, min_periods=14, adjust=False).mean().values
+    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
+    rsi = 100 - 100 / (1 + rs)
+    
+    # ATR(14) for stoploss
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Initialize signals and tracking
     signals = np.zeros(n)
-    entry_price = np.zeros(n)
-    position_side = np.zeros(n)
-    highest_since_entry = np.zeros(n)
-    lowest_since_entry = np.zeros(n)
+    SIZE = 0.30
+    HALF_SIZE = 0.15
     
-    for i in range(50, n):
-        # HTF trend from 1d HMA
-        hma_trend = 1 if hma_1d_aligned[i] > hma_1d_aligned[i-1] else -1
+    # Track position for stoploss
+    position_side = 0
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
+    
+    for i in range(30, n):
+        weekly_trend = hma_1w_aligned[i]
+        weekly_bullish = close[i] > weekly_trend if not np.isnan(weekly_trend) else True
         
-        # 12h KAMA crossover
-        kama_bull = kama_fast[i] > kama_slow[i]
-        kama_bear = kama_fast[i] < kama_slow[i]
+        ema_bullish = ema12[i] > ema26[i]
+        ema_bearish = ema12[i] < ema26[i]
         
-        # RSI pullback conditions
-        rsi_not_overbought = rsi[i] < 70
-        rsi_not_oversold = rsi[i] > 30
-        rsi_pullback_long = rsi[i] < 55  # pullback in uptrend
-        rsi_pullback_short = rsi[i] > 45  # pullback in downtrend
-        
-        # ATR volatility filter (avoid extremely low vol)
-        atr_pct = atr[i] / close[i] * 100
-        vol_ok = atr_pct > 0.5
-        
-        current_signal = 0.0
-        
-        # Entry logic
-        if hma_trend > 0 and kama_bull and rsi_pullback_long and vol_ok:
-            if position_side[i-1] <= 0:
-                current_signal = SIZE_ENTRY
-                entry_price[i] = close[i]
-                position_side[i] = 1
-                highest_since_entry[i] = close[i]
-                lowest_since_entry[i] = close[i]
-            else:
-                current_signal = signals[i-1]
-                position_side[i] = position_side[i-1]
-                entry_price[i] = entry_price[i-1]
-        elif hma_trend < 0 and kama_bear and rsi_pullback_short and vol_ok:
-            if position_side[i-1] >= 0:
-                current_signal = -SIZE_ENTRY
-                entry_price[i] = close[i]
-                position_side[i] = -1
-                highest_since_entry[i] = close[i]
-                lowest_since_entry[i] = close[i]
-            else:
-                current_signal = signals[i-1]
-                position_side[i] = position_side[i-1]
-                entry_price[i] = entry_price[i-1]
-        else:
-            # Check for exit conditions
-            if position_side[i-1] != 0:
-                # Update extremes
-                if position_side[i-1] > 0:
-                    highest_since_entry[i] = max(highest_since_entry[i-1], close[i])
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
-                else:
-                    lowest_since_entry[i] = min(lowest_since_entry[i-1], close[i])
-                    highest_since_entry[i] = highest_since_entry[i-1]
-                
-                entry_price[i] = entry_price[i-1]
-                position_side[i] = position_side[i-1]
-                
-                # Stoploss check
-                if position_side[i-1] > 0:
-                    stop_price = entry_price[i] - STOPLOSS_MULT * atr[i]
-                    if close[i] < stop_price:
-                        current_signal = 0.0
-                        position_side[i] = 0
-                    elif close[i] >= entry_price[i] + TAKEPROFIT_MULT * atr[i]:
-                        # Take profit - reduce to half
-                        current_signal = SIZE_HALF
-                    else:
-                        current_signal = signals[i-1]
-                else:
-                    stop_price = entry_price[i] + STOPLOSS_MULT * atr[i]
-                    if close[i] > stop_price:
-                        current_signal = 0.0
-                        position_side[i] = 0
-                    elif close[i] <= entry_price[i] - TAKEPROFIT_MULT * atr[i]:
-                        # Take profit - reduce to half
-                        current_signal = -SIZE_HALF
-                    else:
-                        current_signal = signals[i-1]
-                
-                # Exit if trend reverses
-                if position_side[i-1] > 0 and hma_trend < 0 and kama_bear:
-                    current_signal = 0.0
-                    position_side[i] = 0
-                elif position_side[i-1] < 0 and hma_trend > 0 and kama_bull:
-                    current_signal = 0.0
-                    position_side[i] = 0
-            else:
-                position_side[i] = 0
-                entry_price[i] = 0
-                highest_since_entry[i] = 0
-                lowest_since_entry[i] = 0
-        
-        # Carry forward if no change
-        if current_signal == 0.0 and i > 0:
-            if position_side[i] == 0:
+        # Check stoploss first (Rule 6)
+        if position_side == 1:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * atr[i]
+            if close[i] < trailing_stop or close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
+                position_side = 0
+                entry_price = 0.0
+                continue
+        elif position_side == -1:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * atr[i]
+            if close[i] > trailing_stop or close[i] > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position_side = 0
+                entry_price = 0.0
+                continue
+        
+        # Entry logic with weekly filter
+        if position_side == 0:
+            # Long entry: weekly bullish + EMA bullish + RSI not overbought
+            if weekly_bullish and ema_bullish and rsi[i] < 70:
+                signals[i] = SIZE
+                position_side = 1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+            # Short entry: weekly bearish + EMA bearish + RSI not oversold
+            elif not weekly_bullish and ema_bearish and rsi[i] > 30:
+                signals[i] = -SIZE
+                position_side = -1
+                entry_price = close[i]
+                lowest_since_entry = low[i]
             else:
-                signals[i] = signals[i-1]
-        else:
-            signals[i] = current_signal
+                signals[i] = 0.0
+        elif position_side == 1:
+            # Hold long or exit on EMA cross
+            if ema_bearish:
+                signals[i] = 0.0
+                position_side = 0
+                entry_price = 0.0
+            else:
+                signals[i] = SIZE
+        elif position_side == -1:
+            # Hold short or exit on EMA cross
+            if ema_bullish:
+                signals[i] = 0.0
+                position_side = 0
+                entry_price = 0.0
+            else:
+                signals[i] = -SIZE
     
     return signals
+
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
+    close_s = pd.Series(close)
+    wma_half = close_s.ewm(span=period // 2, min_periods=period // 2, adjust=False).mean()
+    wma_full = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    hma = (2 * wma_half - wma_full).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
+    return hma.values
