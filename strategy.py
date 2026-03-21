@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #014 - MTF Keltner Channel Breakout + Supertrend + ADX + RSI (15m+1h+4h v1)
+EXPERIMENT #015 - MTF DEMA+ROC+RSI+Volume+BBW (15m+4h Clean v1)
 ==================================================================================================
-Hypothesis: Keltner Channels provide better volatility-adjusted breakouts than Bollinger Bands.
-Current best #004 uses Supertrend+MACD+BBW+RSI on 15m/1h/4h with Sharpe=3.653.
+Hypothesis: Current best #004 uses Supertrend+MACD. Let's try DEMA (faster than HMA) + ROC 
+(momentum cleaner than MACD) + Volume confirmation. 4h trend is more stable than 1h for crypto.
 
-Key changes from #040:
-- Use mtf_data helper for PROPER multi-timeframe alignment (mandatory per rules)
-- Keltner Channels instead of Bollinger Bands (ATR-based, less whipsaw)
-- 4h Supertrend for primary trend (more stable than 1h)
-- 1h ADX for trend strength filter
-- 15m Keltner breakout + RSI pullback for entries
-- Position size: 0.35 (proven safe)
-- Stoploss: 2.0*ATR with trailing at 1R profit
+Key differences from #004:
+- DEMA instead of HMA/Supertrend for trend (faster response, less lag)
+- ROC(10) instead of MACD for momentum (simpler, fewer parameters)
+- Volume spike confirmation (2x average volume) for entry validation
+- 15m + 4h only (skip 1h, cleaner MTF alignment)
+- Position size: 0.30 (slightly conservative)
+- Stoploss: 2.0*ATR
+- ADX threshold: 22 (moderate trend strength)
 
-Why this should beat #004:
-- Keltner Channels are more responsive to volatility changes than BB
-- 4h Supertrend provides cleaner trend signal than 1h
-- ADX filter reduces false breakouts in choppy markets
-- Proper MTF alignment using mtf_data helper (fixes #040's resampling bugs)
+Why this should work:
+- DEMA reacts faster to trend changes than HMA/Supertrend
+- ROC captures momentum without MACD's signal line lag
+- Volume confirmation filters false breakouts
+- 4h trend is more reliable than 1h for crypto perpetuals
+- Based on lessons from #004 (winning) but with different signal types
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_keltner_supertrend_adx_rsi_15m_1h_4h_v1"
+name = "mtf_dema_roc_rsi_volume_bbw_15m_4h_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -53,75 +54,67 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
+def calculate_dema(close, period=21):
+    """Calculate Double Exponential Moving Average"""
     n = len(close)
     if n < period:
         return np.zeros(n)
     
-    ema = np.zeros(n)
-    ema[period - 1] = np.mean(close[:period])
+    ema1 = pd.Series(close).ewm(span=period, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, adjust=False).mean().values
     
-    multiplier = 2.0 / (period + 1)
-    for i in range(period, n):
-        ema[i] = (close[i] - ema[i - 1]) * multiplier + ema[i - 1]
+    dema = 2 * ema1 - ema2
+    dema[:period] = np.nan
     
-    return ema
+    return dema
 
 
-def calculate_keltner_channels(high, low, close, ema_period=20, atr_period=14, atr_mult=2.0):
-    """Calculate Keltner Channels (EMA middle, ATR-based bands)"""
-    n = len(close)
-    if n < max(ema_period, atr_period):
-        return np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    ema = calculate_ema(close, ema_period)
-    atr = calculate_atr(high, low, close, atr_period)
-    
-    upper = ema + atr_mult * atr
-    lower = ema - atr_mult * atr
-    
-    return upper, ema, lower
-
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator"""
+def calculate_roc(close, period=10):
+    """Calculate Rate of Change (momentum)"""
     n = len(close)
     if n < period:
-        return np.zeros(n), np.zeros(n)
+        return np.zeros(n)
     
-    atr = calculate_atr(high, low, close, period)
-    
-    supertrend = np.zeros(n)
-    trend_direction = np.ones(n)
-    
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
-    
+    roc = np.zeros(n)
     for i in range(period, n):
-        mid = (high[i] + low[i]) / 2
-        upper_band[i] = mid + multiplier * atr[i]
-        lower_band[i] = mid - multiplier * atr[i]
+        if close[i - period] != 0:
+            roc[i] = (close[i] - close[i - period]) / close[i - period] * 100
+        else:
+            roc[i] = 0
     
-    supertrend[period] = lower_band[period]
+    return roc
+
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI"""
+    n = len(close)
+    if n < period + 1:
+        return np.zeros(n)
+    
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    
+    avg_gain[period] = np.mean(gain[:period + 1])
+    avg_loss[period] = np.mean(loss[:period + 1])
     
     for i in range(period + 1, n):
-        if trend_direction[i - 1] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i - 1])
-            if close[i] < supertrend[i]:
-                supertrend[i] = upper_band[i]
-                trend_direction[i] = -1
-            else:
-                trend_direction[i] = 1
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i - 1])
-            if close[i] > supertrend[i]:
-                supertrend[i] = lower_band[i]
-                trend_direction[i] = 1
-            else:
-                trend_direction[i] = -1
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
     
-    return supertrend, trend_direction
+    rs = np.zeros(n)
+    for i in range(period, n):
+        if avg_loss[i] == 0:
+            rs[i] = 100
+        else:
+            rs[i] = avg_gain[i] / avg_loss[i]
+    
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi
 
 
 def calculate_adx(high, low, close, period=14):
@@ -178,126 +171,168 @@ def calculate_adx(high, low, close, period=14):
     return adx
 
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI"""
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width"""
     n = len(close)
-    if n < period + 1:
+    if n < period:
+        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = middle + std_mult * std
+    lower = middle - std_mult * std
+    
+    bbw = np.zeros(n)
+    for i in range(period - 1, n):
+        if middle[i] > 0:
+            bbw[i] = (upper[i] - lower[i]) / middle[i]
+    
+    return upper, middle, lower, bbw
+
+
+def calculate_volume_ma(volume, period=20):
+    """Calculate Volume Moving Average"""
+    n = len(volume)
+    if n < period:
         return np.zeros(n)
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    
-    avg_gain[period] = np.mean(gain[:period + 1])
-    avg_loss[period] = np.mean(loss[:period + 1])
-    
-    for i in range(period + 1, n):
-        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
-    
-    rs = np.zeros(n)
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rs[i] = 100
-        else:
-            rs[i] = avg_gain[i] / avg_loss[i]
-    
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # 15m indicators for entry timing
     atr_15m = calculate_atr(high, low, close, period=14)
     rsi_15m = calculate_rsi(close, period=14)
-    kc_upper_15m, kc_middle_15m, kc_lower_15m = calculate_keltner_channels(
-        high, low, close, ema_period=20, atr_period=14, atr_mult=2.0
-    )
+    roc_15m = calculate_roc(close, period=10)
+    dema_15m = calculate_dema(close, period=21)
+    adx_15m = calculate_adx(high, low, close, period=14)
+    _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    vol_ma_15m = calculate_volume_ma(volume, period=20)
     
-    # Get 1h data using mtf_data helper (PROPER alignment)
-    try:
-        df_1h = get_htf_data(prices, '1h')
-        c_1h = df_1h['close'].values
-        h_1h = df_1h['high'].values
-        l_1h = df_1h['low'].values
-        
-        adx_1h_raw = calculate_adx(h_1h, l_1h, c_1h, period=14)
-        adx_1h = align_htf_to_ltf(prices, df_1h, adx_1h_raw)
-    except Exception:
-        adx_1h = np.zeros(n)
-    
-    # Get 4h data using mtf_data helper (PROPER alignment)
+    # Get 4h data using mtf_data helper (MANDATORY - no manual resampling!)
     try:
         df_4h = get_htf_data(prices, '4h')
-        c_4h = df_4h['close'].values
-        h_4h = df_4h['high'].values
-        l_4h = df_4h['low'].values
+        close_4h = df_4h['close'].values
+        high_4h = df_4h['high'].values
+        low_4h = df_4h['low'].values
+        volume_4h = df_4h['volume'].values
         
-        _, st_direction_4h_raw = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
-        st_direction_4h = align_htf_to_ltf(prices, df_4h, st_direction_4h_raw)
-    except Exception:
-        st_direction_4h = np.zeros(n)
+        # 4h indicators for trend
+        dema_4h = calculate_dema(close_4h, period=21)
+        adx_4h = calculate_adx(high_4h, low_4h, close_4h, period=14)
+        _, _, _, bbw_4h = calculate_bollinger_bands(close_4h, period=20, std_mult=2.0)
+        vol_ma_4h = calculate_volume_ma(volume_4h, period=20)
+        
+        # Align 4h indicators to 15m timeframe (auto shift for completed bars)
+        dema_4h_aligned = align_htf_to_ltf(prices, df_4h, dema_4h)
+        adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+        bbw_4h_aligned = align_htf_to_ltf(prices, df_4h, bbw_4h)
+        vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+        close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
+        
+    except Exception as e:
+        # Fallback: use 15m only if 4h data not available
+        dema_4h_aligned = dema_15m
+        adx_4h_aligned = adx_15m
+        bbw_4h_aligned = bbw_15m
+        vol_ma_4h_aligned = vol_ma_15m
+        close_4h_aligned = close
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.35
-    SIZE_HALF = 0.175
+    SIZE_FULL = 0.30
+    SIZE_HALF = 0.15
     
     # RSI thresholds for pullback entries
-    RSI_LONG_MIN = 35
-    RSI_LONG_MAX = 55
+    RSI_LONG_MIN = 45
+    RSI_LONG_MAX = 65
     RSI_SHORT_MIN = 45
     RSI_SHORT_MAX = 65
     
-    # ADX threshold for trend strength (1h)
-    ADX_MIN = 20
+    # ROC momentum threshold
+    ROC_LONG_MIN = 0.5
+    ROC_SHORT_MAX = -0.5
+    
+    # ADX threshold for trend strength (4h)
+    ADX_MIN = 22
+    
+    # BBW minimum for regime filter (4h)
+    BBW_MIN = 0.015
+    
+    # Volume spike multiplier
+    VOLUME_SPIKE_MULT = 1.5
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.0
     
-    # Keltner breakout confirmation
-    KC_BREAKOUT_MULT = 0.5  # Price must break by this fraction of ATR
-    
-    first_valid = max(200, 14 * 2, 20, 28)
+    first_valid = max(200, 40, 14 * 2, 20, 21)
     
     # Track position state
-    position_side = np.zeros(n, dtype=int)
+    position_side = np.zeros(n)
     entry_price = np.zeros(n)
-    tp_triggered = np.zeros(n, dtype=bool)
+    tp_triggered = np.zeros(n)
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(roc_15m[i]) or atr_15m[i] == 0:
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(dema_4h_aligned[i]) or np.isnan(adx_4h_aligned[i]):
+            signals[i] = 0.0
+            continue
+        
+        # 4h trend direction
+        if close_4h_aligned[i] > dema_4h_aligned[i]:
+            trend_4h = 1
+        elif close_4h_aligned[i] < dema_4h_aligned[i]:
+            trend_4h = -1
+        else:
+            trend_4h = 0
+        
+        # 15m trend direction
+        if close[i] > dema_15m[i]:
+            trend_15m = 1
+        elif close[i] < dema_15m[i]:
+            trend_15m = -1
+        else:
+            trend_15m = 0
+        
+        rsi_val = rsi_15m[i]
+        roc_val = roc_15m[i]
+        atr = atr_15m[i]
+        price = close[i]
+        adx_4h_val = adx_4h_aligned[i]
+        bbw_4h_val = bbw_4h_aligned[i]
+        vol_ratio = volume[i] / vol_ma_15m[i] if vol_ma_15m[i] > 0 else 0
+        
+        # ADX filter (4h) - only trade when trend is strong enough
+        if adx_4h_val < ADX_MIN:
             signals[i] = 0.0
             position_side[i] = 0
             continue
         
-        st_trend_4h = st_direction_4h[i]
-        adx_1h_val = adx_1h[i]
-        rsi_val = rsi_15m[i]
-        atr = atr_15m[i]
-        price = close[i]
-        kc_upper = kc_upper_15m[i]
-        kc_lower = kc_lower_15m[i]
-        kc_middle = kc_middle_15m[i]
-        
-        # ADX filter (1h) - only trade when trend is strong enough
-        if adx_1h_val < ADX_MIN or np.isnan(adx_1h_val):
+        # BBW filter - avoid choppy markets (4h)
+        if bbw_4h_val < BBW_MIN:
             signals[i] = 0.0
-            if position_side[i - 1] != 0:
-                position_side[i] = 0
+            position_side[i] = 0
+            continue
+        
+        # Trend filters must agree (4h + 15m DEMA)
+        if trend_4h != trend_15m or trend_4h == 0:
+            signals[i] = 0.0
+            position_side[i] = 0
             continue
         
         # Check stoploss and take profit for existing positions
@@ -326,7 +361,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
-                    tp_triggered[i] = False
+                    tp_triggered[i] = 0
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
                     continue
@@ -337,7 +372,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     signals[i] = SIZE_HALF
                     position_side[i] = 1
                     entry_price[i] = prev_entry
-                    tp_triggered[i] = True
+                    tp_triggered[i] = 1
                     continue
                 
                 # Trail stop at 1R profit
@@ -347,7 +382,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         signals[i] = 0.0
                         position_side[i] = 0
                         entry_price[i] = 0
-                        tp_triggered[i] = False
+                        tp_triggered[i] = 0
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         continue
@@ -358,7 +393,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
-                    tp_triggered[i] = False
+                    tp_triggered[i] = 0
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
                     continue
@@ -369,7 +404,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     signals[i] = -SIZE_HALF
                     position_side[i] = -1
                     entry_price[i] = prev_entry
-                    tp_triggered[i] = True
+                    tp_triggered[i] = 1
                     continue
                 
                 # Trail stop at 1R profit
@@ -379,7 +414,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         signals[i] = 0.0
                         position_side[i] = 0
                         entry_price[i] = 0
-                        tp_triggered[i] = False
+                        tp_triggered[i] = 0
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         continue
@@ -393,28 +428,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h Supertrend trend + 1h ADX + 15m Keltner breakout + RSI pullback
-        if st_trend_4h == 1:  # Bullish trend on 4h
-            # Keltner breakout above upper band
-            breakout_threshold = kc_upper + KC_BREAKOUT_MULT * atr
-            if (price > breakout_threshold and 
-                RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX):
+        # Entry logic: 4h + 15m DEMA trend + 15m ROC momentum + RSI + Volume + BBW
+        if trend_4h == 1 and trend_15m == 1:  # Bullish trend confirmed
+            if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
+                roc_val >= ROC_LONG_MIN and
+                vol_ratio >= VOLUME_SPIKE_MULT):  # Momentum + Volume confirmation
                 signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = price
-                tp_triggered[i] = False
+                tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
                 
-        elif st_trend_4h == -1:  # Bearish trend on 4h
-            # Keltner breakout below lower band
-            breakout_threshold = kc_lower - KC_BREAKOUT_MULT * atr
-            if (price < breakout_threshold and 
-                RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX):
+        elif trend_4h == -1 and trend_15m == -1:  # Bearish trend confirmed
+            if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
+                roc_val <= ROC_SHORT_MAX and
+                vol_ratio >= VOLUME_SPIKE_MULT):  # Momentum + Volume confirmation
                 signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = price
-                tp_triggered[i] = False
+                tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
         
