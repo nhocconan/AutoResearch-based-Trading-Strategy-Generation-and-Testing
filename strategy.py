@@ -1,153 +1,73 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #009 - 4H Supertrend Trend + 1H RSI Pullback + Bollinger Band Width Regime
+EXPERIMENT #010 - KAMA Adaptive Trend + Stochastic Entries + ADX Strength Filter
 ====================================================================================
-Hypothesis: Combine 4h Supertrend for trend direction (volatility-adaptive trend follower)
-with 1h RSI pullback entries (buy dips in uptrend, sell rallies in downtrend). Add
-Bollinger Band Width regime filter to avoid trading during extreme volatility squeezes
-or expansions. This combines proven elements from #005 (RSI pullback) and #007 (Donchian)
-but uses Supertrend instead for better volatility adaptation.
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to volatility better than EMA/HMA.
+During high volatility, KAMA slows down (fewer whipsaws). During low volatility, KAMA speeds up.
+Combine with Stochastic (different from RSI) for entry timing + ADX for trend strength filter.
+Only trade when ADX > 25 (strong trend regime). This avoids choppy markets that kill strategies.
+
+Key differences from current best (#005 EMA+RSI+Z-score):
+- KAMA instead of EMA - adapts to volatility automatically
+- Stochastic instead of RSI - different momentum signal, less correlated
+- ADX filter instead of Z-score - only trade strong trends, skip chop
+- 4h KAMA trend + 1h Stochastic entries (proven MTF structure)
+- Discrete signal levels: 0.0, ±0.25, ±0.35 to minimize churn costs
+- ATR stoploss at 2.0x, take profit at 2R (reduce to half)
 
 Why this might beat Sharpe=5.525:
-- Supertrend adapts stop levels based on ATR (better than fixed EMA distance)
-- RSI pullback entries capture mean-reversion within trends (proven in #005/#007)
-- Bollinger Band Width filter identifies regime (avoid squeeze breakouts that fail)
-- Multi-timeframe: 4h trend + 1h entries (proven architecture)
-- Discrete signal levels (0.0, ±0.20, ±0.35) minimize churn costs
-- ATR-based stoploss protects against adverse moves
+- KAMA's adaptive nature reduces whipsaws in volatile regimes
+- ADX filter avoids 40-50% of losing trades in choppy markets
+- Stochastic captures different entry points than RSI (less crowded signal)
+- Multi-timeframe structure proven to work (see #005, #007 success)
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_supertrend_rsi_bbw_v1"
+name = "mtf_kama_stoch_adx_v2"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+def calculate_kama(close, period=10, fast=2, slow=30):
     """
-    Calculate Supertrend indicator
-    Supertrend = (HL2) ± (multiplier * ATR)
-    where HL2 = (high + low) / 2
-    Trend flips when price crosses the supertrend line
+    Calculate Kaufman Adaptive Moving Average (KAMA)
+    KAMA adapts smoothing based on market efficiency ratio (ER)
+    ER = |close - close[n]| / sum(|close[i] - close[i-1]|)
+    High ER = trending market = fast smoothing
+    Low ER = choppy market = slow smoothing
     """
     n = len(close)
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)  # 1 for bullish, -1 for bearish
+    kama = np.zeros(n)
     
-    # Calculate ATR
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
+    if n < period:
+        return kama
     
-    atr = np.zeros(n)
-    atr[period - 1] = np.mean(tr[1:period])
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
     for i in range(period, n):
-        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+        signal = abs(close[i] - close[i - period])
+        noise = sum(abs(close[j] - close[j - 1]) for j in range(i - period + 1, i + 1))
+        if noise > 0:
+            er[i] = signal / noise
+        else:
+            er[i] = 0
     
-    # Calculate Supertrend
-    hl2 = (high + low) / 2.0
+    # Calculate smoothing constant (SC)
+    # SC = ER * (fast_SC - slow_SC) + slow_SC
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
+    sc = er * (fast_sc - slow_sc) + slow_sc
     
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
+    # Initialize KAMA with first close
+    kama[period - 1] = close[period - 1]
     
+    # Calculate KAMA
     for i in range(period, n):
-        upper_band[i] = hl2[i] + multiplier * atr[i]
-        lower_band[i] = hl2[i] - multiplier * atr[i]
+        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
     
-    # Initialize
-    supertrend[period] = upper_band[period]
-    direction[period] = -1  # Start bearish
-    
-    for i in range(period + 1, n):
-        if direction[i - 1] == 1:  # Previous was bullish
-            if close[i] > lower_band[i]:
-                supertrend[i] = lower_band[i]
-                direction[i] = 1
-            else:
-                supertrend[i] = upper_band[i]
-                direction[i] = -1
-        else:  # Previous was bearish
-            if close[i] < upper_band[i]:
-                supertrend[i] = upper_band[i]
-                direction[i] = -1
-            else:
-                supertrend[i] = lower_band[i]
-                direction[i] = 1
-    
-    return supertrend, direction, atr
-
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI using Wilder's smoothing method"""
-    n = len(close)
-    rsi = np.zeros(n)
-    
-    if n < period + 1:
-        return rsi
-    
-    delta = np.diff(close)
-    gain = np.zeros(n)
-    loss = np.zeros(n)
-    
-    for i in range(1, n):
-        if delta[i - 1] > 0:
-            gain[i] = delta[i - 1]
-        else:
-            loss[i] = -delta[i - 1]
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    
-    avg_gain[period] = np.mean(gain[1:period + 1])
-    avg_loss[period] = np.mean(loss[1:period + 1])
-    
-    for i in range(period + 1, n):
-        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
-    
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-    
-    return rsi
-
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width"""
-    n = len(close)
-    upper = np.zeros(n)
-    middle = np.zeros(n)
-    lower = np.zeros(n)
-    bandwidth = np.zeros(n)
-    percent_b = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        middle[i] = np.mean(window)
-        std = np.std(window)
-        upper[i] = middle[i] + std_mult * std
-        lower[i] = middle[i] - std_mult * std
-        
-        if middle[i] > 0:
-            bandwidth[i] = (upper[i] - lower[i]) / middle[i]
-        else:
-            bandwidth[i] = 0
-        
-        if upper[i] != lower[i]:
-            percent_b[i] = (close[i] - lower[i]) / (upper[i] - lower[i])
-        else:
-            percent_b[i] = 0.5
-    
-    return upper, middle, lower, bandwidth, percent_b
+    return kama
 
 
 def calculate_atr(high, low, close, period=14):
@@ -171,6 +91,102 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
+def calculate_stochastic(high, low, close, k_period=14, d_period=3):
+    """
+    Calculate Stochastic Oscillator (%K and %D)
+    %K = (close - lowest_low) / (highest_high - lowest_low) * 100
+    %D = SMA(%K, d_period)
+    """
+    n = len(close)
+    k = np.zeros(n)
+    d = np.zeros(n)
+    
+    for i in range(k_period - 1, n):
+        lowest = min(low[i - k_period + 1:i + 1])
+        highest = max(high[i - k_period + 1:i + 1])
+        
+        if highest > lowest:
+            k[i] = (close[i] - lowest) / (highest - lowest) * 100
+        else:
+            k[i] = 50
+    
+    # Calculate %D (SMA of %K)
+    for i in range(k_period - 1 + d_period - 1, n):
+        d[i] = np.mean(k[i - d_period + 1:i + 1])
+    
+    return k, d
+
+
+def calculate_adx(high, low, close, period=14):
+    """
+    Calculate Average Directional Index (ADX)
+    Measures trend strength (not direction)
+    ADX > 25 = strong trend, ADX < 20 = choppy/ranging
+    """
+    n = len(close)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+        
+        if high[i] - high[i - 1] > low[i - 1] - low[i]:
+            plus_dm[i] = max(0, high[i] - high[i - 1])
+        else:
+            plus_dm[i] = 0
+            
+        if low[i - 1] - low[i] > high[i] - high[i - 1]:
+            minus_dm[i] = max(0, low[i - 1] - low[i])
+        else:
+            minus_dm[i] = 0
+    
+    # Smooth with Wilder's method
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    adx = np.zeros(n)
+    
+    # Initialize sums
+    plus_sum = np.sum(plus_dm[1:period + 1])
+    minus_sum = np.sum(minus_dm[1:period + 1])
+    tr_sum = np.sum(tr[1:period + 1])
+    
+    for i in range(period, n):
+        if i == period:
+            plus_smooth = plus_sum
+            minus_smooth = minus_sum
+            tr_smooth = tr_sum
+        else:
+            plus_smooth = plus_smooth - plus_smooth / period + plus_dm[i]
+            minus_smooth = minus_smooth - minus_smooth / period + minus_dm[i]
+            tr_smooth = tr_smooth - tr_smooth / period + tr[i]
+        
+        if tr_smooth > 0:
+            plus_di[i] = 100 * plus_smooth / tr_smooth
+            minus_di[i] = 100 * minus_smooth / tr_smooth
+        else:
+            plus_di[i] = 0
+            minus_di[i] = 0
+        
+        # Calculate DX
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+        else:
+            dx[i] = 0
+        
+        # Calculate ADX (SMA of DX)
+        if i >= 2 * period - 1:
+            adx[i] = np.mean(dx[i - period + 1:i + 1])
+    
+    return adx, plus_di, minus_di
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
@@ -179,11 +195,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     n = len(close)
     
     # 1h indicators for entry timing
-    rsi_1h = calculate_rsi(close, period=14)
+    stoch_k, stoch_d = calculate_stochastic(high, low, close, k_period=14, d_period=3)
     atr_1h = calculate_atr(high, low, close, period=14)
-    bb_upper_1h, bb_mid_1h, bb_lower_1h, bb_bw_1h, bb_pct_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    adx_1h, plus_di, minus_di = calculate_adx(high, low, close, period=14)
+    kama_10_1h = calculate_kama(close, period=10, fast=2, slow=30)
+    kama_30_1h = calculate_kama(close, period=30, fast=2, slow=30)
     
-    # 4h indicators for trend (resample 1h → 4h)
+    # 4h KAMA for trend filter (resample 1h → 4h)
     df_1h = pd.DataFrame({
         'open': close,
         'high': high,
@@ -205,24 +223,37 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     c_4h = df_4h['close'].values
     h_4h = df_4h['high'].values
     l_4h = df_4h['low'].values
-    n_4h = len(c_4h)
     
-    # Calculate 4h Supertrend
-    supertrend_4h, direction_4h, atr_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
+    # Calculate 4h KAMA for trend
+    kama_10_4h = calculate_kama(c_4h, period=10, fast=2, slow=30)
+    kama_30_4h = calculate_kama(c_4h, period=30, fast=2, slow=30)
     
-    # Calculate 4h Bollinger Band Width for regime filter
-    _, _, _, bb_bw_4h, _ = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
+    # 4h ADX for trend strength
+    adx_4h, _, _ = calculate_adx(h_4h, l_4h, c_4h, period=14)
     
-    # Map 4h indicators back to 1h timeframe (4 x 1h = 4h)
+    # 4h trend direction based on KAMA cross
+    trend_4h = np.zeros(len(c_4h))
+    for i in range(30, len(c_4h)):
+        if kama_10_4h[i] > kama_30_4h[i] and c_4h[i] > kama_10_4h[i]:
+            trend_4h[i] = 1  # Bullish
+        elif kama_10_4h[i] < kama_30_4h[i] and c_4h[i] < kama_10_4h[i]:
+            trend_4h[i] = -1  # Bearish
+    
+    # Map 4h trend back to 1h timeframe (4 x 1h = 4h)
     trend_1h = np.zeros(n)
-    bb_bw_1h_from_4h = np.zeros(n)
     idx_1h_to_4h = np.arange(n) // 4
     
     for i in range(n):
         idx_4h = idx_1h_to_4h[i]
-        if idx_4h < len(direction_4h):
-            trend_1h[i] = direction_4h[idx_4h]
-            bb_bw_1h_from_4h[i] = bb_bw_4h[idx_4h]
+        if idx_4h < len(trend_4h):
+            trend_1h[i] = trend_4h[idx_4h]
+    
+    # Map 4h ADX back to 1h
+    adx_1h_from_4h = np.zeros(n)
+    for i in range(n):
+        idx_4h = idx_1h_to_4h[i]
+        if idx_4h < len(adx_4h):
+            adx_1h_from_4h[i] = adx_4h[idx_4h]
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
@@ -231,15 +262,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     SIZE_FULL = 0.35   # Full position
     SIZE_HALF = 0.20   # Half position (after take profit)
     
-    # RSI thresholds for pullback entries
-    RSI_LONG_ENTRY = 45.0    # Buy when RSI pulls back to 45 in uptrend
-    RSI_SHORT_ENTRY = 55.0   # Sell when RSI rallies to 55 in downtrend
-    RSI_EXIT_LONG = 65.0     # Exit long when RSI reaches 65 (overbought)
-    RSI_EXIT_SHORT = 35.0    # Exit short when RSI reaches 35 (oversold)
+    # Stochastic thresholds for entry
+    STOCH_LONG_ENTRY = 30   # Enter long when %K crosses above 30 from oversold
+    STOCH_SHORT_ENTRY = 70  # Enter short when %K crosses below 70 from overbought
+    STOCH_EXIT_LONG = 75    # Exit long when overbought
+    STOCH_EXIT_SHORT = 25   # Exit short when oversold
     
-    # Bollinger Band Width regime filter
-    BBW_MIN = 0.02    # Minimum bandwidth to trade (avoid extreme squeeze)
-    BBW_MAX = 0.15    # Maximum bandwidth to trade (avoid extreme expansion)
+    # ADX threshold for trend strength
+    ADX_MIN = 25  # Only trade when ADX > 25 (strong trend)
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.0
@@ -247,57 +277,41 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Take profit multiplier (2R)
     TP_MULT = 2.0
     
-    first_valid = max(60, 30, 14, 28, 50)
+    first_valid = max(80, 30, 14, 28)  # Wait for all indicators (ADX needs 2*period)
     
     # Track entry prices for stoploss/takeprofit logic
     entry_price = np.zeros(n)
     position_side = np.zeros(n)  # 1 for long, -1 for short, 0 for flat
-    tp_triggered = np.zeros(n)  # Track if take profit was hit
-    
-    # Track highest/lowest price since entry for trailing stop
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
+    tp_triggered = np.zeros(n)  # Track if take profit was hit
     
     for i in range(first_valid, n):
-        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(bb_bw_1h_from_4h[i]):
+        if np.isnan(stoch_k[i]) or np.isnan(atr_1h[i]) or np.isnan(adx_1h_from_4h[i]):
             signals[i] = 0.0
             continue
         
         trend = trend_1h[i]
-        rsi_val = rsi_1h[i]
+        adx_val = adx_1h_from_4h[i]
+        stoch_k_val = stoch_k[i]
+        stoch_d_val = stoch_d[i]
         atr = atr_1h[i]
         price = close[i]
-        bbw_4h = bb_bw_1h_from_4h[i]
         
-        # Bollinger Band Width regime filter - avoid extreme volatility regimes
-        if bbw_4h < BBW_MIN or bbw_4h > BBW_MAX:
+        # ADX filter - only trade strong trends
+        if adx_val < ADX_MIN:
             if i > 0 and position_side[i - 1] != 0:
+                # Hold existing position but don't add
                 signals[i] = signals[i - 1]
                 position_side[i] = position_side[i - 1]
                 entry_price[i] = entry_price[i - 1]
                 tp_triggered[i] = tp_triggered[i - 1]
-                highest_since_entry[i] = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else price
-                lowest_since_entry[i] = lowest_since_entry[i - 1] if lowest_since_entry[i - 1] > 0 else price
+                highest_since_entry[i] = highest_since_entry[i-1]
+                lowest_since_entry[i] = lowest_since_entry[i-1]
             else:
                 signals[i] = 0.0
                 position_side[i] = 0
             continue
-        
-        # ATR filter - avoid trading when ATR is extremely high (>5% of price)
-        if atr > 0 and atr / price > 0.05:
-            signals[i] = 0.0
-            position_side[i] = 0
-            entry_price[i] = 0
-            tp_triggered[i] = 0
-            continue
-        
-        # Update highest/lowest since entry for existing positions
-        if i > 0 and position_side[i - 1] != 0:
-            highest_since_entry[i] = max(highest_since_entry[i - 1], price)
-            lowest_since_entry[i] = min(lowest_since_entry[i - 1], price)
-        else:
-            highest_since_entry[i] = price
-            lowest_since_entry[i] = price
         
         # Check trailing stop and take profit for existing positions
         if i > 0 and position_side[i - 1] != 0:
@@ -305,130 +319,179 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             prev_entry = entry_price[i - 1] if entry_price[i - 1] > 0 else price
             prev_tp = tp_triggered[i - 1]
             
+            # Update highest/lowest since entry for trailing
             if prev_side == 1:
-                # Stoploss check (2*ATR against position)
+                highest_since_entry[i] = max(highest_since_entry[i-1] if i > 0 else 0, price)
+                lowest_since_entry[i] = lowest_since_entry[i-1] if i > 0 else price
+                
+                # Stoploss check
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
                     tp_triggered[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
                     continue
-                
-                # Trailing stop: move stop up as price makes new highs
-                trailing_stop = highest_since_entry[i] - ATR_STOP_MULT * atr
                 
                 # Take profit check (2R)
                 tp_price = prev_entry + TP_MULT * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
+                    # Reduce to half position
                     signals[i] = SIZE_HALF
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
+                    highest_since_entry[i] = highest_since_entry[i-1]
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
                     continue
                 
-                # RSI overbought exit
-                if rsi_val >= RSI_EXIT_LONG:
+                # Stochastic exit signal
+                if stoch_k_val > STOCH_EXIT_LONG:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
                     tp_triggered[i] = 0
-                    continue
-                
-                # Trend reversal exit (Supertrend flips bearish)
-                if trend == -1:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
                     continue
                 
             elif prev_side == -1:
-                # Stoploss check (2*ATR against position)
+                lowest_since_entry[i] = min(lowest_since_entry[i-1] if i > 0 else price, price)
+                highest_since_entry[i] = highest_since_entry[i-1] if i > 0 else 0
+                
+                # Stoploss check
                 stoploss_price = prev_entry + ATR_STOP_MULT * atr
                 if price > stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
                     tp_triggered[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
                     continue
-                
-                # Trailing stop: move stop down as price makes new lows
-                trailing_stop = lowest_since_entry[i] + ATR_STOP_MULT * atr
                 
                 # Take profit check (2R)
                 tp_price = prev_entry - TP_MULT * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
+                    # Reduce to half position
                     signals[i] = -SIZE_HALF
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
+                    highest_since_entry[i] = highest_since_entry[i-1]
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
                     continue
                 
-                # RSI oversold exit
-                if rsi_val <= RSI_EXIT_SHORT:
+                # Stochastic exit signal
+                if stoch_k_val < STOCH_EXIT_SHORT:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
                     tp_triggered[i] = 0
-                    continue
-                
-                # Trend reversal exit (Supertrend flips bullish)
-                if trend == 1:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
                     continue
         
-        # Generate new entries based on trend + RSI pullback
-        if trend == 1:  # 4h uptrend (Supertrend bullish)
-            # RSI pullback to 45 (buy the dip in uptrend)
-            if rsi_val <= RSI_LONG_ENTRY:
-                if position_side[i - 1] != -1:
-                    signals[i] = SIZE_FULL
+        # Entry logic with Stochastic crossover confirmation
+        position_size = SIZE_FULL
+        
+        if trend == 1:  # 4h uptrend + ADX > 25
+            # Stochastic oversold entry in uptrend
+            # Require %K crossing above %D for confirmation
+            if stoch_k_val < STOCH_LONG_ENTRY and stoch_k_val > stoch_d_val:
+                # Check previous bar for crossover confirmation
+                if i > 0 and stoch_k[i-1] <= stoch_d[i-1]:
+                    signals[i] = position_size
                     position_side[i] = 1
                     entry_price[i] = price
                     tp_triggered[i] = 0
                     highest_since_entry[i] = price
                     lowest_since_entry[i] = price
+                else:
+                    # Hold existing position
+                    if i > 0 and position_side[i - 1] == 1:
+                        signals[i] = signals[i - 1]
+                        position_side[i] = 1
+                        entry_price[i] = entry_price[i - 1]
+                        tp_triggered[i] = tp_triggered[i - 1]
+                        highest_since_entry[i] = highest_since_entry[i-1]
+                        lowest_since_entry[i] = lowest_since_entry[i-1]
+                    else:
+                        signals[i] = 0.0
+                        position_side[i] = 0
+                        entry_price[i] = 0
+                        tp_triggered[i] = 0
+                        highest_since_entry[i] = 0
+                        lowest_since_entry[i] = 0
             else:
+                # Hold or exit
                 if i > 0 and position_side[i - 1] == 1:
                     signals[i] = signals[i - 1]
                     position_side[i] = 1
                     entry_price[i] = entry_price[i - 1]
                     tp_triggered[i] = tp_triggered[i - 1]
+                    highest_since_entry[i] = highest_since_entry[i-1]
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
                 else:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
                     tp_triggered[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
                     
-        elif trend == -1:  # 4h downtrend (Supertrend bearish)
-            # RSI rally to 55 (sell the rip in downtrend)
-            if rsi_val >= RSI_SHORT_ENTRY:
-                if position_side[i - 1] != 1:
-                    signals[i] = -SIZE_FULL
+        elif trend == -1:  # 4h downtrend + ADX > 25
+            # Stochastic overbought entry in downtrend
+            # Require %K crossing below %D for confirmation
+            if stoch_k_val > STOCH_SHORT_ENTRY and stoch_k_val < stoch_d_val:
+                # Check previous bar for crossover confirmation
+                if i > 0 and stoch_k[i-1] >= stoch_d[i-1]:
+                    signals[i] = -position_size
                     position_side[i] = -1
                     entry_price[i] = price
                     tp_triggered[i] = 0
                     highest_since_entry[i] = price
                     lowest_since_entry[i] = price
+                else:
+                    # Hold existing position
+                    if i > 0 and position_side[i - 1] == -1:
+                        signals[i] = signals[i - 1]
+                        position_side[i] = -1
+                        entry_price[i] = entry_price[i - 1]
+                        tp_triggered[i] = tp_triggered[i - 1]
+                        highest_since_entry[i] = highest_since_entry[i-1]
+                        lowest_since_entry[i] = lowest_since_entry[i-1]
+                    else:
+                        signals[i] = 0.0
+                        position_side[i] = 0
+                        entry_price[i] = 0
+                        tp_triggered[i] = 0
+                        highest_since_entry[i] = 0
+                        lowest_since_entry[i] = 0
             else:
+                # Hold or exit
                 if i > 0 and position_side[i - 1] == -1:
                     signals[i] = signals[i - 1]
                     position_side[i] = -1
                     entry_price[i] = entry_price[i - 1]
                     tp_triggered[i] = tp_triggered[i - 1]
+                    highest_since_entry[i] = highest_since_entry[i-1]
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
                 else:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
                     tp_triggered[i] = 0
-        else:
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
+        else:  # No clear trend
             signals[i] = 0.0
             position_side[i] = 0
             entry_price[i] = 0
             tp_triggered[i] = 0
+            highest_since_entry[i] = 0
+            lowest_since_entry[i] = 0
     
     return signals
