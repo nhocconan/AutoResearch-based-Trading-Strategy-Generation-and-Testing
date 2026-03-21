@@ -637,10 +637,12 @@ def main():
         return_dd_ratio = abs(avg_return / avg_dd) if avg_dd < -0.1 else avg_return
         improved_sharpe = avg_sharpe > best_sharpe
         # Keep ANY strategy with positive Sharpe and reasonable return/DD
-        # EVERY symbol must be profitable — no carrying by one symbol
-        min_sharpe_per_sym = min(r["sharpe_ratio"] for r in bt_results)
-        all_positive = all(r["sharpe_ratio"] > 0 for r in bt_results)
-        is_good = avg_sharpe > 0.1 and avg_trades >= 10 and all_positive
+        # EVERY symbol must be profitable WITH actual trades
+        all_symbols_good = all(
+            r["sharpe_ratio"] > 0 and r["num_trades"] >= 5
+            for r in bt_results
+        )
+        is_good = avg_sharpe > 0.1 and avg_trades >= 10 and all_symbols_good
         status = "keep" if is_good else "discard"
 
         # Save ALL strategies that pass quality gates
@@ -664,8 +666,11 @@ def main():
                 test_return = sum(r["total_return_pct"] for r in test_results) / len(test_results)
                 print(f"       Test: Sharpe={test_sharpe:.3f} | Return={test_return:+.1f}%")
 
-                if test_sharpe < 0:
-                    print(f"       DEMOTED: Test Sharpe < 0 → overfit, demoting to discard")
+                test_trades = sum(r["num_trades"] for r in test_results)
+                test_all_good = all(r["sharpe_ratio"] > 0 and r["num_trades"] >= 3 for r in test_results)
+                if test_sharpe < 0 or not test_all_good or test_trades < 10:
+                    reason = "Sharpe<0" if test_sharpe < 0 else "0-trade symbols" if not test_all_good else "too few trades"
+                    print(f"       DEMOTED: Test {reason} → overfit/unusable, demoting to discard")
                     status = "discard"
                     git_revert_strategy()
                     STRATEGY_FILE.write_text(best_strategy_code)

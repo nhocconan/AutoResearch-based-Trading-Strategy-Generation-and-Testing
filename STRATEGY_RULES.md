@@ -133,6 +133,21 @@ leverage = 1.0    # always 1.0
 - For-loops OK for signal logic, but pre-compute indicators before the loop
 - Never call I/O (file read, network) inside the loop
 
+## Rule 9: MUST Generate Trades
+
+A strategy that generates 0 trades is WORTHLESS and will be auto-rejected.
+This has been the #1 repeated mistake. Your strategy MUST:
+- Generate at least 10 trades on EACH symbol during train (2021-2024, 4 years)
+- Generate at least 3 trades on EACH symbol during test (2025-2026, 15 months)
+- If your entry conditions are too strict, LOOSEN them
+- Test mentally: "would this trigger on a 20% BTC rally? On a 50% crash?"
+
+Common causes of 0 trades:
+- RSI threshold too narrow (e.g., only enter when RSI exactly 42-43)
+- Multiple conflicting filters that never all agree
+- ADX threshold too high (ADX > 40 rarely happens)
+- Entry requires conditions that are mutually exclusive
+
 ## Summary Checklist
 
 Before submitting strategy.py, verify:
@@ -142,5 +157,7 @@ Before submitting strategy.py, verify:
 - [ ] Signal values discrete: 0.0, ±0.15, ±0.30 (max 0.40)
 - [ ] Stoploss logic present (signal → 0)
 - [ ] leverage = 1.0
+- [ ] **MUST generate ≥10 trades per symbol** (entry conditions not too strict)
+- [ ] **ALL symbols must have Sharpe > 0** individually (no SOL-only strategies)
 - [ ] All indicators use min_periods
 - [ ] No .shift(-n) or future indexing
