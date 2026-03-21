@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #325: 15m Mean Reversion + 4h Trend Filter + BB/RSI Entries
-Hypothesis: 15m timeframe needs mean-reversion logic (not trend-following) with HTF trend filter.
-Previous 15m strategies failed because they tried trend-following on noisy data.
-This uses: 4h HMA for macro trend, 15m RSI(7) extremes for entries, Bollinger(20,2) for confirmation,
-ATR(14) trailing stop at 2.5x. LOOSE entry thresholds to ensure trades generate.
-Timeframe: 15m (REQUIRED), HTF: 4h for trend bias.
-Target: Beat Sharpe=0.499 by catching 15m pullbacks in direction of 4h trend.
-Key insight: Mean reversion works better on 15m than trend-following (less whipsaw).
+Experiment #326: 30m EMA Momentum + 4h HMA Trend + RSI Filter + ATR Stop
+Hypothesis: 30m needs SIMPLE logic with LOOSE filters to generate enough trades.
+Previous 30m strategies failed with -70% to -97% returns due to too many conflicting conditions.
+This uses: 4h HMA(21) for macro trend bias, 30m EMA(12/26) for momentum, RSI(14) loose filter (>35/<65),
+and ATR(14) trailing stop at 2.5x. Position size 0.25 (conservative).
+Timeframe: 30m (REQUIRED), HTF: 4h for trend bias.
+Target: Beat Sharpe=0.499 by generating 50-100 trades/year with clean trend following.
+Key insight: Fewer filters + loose RSI thresholds = more trades = better statistics on 30m TF.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_mean_reversion_4h_hma_bb_rsi_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_ema_momentum_4h_hma_trend_rsi_loose_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -27,6 +27,10 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_ema(close, period=12):
+    """Calculate Exponential Moving Average."""
+    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
     close_s = pd.Series(close)
@@ -37,8 +41,8 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=7):
-    """Calculate RSI indicator with shorter period for 15m."""
+def calculate_rsi(close, period=14):
+    """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
@@ -48,19 +52,6 @@ def calculate_rsi(close, period=7):
     rsi = 100 - 100 / (1 + rs)
     rsi = np.clip(rsi, 0, 100)
     return rsi
-
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma
-
-def calculate_sma(close, period=50):
-    """Calculate Simple Moving Average for trend filter."""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -77,11 +68,11 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 7)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
-    sma_50 = calculate_sma(close, 50)
+    rsi = calculate_rsi(close, 14)
+    ema_fast = calculate_ema(close, 12)
+    ema_slow = calculate_ema(close, 26)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -95,51 +86,51 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after 50 bars for EMA26 + indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or np.isnan(atr[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        # 4h macro trend bias
+        # 4h macro trend bias (LOOSE - just directional)
         hma_4h_valid = not np.isnan(hma_4h_aligned[i])
         trend_bullish = hma_4h_valid and close[i] > hma_4h_aligned[i]
         trend_bearish = hma_4h_valid and close[i] < hma_4h_aligned[i]
         
-        # RSI extreme signals (LOOSE thresholds for 15m)
-        rsi_oversold = rsi[i] < 35  # Long entry
-        rsi_overbought = rsi[i] > 65  # Short entry
+        # EMA crossover signals
+        ema_cross_long = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
+        ema_cross_short = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
         
-        # Bollinger Band confirmation
-        at_lower_bb = close[i] <= bb_lower[i]
-        at_upper_bb = close[i] >= bb_upper[i]
+        # EMA trend state (already crossed)
+        ema_trend_long = ema_fast[i] > ema_slow[i]
+        ema_trend_short = ema_fast[i] < ema_slow[i]
         
-        # Price vs SMA50 filter
-        above_sma50 = close[i] > sma_50[i]
-        below_sma50 = close[i] < sma_50[i]
+        # RSI momentum filter (LOOSE - not extreme values for 30m)
+        rsi_ok_long = rsi[i] > 35  # Not too weak
+        rsi_ok_short = rsi[i] < 65  # Not too strong
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (mean reversion in uptrend) ===
-        # Primary: RSI oversold + at lower BB + 4h bullish
-        if rsi_oversold and at_lower_bb and trend_bullish:
+        # === LONG ENTRIES (loose conditions for 30m timeframe) ===
+        # Primary: EMA crossover + 4h bullish + RSI ok
+        if ema_cross_long and trend_bullish and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        # Secondary: RSI oversold + above SMA50 + 4h bullish
-        elif rsi_oversold and above_sma50 and trend_bullish:
+        # Secondary: EMA trend long + 4h bullish + RSI ok
+        elif ema_trend_long and trend_bullish and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        # Tertiary: At lower BB + 4h bullish (loosest)
-        elif at_lower_bb and trend_bullish:
+        # Tertiary: Strong momentum (RSI > 50 + EMA trend + 4h bullish)
+        elif rsi[i] > 50 and ema_trend_long and trend_bullish:
             new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRIES (mean reversion in downtrend) ===
-        # Primary: RSI overbought + at upper BB + 4h bearish
-        if rsi_overbought and at_upper_bb and trend_bearish:
+        # === SHORT ENTRIES (loose conditions for 30m timeframe) ===
+        # Primary: EMA crossover + 4h bearish + RSI ok
+        if ema_cross_short and trend_bearish and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        # Secondary: RSI overbought + below SMA50 + 4h bearish
-        elif rsi_overbought and below_sma50 and trend_bearish:
+        # Secondary: EMA trend short + 4h bearish + RSI ok
+        elif ema_trend_short and trend_bearish and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        # Tertiary: At upper BB + 4h bearish (loosest)
-        elif at_upper_bb and trend_bearish:
+        # Tertiary: Strong momentum (RSI < 50 + EMA trend + 4h bearish)
+        elif rsi[i] < 50 and ema_trend_short and trend_bearish:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
