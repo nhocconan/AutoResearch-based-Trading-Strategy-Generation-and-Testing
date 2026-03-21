@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #015 - MACD Momentum + HTF Trend + Volume Confirmation (1h primary, 12h HTF)
-========================================================================================
-Hypothesis: 1h MACD histogram captures momentum shifts better than RSI for entries.
-12h HMA(50) provides strong trend filter without being too slow (like 1d).
-Volume spikes confirm genuine breakouts vs fake moves. Bollinger Band Width regime
-filter avoids low-volatility chop where MACD whipsaws. This differs from failed
-MACD attempts by adding proper HTF alignment, volume confirmation, and regime filter.
+EXPERIMENT #016 - Donchian Breakout + ADX Trend Strength + HTF Filter (4h primary, 1d HTF)
+==========================================================================================
+Hypothesis: Donchian Channel breakouts work best when combined with trend strength (ADX)
+and higher timeframe alignment. Unlike failed donchian_adx_zscore_v1, this uses:
+1. Pure breakout logic (no zscore mean-reversion conflict)
+2. Volatility-adjusted position sizing (smaller size in high vol = lower DD)
+3. ADX > 25 filter to avoid choppy breakouts
+4. 1d HMA(50) for major trend alignment (only trade breakouts in trend direction)
+5. Trailing stop at 2*ATR with take-profit at 3R
+
+Why this differs from failed strategies:
+- donchian_adx_zscore_v1 mixed breakout + mean-reversion (conflicting signals)
+- This is pure trend-following with proper risk management
+- Volatility-adjusted sizing prevents blowups during high-vol periods (2022 crash)
 
 Key features:
-- Primary TF: 1h (this experiment's requirement)
-- HTF filter: 12h HMA(50) for trend direction
-- Momentum: MACD(12,26,9) histogram crossing zero with slope confirmation
-- Volume: Volume > 1.5x 20-bar SMA confirms genuine moves
-- Regime: BB Width > 40th percentile (avoid ultra-low vol chop)
-- Stoploss: 2.5*ATR(14) trailing
-- Position sizing: 0.25-0.30 discrete levels with take-profit reduction
+- Primary TF: 4h
+- HTF filter: 1d HMA(50) for major trend
+- Entry: Donchian(20) breakout + ADX(14) > 25 + HTF trend alignment
+- Stoploss: 2*ATR(14) trailing
+- Position sizing: 0.20-0.30, volatility-adjusted
+- Take profit: Reduce to half at 3R, trail stop at 1.5R
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "macd_volume_htf_1h_12h_v1"
-timeframe = "1h"
+name = "donchian_adx_htf_4h_1d_v2"
+timeframe = "4h"
 leverage = 1.0
 
 
@@ -50,146 +56,146 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram"""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, adjust=False, min_periods=fast).mean()
-    ema_slow = close_s.ewm(span=slow, adjust=False, min_periods=slow).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    
+    # Calculate True Range and Directional Movement
+    tr = np.zeros(n)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    tr[0] = high[0] - low[0]
+    
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i - 1]),
+                    abs(low[i] - close[i - 1]))
+        
+        if high[i] - high[i - 1] > low[i - 1] - low[i]:
+            plus_dm[i] = max(0, high[i] - high[i - 1])
+        else:
+            plus_dm[i] = 0
+            
+        if low[i - 1] - low[i] > high[i] - high[i - 1]:
+            minus_dm[i] = max(0, low[i - 1] - low[i])
+        else:
+            minus_dm[i] = 0
+    
+    # Smooth using Wilder's method (EMA with span=period)
+    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    # Calculate DI+ and DI-
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    mask = tr_smooth > 0
+    plus_di[mask] = 100 * plus_dm_smooth[mask] / tr_smooth[mask]
+    minus_di[mask] = 100 * minus_dm_smooth[mask] / tr_smooth[mask]
+    
+    # Calculate DX and ADX
+    dx = np.zeros(n)
+    di_sum = plus_di + minus_di
+    mask2 = di_sum > 0
+    dx[mask2] = 100 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
+    
+    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return adx
 
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI"""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-
-def calculate_bollinger_bands(close, period=20, std_dev=2):
-    """Calculate Bollinger Bands and Band Width"""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    band_width = (upper - lower) / sma
-    return upper.values, lower.values, band_width.values
-
-
-def calculate_volume_spike(volume, period=20, threshold=1.5):
-    """Detect volume spikes above threshold * SMA"""
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    volume_spike = volume > (threshold * vol_sma)
-    return volume_spike
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (upper and lower bands)"""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    # Fill early values with NaN
+    upper[:period - 1] = np.nan
+    lower[:period - 1] = np.nan
+    
+    return upper, lower
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
-    volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load 12h HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
-    hma_12h = calculate_hma(df_12h['close'].values, 50)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # Load 1d HTF data ONCE before loop (Rule 1)
+    df_1d = get_htf_data(prices, '1d')
+    hma_1d = calculate_hma(df_1d['close'].values, 50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
-    macd_line, signal_line, histogram = calculate_macd(close, 12, 26, 9)
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2)
-    volume_spike = calculate_volume_spike(volume, 20, 1.5)
+    adx = calculate_adx(high, low, close, 14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
-    # Calculate MACD histogram slope (momentum acceleration)
-    hist_slope = np.zeros(n)
-    hist_slope[1:] = histogram[1:] - histogram[:-1]
-    
-    # Calculate BB Width percentile for regime filter
-    bb_width_pr = np.zeros(n)
-    bb_width_pr[:] = np.nan
-    window = 100
-    for i in range(window - 1, n):
-        if not np.isnan(bb_width[i]):
-            window_data = bb_width[i - window + 1:i + 1]
-            window_data = window_data[~np.isnan(window_data)]
-            if len(window_data) > 0:
-                bb_width_pr[i] = np.sum(window_data <= bb_width[i]) / len(window_data)
+    # Calculate volatility for position sizing (20-period std of returns)
+    returns = np.diff(close) / close[:-1]
+    returns = np.insert(returns, 0, 0)
+    vol = pd.Series(returns).rolling(window=20, min_periods=20).std().values
+    vol = np.nan_to_num(vol, nan=0.01)
     
     # Generate signals
     signals = np.zeros(n)
-    SIZE = 0.28  # Base position size (28% of capital)
-    HALF_SIZE = SIZE / 2  # For take profit reduction
+    BASE_SIZE = 0.25  # Base position size (25% of capital)
+    MIN_SIZE = 0.15   # Minimum position size
+    MAX_SIZE = 0.35   # Maximum position size
+    HALF_SIZE = BASE_SIZE / 2
     
-    # Track position state for stoploss and take profit
+    # Track position state
     position_side = 0  # 0=flat, 1=long, -1=short
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     entry_price = 0.0
+    entry_atr = 0.0
     profit_target_hit = False
     
-    min_period = 120  # Wait for all indicators to stabilize
+    min_period = 100  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_12h_aligned[i]) or np.isnan(histogram[i]) or 
-            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_width_pr[i]) or 
-            atr[i] == 0 or np.isnan(hist_slope[i])):
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(adx[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # 12h trend filter (HTF)
-        htf_trend = 1 if close[i] > hma_12h_aligned[i] else -1
+        # Daily trend filter (HTF) - only trade in direction of major trend
+        daily_trend = 1 if close[i] > hma_1d_aligned[i] else -1
         
-        # MACD momentum signals
-        macd_bullish = histogram[i] > 0 and hist_slope[i] > 0
-        macd_bearish = histogram[i] < 0 and hist_slope[i] < 0
+        # ADX trend strength filter (avoid choppy markets)
+        adx_strong = adx[i] > 25
         
-        # MACD zero-cross confirmation (stronger signal)
-        macd_cross_long = histogram[i] > 0 and histogram[i-1] <= 0
-        macd_cross_short = histogram[i] < 0 and histogram[i-1] >= 0
+        # Donchian breakout signals
+        breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
+        breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
         
-        # Regime filter: only trade when BB Width is in top 60% (trending market)
-        regime_valid = bb_width_pr[i] > 0.40
-        
-        # Volume confirmation
-        vol_confirmed = volume_spike[i]
-        
-        # RSI filter to avoid overbought/oversold entries
-        rsi_valid_long = rsi[i] < 70  # Not overbought
-        rsi_valid_short = rsi[i] > 30  # Not oversold
+        # Volatility-adjusted position sizing
+        # Target vol = 0.02 (2% daily), adjust size inversely to current vol
+        target_vol = 0.02
+        vol_adjustment = np.clip(target_vol / (vol[i] + 0.001), 0.5, 2.0)
+        current_size = np.clip(BASE_SIZE * vol_adjustment, MIN_SIZE, MAX_SIZE)
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: HTF bullish + MACD bullish + Volume spike + Regime valid + RSI valid
-        long_condition = (htf_trend == 1 and 
-                         (macd_bullish or macd_cross_long) and 
-                         vol_confirmed and 
-                         regime_valid and 
-                         rsi_valid_long)
+        # Long entry: Donchian breakout + ADX strong + Daily trend bullish
+        if breakout_long and adx_strong and daily_trend == 1:
+            target_signal = current_size
         
-        # Short entry: HTF bearish + MACD bearish + Volume spike + Regime valid + RSI valid
-        short_condition = (htf_trend == -1 and 
-                          (macd_bearish or macd_cross_short) and 
-                          vol_confirmed and 
-                          regime_valid and 
-                          rsi_valid_short)
-        
-        if long_condition:
-            target_signal = SIZE
-        elif short_condition:
-            target_signal = -SIZE
+        # Short entry: Donchian breakout + ADX strong + Daily trend bearish
+        elif breakout_short and adx_strong and daily_trend == -1:
+            target_signal = -current_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
@@ -199,20 +205,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.5 * atr[i]
+                trailing_stop = highest_since_entry - 2.0 * entry_atr
                 
                 # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry, where R = 2.5*ATR)
+                # Check take profit (3R from entry, where R = 2*ATR)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 5.0 * atr[i]:  # 2R = 5*ATR
+                    if close[i] >= entry_price + 6.0 * entry_atr:  # 3R = 6*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.5 * atr[i]
+                trailing_stop = lowest_since_entry + 2.0 * entry_atr
                 
                 # Check stoploss
                 if close[i] > trailing_stop:
@@ -220,7 +226,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 5.0 * atr[i]:  # 2R profit
+                    if close[i] <= entry_price - 6.0 * entry_atr:  # 3R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -229,9 +235,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry = 0.0
             lowest_since_entry = float('inf')
             entry_price = 0.0
+            entry_atr = 0.0
             profit_target_hit = False
         elif take_profit_triggered:
-            # Reduce position to half at 2R profit
+            # Reduce position to half at 3R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
@@ -243,28 +250,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry = close[i]
                 lowest_since_entry = close[i]
                 entry_price = close[i]
+                entry_atr = atr[i]
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                if position_side == 1 and htf_trend == -1:
-                    # HTF trend reversed, exit long
+                # Exit if ADX drops below 20 (trend weakening) or HTF trend reverses
+                if adx[i] < 20 or (position_side == 1 and daily_trend == -1) or (position_side == -1 and daily_trend == 1):
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
-                    profit_target_hit = False
-                elif position_side == -1 and htf_trend == 1:
-                    # HTF trend reversed, exit short
-                    signals[i] = 0.0
-                    position_side = 0
-                    highest_since_entry = 0.0
-                    lowest_since_entry = float('inf')
-                    entry_price = 0.0
+                    entry_atr = 0.0
                     profit_target_hit = False
                 else:
                     # Maintain position
-                    signals[i] = SIZE * position_side if not profit_target_hit else HALF_SIZE * position_side
+                    signals[i] = current_size * position_side if not profit_target_hit else HALF_SIZE * position_side
             else:
                 signals[i] = 0.0
     
