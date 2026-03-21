@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #037 - Supertrend + Volume + ADX Regime (15m primary, 4h HTF)
-================================================================================
-Hypothesis: 15m Supertrend provides entry timing, but needs confirmation from
-4h trend direction (HMA filter), volume surge (>1.5x 20-bar MA), and ADX > 20
-to ensure we're in a trending regime. This avoids the choppy market losses
-seen in experiments #025, #031, #032. Key difference from #022: faster 15m TF
-with tighter stops, volume confirmation added, ADX regime filter.
+EXPERIMENT #038 - Donchian Breakout + 4h HMA Trend + Volume Confirmation (30m primary)
+=======================================================================================
+Hypothesis: 30m Donchian Channel breakouts capture momentum moves, but need HTF trend
+alignment to avoid false breakouts. 4h HMA(21) provides trend direction filter.
+Volume surge (>1.5x 20-bar average) confirms breakout validity. ADX(14) > 25 ensures
+we only trade in trending regimes, not chop. RSI momentum filter (>55 long, <45 short)
+adds confirmation. This differs from previous supertrend strategies by using pure
+price breakouts with volume confirmation instead of ATR-based trend following.
 
 Key features:
-- Primary TF: 15m (faster entries than 4h)
+- Primary TF: 30m
 - HTF filter: 4h HMA(21) for major trend direction
-- Trend: Supertrend(10, 3) on 15m
-- Volume: Current volume > 1.5 * 20-bar volume MA (confirms breakout)
-- Regime: ADX(14) > 20 (trending market, avoids chop)
-- RSI filter: 30-70 zone (avoid extreme overbought/oversold)
-- Stoploss: 2.5*ATR(14) trailing
-- Position sizing: 0.25 base, discrete levels (0.0, ±0.25, ±0.125)
+- Entry: Donchian(20) breakout (price > 20-bar high or < 20-bar low)
+- Volume filter: Current volume > 1.5x 20-bar average volume
+- Regime filter: ADX(14) > 25 (trending market only)
+- Momentum: RSI(14) > 55 for long, < 45 for short
+- Stoploss: 2.5*ATR(14) trailing stop
+- Position sizing: 0.25-0.30 discrete levels
 - Take profit: Reduce to half at 2R profit, trail stop
 """
 
@@ -24,8 +25,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "supertrend_vol_adx_15m_4h_v1"
-timeframe = "15m"
+name = "donchian_volume_hma_30m_4h_v1"
+timeframe = "30m"
 leverage = 1.0
 
 
@@ -52,33 +53,17 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3):
-    """Calculate Supertrend indicator"""
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high and lowest low over period)"""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
     
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 = bullish, -1 = bearish
-    
-    supertrend[0] = upper_band[0]
-    
-    for i in range(1, n):
-        if close[i - 1] <= supertrend[i - 1]:
-            supertrend[i] = min(upper_band[i], supertrend[i - 1])
-            if close[i] > supertrend[i]:
-                direction[i] = 1
-                supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = max(lower_band[i], supertrend[i - 1])
-            if close[i] < supertrend[i]:
-                direction[i] = -1
-                supertrend[i] = upper_band[i]
-    
-    return supertrend, direction
+    return upper, lower
 
 
 def calculate_rsi(close, period=14):
@@ -98,15 +83,11 @@ def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index)"""
     n = len(close)
     
+    # Calculate +DM and -DM
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
-    tr = np.zeros(n)
     
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i],
-                    abs(high[i] - close[i - 1]),
-                    abs(low[i] - close[i - 1]))
-        
         if high[i] - high[i - 1] > low[i - 1] - low[i]:
             plus_dm[i] = max(high[i] - high[i - 1], 0)
         else:
@@ -117,24 +98,37 @@ def calculate_adx(high, low, close, period=14):
         else:
             minus_dm[i] = 0
     
+    # Calculate TR
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i - 1]),
+                    abs(low[i] - close[i - 1]))
+    
+    # Smooth with Wilder's method (EMA with span=period)
     tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
     plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
     minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
     
+    # Calculate +DI and -DI
     plus_di = 100 * plus_dm_smooth / (tr_smooth + 1e-10)
     minus_di = 100 * minus_dm_smooth / (tr_smooth + 1e-10)
     
+    # Calculate DX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    
+    # Calculate ADX (smoothed DX)
     adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
     
     return adx
 
 
-def calculate_volume_ma(volume, period=20):
-    """Calculate volume moving average"""
+def calculate_volume_sma(volume, period=20):
+    """Calculate simple moving average of volume"""
     vol_s = pd.Series(volume)
-    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_ma
+    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -147,22 +141,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Load 4h HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)  # auto shift(1)
     
-    # Calculate 15m indicators
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3)
+    # Calculate 30m indicators
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     adx = calculate_adx(high, low, close, 14)
-    vol_ma = calculate_volume_ma(volume, 20)
+    vol_sma = calculate_volume_sma(volume, 20)
     
     # Generate signals
     signals = np.zeros(n)
-    SIZE = 0.25  # Base position size (25% of capital)
+    SIZE = 0.28  # Base position size (28% of capital)
     HALF_SIZE = SIZE / 2  # For take profit reduction
     
     # Track position state for stoploss and take profit
-    position_side = 0
+    position_side = 0  # 0=flat, 1=long, -1=short
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     entry_price = 0.0
@@ -172,39 +166,38 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(supertrend[i]) or 
-            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]) or 
-            np.isnan(vol_ma[i]) or atr[i] == 0 or vol_ma[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(atr[i]) or np.isnan(rsi[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_sma[i]) or atr[i] == 0 or vol_sma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # 4h trend filter (HTF)
+        # 4h trend filter (HTF) - price relative to HMA
         hma_trend = 1 if close[i] > hma_4h_aligned[i] else -1
         
-        # 15m Supertrend direction
-        st_trend = int(st_direction[i])
+        # Donchian breakout signals
+        breakout_long = close[i] > donchian_upper[i]
+        breakout_short = close[i] < donchian_lower[i]
         
-        # Volume confirmation: current volume > 1.5 * 20-bar MA
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (current volume > 1.5x average)
+        volume_surge = volume[i] > 1.5 * vol_sma[i]
         
-        # ADX regime filter: ADX > 20 (trending market)
-        regime_valid = adx[i] > 20
+        # Regime filter (ADX > 25 = trending market)
+        regime_valid = adx[i] > 25
         
-        # RSI filter: avoid extreme overbought/oversold (30-70 zone)
-        rsi_valid_long = 30 <= rsi[i] <= 70
-        rsi_valid_short = 30 <= rsi[i] <= 70
+        # RSI momentum filter
+        rsi_long = rsi[i] > 55
+        rsi_short = rsi[i] < 45
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: All conditions aligned
-        if (st_trend == 1 and hma_trend == 1 and volume_confirmed and 
-            regime_valid and rsi_valid_long):
+        # Long entry: Donchian breakout + 4h trend bullish + volume surge + regime valid + RSI confirmation
+        if breakout_long and hma_trend == 1 and volume_surge and regime_valid and rsi_long:
             target_signal = SIZE
         
-        # Short entry: All conditions aligned
-        elif (st_trend == -1 and hma_trend == -1 and volume_confirmed and 
-              regime_valid and rsi_valid_short):
+        # Short entry: Donchian breakout + 4h trend bearish + volume surge + regime valid + RSI confirmation
+        elif breakout_short and hma_trend == -1 and volume_surge and regime_valid and rsi_short:
             target_signal = -SIZE
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -223,7 +216,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit (2R from entry, where R = 2.5*ATR)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 5.0 * atr[i]:
+                    if close[i] >= entry_price + 5.0 * atr[i]:  # 2R = 5*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
@@ -236,7 +229,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 5.0 * atr[i]:
+                    if close[i] <= entry_price - 5.0 * atr[i]:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -262,16 +255,16 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                if position_side == 1 and st_trend == -1:
-                    # Trend reversed, exit long
+                if position_side == 1 and hma_trend == -1:
+                    # HTF trend reversed, exit long
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
                     profit_target_hit = False
-                elif position_side == -1 and st_trend == 1:
-                    # Trend reversed, exit short
+                elif position_side == -1 and hma_trend == 1:
+                    # HTF trend reversed, exit short
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
