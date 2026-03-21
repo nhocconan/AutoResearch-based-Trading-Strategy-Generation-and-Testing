@@ -39,34 +39,56 @@ def revalidate_strategy(strategy_path: str, symbols: list, commit: str) -> list[
     rows = []
     strategy_name = Path(strategy_path).stem
 
-    for period in ["train", "test"]:
-        for symbol in symbols:
-            try:
-                result = run_strategy_backtest(
-                    strategy_path=strategy_path,
-                    symbol=symbol,
-                    period=period,
-                )
-                m = compute_metrics(result)
-                status = "keep" if m["sharpe_ratio"] > 0 and m["max_drawdown_pct"] > -50 else "discard"
-                desc = f"revalidated {strategy_name}"
-                row = metrics_to_tsv_row(
-                    metrics=m,
-                    strategy_name=strategy_name,
-                    symbol=symbol,
-                    commit=commit,
-                    status=status,
-                    description=desc,
-                    period=period,
-                )
-                rows.append(row)
-                sharpe = m["sharpe_ratio"]
-                dd = m["max_drawdown_pct"]
-                ret = m["total_return_pct"]
-                trades = m["num_trades"]
-                print(f"  {symbol:8s} {period:5s} Sharpe={sharpe:7.3f} Return={ret:+10.1f}% DD={dd:7.1f}% Trades={trades:5d} [{status}]")
-            except Exception as e:
-                print(f"  {symbol:8s} {period:5s} ERROR: {e}")
+    # Train first — early stop if first symbol fails
+    train_rows = []
+    train_pass = True
+    for symbol in symbols:
+        try:
+            result = run_strategy_backtest(strategy_path=strategy_path, symbol=symbol, period="train")
+            m = compute_metrics(result)
+            sharpe = m["sharpe_ratio"]
+            trades = m["num_trades"]
+            dd = m["max_drawdown_pct"]
+            status = "keep" if sharpe > 0 and trades >= 5 and dd > -50 else "discard"
+            row = metrics_to_tsv_row(m, strategy_name, symbol, commit, status, f"revalidated {strategy_name}", "train")
+            train_rows.append(row)
+            print(f"  {symbol:8s} train Sharpe={sharpe:7.3f} Return={m['total_return_pct']:+10.1f}% DD={dd:7.1f}% Trades={trades:5d} [{status}]")
+            if sharpe <= 0 or trades < 5:
+                print(f"  → EARLY STOP train: {symbol} failed (Sharpe={sharpe:.3f} trades={trades})")
+                train_pass = False
+                break
+        except Exception as e:
+            print(f"  {symbol:8s} train ERROR: {e}")
+            train_pass = False
+            break
+
+    rows.extend(train_rows)
+
+    # Only run test if ALL train symbols passed
+    if not train_pass:
+        print(f"  → SKIP test (train failed)")
+        return rows
+
+    test_rows = []
+    for symbol in symbols:
+        try:
+            result = run_strategy_backtest(strategy_path=strategy_path, symbol=symbol, period="test")
+            m = compute_metrics(result)
+            sharpe = m["sharpe_ratio"]
+            trades = m["num_trades"]
+            dd = m["max_drawdown_pct"]
+            status = "keep" if sharpe > 0 and trades >= 3 and dd > -50 else "discard"
+            row = metrics_to_tsv_row(m, strategy_name, symbol, commit, status, f"revalidated {strategy_name}", "test")
+            test_rows.append(row)
+            print(f"  {symbol:8s} test  Sharpe={sharpe:7.3f} Return={m['total_return_pct']:+10.1f}% DD={dd:7.1f}% Trades={trades:5d} [{status}]")
+            if sharpe <= 0 or trades < 3:
+                print(f"  → EARLY STOP test: {symbol} failed")
+                break
+        except Exception as e:
+            print(f"  {symbol:8s} test  ERROR: {e}")
+            break
+
+    rows.extend(test_rows)
     return rows
 
 
