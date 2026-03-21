@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #221: 12h Fisher Transform + Choppiness Index Regime Filter with Daily HMA
-Hypothesis: Fisher Transform catches reversals better than RSI in bear/range markets (2025 test period).
-Choppiness Index determines regime: CHOP<38.2=trending (follow Fisher with trend), CHOP>61.8=ranging (fade Fisher extremes).
-Daily HMA provides macro bias. This should work better than pure breakout (Donchian failed) and pure trend (Supertrend exhausted).
-Position sizing: 0.25 entry, 0.12 half at 2R. Stoploss: 2.5*ATR trailing. Target: Beat Sharpe=0.499.
+Experiment #222: 1d Dual Momentum with Weekly HMA Trend Filter
+Hypothesis: On daily timeframe, combining price momentum (ROC) with relative strength (RSI)
+creates robust signals. Long when ROC(10)>0 AND RSI(14)>50 AND price>weekly_HMA(21).
+Short when ROC(10)<0 AND RSI(14)<50 AND price<weekly_HMA(21). This captures sustained
+moves while avoiding counter-trend trades. ATR(14) stoploss at 2.5x. Position sizing:
+0.25 entry, reduce to 0.125 at 2R profit. Target: Beat Sharpe=0.499 with fewer whipsaws.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_fisher_chop_regime_daily_hma_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_dual_momentum_weekly_hma_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -34,69 +35,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_fisher_transform(high, low, period=9):
-    """
-    Ehlers Fisher Transform - normalizes price to Gaussian distribution.
-    Extreme values (>1.5 or <-1.5) indicate potential reversals.
-    """
-    hl2 = (high + low) / 2
-    hl2_s = pd.Series(hl2)
-    
-    # Calculate highest high and lowest low over period
-    highest = hl2_s.rolling(window=period, min_periods=period).max().values
-    lowest = hl2_s.rolling(window=period, min_periods=period).min().values
-    
-    # Normalize to 0-1 range
-    range_hl = highest - lowest
-    range_hl = np.where(range_hl == 0, 0.001, range_hl)  # avoid div by zero
-    normalized = (hl2 - lowest) / range_hl
-    
-    # Clamp to avoid extreme values
-    normalized = np.clip(normalized, 0.001, 0.999)
-    
-    # Fisher transform
-    fisher_input = 0.66 * ((normalized - 0.5) / 0.5) + 0.67 * np.roll(fisher_input_raw(normalized), 1)
-    fisher_input = np.clip(fisher_input, -0.999, 0.999)
-    
-    # Actual Fisher calculation
-    fisher = 0.5 * np.log((1 + fisher_input) / (1 - fisher_input + 0.0001))
-    fisher_prev = np.roll(fisher, 1)
-    fisher_prev[0] = fisher[0]
-    
-    # Signal line (trigger)
-    trigger = np.roll(fisher, 1)
-    trigger[0] = fisher[0]
-    
-    return fisher, trigger
-
-def fisher_input_raw(normalized):
-    """Helper for Fisher input calculation."""
-    return 0.66 * ((normalized - 0.5) / 0.5)
-
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppiness vs trending.
-    CHOP > 61.8 = ranging/consolidation
-    CHOP < 38.2 = trending
-    """
-    atr = calculate_atr(high, low, close, period)
-    
-    # Highest high and lowest low over period
-    highest = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    # Sum of ATR over period
-    atr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
-    
-    # Choppiness calculation
-    range_hl = highest - lowest
-    range_hl = np.where(range_hl == 0, 0.001, range_hl)
-    
-    chop = 100 * np.log10(atr_sum / range_hl) / np.log10(period)
-    chop = np.clip(chop, 0, 100)
-    
-    return chop
-
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -109,6 +47,17 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_roc(close, period=10):
+    """Calculate Rate of Change (momentum)."""
+    roc = np.zeros(len(close))
+    for i in range(period, len(close)):
+        roc[i] = (close[i] - close[i - period]) / close[i - period] * 100
+    return roc
+
+def calculate_sma(close, period=200):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -116,23 +65,23 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    fisher, fisher_trigger = calculate_fisher_transform(high, low, 9)
-    chop = calculate_choppiness_index(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
+    roc = calculate_roc(close, 10)
+    sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.12
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -142,60 +91,30 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):
-        # HTF trend filter
-        daily_bullish = close[i] > hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else False
-        daily_bearish = close[i] < hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else False
+    for i in range(250, n):  # Start after SMA200 warmup
+        # Weekly trend filter
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # Regime detection via Choppiness Index
-        trending_regime = chop[i] < 38.2
-        ranging_regime = chop[i] > 61.8
-        neutral_regime = not trending_regime and not ranging_regime
+        # Dual momentum signals
+        momentum_long = roc[i] > 0 and rsi[i] > 50
+        momentum_short = roc[i] < 0 and rsi[i] < 50
         
-        # Fisher Transform signals
-        fisher_bullish_cross = fisher[i] > fisher_trigger[i] and fisher[i-1] <= fisher_trigger[i-1]
-        fisher_bearish_cross = fisher[i] < fisher_trigger[i] and fisher[i-1] >= fisher_trigger[i-1]
-        
-        # Fisher extreme levels for mean reversion
-        fisher_oversold = fisher[i] < -1.5
-        fisher_overbought = fisher[i] > 1.5
-        
-        # RSI confirmation
-        rsi_bullish = rsi[i] > 45
-        rsi_bearish = rsi[i] < 55
-        rsi_neutral = 35 < rsi[i] < 65
+        # Long-term trend filter
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
         
         new_signal = 0.0
         
-        # === TRENDING REGIME (CHOP < 38.2) ===
-        # Follow Fisher crosses with trend alignment
-        if trending_regime:
-            # Long: Fisher bullish cross + daily trend + RSI confirmation
-            if fisher_bullish_cross and daily_bullish and rsi_bullish:
-                new_signal = SIZE_ENTRY
-            
-            # Short: Fisher bearish cross + daily trend + RSI confirmation
-            elif fisher_bearish_cross and daily_bearish and rsi_bearish:
-                new_signal = -SIZE_ENTRY
+        # === LONG ENTRY ===
+        # Momentum long + weekly bullish + above SMA200
+        if momentum_long and weekly_bullish and above_sma200:
+            new_signal = SIZE_ENTRY
         
-        # === RANGING REGIME (CHOP > 61.8) ===
-        # Mean reversion: fade Fisher extremes
-        elif ranging_regime:
-            # Long: Fisher oversold + RSI oversold
-            if fisher_oversold and rsi[i] < 40:
-                new_signal = SIZE_ENTRY
-            
-            # Short: Fisher overbought + RSI overbought
-            elif fisher_overbought and rsi[i] > 60:
-                new_signal = -SIZE_ENTRY
-        
-        # === NEUTRAL REGIME ===
-        # Use Fisher crosses with stricter RSI filter
-        else:
-            if fisher_bullish_cross and rsi_neutral:
-                new_signal = SIZE_ENTRY
-            elif fisher_bearish_cross and rsi_neutral:
-                new_signal = -SIZE_ENTRY
+        # === SHORT ENTRY ===
+        # Momentum short + weekly bearish + below SMA200
+        if momentum_short and weekly_bearish and below_sma200:
+            new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
