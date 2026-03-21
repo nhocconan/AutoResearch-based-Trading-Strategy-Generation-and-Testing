@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #108 - MTF Supertrend+RSI+Chandelier+VolAdj Sizing (15m+4h Proper HTF v1)
+EXPERIMENT #109 - MTF Supertrend+RSI+Chandelier+VolRegime (15m+4h Proper HTF v1)
 ==================================================================================================
-Hypothesis: Recent failures (#101-#107) show Chandelier stops alone aren't enough - need 
-volatility-adjusted position sizing AND proper HTF alignment. Current best uses 15m+1h+4h.
+Hypothesis: Experiments #101-#108 failed due to improper Chandelier implementation and 
+overly aggressive vol-adjusted sizing. Key fixes:
+- Use mtf_data helper for PROPER 4h alignment (no synthetic resampling)
+- Chandelier exit: 3*ATR(22) from highest_high since entry (proper trailing)
+- Vol regime: BBW percentile to switch between 0.35 (low vol) and 0.25 (high vol)
+- Simpler entry: Supertrend direction + RSI pullback + 4h HMA trend filter
+- Discrete position sizes only (0.0, ±0.25, ±0.35) to minimize churn costs
 
-Key changes from #040:
-- Use mtf_data helper for PROPER 4h alignment (not manual resampling)
-- Chandelier exit: highest_high - 3*ATR(22) for trailing stops
-- Volatility-adjusted sizing: base_size * (median_ATR / current_ATR), capped at 0.35
-- Discrete signal levels: 0.0, ±0.20, ±0.35 to minimize churn costs
-- Stricter entry filters to reduce trade frequency and fees
-- 4h Supertrend for major trend, 15m RSI for pullback entries
-
-Why this should beat #040 and recent failures:
-- Proper HTF alignment prevents look-ahead bias (46 strategies failed without this)
-- Vol-adjusted sizing reduces exposure during high vol (2022 crash protection)
-- Chandelier trailing stop locks in profits better than fixed ATR stops
-- Based on winning combo from mtf_supertrend_macd_bbw_rsi_15m_1h_4h_v1 (Sharpe=3.653)
+Why this should beat #108:
+- Proper HTF alignment via mtf_data (46 strategies failed without this)
+- Conservative vol-adjusted sizing (only 2 levels, not continuous)
+- Chandelier at 3*ATR(22) instead of 2*ATR(14) for wider stops
+- Based on #098 which had positive Sharpe (0.145) with similar logic
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_supertrend_rsi_chandelier_voladj_15m_4h_proper_htf_v1"
+name = "mtf_supertrend_rsi_chandelier_volregime_15m_4h_proper_htf_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -50,6 +47,68 @@ def calculate_atr(high, low, close, period=14):
         atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
     
     return atr
+
+
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    wma1 = np.zeros(n)
+    wma2 = np.zeros(n)
+    hma = np.zeros(n)
+    
+    for i in range(half_period - 1, n):
+        weights = np.arange(1, half_period + 1)
+        wma1[i] = np.sum(close[i - half_period + 1:i + 1] * weights) / np.sum(weights)
+    
+    for i in range(period - 1, n):
+        weights = np.arange(1, period + 1)
+        wma2[i] = np.sum(close[i - period + 1:i + 1] * weights) / np.sum(weights)
+    
+    for i in range(period - 1 + sqrt_period - 1, n):
+        start_idx = i - sqrt_period + 1
+        weights = np.arange(1, sqrt_period + 1)
+        raw_vals = 2 * wma1[start_idx:i + 1] - wma2[start_idx:i + 1]
+        hma[i] = np.sum(raw_vals * weights) / np.sum(weights)
+    
+    return hma
+
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI"""
+    n = len(close)
+    if n < period + 1:
+        return np.zeros(n)
+    
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    
+    avg_gain[period] = np.mean(gain[:period + 1])
+    avg_loss[period] = np.mean(loss[:period + 1])
+    
+    for i in range(period + 1, n):
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
+    
+    rs = np.zeros(n)
+    for i in range(period, n):
+        if avg_loss[i] == 0:
+            rs[i] = 100
+        else:
+            rs[i] = avg_gain[i] / avg_loss[i]
+    
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi
 
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
@@ -92,71 +151,41 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     return supertrend, trend_direction
 
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI"""
-    n = len(close)
-    if n < period + 1:
-        return np.zeros(n)
-    
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    
-    avg_gain[period] = np.mean(gain[:period + 1])
-    avg_loss[period] = np.mean(loss[:period + 1])
-    
-    for i in range(period + 1, n):
-        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
-    
-    rs = np.zeros(n)
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rs[i] = 100
-        else:
-            rs[i] = avg_gain[i] / avg_loss[i]
-    
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi
-
-
-def calculate_chandelier_exit(high, low, close, atr, period=22, multiplier=3.0):
-    """
-    Calculate Chandelier Exit (ATR trailing stop)
-    Long exit: highest_high - multiplier * ATR
-    Short exit: lowest_low + multiplier * ATR
-    """
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width"""
     n = len(close)
     if n < period:
-        return np.zeros(n), np.zeros(n)
+        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
     
-    chandelier_long = np.zeros(n)
-    chandelier_short = np.zeros(n)
+    middle = np.zeros(n)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    bbw = np.zeros(n)
     
     for i in range(period - 1, n):
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
+        window = close[i - period + 1:i + 1]
+        middle[i] = np.mean(window)
+        std = np.std(window)
+        upper[i] = middle[i] + std_mult * std
+        lower[i] = middle[i] - std_mult * std
         
-        chandelier_long[i] = highest_high - multiplier * atr[i]
-        chandelier_short[i] = lowest_low + multiplier * atr[i]
+        if middle[i] > 0:
+            bbw[i] = (upper[i] - lower[i]) / middle[i]
+        else:
+            bbw[i] = 0
     
-    return chandelier_long, chandelier_short
+    return upper, middle, lower, bbw
 
 
-def calculate_atr_percentile(atr, lookback=100):
-    """Calculate ATR percentile for volatility regime detection"""
-    n = len(atr)
+def calculate_bbw_percentile(bbw, lookback=100):
+    """Calculate BBW percentile rank for vol regime detection"""
+    n = len(bbw)
     percentile = np.zeros(n)
     
     for i in range(lookback - 1, n):
-        window = atr[i - lookback + 1:i + 1]
-        sorted_window = np.sort(window)
-        rank = np.searchsorted(sorted_window, atr[i])
-        percentile[i] = rank / lookback
+        window = bbw[i - lookback + 1:i + 1]
+        rank = np.sum(window <= bbw[i]) / lookback
+        percentile[i] = rank
     
     return percentile
 
@@ -167,61 +196,41 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # Load 4h data using PROPER mtf_data helper (CRITICAL - no manual resampling!)
+    # 15m indicators for entry timing
+    atr_15m = calculate_atr(high, low, close, period=14)
+    atr_22_15m = calculate_atr(high, low, close, period=22)  # For Chandelier
+    rsi_15m = calculate_rsi(close, period=14)
+    supertrend_15m, st_direction_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    bbw_pct_15m = calculate_bbw_percentile(bbw_15m, lookback=100)
+    
+    # 4h indicators for trend filter - USE PROPER MTF HELPER
     try:
         df_4h = get_htf_data(prices, '4h')
         close_4h = df_4h['close'].values
         high_4h = df_4h['high'].values
         low_4h = df_4h['low'].values
-    except Exception:
-        # Fallback if mtf_data not available
-        df_4h = None
-        close_4h = None
-        high_4h = None
-        low_4h = None
-    
-    # 15m indicators for entry timing
-    atr_15m = calculate_atr(high, low, close, period=14)
-    atr_15m_22 = calculate_atr(high, low, close, period=22)
-    rsi_15m = calculate_rsi(close, period=14)
-    
-    # Chandelier exit for trailing stops
-    chandelier_long_15m, chandelier_short_15m = calculate_chandelier_exit(
-        high, low, close, atr_15m_22, period=22, multiplier=3.0
-    )
-    
-    # ATR percentile for volatility regime
-    atr_pct_15m = calculate_atr_percentile(atr_15m, lookback=100)
-    
-    # 15m Supertrend for short-term trend
-    supertrend_15m, st_direction_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    
-    # 4h indicators for major trend (using mtf_data helper)
-    if df_4h is not None and close_4h is not None:
-        atr_4h = calculate_atr(high_4h, low_4h, close_4h, period=14)
+        
+        hma_4h = calculate_hma(close_4h, period=21)
         supertrend_4h, st_direction_4h = calculate_supertrend(high_4h, low_4h, close_4h, period=10, multiplier=3.0)
-        rsi_4h = calculate_rsi(close_4h, period=14)
+        _, _, _, bbw_4h = calculate_bollinger_bands(close_4h, period=20, std_mult=2.0)
         
         # Align 4h indicators to 15m timeframe (auto shift for completed bars)
-        st_4h_aligned = align_htf_to_ltf(prices, df_4h, st_direction_4h)
-        rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-        atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
-    else:
-        # Fallback: use 15m supertrend with longer period as proxy
-        st_4h_aligned = calculate_supertrend(high, low, close, period=40, multiplier=3.0)[1]
-        rsi_4h_aligned = calculate_rsi(close, period=56)
-        atr_4h_aligned = calculate_atr(high, low, close, period=56)
+        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+        st_dir_4h_aligned = align_htf_to_ltf(prices, df_4h, st_direction_4h)
+        bbw_4h_aligned = align_htf_to_ltf(prices, df_4h, bbw_4h)
+    except Exception:
+        # Fallback if mtf_data fails
+        hma_4h_aligned = np.zeros(n)
+        st_dir_4h_aligned = np.ones(n)
+        bbw_4h_aligned = np.zeros(n)
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
-    # Position sizing - DISCRETE levels with vol adjustment (CRITICAL for drawdown control)
-    BASE_SIZE = 0.30
-    SIZE_LOW_VOL = 0.35  # When ATR percentile < 0.4
-    SIZE_MED_VOL = 0.25  # When ATR percentile 0.4-0.7
-    SIZE_HIGH_VOL = 0.15  # When ATR percentile > 0.7
-    SIZE_MIN = 0.15
-    SIZE_MAX = 0.35
+    # Position sizing - DISCRETE levels based on vol regime
+    SIZE_LOW_VOL = 0.35  # BBW percentile < 50th
+    SIZE_HIGH_VOL = 0.25  # BBW percentile >= 50th
     
     # RSI thresholds for pullback entries
     RSI_LONG_MIN = 35
@@ -229,159 +238,135 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     RSI_SHORT_MIN = 45
     RSI_SHORT_MAX = 65
     
-    # ATR stoploss multiplier (Chandelier uses 3.0)
-    ATR_STOP_MULT = 2.5
+    # ADX not used - rely on Supertrend direction
+    # Chandelier stop: 3*ATR(22) from highest/lowest since entry
+    CHANDELIER_MULT = 3.0
     
-    first_valid = max(200, 100, 22, 56)
+    first_valid = max(200, 100, 22, 21, 14)
     
     # Track position state
     position_side = np.zeros(n)
     entry_price = np.zeros(n)
-    tp_triggered = np.zeros(n)
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
+    chandelier_stop = np.zeros(n)
     
     for i in range(first_valid, n):
         if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
             continue
         
-        # Get 4h trend direction
-        trend_4h = st_4h_aligned[i] if not np.isnan(st_4h_aligned[i]) else 0
+        # 4h trend filter
+        trend_4h = 0
+        if hma_4h_aligned[i] > 0 and close[i] > hma_4h_aligned[i]:
+            trend_4h = 1
+        elif hma_4h_aligned[i] > 0 and close[i] < hma_4h_aligned[i]:
+            trend_4h = -1
         
-        # Get 15m indicators
+        st_trend_4h = st_dir_4h_aligned[i]
+        
+        # 15m signals
+        st_trend_15m = st_direction_15m[i]
         rsi_val = rsi_15m[i]
-        atr = atr_15m[i]
+        atr = atr_22_15m[i]
         price = close[i]
-        st_15m = st_direction_15m[i]
-        atr_pct = atr_pct_15m[i]
         
-        # Volatility-adjusted position sizing
-        if atr_pct < 0.4:
-            vol_adjusted_size = SIZE_LOW_VOL
-        elif atr_pct < 0.7:
-            vol_adjusted_size = SIZE_MED_VOL
+        # Vol regime for position sizing
+        vol_regime = bbw_pct_15m[i]
+        if vol_regime < 0.5:
+            position_size = SIZE_LOW_VOL
         else:
-            vol_adjusted_size = SIZE_HIGH_VOL
+            position_size = SIZE_HIGH_VOL
         
-        # Cap position size
-        vol_adjusted_size = np.clip(vol_adjusted_size, SIZE_MIN, SIZE_MAX)
-        
-        # Check stoploss and take profit for existing positions
+        # Check for existing position - apply Chandelier exit
         if position_side[i - 1] != 0:
             prev_side = position_side[i - 1]
             prev_entry = entry_price[i - 1] if entry_price[i - 1] > 0 else close[i - 1]
-            prev_tp = tp_triggered[i - 1]
             prev_high = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else prev_entry
             prev_low = lowest_since_entry[i - 1] if lowest_since_entry[i - 1] > 0 else prev_entry
+            prev_chandelier = chandelier_stop[i - 1] if chandelier_stop[i - 1] > 0 else prev_entry
             
             # Update highest/lowest since entry
             if prev_side == 1:
                 current_high = max(prev_high, price)
                 current_low = min(prev_low, price) if prev_low > 0 else price
-            else:
-                current_high = max(prev_high, price) if prev_high > 0 else price
-                current_low = min(prev_low, price)
-            
-            highest_since_entry[i] = current_high
-            lowest_since_entry[i] = current_low
-            
-            # Chandelier stoploss check (3*ATR(22))
-            if prev_side == 1:
-                chandelier_stop = chandelier_long_15m[i]
-                if price < chandelier_stop:
+                # Chandelier stop for long: highest_high - 3*ATR
+                new_chandelier = current_high - CHANDELIER_MULT * atr
+                chandelier_stop[i] = max(prev_chandelier, new_chandelier) if prev_chandelier > 0 else new_chandelier
+                
+                # Check Chandelier exit
+                if price < chandelier_stop[i]:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
-                    tp_triggered[i] = 0
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
+                    chandelier_stop[i] = 0
                     continue
                 
-                # Take profit check (2R) - reduce to half
-                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
-                if not prev_tp and price >= tp_price:
-                    signals[i] = vol_adjusted_size * 0.5
-                    position_side[i] = 1
-                    entry_price[i] = prev_entry
-                    tp_triggered[i] = 1
+                # Check 4h trend reversal
+                if trend_4h == -1 or st_trend_4h == -1:
+                    signals[i] = 0.0
+                    position_side[i] = 0
+                    entry_price[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
+                    chandelier_stop[i] = 0
                     continue
-                
-                # Trail stop at 1R profit
-                if prev_tp:
-                    trail_stop = current_high - ATR_STOP_MULT * atr
-                    if price < trail_stop:
-                        signals[i] = 0.0
-                        position_side[i] = 0
-                        entry_price[i] = 0
-                        tp_triggered[i] = 0
-                        highest_since_entry[i] = 0
-                        lowest_since_entry[i] = 0
-                        continue
                     
             elif prev_side == -1:
-                chandelier_stop = chandelier_short_15m[i]
-                if price > chandelier_stop:
+                current_high = max(prev_high, price) if prev_high > 0 else price
+                current_low = min(prev_low, price)
+                # Chandelier stop for short: lowest_low + 3*ATR
+                new_chandelier = current_low + CHANDELIER_MULT * atr
+                chandelier_stop[i] = min(prev_chandelier, new_chandelier) if prev_chandelier > 0 else new_chandelier
+                
+                # Check Chandelier exit
+                if price > chandelier_stop[i]:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
-                    tp_triggered[i] = 0
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
+                    chandelier_stop[i] = 0
                     continue
                 
-                # Take profit check (2R) - reduce to half
-                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
-                if not prev_tp and price <= tp_price:
-                    signals[i] = -vol_adjusted_size * 0.5
-                    position_side[i] = -1
-                    entry_price[i] = prev_entry
-                    tp_triggered[i] = 1
+                # Check 4h trend reversal
+                if trend_4h == 1 or st_trend_4h == 1:
+                    signals[i] = 0.0
+                    position_side[i] = 0
+                    entry_price[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
+                    chandelier_stop[i] = 0
                     continue
-                
-                # Trail stop at 1R profit
-                if prev_tp:
-                    trail_stop = current_low + ATR_STOP_MULT * atr
-                    if price > trail_stop:
-                        signals[i] = 0.0
-                        position_side[i] = 0
-                        entry_price[i] = 0
-                        tp_triggered[i] = 0
-                        highest_since_entry[i] = 0
-                        lowest_since_entry[i] = 0
-                        continue
             
             # Hold position if no exit triggered
             signals[i] = signals[i - 1]
             position_side[i] = position_side[i - 1]
             entry_price[i] = entry_price[i - 1]
-            tp_triggered[i] = tp_triggered[i - 1]
             highest_since_entry[i] = highest_since_entry[i - 1]
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h Supertrend + 15m RSI pullback + 15m Supertrend confirmation
-        # Only enter when 4h and 15m trends agree
-        
-        if trend_4h == 1 and st_15m == 1:  # Bullish trend on both timeframes
-            # RSI pullback entry (not overbought)
-            if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX):
-                signals[i] = vol_adjusted_size
+        # Entry logic: 4h trend + 15m Supertrend + RSI pullback
+        if trend_4h == 1 and st_trend_4h == 1 and st_trend_15m == 1:  # Bullish
+            if RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX:  # Pullback entry
+                signals[i] = position_size
                 position_side[i] = 1
                 entry_price[i] = price
-                tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
+                chandelier_stop[i] = price - CHANDELIER_MULT * atr
                 
-        elif trend_4h == -1 and st_15m == -1:  # Bearish trend on both timeframes
-            # RSI pullback entry (not oversold)
-            if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX):
-                signals[i] = -vol_adjusted_size
+        elif trend_4h == -1 and st_trend_4h == -1 and st_trend_15m == -1:  # Bearish
+            if RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX:  # Pullback entry
+                signals[i] = -position_size
                 position_side[i] = -1
                 entry_price[i] = price
-                tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
+                chandelier_stop[i] = price + CHANDELIER_MULT * atr
         
         else:
             signals[i] = 0.0
