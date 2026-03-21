@@ -1,56 +1,47 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #003 - EMA Crossover + Bollinger Regime + 4h Trend Filter (1h)
-=========================================================================
-Hypothesis: Simple EMA crossovers with Bollinger Band regime detection
-provide more reliable signals than adaptive averages. On 1h timeframe,
-we enter when fast EMA crosses slow EMA, confirmed by Bollinger Band
-expansion (trend regime) and aligned with 4h trend direction.
+EXPERIMENT #004 - Supertrend + Daily Trend Filter (4h Primary)
+=================================================================
+Hypothesis: 4h Supertrend captures medium-term trends while daily HMA(50)
+filter ensures we trade only in direction of long-term trend. RSI filter
+avoids entering at extremes. ATR trailing stop protects capital.
 
 Key features:
-- Primary TF: 1h (required for this experiment)
-- HTF filter: 4h EMA(21) for trend direction
-- Entry: EMA(8) crosses EMA(21) with BB regime confirmation
-- Regime filter: Bollinger Width > median = trending market
-- Stoploss: 2.0*ATR(14) trailing
-- Position sizing: 0.30 discrete levels
+- Primary TF: 4h (4-hour candles)
+- HTF filter: 1d HMA(50) for major trend direction
+- Entry: Supertrend(10, 3) flip signals
+- Filter: RSI(14) between 40-60 (not overbought/oversold)
+- Stoploss: 2.5*ATR(14) trailing
+- Position sizing: 0.25-0.30 discrete levels
 
-Why different from failed strategies:
-- Simpler EMA vs complex KAMA (less calculation errors)
-- 1h TF = more stable than 30m/15m, more trades than 4h+
-- BB regime filter avoids mean-reversion chop
-- Proven EMA crossover baseline with added filters
+Why this should work:
+- 4h provides enough signals (vs 1d which is too slow)
+- Daily trend filter reduces whipsaws in choppy markets
+- Supertrend adapts to volatility via ATR
+- Discrete sizing minimizes fee churn
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "ema_bb_regime_4hfilter_1h_v1"
-timeframe = "1h"
+name = "supertrend_daily_filter_4h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 
-def calculate_ema(close, period):
-    """Calculate EMA with proper min_periods"""
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
     close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
-    return ema.values
-
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands with proper min_periods"""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + (std * std_mult)
-    lower = sma - (std * std_mult)
-    width = (upper - lower) / sma  # Bollinger Width (normalized)
-    return upper.values, lower.values, width.values
+    wma1 = close_s.ewm(span=period//2, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, adjust=False).mean()
+    raw_hma = 2 * wma1 - wma2
+    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
+    return hma.values
 
 
 def calculate_atr(high, low, close, period=14):
-    """Calculate ATR with proper min_periods"""
+    """Calculate ATR using Wilder's smoothing"""
     n = len(close)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
@@ -58,18 +49,61 @@ def calculate_atr(high, low, close, period=14):
         tr[i] = max(high[i] - low[i],
                     abs(high[i] - close[i-1]),
                     abs(low[i] - close[i-1]))
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
 
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    supertrend = np.zeros(n)
+    direction = np.zeros(n)  # 1 = bullish, -1 = bearish
+    
+    for i in range(period, n):
+        if np.isnan(atr[i]) or atr[i] == 0:
+            supertrend[i] = np.nan
+            direction[i] = 0
+            continue
+        
+        mid = (high[i] + low[i]) / 2
+        upper_band = mid + multiplier * atr[i]
+        lower_band = mid - multiplier * atr[i]
+        
+        if i == period:
+            supertrend[i] = upper_band
+            direction[i] = 1
+        else:
+            # Update upper/lower bands based on previous direction
+            if direction[i-1] == 1:
+                upper_band = min(upper_band, supertrend[i-1])
+                if close[i] > supertrend[i-1]:
+                    supertrend[i] = upper_band
+                    direction[i] = 1
+                else:
+                    supertrend[i] = upper_band
+                    direction[i] = -1
+            else:
+                lower_band = max(lower_band, supertrend[i-1])
+                if close[i] < supertrend[i-1]:
+                    supertrend[i] = lower_band
+                    direction[i] = -1
+                else:
+                    supertrend[i] = lower_band
+                    direction[i] = 1
+    
+    return supertrend, direction
+
+
 def calculate_rsi(close, period=14):
-    """Calculate RSI with proper min_periods"""
+    """Calculate RSI"""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
@@ -81,77 +115,56 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values.copy()
     n = len(close)
     
-    # Load 4h HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
-    ema_4h = calculate_ema(df_4h['close'].values, 21)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # auto shift(1)
+    # Load 1d HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_1d = get_htf_data(prices, '1d')
+    hma_1d = calculate_hma(df_1d['close'].values, 50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
-    ema_fast = calculate_ema(close, 8)
-    ema_slow = calculate_ema(close, 21)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2.0)
-    atr = calculate_atr(high, low, close, 14)
+    # Calculate 4h indicators
     rsi = calculate_rsi(close, 14)
-    
-    # Calculate Bollinger Width median for regime filter
-    bb_width_median = np.nanmedian(bb_width[50:])  # Skip initial NaN period
+    atr = calculate_atr(high, low, close, 14)
+    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.30  # Base position size (30% of capital)
+    SIZE = 0.28  # Base position size (28% of capital)
     
     # Track position state for stoploss
     position_side = 0  # 0=flat, 1=long, -1=short
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
-    entry_price = 0.0
     
-    min_period = 50  # Wait for indicators to stabilize
-    
-    # Track EMA crossover state
-    prev_ema_diff = 0.0
+    min_period = 80  # Wait for daily HMA and Supertrend to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_fast[i]) or 
-            np.isnan(ema_slow[i]) or np.isnan(bb_width[i]) or 
-            np.isnan(atr[i]) or np.isnan(rsi[i]) or atr[i] == 0):
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(atr[i]) or np.isnan(supertrend[i]) or 
+            atr[i] == 0 or st_direction[i] == 0):
             signals[i] = 0.0
-            prev_ema_diff = ema_fast[i] - ema_slow[i] if not np.isnan(ema_fast[i]) and not np.isnan(ema_slow[i]) else prev_ema_diff
             continue
         
-        # 4h Trend filter (HTF)
-        htf_trend = 0
-        if close[i] > ema_4h_aligned[i]:
-            htf_trend = 1  # Bullish HTF
-        elif close[i] < ema_4h_aligned[i]:
-            htf_trend = -1  # Bearish HTF
+        # Daily trend filter (price above/below daily HMA50)
+        daily_trend = 1 if close[i] > hma_1d_aligned[i] else -1
         
-        # 1h EMA crossover signal
-        ema_diff = ema_fast[i] - ema_slow[i]
-        ema_cross_long = (prev_ema_diff <= 0) and (ema_diff > 0)  # Fast crosses above Slow
-        ema_cross_short = (prev_ema_diff >= 0) and (ema_diff < 0)  # Fast crosses below Slow
-        prev_ema_diff = ema_diff
+        # RSI filter (avoid extremes - don't buy overbought or sell oversold)
+        rsi_valid = 40 < rsi[i] < 60
         
-        # Bollinger Band regime filter (trending vs mean-reversion)
-        # Width > median = trending market (good for breakout strategies)
-        # Width < median = mean-reversion market (avoid trend trades)
-        regime_trending = bb_width[i] > bb_width_median
+        # Supertrend direction signal
+        st_signal = int(st_direction[i])
+        prev_st_signal = int(st_direction[i-1]) if i > 0 else 0
         
-        # RSI filter to avoid extreme entries
-        rsi_valid_long = rsi[i] < 70  # Not overbought
-        rsi_valid_short = rsi[i] > 30  # Not oversold
+        # Detect Supertrend flip (entry signal)
+        supertrend_flip = 0
+        if prev_st_signal == -1 and st_signal == 1:
+            supertrend_flip = 1  # Bullish flip
+        elif prev_st_signal == 1 and st_signal == -1:
+            supertrend_flip = -1  # Bearish flip
         
-        # Determine target signal
+        # Determine target signal based on trend filter and RSI
         target_signal = 0.0
-        
-        # Long entry: HTF bullish + EMA cross long + trending regime + RSI valid
-        if htf_trend == 1 and ema_cross_long and regime_trending and rsi_valid_long:
-            target_signal = BASE_SIZE
-        
-        # Short entry: HTF bearish + EMA cross short + trending regime + RSI valid
-        elif htf_trend == -1 and ema_cross_short and regime_trending and rsi_valid_short:
-            target_signal = -BASE_SIZE
+        if supertrend_flip == daily_trend and rsi_valid:
+            target_signal = SIZE * supertrend_flip
         
         # Stoploss logic - check BEFORE setting new signal
         stoploss_triggered = False
@@ -159,13 +172,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.0 * atr[i]
+                trailing_stop = highest_since_entry - 2.5 * atr[i]
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.0 * atr[i]
+                trailing_stop = lowest_since_entry + 2.5 * atr[i]
                 if close[i] > trailing_stop:
                     stoploss_triggered = True
         
@@ -174,41 +187,18 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             position_side = 0
             highest_since_entry = 0.0
             lowest_since_entry = float('inf')
-            entry_price = 0.0
         else:
             # Apply signal change
             if target_signal != 0.0:
-                # Check if this is a reversal or new entry
+                signals[i] = target_signal
                 if position_side == 0:
                     # New entry
-                    signals[i] = target_signal
                     position_side = 1 if target_signal > 0 else -1
                     highest_since_entry = close[i]
                     lowest_since_entry = close[i]
-                    entry_price = close[i]
-                elif np.sign(target_signal) == position_side:
-                    # Same direction - maintain position
-                    signals[i] = target_signal
-                    # Update extremes for trailing stop
-                    if position_side == 1:
-                        highest_since_entry = max(highest_since_entry, close[i])
-                    else:
-                        lowest_since_entry = min(lowest_since_entry, close[i])
-                else:
-                    # Reversal - close old, open new
-                    signals[i] = target_signal
-                    position_side = 1 if target_signal > 0 else -1
-                    highest_since_entry = close[i]
-                    lowest_since_entry = close[i]
-                    entry_price = close[i]
             elif position_side != 0:
-                # Maintain existing position (no new signal but still in trade)
-                signals[i] = BASE_SIZE * position_side
-                # Update extremes for trailing stop
-                if position_side == 1:
-                    highest_since_entry = max(highest_since_entry, close[i])
-                else:
-                    lowest_since_entry = min(lowest_since_entry, close[i])
+                # Maintain existing position
+                signals[i] = SIZE * position_side
             else:
                 signals[i] = 0.0
     
