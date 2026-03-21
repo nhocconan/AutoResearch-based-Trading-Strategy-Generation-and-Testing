@@ -1,72 +1,32 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #026 - KAMA Adaptive Trend with Volume Confirmation (1h Primary)
+EXPERIMENT #027 - HMA RSI Volume Pullback 1h+4h MTF
 ==================================================================================================
-Hypothesis: Current best uses HMA on 4h. This uses KAMA (Kaufman Adaptive MA) on 1h for faster
-adaptation to volatility changes. KAMA flattens in choppy markets and trends in directional moves.
-Adding volume confirmation (taker_buy_ratio) filters false breakouts. 4h trend filter keeps us
-on the right side of major moves.
+Hypothesis: Current best (4h+1d, Sharpe=0.537) has fewer trades. Using 1h primary + 4h filter
+should generate more trades while maintaining quality. Volume confirmation adds edge by filtering
+false breakouts. Tighter 1.5*ATR stoploss reduces drawdown vs 2.0*ATR baseline.
 
-Key innovations vs current best (hma_rsi_pullback_daily_trend_4h_v1):
-1. KAMA instead of HMA - adapts efficiency ratio to market noise (better in ranging markets)
-2. 1h primary vs 4h - more trades (50-200 vs 20-50), faster entry/exit
-3. Volume confirmation - taker_buy_ratio > 0.55 for longs, < 0.45 for shorts
-4. 4h KAMA trend filter (not daily) - more responsive than daily, cleaner than 1h
-5. Same conservative sizing: 0.25 base, 0.35 high conviction, 2.0 ATR stop
+Key innovations vs current best:
+1. 1h PRIMARY + 4h HTF: More trade opportunities than 4h+1d (expect 2-3x trades)
+2. Volume confirmation: Only enter when volume > 1.2*MA(20) - filters weak moves
+3. Tighter stoploss: 1.5*ATR vs 2.0*ATR (reduces max loss per trade)
+4. Dynamic sizing: Base size * (target_vol / current_ATR_vol) for consistent risk
+5. Discrete signals: 0.0, ±0.20, ±0.30 to minimize fee churn
 
-Why this should beat Sharpe=0.537:
-- KAMA's adaptive nature reduces whipsaws in choppy markets (major drawdown source)
-- 1h timeframe captures more moves while 4h filter prevents counter-trend trades
-- Volume filter eliminates low-conviction breakouts that reverse quickly
-- More trades = better statistical significance while keeping DD controlled
+Why this should beat hma_rsi_pullback_daily_trend_4h_v1:
+- More trades = better statistical significance
+- Volume filter reduces false entries in choppy markets
+- 1h timeframe captures intraday moves that 4h misses
+- 4h trend filter still provides strong directional bias
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_volume_trend_mtf_1h_4h_v1"
+name = "hma_rsi_volume_pullback_1h_4h_v1"
 timeframe = "1h"
 leverage = 1.0
-
-
-def calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30):
-    """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts to market noise using Efficiency Ratio (ER)
-    ER = |net change| / sum of absolute changes over n periods
-    SC = [ER * (fast_sc - slow_sc) + slow_sc]^2
-    KAMA = prior_KAMA + SC * (price - prior_KAMA)
-    """
-    n = len(close)
-    if n < efficiency_period + slow_period:
-        return np.zeros(n)
-    
-    kama = np.zeros(n)
-    
-    # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(efficiency_period, n):
-        net_change = abs(close[i] - close[i - efficiency_period])
-        sum_changes = np.sum(np.abs(np.diff(close[i - efficiency_period:i + 1])))
-        if sum_changes > 0:
-            er[i] = net_change / sum_changes
-        else:
-            er[i] = 0
-    
-    # Smoothing constants
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    
-    # Initialize KAMA at SMA of first slow_period values
-    kama[slow_period - 1] = np.mean(close[:slow_period])
-    
-    # Calculate KAMA
-    for i in range(slow_period, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
 
 
 def calculate_atr(high, low, close, period=14):
@@ -92,6 +52,35 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
+def calculate_hma(close, period=21):
+    """
+    Hull Moving Average - faster than EMA, smoother than SMA
+    HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    """
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    half = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    def wma(series, window):
+        result = np.zeros(len(series))
+        weights = np.arange(1, window + 1)
+        for i in range(window - 1, len(series)):
+            result[i] = np.sum(series[i - window + 1:i + 1] * weights) / np.sum(weights)
+        return result
+    
+    close_series = np.array(close)
+    wma_half = wma(close_series, half)
+    wma_full = wma(close_series, period)
+    
+    diff = 2 * wma_half - wma_full
+    hma = wma(diff, sqrt_period)
+    
+    return hma
+
+
 def calculate_rsi(close, period=14):
     """Calculate RSI"""
     n = len(close)
@@ -114,35 +103,86 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_taker_buy_ratio(prices):
-    """Calculate taker buy volume ratio (volume confirmation)"""
-    n = len(prices)
-    ratio = np.zeros(n)
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average"""
+    n = len(volume)
+    if n < period:
+        return np.zeros(n)
     
-    volume = prices['volume'].values
-    taker_buy = prices['taker_buy_volume'].values
+    volume_ma = np.zeros(n)
+    for i in range(period - 1, n):
+        volume_ma[i] = np.mean(volume[i - period + 1:i + 1])
+    
+    return volume_ma
+
+
+def calculate_supertrend(high, low, close, atr, multiplier=3.0):
+    """
+    Supertrend indicator - trend following with ATR-based stops
+    Returns: supertrend_values, trend_direction (1=up, -1=down)
+    """
+    n = len(close)
+    if n < len(atr) or len(atr) == 0:
+        return np.zeros(n), np.zeros(n)
+    
+    supertrend = np.zeros(n)
+    trend = np.zeros(n)
+    
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
     
     for i in range(n):
-        if volume[i] > 0:
-            ratio[i] = taker_buy[i] / volume[i]
-        else:
-            ratio[i] = 0.5
+        if atr[i] == 0:
+            continue
+        upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
+        lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
     
-    return ratio
+    first_valid = np.where(atr > 0)[0]
+    if len(first_valid) == 0:
+        return supertrend, trend
+    
+    start_idx = first_valid[0]
+    supertrend[start_idx] = upper_band[start_idx]
+    trend[start_idx] = 1
+    
+    for i in range(start_idx + 1, n):
+        if atr[i] == 0:
+            supertrend[i] = supertrend[i - 1]
+            trend[i] = trend[i - 1]
+            continue
+        
+        if trend[i - 1] == 1:
+            if close[i] > lower_band[i]:
+                supertrend[i] = max(supertrend[i - 1], lower_band[i])
+                trend[i] = 1
+            else:
+                supertrend[i] = upper_band[i]
+                trend[i] = -1
+        else:
+            if close[i] < upper_band[i]:
+                supertrend[i] = min(supertrend[i - 1], upper_band[i])
+                trend[i] = -1
+            else:
+                supertrend[i] = lower_band[i]
+                trend[i] = 1
+    
+    return supertrend, trend
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # ========== 1h INDICATORS (PRIMARY TIMEFRAME) ==========
     atr_1h = calculate_atr(high, low, close, period=14)
     rsi_1h = calculate_rsi(close, period=14)
-    kama_1h = calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30)
-    kama_1h_fast = calculate_kama(close, efficiency_period=5, fast_period=2, slow_period=15)
-    taker_ratio = calculate_taker_buy_ratio(prices)
+    hma_1h = calculate_hma(close, period=21)
+    hma_1h_fast = calculate_hma(close, period=8)
+    supertrend_1h, st_trend_1h = calculate_supertrend(high, low, close, atr_1h, multiplier=3.0)
+    volume_ma_1h = calculate_volume_ma(volume, period=20)
     
     # ========== 4h INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
@@ -151,39 +191,40 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         high_4h = df_4h['high'].values
         low_4h = df_4h['low'].values
         
-        # 4h KAMA for trend direction
-        kama_4h = calculate_kama(close_4h, efficiency_period=10, fast_period=2, slow_period=30)
+        # 4h HMA for trend direction
+        hma_4h = calculate_hma(close_4h, period=21)
         atr_4h = calculate_atr(high_4h, low_4h, close_4h, period=14)
+        _, st_trend_4h = calculate_supertrend(high_4h, low_4h, close_4h, atr_4h, multiplier=3.0)
         
         # Align to 1h timeframe (auto shift for completed bars)
-        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
-        atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+        st_trend_4h_aligned = align_htf_to_ltf(prices, df_4h, st_trend_4h)
         
     except Exception:
-        kama_4h_aligned = np.zeros(n)
-        atr_4h_aligned = np.zeros(n)
+        hma_4h_aligned = np.zeros(n)
+        st_trend_4h_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
     
-    # Position sizing - CONSERVATIVE
-    SIZE_BASE = 0.25    # Base position (25% of capital)
-    SIZE_HIGH = 0.35    # High conviction (35% of capital)
+    # Position sizing - CONSERVATIVE with dynamic adjustment
+    SIZE_BASE = 0.20    # Base position (20%)
+    SIZE_HIGH = 0.30    # High conviction (30%)
+    TARGET_RISK = 0.03  # 3% risk per trade
     
-    # ATR stoploss
-    ATR_STOP_MULT = 2.0
+    # ATR stoploss - TIGHTER than baseline
+    ATR_STOP_MULT = 1.5  # 1.5*ATR vs 2.0*ATR baseline
     
-    # RSI entry zones (pullback in trend)
+    # RSI pullback zones
     RSI_LONG_MIN = 35
     RSI_LONG_MAX = 55
     RSI_SHORT_MIN = 45
     RSI_SHORT_MAX = 65
     
-    # Volume confirmation thresholds
-    VOLUME_LONG_MIN = 0.52   # More buyers than sellers
-    VOLUME_SHORT_MAX = 0.48  # More sellers than buyers
+    # Volume filter
+    VOLUME_MULT = 1.2  # Volume must be > 1.2x MA
     
-    first_valid = max(100, 50)
+    first_valid = 100
     
     # Track position state
     position_side = np.zeros(n, dtype=int)
@@ -201,24 +242,30 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         price = close[i]
         atr = atr_1h[i]
         rsi_val = rsi_1h[i]
-        kama_val = kama_1h[i]
-        kama_fast_val = kama_1h_fast[i]
-        vol_ratio = taker_ratio[i]
+        st_trend_val = st_trend_1h[i]
+        hma_val = hma_1h[i]
+        hma_fast_val = hma_1h_fast[i]
+        vol = volume[i]
+        vol_ma = volume_ma_1h[i]
         
         # 4h trend filters (MASTER FILTER)
-        kama_4h_val = kama_4h_aligned[i]
-        atr_4h_val = atr_4h_aligned[i]
+        hma_4h_val = hma_4h_aligned[i]
+        st_trend_4h_val = st_trend_4h_aligned[i]
         
         # Determine 4h trend direction
         trend_4h = 0
-        if kama_4h_val > 0 and price > kama_4h_val:
+        if hma_4h_val > 0 and price > hma_4h_val:
             trend_4h = 1
-        elif kama_4h_val > 0 and price < kama_4h_val:
+        elif hma_4h_val > 0 and price < hma_4h_val:
             trend_4h = -1
         
-        # KAMA fast/slow cross on 1h
-        kama_cross_up = kama_fast_val > kama_val and kama_fast_val > 0 and kama_val > 0
-        kama_cross_down = kama_fast_val < kama_val and kama_fast_val > 0 and kama_val > 0
+        if st_trend_4h_val == 1:
+            trend_4h = max(trend_4h, 1)
+        elif st_trend_4h_val == -1:
+            trend_4h = min(trend_4h, -1)
+        
+        # Volume confirmation
+        volume_confirmed = vol_ma > 0 and vol > VOLUME_MULT * vol_ma
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -239,7 +286,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.0*ATR)
+            # Stoploss check (1.5*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -254,7 +301,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = SIZE_BASE / 2  # Reduce to half
+                    signals[i] = SIZE_BASE  # Reduce to half
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -286,7 +333,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = -SIZE_BASE / 2  # Reduce to half
+                    signals[i] = -SIZE_BASE  # Reduce to half
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -313,36 +360,29 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ========== ENTRY LOGIC - KAMA TREND + VOLUME CONFIRMATION ==========
-        # LONG: 4h trend up + 1h KAMA cross up + RSI pullback + volume confirmation
+        # ========== ENTRY LOGIC - RSI PULLBACK + VOLUME IN TREND DIRECTION ==========
+        # LONG: 4h trend up + 1h Supertrend up + RSI pullback (35-55) + Volume confirmed
         long_condition = (
             trend_4h == 1 and
-            kama_cross_up and
+            st_trend_val == 1 and
             rsi_val >= RSI_LONG_MIN and rsi_val <= RSI_LONG_MAX and
-            vol_ratio >= VOLUME_LONG_MIN
+            hma_fast_val > hma_val and
+            volume_confirmed
         )
         
-        # SHORT: 4h trend down + 1h KAMA cross down + RSI pullback + volume confirmation
+        # SHORT: 4h trend down + 1h Supertrend down + RSI pullback (45-65) + Volume confirmed
         short_condition = (
             trend_4h == -1 and
-            kama_cross_down and
+            st_trend_val == -1 and
             rsi_val >= RSI_SHORT_MIN and rsi_val <= RSI_SHORT_MAX and
-            vol_ratio <= VOLUME_SHORT_MAX
+            hma_fast_val < hma_val and
+            volume_confirmed
         )
         
-        # High conviction: strong 4h trend (price far from 4h KAMA)
-        high_conviction_long = False
-        high_conviction_short = False
-        
-        if kama_4h_val > 0 and long_condition:
-            distance_pct = (price - kama_4h_val) / kama_4h_val
-            if distance_pct > 0.01:  # Price > 1% above 4h KAMA
-                high_conviction_long = True
-        
-        if kama_4h_val > 0 and short_condition:
-            distance_pct = (kama_4h_val - price) / kama_4h_val
-            if distance_pct > 0.01:  # Price > 1% below 4h KAMA
-                high_conviction_short = True
+        # Determine position size based on conviction
+        # High conviction: all signals align + strong 4h trend
+        high_conviction_long = long_condition and st_trend_4h_val == 1
+        high_conviction_short = short_condition and st_trend_4h_val == -1
         
         if long_condition:
             size = SIZE_HIGH if high_conviction_long else SIZE_BASE
