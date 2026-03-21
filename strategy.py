@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #214: 4h KAMA Adaptive Trend with Daily/Weekly HMA Filter + RSI Pullback
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility - 
-faster during trends, slower during ranges. This should reduce whipsaws compared to 
-fixed EMA/HMA. 4h timeframe captures multi-day swings. Daily HMA provides trend bias, 
-Weekly HMA confirms macro direction. RSI pullback entries (not extremes) catch dips 
-in uptrends and rallies in downtrends. ATR trailing stop limits drawdown.
-Position sizing: 0.25 entry, 0.125 half at 2R profit, stoploss at 2.5*ATR.
-Target: Beat Sharpe=0.499 from current best (mtf_12h_supertrend_daily_hma_rsi_pullback_v2)
+Experiment #215: 12h EMA Crossover with Daily/Weekly HMA Trend Filter and RSI Pullback
+Hypothesis: Simple EMA(8)/EMA(21) crossover on 12h provides clean entry signals. 
+Daily HMA(21) filters trend direction (only long when price > 1d HMA, only short when <).
+Weekly HMA(21) provides macro confirmation for short entries (avoid shorts in bull markets).
+RSI(14) pullback filter ensures we enter on dips (RSI 40-55 for longs, 45-60 for shorts).
+This is simpler than Donchian breakouts and should generate more consistent trades.
+Position sizing: 0.25 entry, 0.125 at 2R profit. Stoploss: 2.5*ATR trailing stop.
+Target: Beat Sharpe=0.499 from current best with cleaner trend following.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_daily_weekly_hma_rsi_pullback_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_ema_crossover_daily_weekly_hma_rsi_pullback_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -27,44 +27,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA).
-    KAMA adapts to market noise - moves faster during trends, slower during ranges.
-    Efficiency Ratio (ER) measures trend vs noise.
-    """
-    close_s = pd.Series(close)
-    n = len(close)
-    
-    # Calculate Efficiency Ratio
-    change = np.abs(close - np.roll(close, period))
-    change[0:period] = np.abs(close[0:period] - close[0])
-    
-    volatility = np.zeros(n)
-    for i in range(1, n):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-    volatility[0:period] = np.abs(close[0:period] - close[0])
-    volatility_diff = np.abs(volatility - np.roll(volatility, period))
-    volatility_diff[0:period] = volatility[0:period]
-    
-    er = np.zeros(n)
-    mask = volatility_diff > 0
-    er[mask] = change[mask] / volatility_diff[mask]
-    er = np.clip(er, 0, 1)
-    
-    # Calculate smoothing constant
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[period-1] = close[period-1]
-    for i in range(period, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
     close_s = pd.Series(close)
@@ -74,6 +36,12 @@ def calculate_hma(close, period=21):
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
+
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+    return ema
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -105,10 +73,21 @@ def generate_signals(prices):
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
-    kama = calculate_kama(close, period=10, fast_period=2, slow_period=30)
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
+    ema_fast = calculate_ema(close, 8)
+    ema_slow = calculate_ema(close, 21)
+    
+    # EMA crossover detection
+    ema_cross_long = (ema_fast > ema_slow) & (np.roll(ema_fast, 1) <= np.roll(ema_slow, 1))
+    ema_cross_short = (ema_fast < ema_slow) & (np.roll(ema_fast, 1) >= np.roll(ema_slow, 1))
+    ema_cross_long[0] = False
+    ema_cross_short[0] = False
+    
+    # EMA trend state (not just crossover)
+    ema_bullish = ema_fast > ema_slow
+    ema_bearish = ema_fast < ema_slow
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -129,43 +108,38 @@ def generate_signals(prices):
         weekly_bullish = close[i] > hma_1w_aligned[i]
         weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # KAMA trend direction
-        kama_bullish = close[i] > kama[i]
-        kama_bearish = close[i] < kama[i]
-        
-        # RSI pullback conditions (not extremes - allows more trades)
-        rsi_pullback_long = 35 < rsi[i] < 55  # dip in uptrend
-        rsi_pullback_short = 45 < rsi[i] < 65  # rally in downtrend
-        rsi_neutral = 40 < rsi[i] < 60
-        
-        # KAMA slope (trend momentum)
-        kama_slope = kama[i] - kama[i-5] if i >= 5 else 0
-        kama_rising = kama_slope > 0
-        kama_falling = kama_slope < 0
+        # RSI pullback filter (not extremes, but pullback zones)
+        rsi_pullback_long = 40 <= rsi[i] <= 55
+        rsi_pullback_short = 45 <= rsi[i] <= 60
+        rsi_neutral = 35 <= rsi[i] <= 65
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Primary: KAMA bullish + daily HMA bullish + RSI pullback
-        if kama_bullish and daily_bullish and rsi_pullback_long:
-            new_signal = SIZE_ENTRY
-        # Secondary: Weekly HMA confirms + KAMA rising
-        elif kama_bullish and weekly_bullish and kama_rising and rsi_neutral:
-            new_signal = SIZE_ENTRY
-        # Tertiary: Strong weekly trend + KAMA cross above
-        elif weekly_bullish and close[i] > kama[i] and close[i-1] <= kama[i-1]:
-            new_signal = SIZE_ENTRY
+        # EMA crossover long with daily trend confirmation
+        if ema_cross_long[i]:
+            if daily_bullish and rsi_pullback_long:
+                new_signal = SIZE_ENTRY
+            elif daily_bullish and rsi_neutral:
+                new_signal = SIZE_ENTRY
+        
+        # EMA bullish continuation (already crossed, pullback entry)
+        elif ema_bullish[i] and daily_bullish:
+            if rsi_pullback_long and position_side <= 0:
+                new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Primary: KAMA bearish + daily HMA bearish + RSI pullback
-        if kama_bearish and daily_bearish and rsi_pullback_short:
-            new_signal = -SIZE_ENTRY
-        # Secondary: Weekly HMA confirms + KAMA falling
-        elif kama_bearish and weekly_bearish and kama_falling and rsi_neutral:
-            new_signal = -SIZE_ENTRY
-        # Tertiary: Strong weekly trend + KAMA cross below
-        elif weekly_bearish and close[i] < kama[i] and close[i-1] >= kama[i-1]:
-            new_signal = -SIZE_ENTRY
+        # EMA crossover short with daily AND weekly trend confirmation
+        if ema_cross_short[i]:
+            if daily_bearish and weekly_bearish and rsi_pullback_short:
+                new_signal = -SIZE_ENTRY
+            elif daily_bearish and rsi_neutral:
+                new_signal = -SIZE_ENTRY * 0.7  # Smaller short position
+        
+        # EMA bearish continuation (already crossed, pullback entry)
+        elif ema_bearish[i] and daily_bearish:
+            if weekly_bearish and rsi_pullback_short and position_side >= 0:
+                new_signal = -SIZE_ENTRY * 0.7
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
