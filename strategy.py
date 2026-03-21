@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #024 - MTF HMA+KAMA+Stoch+RSI+ADX+Volume+BBW (15m+1h v4)
+EXPERIMENT #025 - MTF HMA+KAMA+Stoch+RSI+ADX+Volume+BBW+ROC (15m+1h v5)
 ==================================================================================================
-Hypothesis: Building on #021 (Sharpe=4.629) and #023 (Sharpe=3.981, Return=+2240%),
-this experiment refines the 15m+1h MTF approach with key optimizations:
+Hypothesis: Building on #021 (Sharpe=4.629) and #024 (Sharpe=3.881), this experiment
+optimizes the 15m+1h MTF approach with key refinements:
 
-Key improvements vs #023:
-- Timeframe: 15m entries + 1h trend (proven best combination)
-- Position size: 0.35 (increased from 0.30 for better returns, still safe max)
-- RSI range: 40-60 (tighter than 35-65 for cleaner pullback entries)
-- Stochastic: (14,3,3) with 25/75 thresholds (tighter than 20/80)
-- Add ADX(14) trend strength filter: must be > 25 (confirms strong trend)
-- Stoploss: 2.5*ATR (looser than 2.0*ATR to avoid premature exits in volatility)
-- Volume ratio: 1.2x (same as #023, proven effective)
-- BBW percentile: > 30 (higher than 25 to avoid more choppy markets)
-- HMA periods: 16/48 (same as #023, proven effective)
-- KAMA ER period: 10 (same, adaptive to market conditions)
+Key improvements vs #024:
+- Timeframe: 15m entries + 1h trend (proven best combination from #021)
+- Position size: 0.30 (reduced from 0.35 for better risk control)
+- RSI range: 45-55 (tighter than 40-60 for higher quality pullback entries)
+- Stochastic: (14,3,3) with 30/70 thresholds (tighter than 25/75)
+- ADX(14) trend strength filter: must be > 28 (higher than 25 for stronger trends)
+- Stoploss: 2.0*ATR (tighter than 2.5*ATR for better risk/reward)
+- Volume ratio: 1.3x (higher than 1.2x for stronger confirmation)
+- BBW percentile: > 35 (higher than 30 to avoid more choppy markets)
+- HMA periods: 16/48 (same as #024, proven effective)
+- Add ROC(10) momentum filter: must align with trend direction
+- Add dynamic position sizing: base_size * (target_vol / current_vol)
 
-Why this should beat #021 and #023:
-- Tighter RSI range captures only quality pullback entries (less noise)
-- ADX filter ensures we only trade when trend has strength (avoids weak trends)
-- Looser stoploss (2.5*ATR) reduces premature exits during normal volatility
-- Higher position size (0.35) captures more of proven trend moves
-- BBW > 30 avoids more choppy/squeeze conditions than > 25
-- 15m+1h proven best in #021 (Sharpe=4.629 vs #022's 2.727 with 1h+4h)
+Why this should beat #021 and #024:
+- Tighter RSI range (45-55) captures only deepest pullbacks in trends
+- Higher ADX threshold (28) ensures only strongest trends are traded
+- Tighter stoploss (2.0*ATR) improves risk/reward ratio
+- ROC momentum filter adds confirmation of trend continuation
+- Dynamic position sizing reduces exposure during high volatility
+- Higher volume threshold (1.3x) filters weaker moves
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_kama_stoch_rsi_adx_volume_bbw_15m_v4"
+name = "mtf_hma_kama_stoch_rsi_adx_volume_bbw_roc_15m_v5"
 timeframe = "15m"
 leverage = 1.0
 
@@ -199,7 +200,6 @@ def calculate_adx(high, low, close, period=14):
     dx = np.zeros(n)
     adx = np.zeros(n)
     
-    # Smooth TR, +DM, -DM using Wilder's method
     tr_smooth = np.zeros(n)
     plus_dm_smooth = np.zeros(n)
     minus_dm_smooth = np.zeros(n)
@@ -228,7 +228,6 @@ def calculate_adx(high, low, close, period=14):
         else:
             dx[i] = 0
     
-    # Smooth DX to get ADX
     adx[period * 2 - 2] = np.mean(dx[period - 1:period * 2 - 1])
     
     for i in range(period * 2 - 1, n):
@@ -319,6 +318,23 @@ def calculate_bbw_percentile(bbw, lookback=100):
     return percentile
 
 
+def calculate_roc(close, period=10):
+    """Calculate Rate of Change"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    roc = np.zeros(n)
+    
+    for i in range(period, n):
+        if close[i - period] > 0:
+            roc[i] = (close[i] - close[i - period]) / close[i - period] * 100
+        else:
+            roc[i] = 0
+    
+    return roc
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
@@ -333,10 +349,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     hma_15m = calculate_hma(close, period=16)
     kama_15m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     stoch_k_15m, stoch_d_15m = calculate_stochastic(high, low, close, k_period=14, d_period=3)
-    adx_15m = calculate_adx(high, low, close, period=14)
     volume_ratio_15m = calculate_volume_sma_ratio(volume, period=20)
     _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    bbw_pct_15m = calculate_bbw_percentile(bbw_15m, lookback=100)
+    roc_15m = calculate_roc(close, period=10)
     
     # Resample to 1h for trend filters using proper method
     try:
@@ -433,33 +448,39 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.35
-    SIZE_HALF = 0.175
+    BASE_SIZE = 0.30
+    SIZE_HALF = 0.15
     
     # RSI thresholds for pullback entries (tighter range for cleaner entries)
-    RSI_LONG_MIN = 40
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 60
+    RSI_LONG_MIN = 45
+    RSI_LONG_MAX = 55
+    RSI_SHORT_MIN = 45
+    RSI_SHORT_MAX = 55
     
-    # Stochastic thresholds (tighter than 20/80)
-    STOCH_LONG_MAX = 75
-    STOCH_SHORT_MIN = 25
+    # Stochastic thresholds (tighter than 25/75)
+    STOCH_LONG_MAX = 70
+    STOCH_SHORT_MIN = 30
     
-    # ADX threshold for trend strength
-    ADX_MIN = 25
+    # ADX threshold for trend strength (higher than 25)
+    ADX_MIN = 28
     
     # Z-score threshold for mean reversion filter
-    ZSCORE_MAX = 2.0
+    ZSCORE_MAX = 1.8
     
-    # Volume ratio threshold
-    VOLUME_RATIO_MIN = 1.2
+    # Volume ratio threshold (higher than 1.2x)
+    VOLUME_RATIO_MIN = 1.3
     
-    # BBW percentile threshold (avoid bottom 30% = too choppy)
-    BBW_PCT_MIN = 30
+    # BBW percentile threshold (avoid bottom 35% = too choppy)
+    BBW_PCT_MIN = 35
     
-    # ATR stoploss multiplier (looser to avoid premature exits)
-    ATR_STOP_MULT = 2.5
+    # ATR stoploss multiplier (tighter for better R:R)
+    ATR_STOP_MULT = 2.0
+    
+    # ROC threshold for momentum confirmation
+    ROC_MIN = 0.5
+    
+    # Volatility target for dynamic sizing (annualized ~20%)
+    TARGET_VOL = 0.02
     
     first_valid = max(200, 48 * 4, 14 * 2, 20, 28, 100, 14 * 2 * 4)
     
@@ -486,8 +507,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         stoch_d = stoch_d_15m[i]
         vol_ratio = volume_ratio_15m[i]
         bbw_pct = bbw_pct_1h_mapped[i]
+        roc_val = roc_15m[i]
         
-        # BBW percentile filter - avoid choppy markets (bottom 30%)
+        # Calculate dynamic position size based on volatility
+        current_vol_pct = atr / price if price > 0 else TARGET_VOL
+        if current_vol_pct > 0:
+            vol_adjustment = min(1.5, max(0.5, TARGET_VOL / current_vol_pct))
+        else:
+            vol_adjustment = 1.0
+        
+        size_full = BASE_SIZE * vol_adjustment
+        size_half = size_full / 2
+        
+        # BBW percentile filter - avoid choppy markets (bottom 35%)
         if bbw_pct < BBW_PCT_MIN:
             signals[i] = 0.0
             position_side[i] = 0
@@ -524,7 +556,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.5*ATR)
+            # Stoploss check (2.0*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -539,7 +571,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = SIZE_HALF
+                    signals[i] = size_half
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
@@ -571,7 +603,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = -SIZE_HALF
+                    signals[i] = -size_half
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
@@ -598,13 +630,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 1h HMA + KAMA + ADX + BBW% + 15m RSI + Stoch + Volume + Z-score
+        # Entry logic: 1h HMA + KAMA + ADX + BBW% + 15m RSI + Stoch + Volume + Z-score + ROC
         if trend == 1 and kama_trend == 1:  # Bullish trend confirmed on 1h
             if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
                 stoch_k < STOCH_LONG_MAX and
                 abs(zscore_val) < ZSCORE_MAX and
-                vol_ratio >= VOLUME_RATIO_MIN):  # Pullback + Stoch not overbought + Volume confirm
-                signals[i] = SIZE_FULL
+                vol_ratio >= VOLUME_RATIO_MIN and
+                roc_val > ROC_MIN):  # Pullback + Stoch not overbought + Volume + Momentum confirm
+                signals[i] = size_full
                 position_side[i] = 1
                 entry_price[i] = price
                 tp_triggered[i] = 0
@@ -615,8 +648,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
                 stoch_k > STOCH_SHORT_MIN and
                 abs(zscore_val) < ZSCORE_MAX and
-                vol_ratio >= VOLUME_RATIO_MIN):  # Pullback + Stoch not oversold + Volume confirm
-                signals[i] = -SIZE_FULL
+                vol_ratio >= VOLUME_RATIO_MIN and
+                roc_val < -ROC_MIN):  # Pullback + Stoch not oversold + Volume + Momentum confirm
+                signals[i] = -size_full
                 position_side[i] = -1
                 entry_price[i] = price
                 tp_triggered[i] = 0
