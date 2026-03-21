@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #073 - Regime Adaptive MTF with Clean Signal Voting (15m + 4h)
+EXPERIMENT #074 - Confidence-Weighted Ensemble with Adaptive Regime (15m + 4h)
 ==================================================================================================
-Hypothesis: Previous ensemble strategies failed due to over-complexity and improper MTF handling.
+Hypothesis: Previous ensemble strategies failed due to too many signals causing churn and fees.
 This version uses:
-- Proper mtf_data helper for 4h trend alignment (NO manual resampling!)
-- Regime detection via BBW percentile (trend vs mean-reversion modes)
-- Simplified 3-signal voting: HMA trend, Supertrend, RSI momentum
-- Adaptive sizing: larger positions in low-vol trend regime, smaller in high-vol MR regime
-- 15m entries with 4h trend filter (proven combination from #066)
+- Only 4 high-quality signals (HMA, Supertrend, RSI, MACD) to reduce noise
+- Confidence-weighted sizing: more agreement = larger position (0.20 to 0.35)
+- Dual regime detection: BBW percentile + ATR volatility for better regime classification
+- 15m entries with 4h trend filter (proven from #066, #073)
+- Stricter entry filters to reduce false signals and fee drain
 
 Why this should work:
-- mtf_data helper ensures correct 4h boundary alignment (no look-ahead)
-- Regime switching reduces whipsaws in choppy markets
-- Signal voting (2/3 agreement) reduces false entries
-- Conservative sizing (0.25-0.35) controls drawdown
-- Based on #066 success (Sharpe=0.181) but cleaner implementation
+- Fewer signals = fewer changes = lower fees (0.10% per change adds up fast)
+- Confidence weighting captures strong moves while staying small in uncertain markets
+- Dual regime (BBW + ATR) better identifies true trend vs chop conditions
+- Based on #073 success (Sharpe=0.200) but with cleaner signal logic
+- MACD histogram adds momentum confirmation missing from pure trend indicators
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "regime_adaptive_mtf_voting_15m_4h_v1"
+name = "confidence_weighted_ensemble_regime_15m_4h_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -92,21 +92,20 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized deviation from mean)"""
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram"""
     n = len(close)
-    if n < period:
-        return np.zeros(n)
+    if n < slow + signal:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
     
-    rolling_mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    rolling_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    ema_fast = pd.Series(close).ewm(span=fast, adjust=False).mean().values
+    ema_slow = pd.Series(close).ewm(span=slow, adjust=False).mean().values
     
-    zscore = np.zeros(n)
-    for i in range(period - 1, n):
-        if rolling_std[i] > 0:
-            zscore[i] = (close[i] - rolling_mean[i]) / rolling_std[i]
+    macd_line = ema_fast - ema_slow
+    signal_line = pd.Series(macd_line).ewm(span=signal, adjust=False).mean().values
+    histogram = macd_line - signal_line
     
-    return zscore
+    return macd_line, signal_line, histogram
 
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
@@ -178,6 +177,20 @@ def calculate_bbw_percentile(bbw, lookback=100):
     return percentile
 
 
+def calculate_atr_percentile(atr, lookback=100):
+    """Calculate ATR percentile for volatility regime"""
+    n = len(atr)
+    percentile = np.zeros(n)
+    
+    for i in range(lookback - 1, n):
+        window = atr[i - lookback + 1:i + 1]
+        if len(window) == lookback:
+            rank = np.sum(window < atr[i])
+            percentile[i] = rank / lookback
+    
+    return percentile
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
@@ -187,10 +200,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # ========== 15m indicators for entry timing ==========
     atr_15m = calculate_atr(high, low, close, period=14)
     rsi_15m = calculate_rsi(close, period=14)
-    zscore_15m = calculate_zscore(close, period=20)
+    macd_line_15m, macd_signal_15m, macd_hist_15m = calculate_macd(close, fast=12, slow=26, signal=9)
     supertrend_15m, st_direction_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
     _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     bbw_pct_15m = calculate_bbw_percentile(bbw_15m, lookback=100)
+    atr_pct_15m = calculate_atr_percentile(atr_15m, lookback=100)
     
     # ========== 4h indicators for trend (using mtf_data helper) ==========
     df_4h = get_htf_data(prices, '4h')
@@ -200,36 +214,42 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     hma_4h = calculate_hma(close_4h, period=21)
     st_4h, st_direction_4h = calculate_supertrend(high_4h, low_4h, close_4h, period=10, multiplier=3.0)
+    macd_line_4h, macd_signal_4h, macd_hist_4h = calculate_macd(close_4h, fast=12, slow=26, signal=9)
     _, _, _, bbw_4h = calculate_bollinger_bands(close_4h, period=20, std_mult=2.0)
     bbw_pct_4h = calculate_bbw_percentile(bbw_4h, lookback=100)
+    atr_pct_4h = calculate_atr_percentile(calculate_atr(high_4h, low_4h, close_4h, 14), lookback=100)
     
     # Align 4h indicators to 15m timeframe (auto shift for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     st_dir_4h_aligned = align_htf_to_ltf(prices, df_4h, st_direction_4h)
+    macd_hist_4h_aligned = align_htf_to_ltf(prices, df_4h, macd_hist_4h)
     bbw_pct_4h_aligned = align_htf_to_ltf(prices, df_4h, bbw_pct_4h)
+    atr_pct_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_pct_4h)
     
     # ========== Signal generation ==========
     signals = np.zeros(n)
     
-    # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_TREND = 0.35  # Larger size in trend regime
-    SIZE_MR = 0.20     # Smaller size in mean-reversion regime
-    SIZE_HALF = 0.175
+    # Position sizing - DISCRETE levels based on confidence (CRITICAL for drawdown control)
+    SIZE_LOW = 0.20    # 1-2 signals agree
+    SIZE_MED = 0.28    # 3 signals agree
+    SIZE_HIGH = 0.35   # 4 signals agree (max)
+    SIZE_HALF = 0.175  # Take profit reduction
     
-    # Regime thresholds
-    BBW_TREND_THRESHOLD = 0.50  # Below = trend regime, Above = MR regime
+    # Regime thresholds (dual: BBW + ATR)
+    BBW_TREND_THRESHOLD = 0.40  # Below = low vol trend regime
+    ATR_TREND_THRESHOLD = 0.40  # Below = low vol trend regime
     
     # Entry thresholds
-    RSI_LONG_MIN = 40
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 60
-    ZSCORE_MAX = 2.0
+    RSI_LONG_MIN = 45
+    RSI_LONG_MAX = 65
+    RSI_SHORT_MIN = 35
+    RSI_SHORT_MAX = 55
+    MACD_HIST_MIN = 0.0  # Must be positive for long
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.5
     
-    first_valid = max(200, 100)
+    first_valid = max(250, 150)
     
     # Track position state
     position_side = np.zeros(n)
@@ -239,38 +259,37 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(zscore_15m[i]) or atr_15m[i] == 0:
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(macd_hist_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(st_dir_4h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(st_dir_4h_aligned[i]) or np.isnan(macd_hist_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         atr = atr_15m[i]
         rsi_val = rsi_15m[i]
-        zscore_val = zscore_15m[i]
+        macd_hist_val = macd_hist_15m[i]
+        macd_hist_4h_val = macd_hist_4h_aligned[i]
         bbw_regime = bbw_pct_4h_aligned[i]
+        atr_regime = atr_pct_4h_aligned[i]
         
-        # Determine regime
-        is_trend_regime = bbw_regime < BBW_TREND_THRESHOLD
+        # Determine regime (dual filter: both BBW and ATR must be low for trend)
+        is_trend_regime = (bbw_regime < BBW_TREND_THRESHOLD) and (atr_regime < ATR_TREND_THRESHOLD)
         
-        # 4h trend signals
+        # 4h trend signals (2 signals)
         hma_trend_4h = 1 if close[i] > hma_4h_aligned[i] else (-1 if close[i] < hma_4h_aligned[i] else 0)
         st_trend_4h = st_dir_4h_aligned[i]
+        macd_trend_4h = 1 if macd_hist_4h_val > 0 else (-1 if macd_hist_4h_val < 0 else 0)
         
-        # 15m momentum signals
+        # 15m momentum signals (2 signals)
         st_trend_15m = st_direction_15m[i]
-        rsi_signal = 0
-        if RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX:
-            rsi_signal = 1
-        elif RSI_SHORT_MIN <= (100 - rsi_val) <= RSI_SHORT_MAX:
-            rsi_signal = -1
+        macd_trend_15m = 1 if macd_hist_val > 0 else (-1 if macd_hist_val < 0 else 0)
         
-        # Signal voting (need 2/3 agreement for entry)
-        bullish_votes = sum([hma_trend_4h == 1, st_trend_4h == 1, st_trend_15m == 1])
-        bearish_votes = sum([hma_trend_4h == -1, st_trend_4h == -1, st_trend_15m == -1])
+        # Signal voting with confidence scoring
+        bullish_votes = sum([hma_trend_4h == 1, st_trend_4h == 1, st_trend_15m == 1, macd_trend_15m == 1])
+        bearish_votes = sum([hma_trend_4h == -1, st_trend_4h == -1, st_trend_15m == -1, macd_trend_15m == -1])
         
         # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
@@ -365,13 +384,30 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic with regime adaptation
-        position_size = SIZE_TREND if is_trend_regime else SIZE_MR
+        # Entry logic with confidence-weighted sizing
+        # Determine position size based on vote count
+        if bullish_votes >= 4:
+            position_size = SIZE_HIGH
+        elif bullish_votes >= 3:
+            position_size = SIZE_MED
+        elif bullish_votes >= 2:
+            position_size = SIZE_LOW
+        else:
+            position_size = 0.0
         
-        # Long entry: 2/3 bullish votes + RSI pullback + Z-score filter
-        if bullish_votes >= 2 and hma_trend_4h == 1:
+        if bearish_votes >= 4:
+            position_size_short = SIZE_HIGH
+        elif bearish_votes >= 3:
+            position_size_short = SIZE_MED
+        elif bearish_votes >= 2:
+            position_size_short = SIZE_LOW
+        else:
+            position_size_short = 0.0
+        
+        # Long entry: 2+ bullish votes + RSI filter + MACD confirmation
+        if bullish_votes >= 2 and hma_trend_4h == 1 and macd_trend_4h == 1:
             if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
-                abs(zscore_val) < ZSCORE_MAX):
+                macd_hist_val > MACD_HIST_MIN):
                 signals[i] = position_size
                 position_side[i] = 1
                 entry_price[i] = price
@@ -379,11 +415,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
                 
-        # Short entry: 2/3 bearish votes + RSI pullback + Z-score filter
-        elif bearish_votes >= 2 and hma_trend_4h == -1:
-            if (RSI_SHORT_MIN <= (100 - rsi_val) <= RSI_SHORT_MAX and 
-                abs(zscore_val) < ZSCORE_MAX):
-                signals[i] = -position_size
+        # Short entry: 2+ bearish votes + RSI filter + MACD confirmation
+        elif bearish_votes >= 2 and hma_trend_4h == -1 and macd_trend_4h == -1:
+            if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
+                macd_hist_val < -MACD_HIST_MIN):
+                signals[i] = -position_size_short
                 position_side[i] = -1
                 entry_price[i] = price
                 tp_triggered[i] = 0
