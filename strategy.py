@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #257: 12h KAMA Trend + ROC Momentum with Daily HMA Filter
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility better than 
-fixed EMAs, reducing whipsaw in choppy conditions. ROC(10) momentum confirms trend strength.
-Daily HMA provides primary trend bias (proven in current best strategy). Simpler entry logic
-than MACD/Donchian combo to ensure sufficient trades. Volume ratio as secondary confirmation.
-Position sizing: 0.28 entry, 0.14 half at 2R profit. Stoploss: 2.5*ATR trailing stop.
-Key difference from current best: KAMA crossover instead of Supertrend, ROC instead of RSI.
-Target: Beat Sharpe=0.499 with fewer whipsaws in range markets.
+Experiment #258: 1d Connors RSI + Choppiness Regime + Weekly HMA Trend Filter
+Hypothesis: Daily timeframe with Connors RSI (CRSI) for mean reversion entries combined with 
+Choppiness Index regime detection can adapt to both trending and ranging markets. Weekly HMA 
+provides macro trend bias. CRSI<20 for long, CRSI>80 for short (looser than typical 10/90 to 
+ensure trades). CHOP>61.8 = range (favor mean reversion), CHOP<38.2 = trend (favor trend follow).
+This differs from failed experiments by using CRSI instead of simple RSI, and adding regime 
+adaptation. Position sizing: 0.25 entry, 0.12 half at 2R. Stoploss: 2.5*ATR trailing.
+Target: Beat Sharpe=0.499 with fewer but higher quality trades on 1d timeframe.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_roc_daily_hma_volume_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_crsi_chop_regime_weekly_hma_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -27,42 +27,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """
-    Calculate Kaufman Adaptive Moving Average.
-    KAMA adapts to market noise - moves fast in trends, slow in chop.
-    ER (Efficiency Ratio) determines smoothing constant.
-    """
-    close_s = pd.Series(close)
-    n = len(close)
-    
-    # Calculate Efficiency Ratio
-    change = np.abs(close - np.roll(close, period))
-    change[0:period] = np.abs(close[0:period] - close[0])
-    volatility = pd.Series(np.abs(close - np.roll(close, 1))).rolling(window=period, min_periods=period).sum().values
-    volatility[0:period] = np.abs(close[0:period] - close[0])
-    
-    er = np.where(volatility > 0, change / volatility, 0.0)
-    er = np.clip(er, 0, 1)
-    
-    # Smoothing constant
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
-def calculate_roc(close, period=10):
-    """Calculate Rate of Change momentum indicator."""
-    close_s = pd.Series(close)
-    roc = close_s.pct_change(periods=period) * 100
-    roc = roc.fillna(0).values
-    return roc
-
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
     close_s = pd.Series(close)
@@ -73,46 +37,114 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_volume_ratio(taker_buy_volume, volume):
-    """Calculate taker buy volume ratio (0-1, >0.5 = bullish)."""
-    ratio = np.where(volume > 0, taker_buy_volume / volume, 0.5)
-    return ratio
+def calculate_rsi(close, period=14):
+    """Calculate RSI indicator."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
+    rsi = 100 - 100 / (1 + rs)
+    rsi = np.clip(rsi, 0, 100)
+    return rsi
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Calculate Connors RSI (CRSI).
+    CRSI = (RSI(close, 3) + RSI(streak, 2) + PercentRank(100)) / 3
+    Streak: consecutive days up/down (positive/negative count)
+    PercentRank: percentage of prior closes lower than current close
+    """
+    n = len(close)
+    
+    # RSI(3) component
+    rsi_short = calculate_rsi(close, rsi_period)
+    
+    # Streak RSI component
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = streak[i-1]
+    
+    # Convert streak to RSI-like value (0-100)
+    streak_gain = np.where(streak > 0, streak, 0.0)
+    streak_loss = np.where(streak < 0, -streak, 0.0)
+    avg_streak_g = pd.Series(streak_gain).ewm(span=streak_period, min_periods=streak_period, adjust=False).mean().values
+    avg_streak_l = pd.Series(streak_loss).ewm(span=streak_period, min_periods=streak_period, adjust=False).mean().values
+    streak_rs = np.where(avg_streak_l > 0, avg_streak_g / avg_streak_l, 100.0)
+    streak_rsi = 100 - 100 / (1 + streak_rs)
+    streak_rsi = np.clip(streak_rsi, 0, 100)
+    
+    # PercentRank component (percentage of prior closes lower than current)
+    percent_rank = np.zeros(n)
+    for i in range(rank_period, n):
+        window = close[i-rank_period:i]
+        count_lower = np.sum(window < close[i])
+        percent_rank[i] = 100.0 * count_lower / rank_period
+    
+    # Combine into CRSI
+    crsi = (rsi_short + streak_rsi + percent_rank) / 3.0
+    crsi = np.clip(crsi, 0, 100)
+    return crsi
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    CHOP > 61.8 = ranging market, CHOP < 38.2 = trending market
+    """
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    atr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
+    
+    price_range = highest_high - lowest_low
+    price_range = np.where(price_range > 0, price_range, 1e-10)
+    
+    chop = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    chop = np.clip(chop, 0, 100)
+    return chop
+
+def calculate_sma(close, period=200):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    kama = calculate_kama(close, period=10, fast=2, slow=30)
-    kama_fast = calculate_kama(close, period=5, fast=2, slow=20)
-    roc = calculate_roc(close, 10)
-    vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
+    crsi = calculate_crsi(close, 3, 2, 100)
+    chop = calculate_choppiness(high, low, close, 14)
+    sma_200 = calculate_sma(close, 200)
     
-    # Track previous values for crossover detection
-    prev_kama = np.roll(kama, 1)
-    prev_kama[0] = kama[0]
-    prev_kama_fast = np.roll(kama_fast, 1)
-    prev_kama_fast[0] = kama_fast[0]
-    prev_roc = np.roll(roc, 1)
-    prev_roc[0] = roc[0]
+    # Track previous values
+    prev_crsi = np.roll(crsi, 1)
+    prev_crsi[0] = crsi[0]
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.28
-    SIZE_HALF = 0.14
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.12
     
     # Track positions for stoploss
     position_side = 0
@@ -122,74 +154,70 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(50, n):
-        # HTF trend filter (Daily HMA - proven in current best)
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+    for i in range(250, n):  # Need 250 bars for all indicators to warm up
+        # Weekly trend filter
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # KAMA crossover signals (adaptive trend)
-        kama_cross_up = prev_kama[i] <= close[i] and kama[i] > close[i]
-        kama_cross_down = prev_kama[i] >= close[i] and kama[i] < close[i]
+        # Long-term trend filter
+        above_sma200 = close[i] > sma_200[i] if not np.isnan(sma_200[i]) else False
+        below_sma200 = close[i] < sma_200[i] if not np.isnan(sma_200[i]) else False
         
-        # KAMA fast/slow crossover
-        kama_fs_cross_up = prev_kama_fast[i] <= prev_kama[i] and kama_fast[i] > kama[i]
-        kama_fs_cross_down = prev_kama_fast[i] >= prev_kama[i] and kama_fast[i] < kama[i]
+        # Regime detection
+        ranging_market = chop[i] > 55.0  # Slightly lower threshold to get more signals
+        trending_market = chop[i] < 45.0
         
-        # Price vs KAMA position
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # CRSI mean reversion signals (looser thresholds for more trades)
+        crsi_oversold = crsi[i] < 25.0
+        crsi_overbought = crsi[i] > 75.0
+        crsi_rising = crsi[i] > prev_crsi[i]
+        crsi_falling = crsi[i] < prev_crsi[i]
         
-        # ROC momentum
-        roc_positive = roc[i] > 0
-        roc_negative = roc[i] < 0
-        roc_strong_long = roc[i] > 2.0
-        roc_strong_short = roc[i] < -2.0
-        roc_improving = roc[i] > prev_roc[i]
-        roc_worsening = roc[i] < prev_roc[i]
-        
-        # Volume confirmation
-        vol_bullish = vol_ratio[i] > 0.52
-        vol_bearish = vol_ratio[i] < 0.48
+        # CRSI cross signals
+        crsi_cross_up = prev_crsi[i] <= 25.0 and crsi[i] > 25.0
+        crsi_cross_down = prev_crsi[i] >= 75.0 and crsi[i] < 75.0
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # KAMA crossover with trend and momentum
-        if kama_cross_up or kama_fs_cross_up:
-            if daily_bullish and (roc_positive or vol_bullish):
+        # Mean reversion in ranging market
+        if ranging_market and crsi_oversold:
+            if weekly_bullish or above_sma200:
                 new_signal = SIZE_ENTRY
-            elif price_above_kama and roc_improving:
-                new_signal = SIZE_ENTRY
-        
-        # Price above KAMA with momentum in uptrend
-        elif price_above_kama and daily_bullish:
-            if roc_strong_long or (roc_positive and vol_bullish):
+            elif crsi_rising:
                 new_signal = SIZE_ENTRY
         
-        # Pullback to KAMA in uptrend
-        elif daily_bullish and price_above_kama:
-            if prev_kama[i] > close[i] and kama[i] <= close[i]:
-                if roc_improving or vol_bullish:
-                    new_signal = SIZE_ENTRY
+        # CRSI cross up with trend confirmation
+        if crsi_cross_up:
+            if weekly_bullish and above_sma200:
+                new_signal = SIZE_ENTRY
+            elif ranging_market and crsi_rising:
+                new_signal = SIZE_ENTRY
+        
+        # Trending market pullback
+        if trending_market and weekly_bullish:
+            if crsi[i] < 40.0 and crsi_rising:
+                new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # KAMA crossover with trend and momentum
-        if kama_cross_down or kama_fs_cross_down:
-            if daily_bearish and (roc_negative or vol_bearish):
+        # Mean reversion in ranging market
+        if ranging_market and crsi_overbought:
+            if weekly_bearish or below_sma200:
                 new_signal = -SIZE_ENTRY
-            elif price_below_kama and roc_worsening:
-                new_signal = -SIZE_ENTRY
-        
-        # Price below KAMA with momentum in downtrend
-        elif price_below_kama and daily_bearish:
-            if roc_strong_short or (roc_negative and vol_bearish):
+            elif crsi_falling:
                 new_signal = -SIZE_ENTRY
         
-        # Pullback to KAMA in downtrend
-        elif daily_bearish and price_below_kama:
-            if prev_kama[i] < close[i] and kama[i] >= close[i]:
-                if roc_worsening or vol_bearish:
-                    new_signal = -SIZE_ENTRY
+        # CRSI cross down with trend confirmation
+        if crsi_cross_down:
+            if weekly_bearish and below_sma200:
+                new_signal = -SIZE_ENTRY
+            elif ranging_market and crsi_falling:
+                new_signal = -SIZE_ENTRY
+        
+        # Trending market pullback
+        if trending_market and weekly_bearish:
+            if crsi[i] > 60.0 and crsi_falling:
+                new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
