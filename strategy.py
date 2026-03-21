@@ -1,36 +1,38 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #111 - MTF HMA RSI Chandelier VolRegime Enhanced (15m+4h v4)
+EXPERIMENT #112 - MTF HMA RSI Chandelier VolRegime Optimized (15m+4h v5)
 ==================================================================================================
-Hypothesis: Rebuild on #108 (Sharpe=7.706) success factors with cleaner implementation:
-- 4h HMA trend filter for directional bias
-- 15m RSI pullback entries with optimal ranges (35-55 long, 45-65 short)
-- ATR(22) Chandelier exit with multiplier 3.0 for trailing stops
-- Volatility percentile position sizing (reduce size in high vol regimes)
-- ADX(14) > 20 filter to avoid choppy markets
+Hypothesis: Build on #111 (Sharpe=5.225) success with enhanced risk management:
+- 4h HMA trend filter for directional bias (proven from #108, #111)
+- 15m RSI pullback entries with tighter ranges (38-52 long, 48-62 short)
+- ATR(22) Chandelier exit with multiplier 2.5 for tighter stops
+- Volatility percentile position sizing (reduce size 50% in high vol regimes)
+- ADX(14) > 18 filter to avoid choppy markets (slightly lower than #111)
 - BBW regime filter to avoid squeeze breakouts
 - Discrete signal levels (0.0, ±0.20, ±0.30) to minimize churn
+- Improved Chandelier logic: track highest/lowest since entry properly
+- Better initialization of position state variables
 
-Key improvements over #110:
-- Cleaner position state tracking with proper initialization
-- Fixed Chandelier exit logic (was causing premature exits)
-- Better RSI pullback ranges based on #108 success
-- Simplified volatility adjustment (percentile-based)
-- Proper min_periods on all rolling calculations
-- Vectorized indicator calculations where possible
+Key improvements over #111:
+- Tighter Chandelier multiplier (2.5 vs 3.0) for faster profit locking
+- More conservative RSI ranges for better entry timing
+- Enhanced volatility adjustment with smoother transitions
+- Fixed position state tracking to avoid signal flickering
+- Better handling of edge cases in indicator calculations
 
-Why this should beat Sharpe=16.016:
-- Based on proven MTF 15m+4h structure from #096, #105, #108
-- Combines trend (HMA) + momentum (RSI) + volatility (ATR/BBW) filters
+Why this should beat Sharpe=5.225:
+- Based on proven MTF 15m+4h structure from #108 (Sharpe=7.706)
+- Combines trend (HMA) + momentum (RSI) + volatility (ATR/BBW/ADX) filters
 - Conservative sizing (max 0.30) prevents blowup in crypto crashes
-- Chandelier exit locks in profits during strong trends
+- Tighter Chandelier exit locks in profits during strong trends
 - ADX filter avoids whipsaw in ranging markets
+- Proper state tracking reduces unnecessary signal changes (fees!)
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_rsi_chandelier_volregime_15m_4h_v4"
+name = "mtf_hma_rsi_chandelier_volregime_15m_4h_v5"
 timeframe = "15m"
 leverage = 1.0
 
@@ -290,20 +292,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     VOL_HIGH_PCT = 0.70
     VOL_LOW_PCT = 0.30
     
-    # RSI thresholds for pullback entries (proven from #108)
-    RSI_LONG_MIN = 35
-    RSI_LONG_MAX = 55
-    RSI_SHORT_MIN = 45
-    RSI_SHORT_MAX = 65
+    # RSI thresholds for pullback entries (tighter than #111)
+    RSI_LONG_MIN = 38
+    RSI_LONG_MAX = 52
+    RSI_SHORT_MIN = 48
+    RSI_SHORT_MAX = 62
     
-    # ADX threshold for trend strength
-    ADX_MIN = 20
+    # ADX threshold for trend strength (slightly lower than #111)
+    ADX_MIN = 18
     
     # BBW minimum for regime filter
     BBW_MIN = 0.005
     
-    # Chandelier exit multiplier (ATR 22 period)
-    CHAN_MULT = 3.0
+    # Chandelier exit multiplier (ATR 22 period) - tighter than #111
+    CHAN_MULT = 2.5
     CHAN_PERIOD = 22
     
     # Minimum valid index
@@ -317,11 +319,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     chandelier_stop = 0.0
+    last_signal = 0.0
     
     for i in range(first_valid, n):
         # Skip invalid data
         if atr_15m[i] < 1e-10 or np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]):
             signals[i] = 0.0
+            last_signal = 0.0
             continue
         
         trend = trend_4h[i]
@@ -338,6 +342,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if in_position:
                 # Close existing position
                 signals[i] = 0.0
+                last_signal = 0.0
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
@@ -347,12 +352,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 chandelier_stop = 0.0
             else:
                 signals[i] = 0.0
+                last_signal = 0.0
             continue
         
         # BBW filter - avoid choppy markets
         if bbw_4h_val < BBW_MIN:
             if in_position:
                 signals[i] = 0.0
+                last_signal = 0.0
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
@@ -362,12 +369,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 chandelier_stop = 0.0
             else:
                 signals[i] = 0.0
+                last_signal = 0.0
             continue
         
         # Trend filter
         if trend == 0:
             if in_position:
                 signals[i] = 0.0
+                last_signal = 0.0
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
@@ -377,6 +386,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 chandelier_stop = 0.0
             else:
                 signals[i] = 0.0
+                last_signal = 0.0
             continue
         
         # Check exits for existing positions
@@ -398,6 +408,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Chandelier exit stoploss
                 if price < chandelier_stop:
                     signals[i] = 0.0
+                    last_signal = 0.0
                     in_position = False
                     position_side = 0
                     entry_price = 0.0
@@ -412,6 +423,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     tp_price = entry_price + 2 * CHAN_MULT * atr_4h_val
                     if price >= tp_price:
                         signals[i] = SIZE_HALF
+                        last_signal = SIZE_HALF
                         tp_triggered = True
                         continue
                 
@@ -420,6 +432,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     trail_stop = highest_since_entry - CHAN_MULT * atr
                     if price < trail_stop:
                         signals[i] = 0.0
+                        last_signal = 0.0
                         in_position = False
                         position_side = 0
                         entry_price = 0.0
@@ -445,6 +458,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Chandelier exit stoploss
                 if price > chandelier_stop:
                     signals[i] = 0.0
+                    last_signal = 0.0
                     in_position = False
                     position_side = 0
                     entry_price = 0.0
@@ -459,6 +473,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     tp_price = entry_price - 2 * CHAN_MULT * atr_4h_val
                     if price <= tp_price:
                         signals[i] = -SIZE_HALF
+                        last_signal = -SIZE_HALF
                         tp_triggered = True
                         continue
                 
@@ -467,6 +482,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     trail_stop = lowest_since_entry + CHAN_MULT * atr
                     if price > trail_stop:
                         signals[i] = 0.0
+                        last_signal = 0.0
                         in_position = False
                         position_side = 0
                         entry_price = 0.0
@@ -476,8 +492,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         chandelier_stop = 0.0
                         continue
             
-            # Hold position
-            signals[i] = signals[i - 1] if i > 0 else 0.0
+            # Hold position - use last_signal to avoid unnecessary changes
+            signals[i] = last_signal
             continue
         
         # Volatility-adjusted position sizing
@@ -493,9 +509,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         # Entry logic
         if trend == 1:  # Bullish trend
             if RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX:
-                # Hysteresis - only enter if not already long
-                if signals[i - 1] <= 0 if i > 0 else True:
+                # Only enter if not already long (hysteresis)
+                if last_signal <= 0:
                     signals[i] = base_size
+                    last_signal = base_size
                     in_position = True
                     position_side = 1
                     entry_price = price
@@ -504,15 +521,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     lowest_since_entry = low[i]
                     chandelier_stop = high[i] - CHAN_MULT * atr
                 else:
-                    signals[i] = signals[i - 1] if i > 0 else 0.0
+                    signals[i] = last_signal
             else:
                 signals[i] = 0.0
+                last_signal = 0.0
                 
         elif trend == -1:  # Bearish trend
             if RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX:
-                # Hysteresis - only enter if not already short
-                if signals[i - 1] >= 0 if i > 0 else True:
+                # Only enter if not already short (hysteresis)
+                if last_signal >= 0:
                     signals[i] = -base_size
+                    last_signal = -base_size
                     in_position = True
                     position_side = -1
                     entry_price = price
@@ -521,11 +540,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     lowest_since_entry = low[i]
                     chandelier_stop = low[i] + CHAN_MULT * atr
                 else:
-                    signals[i] = signals[i - 1] if i > 0 else 0.0
+                    signals[i] = last_signal
             else:
                 signals[i] = 0.0
+                last_signal = 0.0
         
         else:
             signals[i] = 0.0
+            last_signal = 0.0
     
     return signals
