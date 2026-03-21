@@ -1,45 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #013 - Multi-TF Pullback Strategy (15m Primary)
-==========================================================
-Hypothesis: 15m RSI pullback entries aligned with 4h HMA trend + 1h Supertrend
-confirmation will capture trend continuations with better timing than daily-based
-strategies. The 15m timeframe provides more entry opportunities while HTF filters
-prevent counter-trend trades. Volume confirmation reduces false breakouts.
+EXPERIMENT #014 - Supertrend + RSI Pullback + 4h HMA Trend Filter (30m)
+========================================================================
+Hypothesis: 30m Supertrend(10,3) captures trend direction with ATR-based stops.
+Combined with 4h HMA(21) for major trend filter and RSI(14) pullback entries,
+this reduces false signals during choppy periods. Volume confirmation filters
+weak breakouts. ATR trailing stop protects capital. Different from failed
+strategies by using Supertrend flips (not crossovers) with strict 4h alignment.
 
 Key features:
-- Primary TF: 15m (more trade opportunities than 1h/4h/1d)
-- HTF filter 1: 4h HMA(21) for major trend direction
-- HTF filter 2: 1h Supertrend(10,3) for intermediate trend confirmation
-- Entry: 15m RSI(14) pullback to 40-60 zone + volume > 20-period average
-- Stoploss: 2.5*ATR(14) trailing stop
+- Primary TF: 30m (required for this experiment)
+- HTF filter: 4h HMA(21) for trend direction
+- Entry: Supertrend(10,3) flip + RSI pullback (35-65 range)
+- Filter: 4h trend must align with Supertrend direction
+- Volume: Must be > 20-period average
+- Stoploss: 2.5*ATR(14) trailing
 - Position sizing: 0.25-0.30 discrete levels
 - Take profit: Reduce to half at 2R profit
-
-Why this differs from failed strategies:
-- Uses 15m primary (not tried successfully in experiment history)
-- Triple timeframes: 4h trend + 1h confirmation + 15m entry
-- RSI pullback (not breakout) = better risk/reward in trending markets
-- Volume filter on 15m (not daily) = more responsive
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_rsi_pullback_4h_1h_15m_v1"
-timeframe = "15m"
+name = "supertrend_rsi_4h_filter_30m_v1"
+timeframe = "30m"
 leverage = 1.0
-
-
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period // 2, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, adjust=False).mean()
-    raw_hma = 2 * wma1 - wma2
-    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
-    return hma.values
 
 
 def calculate_atr(high, low, close, period=14):
@@ -63,39 +49,25 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     upper_band = np.zeros(n)
     lower_band = np.zeros(n)
     supertrend = np.zeros(n)
-    trend = np.ones(n)  # 1 = uptrend, -1 = downtrend
+    direction = np.ones(n)  # 1 = bullish, -1 = bearish
     
     for i in range(period, n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            supertrend[i] = np.nan
-            continue
-        
-        upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
-        lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
+        hl2 = (high[i] + low[i]) / 2
+        upper_band[i] = hl2 + multiplier * atr[i]
+        lower_band[i] = hl2 - multiplier * atr[i]
         
         if i == period:
             supertrend[i] = upper_band[i]
-            trend[i] = -1 if close[i] < supertrend[i] else 1
+            direction[i] = -1
         else:
-            # Update bands based on previous trend
-            if trend[i - 1] == 1:
-                lower_band[i] = max(lower_band[i], lower_band[i - 1])
-                if close[i] < lower_band[i]:
-                    trend[i] = -1
-                    supertrend[i] = upper_band[i]
-                else:
-                    trend[i] = 1
-                    supertrend[i] = lower_band[i]
+            if close[i - 1] > supertrend[i - 1]:
+                supertrend[i] = lower_band[i]
+                direction[i] = 1
             else:
-                upper_band[i] = min(upper_band[i], upper_band[i - 1])
-                if close[i] > upper_band[i]:
-                    trend[i] = 1
-                    supertrend[i] = lower_band[i]
-                else:
-                    trend[i] = -1
-                    supertrend[i] = upper_band[i]
+                supertrend[i] = upper_band[i]
+                direction[i] = -1
     
-    return supertrend, trend
+    return supertrend, direction
 
 
 def calculate_rsi(close, period=14):
@@ -111,6 +83,16 @@ def calculate_rsi(close, period=14):
     return rsi.values
 
 
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
+    close_s = pd.Series(close)
+    wma1 = close_s.ewm(span=period // 2, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, adjust=False).mean()
+    raw_hma = 2 * wma1 - wma2
+    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
+    return hma.values
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
@@ -118,29 +100,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    # Load 4h HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
-    df_1h = get_htf_data(prices, '1h')
-    
-    # Calculate 4h HMA(21) for major trend
     hma_4h = calculate_hma(df_4h['close'].values, 21)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1h Supertrend(10, 3) for intermediate trend
-    supertrend_1h, trend_1h = calculate_supertrend(
-        df_1h['high'].values,
-        df_1h['low'].values,
-        df_1h['close'].values,
-        period=10,
-        multiplier=3.0
-    )
-    trend_1h_aligned = align_htf_to_ltf(prices, df_1h, trend_1h)
-    
-    # Calculate 15m indicators
+    # Calculate 30m indicators
+    supertrend, supertrend_direction = calculate_supertrend(high, low, close, 10, 3.0)
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     
-    # Volume moving average (20-period)
+    # Volume moving average
     volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Generate signals
@@ -154,78 +124,67 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = float('inf')
     entry_price = 0.0
     profit_target_hit = False
-    entry_atr = 0.0
     
-    min_period = 150  # Wait for all indicators to stabilize
+    min_period = 100  # Wait for indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(trend_1h_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_sma[i]) or np.isnan(rsi[i]) or 
-            atr[i] == 0 or volume_sma[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(supertrend[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_sma[i]) or np.isnan(rsi[i]) or atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # 4h trend filter (price above HMA = bullish)
-        trend_4h = 1 if close[i] > hma_4h_aligned[i] else -1
+        # 4h trend filter
+        hma_4h_trend = 1 if close[i] > hma_4h_aligned[i] else -1
         
-        # 1h Supertrend confirmation
-        st_trend = int(trend_1h_aligned[i]) if not np.isnan(trend_1h_aligned[i]) else 0
+        # Volume confirmation
+        volume_confirmed = volume[i] > volume_sma[i]
         
-        # Volume confirmation (must be above 20-period average)
-        volume_confirmed = volume[i] > volume_sma[i] * 1.0  # At least average volume
+        # Supertrend direction
+        st_direction = supertrend_direction[i]
         
-        # RSI pullback zone (40-60 for continuation entries)
-        rsi_pullback_long = 40 <= rsi[i] <= 60
-        rsi_pullback_short = 40 <= rsi[i] <= 60
+        # RSI pullback filter (avoid extreme entries)
+        rsi_valid = 35 < rsi[i] < 65
         
-        # RSI momentum confirmation (rising for long, falling for short)
-        rsi_momentum_long = rsi[i] > rsi[i - 1] if i > 0 else False
-        rsi_momentum_short = rsi[i] < rsi[i - 1] if i > 0 else False
-        
-        # Determine target signal based on all filters
+        # Determine target signal
         target_signal = 0.0
         
-        # Long entry: 4h uptrend + 1h supertrend up + RSI pullback + volume
-        if trend_4h == 1 and st_trend == 1 and rsi_pullback_long and rsi_momentum_long and volume_confirmed:
-            target_signal = SIZE
+        # Long entry: Supertrend bullish + 4h trend up + volume + RSI valid
+        if st_direction == 1 and hma_4h_trend == 1 and volume_confirmed and rsi_valid:
+            # Check for Supertrend flip (previous was bearish)
+            if i > 0 and supertrend_direction[i - 1] == -1:
+                target_signal = SIZE
         
-        # Short entry: 4h downtrend + 1h supertrend down + RSI pullback + volume
-        elif trend_4h == -1 and st_trend == -1 and rsi_pullback_short and rsi_momentum_short and volume_confirmed:
-            target_signal = -SIZE
+        # Short entry: Supertrend bearish + 4h trend down + volume + RSI valid
+        elif st_direction == -1 and hma_4h_trend == -1 and volume_confirmed and rsi_valid:
+            # Check for Supertrend flip (previous was bullish)
+            if i > 0 and supertrend_direction[i - 1] == 1:
+                target_signal = -SIZE
         
-        # Stoploss and take profit logic - check BEFORE setting new signal
+        # Stoploss and take profit logic
         stoploss_triggered = False
         take_profit_triggered = False
         
         if position_side != 0:
             if position_side == 1:
-                # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
                 trailing_stop = highest_since_entry - 2.5 * atr[i]
                 
-                # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry, where R = 2.5*ATR)
-                if not profit_target_hit and entry_atr > 0:
-                    profit_target = entry_price + 5.0 * entry_atr  # 2R = 5*ATR
-                    if close[i] >= profit_target:
+                if not profit_target_hit:
+                    if close[i] >= entry_price + 5.0 * atr[i]:  # 2R profit
                         take_profit_triggered = True
             else:
-                # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
                 trailing_stop = lowest_since_entry + 2.5 * atr[i]
                 
-                # Check stoploss
                 if close[i] > trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit
-                if not profit_target_hit and entry_atr > 0:
-                    profit_target = entry_price - 5.0 * entry_atr  # 2R profit
-                    if close[i] <= profit_target:
+                if not profit_target_hit:
+                    if close[i] <= entry_price - 5.0 * atr[i]:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -235,45 +194,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry = float('inf')
             entry_price = 0.0
             profit_target_hit = False
-            entry_atr = 0.0
         elif take_profit_triggered:
-            # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
-            # Apply signal change
-            if target_signal != 0.0 and position_side == 0:
-                # New entry
+            if target_signal != 0.0:
                 signals[i] = target_signal
-                position_side = 1 if target_signal > 0 else -1
-                highest_since_entry = close[i]
-                lowest_since_entry = close[i]
-                entry_price = close[i]
-                profit_target_hit = False
-                entry_atr = atr[i]
+                if position_side == 0:
+                    position_side = 1 if target_signal > 0 else -1
+                    highest_since_entry = close[i]
+                    lowest_since_entry = close[i]
+                    entry_price = close[i]
+                    profit_target_hit = False
             elif position_side != 0:
-                # Maintain existing position (check if we should exit on trend reversal)
-                if position_side == 1 and (trend_4h == -1 or st_trend == -1):
-                    # Trend reversed, exit long
-                    signals[i] = 0.0
-                    position_side = 0
-                    highest_since_entry = 0.0
-                    lowest_since_entry = float('inf')
-                    entry_price = 0.0
-                    profit_target_hit = False
-                    entry_atr = 0.0
-                elif position_side == -1 and (trend_4h == 1 or st_trend == 1):
-                    # Trend reversed, exit short
-                    signals[i] = 0.0
-                    position_side = 0
-                    highest_since_entry = 0.0
-                    lowest_since_entry = float('inf')
-                    entry_price = 0.0
-                    profit_target_hit = False
-                    entry_atr = 0.0
-                else:
-                    # Maintain position
-                    signals[i] = SIZE * position_side if not profit_target_hit else HALF_SIZE * position_side
+                signals[i] = SIZE * position_side if not profit_target_hit else HALF_SIZE * position_side
             else:
                 signals[i] = 0.0
     
