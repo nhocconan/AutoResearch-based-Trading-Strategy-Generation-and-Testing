@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #015 - MTF DEMA+ROC+RSI+Volume+BBW (15m+4h Clean v1)
+EXPERIMENT #016 - MTF DEMA+Stochastic+Volume+ATR Dynamic Sizing (1h+4h v1)
 ==================================================================================================
-Hypothesis: Current best #004 uses Supertrend+MACD. Let's try DEMA (faster than HMA) + ROC 
-(momentum cleaner than MACD) + Volume confirmation. 4h trend is more stable than 1h for crypto.
+Hypothesis: Current best #004 uses 15m/1h/4h with Supertrend+MACD+RSI. This experiment tries:
+- 4h DEMA trend (faster than HMA, more responsive than SMA)
+- 1h Stochastic entry (different momentum measure than RSI)
+- Volume confirmation (proven in #009, #012 kept strategies)
+- ATR-based dynamic position sizing (reduce size in high volatility)
+- ADX filter for trend strength validation
 
-Key differences from #004:
-- DEMA instead of HMA/Supertrend for trend (faster response, less lag)
-- ROC(10) instead of MACD for momentum (simpler, fewer parameters)
-- Volume spike confirmation (2x average volume) for entry validation
-- 15m + 4h only (skip 1h, cleaner MTF alignment)
-- Position size: 0.30 (slightly conservative)
-- Stoploss: 2.0*ATR
-- ADX threshold: 22 (moderate trend strength)
-
-Why this should work:
-- DEMA reacts faster to trend changes than HMA/Supertrend
-- ROC captures momentum without MACD's signal line lag
+Why this should beat #004 (Sharpe=3.653):
+- 4h trend is more stable than 1h trend (less whipsaw)
+- Stochastic has better overbought/oversold detection than RSI
 - Volume confirmation filters false breakouts
-- 4h trend is more reliable than 1h for crypto perpetuals
-- Based on lessons from #004 (winning) but with different signal types
+- Dynamic sizing reduces risk during high volatility periods
+- Based on lessons from #009 (volume worked) and #012 (kept strategy)
+
+Key differences from #040:
+- Uses 4h trend instead of 1h trend (slower, more stable)
+- Uses Stochastic instead of RSI (different momentum)
+- Uses DEMA instead of HMA (faster response)
+- Dynamic position sizing based on ATR volatility
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_dema_roc_rsi_volume_bbw_15m_4h_v1"
-timeframe = "15m"
+name = "mtf_dema_stochastic_volume_atr_1h_4h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
@@ -64,57 +65,33 @@ def calculate_dema(close, period=21):
     ema2 = pd.Series(ema1).ewm(span=period, adjust=False).mean().values
     
     dema = 2 * ema1 - ema2
-    dema[:period] = np.nan
+    dema[:period] = 0
     
     return dema
 
 
-def calculate_roc(close, period=10):
-    """Calculate Rate of Change (momentum)"""
+def calculate_stochastic(high, low, close, k_period=14, d_period=3):
+    """Calculate Stochastic Oscillator (%K and %D)"""
     n = len(close)
-    if n < period:
-        return np.zeros(n)
+    if n < k_period + d_period:
+        return np.zeros(n), np.zeros(n)
     
-    roc = np.zeros(n)
-    for i in range(period, n):
-        if close[i - period] != 0:
-            roc[i] = (close[i] - close[i - period]) / close[i - period] * 100
+    k_percent = np.zeros(n)
+    d_percent = np.zeros(n)
+    
+    for i in range(k_period - 1, n):
+        lowest_low = np.min(low[i - k_period + 1:i + 1])
+        highest_high = np.max(high[i - k_period + 1:i + 1])
+        
+        if highest_high > lowest_low:
+            k_percent[i] = 100 * (close[i] - lowest_low) / (highest_high - lowest_low)
         else:
-            roc[i] = 0
+            k_percent[i] = 50
     
-    return roc
-
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI"""
-    n = len(close)
-    if n < period + 1:
-        return np.zeros(n)
+    d_percent = pd.Series(k_percent).rolling(window=d_period, min_periods=d_period).mean().values
+    d_percent[:d_period + k_period - 2] = 0
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    
-    avg_gain[period] = np.mean(gain[:period + 1])
-    avg_loss[period] = np.mean(loss[:period + 1])
-    
-    for i in range(period + 1, n):
-        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
-    
-    rs = np.zeros(n)
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rs[i] = 100
-        else:
-            rs[i] = avg_gain[i] / avg_loss[i]
-    
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi
+    return k_percent, d_percent
 
 
 def calculate_adx(high, low, close, period=14):
@@ -171,34 +148,14 @@ def calculate_adx(high, low, close, period=14):
     return adx
 
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
-    
-    bbw = np.zeros(n)
-    for i in range(period - 1, n):
-        if middle[i] > 0:
-            bbw[i] = (upper[i] - lower[i]) / middle[i]
-    
-    return upper, middle, lower, bbw
-
-
-def calculate_volume_ma(volume, period=20):
-    """Calculate Volume Moving Average"""
+def calculate_volume_sma(volume, period=20):
+    """Calculate Volume SMA for volume confirmation"""
     n = len(volume)
     if n < period:
         return np.zeros(n)
     
-    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_ma
+    volume_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return volume_sma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -208,16 +165,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values
     n = len(close)
     
-    # 15m indicators for entry timing
-    atr_15m = calculate_atr(high, low, close, period=14)
-    rsi_15m = calculate_rsi(close, period=14)
-    roc_15m = calculate_roc(close, period=10)
-    dema_15m = calculate_dema(close, period=21)
-    adx_15m = calculate_adx(high, low, close, period=14)
-    _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    vol_ma_15m = calculate_volume_ma(volume, period=20)
+    # 1h indicators for entry timing
+    atr_1h = calculate_atr(high, low, close, period=14)
+    stoch_k_1h, stoch_d_1h = calculate_stochastic(high, low, close, k_period=14, d_period=3)
+    adx_1h = calculate_adx(high, low, close, period=14)
+    volume_sma_1h = calculate_volume_sma(volume, period=20)
+    dema_1h = calculate_dema(close, period=21)
     
-    # Get 4h data using mtf_data helper (MANDATORY - no manual resampling!)
+    # Get 4h data using mtf_data helper (CRITICAL - no manual resampling!)
     try:
         df_4h = get_htf_data(prices, '4h')
         close_4h = df_4h['close'].values
@@ -226,56 +181,50 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         volume_4h = df_4h['volume'].values
         
         # 4h indicators for trend
-        dema_4h = calculate_dema(close_4h, period=21)
-        adx_4h = calculate_adx(high_4h, low_4h, close_4h, period=14)
-        _, _, _, bbw_4h = calculate_bollinger_bands(close_4h, period=20, std_mult=2.0)
-        vol_ma_4h = calculate_volume_ma(volume_4h, period=20)
+        dema_4h_raw = calculate_dema(close_4h, period=21)
+        adx_4h_raw = calculate_adx(high_4h, low_4h, close_4h, period=14)
+        atr_4h_raw = calculate_atr(high_4h, low_4h, close_4h, period=14)
+        volume_sma_4h_raw = calculate_volume_sma(volume_4h, period=20)
         
-        # Align 4h indicators to 15m timeframe (auto shift for completed bars)
-        dema_4h_aligned = align_htf_to_ltf(prices, df_4h, dema_4h)
-        adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
-        bbw_4h_aligned = align_htf_to_ltf(prices, df_4h, bbw_4h)
-        vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
-        close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
-        
-    except Exception as e:
-        # Fallback: use 15m only if 4h data not available
-        dema_4h_aligned = dema_15m
-        adx_4h_aligned = adx_15m
-        bbw_4h_aligned = bbw_15m
-        vol_ma_4h_aligned = vol_ma_15m
-        close_4h_aligned = close
+        # Align 4h indicators to 1h timeframe (auto shift for completed bars)
+        dema_4h = align_htf_to_ltf(prices, df_4h, dema_4h_raw)
+        adx_4h = align_htf_to_ltf(prices, df_4h, adx_4h_raw)
+        atr_4h = align_htf_to_ltf(prices, df_4h, atr_4h_raw)
+        volume_sma_4h = align_htf_to_ltf(prices, df_4h, volume_sma_4h_raw)
+    except Exception:
+        # Fallback if mtf_data fails
+        dema_4h = np.zeros(n)
+        adx_4h = np.zeros(n)
+        atr_4h = np.zeros(n)
+        volume_sma_4h = np.zeros(n)
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.30
-    SIZE_HALF = 0.15
+    SIZE_FULL = 0.35
+    SIZE_HALF = 0.175
+    SIZE_DYNAMIC_MIN = 0.20
     
-    # RSI thresholds for pullback entries
-    RSI_LONG_MIN = 45
-    RSI_LONG_MAX = 65
-    RSI_SHORT_MIN = 45
-    RSI_SHORT_MAX = 65
-    
-    # ROC momentum threshold
-    ROC_LONG_MIN = 0.5
-    ROC_SHORT_MAX = -0.5
+    # Stochastic thresholds for entry
+    STOCH_LONG_MIN = 20
+    STOCH_LONG_MAX = 50
+    STOCH_SHORT_MIN = 50
+    STOCH_SHORT_MAX = 80
     
     # ADX threshold for trend strength (4h)
-    ADX_MIN = 22
-    
-    # BBW minimum for regime filter (4h)
-    BBW_MIN = 0.015
-    
-    # Volume spike multiplier
-    VOLUME_SPIKE_MULT = 1.5
+    ADX_MIN = 20
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.0
     
-    first_valid = max(200, 40, 14 * 2, 20, 21)
+    # Volume confirmation threshold
+    VOLUME_MULT = 1.2
+    
+    # ATR-based dynamic sizing
+    ATR_BASELINE = np.percentile(atr_1h[100:], 50) if len(atr_1h) > 100 else np.mean(atr_1h[100:])
+    
+    first_valid = max(200, 14 * 2, 20, 28)
     
     # Track position state
     position_side = np.zeros(n)
@@ -285,37 +234,28 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(roc_15m[i]) or atr_15m[i] == 0:
+        if np.isnan(atr_1h[i]) or np.isnan(stoch_k_1h[i]) or np.isnan(adx_1h[i]) or atr_1h[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(dema_4h_aligned[i]) or np.isnan(adx_4h_aligned[i]):
-            signals[i] = 0.0
-            continue
-        
-        # 4h trend direction
-        if close_4h_aligned[i] > dema_4h_aligned[i]:
+        # 4h trend filter
+        trend_4h = 0
+        if dema_4h[i] > 0 and close[i] > dema_4h[i]:
             trend_4h = 1
-        elif close_4h_aligned[i] < dema_4h_aligned[i]:
+        elif dema_4h[i] > 0 and close[i] < dema_4h[i]:
             trend_4h = -1
-        else:
-            trend_4h = 0
         
-        # 15m trend direction
-        if close[i] > dema_15m[i]:
-            trend_15m = 1
-        elif close[i] < dema_15m[i]:
-            trend_15m = -1
-        else:
-            trend_15m = 0
+        adx_4h_val = adx_4h[i]
+        atr_4h_val = atr_4h[i]
         
-        rsi_val = rsi_15m[i]
-        roc_val = roc_15m[i]
-        atr = atr_15m[i]
+        # 1h indicators
+        stoch_k = stoch_k_1h[i]
+        stoch_d = stoch_d_1h[i]
+        adx_1h_val = adx_1h[i]
+        atr = atr_1h[i]
         price = close[i]
-        adx_4h_val = adx_4h_aligned[i]
-        bbw_4h_val = bbw_4h_aligned[i]
-        vol_ratio = volume[i] / vol_ma_15m[i] if vol_ma_15m[i] > 0 else 0
+        vol = volume[i]
+        vol_sma = volume_sma_1h[i]
         
         # ADX filter (4h) - only trade when trend is strong enough
         if adx_4h_val < ADX_MIN:
@@ -323,14 +263,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             position_side[i] = 0
             continue
         
-        # BBW filter - avoid choppy markets (4h)
-        if bbw_4h_val < BBW_MIN:
+        # Volume confirmation - avoid low volume periods
+        if vol_sma > 0 and vol < vol_sma * 0.8:
             signals[i] = 0.0
             position_side[i] = 0
             continue
         
-        # Trend filters must agree (4h + 15m DEMA)
-        if trend_4h != trend_15m or trend_4h == 0:
+        # Trend filter - 4h DEMA must agree with price direction
+        if trend_4h == 0:
             signals[i] = 0.0
             position_side[i] = 0
             continue
@@ -428,23 +368,29 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h + 15m DEMA trend + 15m ROC momentum + RSI + Volume + BBW
-        if trend_4h == 1 and trend_15m == 1:  # Bullish trend confirmed
-            if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
-                roc_val >= ROC_LONG_MIN and
-                vol_ratio >= VOLUME_SPIKE_MULT):  # Momentum + Volume confirmation
-                signals[i] = SIZE_FULL
+        # Dynamic position sizing based on ATR volatility
+        if ATR_BASELINE > 0:
+            atr_ratio = ATR_BASELINE / atr
+            position_size = SIZE_FULL * min(max(atr_ratio, 0.5), 1.5)
+            position_size = max(SIZE_DYNAMIC_MIN, min(0.40, position_size))
+        else:
+            position_size = SIZE_FULL
+        
+        # Entry logic: 4h DEMA trend + 1h Stochastic entry + Volume confirmation
+        if trend_4h == 1:  # Bullish trend on 4h
+            if (STOCH_LONG_MIN <= stoch_k <= STOCH_LONG_MAX and 
+                stoch_k > stoch_d):  # Stochastic bullish cross in oversold zone
+                signals[i] = position_size
                 position_side[i] = 1
                 entry_price[i] = price
                 tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
                 
-        elif trend_4h == -1 and trend_15m == -1:  # Bearish trend confirmed
-            if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
-                roc_val <= ROC_SHORT_MAX and
-                vol_ratio >= VOLUME_SPIKE_MULT):  # Momentum + Volume confirmation
-                signals[i] = -SIZE_FULL
+        elif trend_4h == -1:  # Bearish trend on 4h
+            if (STOCH_SHORT_MIN <= stoch_k <= STOCH_SHORT_MAX and 
+                stoch_k < stoch_d):  # Stochastic bearish cross in overbought zone
+                signals[i] = -position_size
                 position_side[i] = -1
                 entry_price[i] = price
                 tp_triggered[i] = 0
