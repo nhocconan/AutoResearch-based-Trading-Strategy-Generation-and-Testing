@@ -175,7 +175,7 @@ You must BEAT this. Try combining different signal types.
 
 strategy.py MUST contain:
 - name: str
-- timeframe: str (one of: "5m", "15m", "1h", "4h", "1d")
+- timeframe: str (one of: "5m", "15m", "30m", "1h", "4h", "1d")
 - leverage: float (USE 1.0)
 - generate_signals(prices: pd.DataFrame) -> np.ndarray
 
@@ -229,29 +229,28 @@ def build_experiment_prompt(
     n = experiment_num
     if n <= 20:
         phase_hint = """
-PHASE 1 — EXPLORE SIGNAL COMBINATIONS (experiments 1-20)
-The current best uses 4H HMA trend + 1H RSI pullback + Z-score filter.
-Try different COMBINATIONS of signals. Each experiment should combine 2-3 signal types:
-- Trend signals: Supertrend, HMA, KAMA, EMA crossover, Donchian breakout
-- Entry timing: RSI pullback, MACD histogram cross, Stochastic, volume spike
-- Risk filter: Z-score, Bollinger BW, ADX strength, ATR regime
-- Stoploss: signal→0 when price moves 2*ATR against position
+PHASE 1 — EXPLORE TIMEFRAMES & SIGNAL COMBOS (experiments 1-20)
+IMPORTANT: Try DIFFERENT primary timeframes! Not just 15m!
+Available: 5m, 15m, 30m, 1h, 4h, 1d. Use mtf_data.get_htf_data() for HTF.
 
-Examples to try:
-1. 4H Supertrend trend + 1H MACD entry + Z-score filter
-2. 4H Donchian trend + 1H RSI pullback + volume confirmation
-3. 4H KAMA trend + 15m Bollinger squeeze entry
-4. 4H EMA(21/55) trend + 1H Stochastic entry + ADX filter
-5. Daily trend (SMA-50) + 4H MACD + 1H RSI entry
+Examples — VARY the primary timeframe each experiment:
+1. Primary=1h, HTF=4h: Supertrend 4h trend + 1h MACD entry + Z-score filter
+2. Primary=30m, HTF=4h: 4h Donchian trend + 30m RSI pullback + volume
+3. Primary=1h, HTF=1d: Daily SMA(50) trend + 1h Stochastic entry + ADX
+4. Primary=4h (single TF): Supertrend + MACD + RSI combo, no MTF needed
+5. Primary=15m, HTF=1h: 1h KAMA trend + 15m Bollinger squeeze entry
+6. Primary=30m, HTF=1h: 1h EMA crossover + 30m RSI + volume spike
+7. Primary=1h, HTF=4h: 4h HMA + 1h RSI pullback + BBW regime filter
 
+Signal combos: Trend(Supertrend/HMA/KAMA/EMA/Donchian) + Entry(RSI/MACD/Stoch/volume) + Filter(Z-score/BBW/ADX)
 REMEMBER: signal size 0.20-0.35, discrete levels, stoploss via signal→0"""
     elif n <= 50:
         phase_hint = """
-PHASE 2 — OPTIMIZE BEST COMBINATIONS (experiments 21-50)
-Take the best performing approach and try:
-- Different parameter combinations
-- Different timeframe pairs (1d+4h, 4h+15m, 4h+1h)
-- Add/remove signal components
+PHASE 2 — OPTIMIZE WITH VARIED TIMEFRAMES (experiments 21-50)
+Take best approach and try ON DIFFERENT TIMEFRAMES:
+- If best was 15m, try same logic on 30m and 1h
+- If best was 1h, try on 30m (more trades) and 4h (cleaner signals)
+- Try single-TF strategies on 4h or 1d (no MTF complexity, cleaner)
 - Different position sizing (0.20 vs 0.30 vs 0.35)
 - ATR-based dynamic sizing: size = base * (target_vol / current_vol)
 - Tighter/looser stoploss (1.5*ATR vs 2.5*ATR)"""
@@ -286,7 +285,7 @@ Take the best performing strategy and add:
 {phase_hint}
 
 RULES:
-- Train: 2021-2024 | Timeframes: 5m, 15m, 1h, 4h, 1d
+- Train: 2021-2024 | Timeframes: 5m, 15m, 30m, 1h, 4h, 1d
 - Signal bar t → fill bar t+1 | Costs: 0.10% round trip + funding
 - REJECT if: DD < -50% | trades < 10 | Sharpe ≤ 0
 
