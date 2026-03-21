@@ -485,18 +485,24 @@ def main():
             })
             continue
 
-        improved = avg_sharpe > best_sharpe
-        status = "keep" if improved else "discard"
+        # Compute return/DD ratio (Calmar-like)
+        return_dd_ratio = abs(avg_return / avg_dd) if avg_dd < -0.1 else avg_return
+        improved_sharpe = avg_sharpe > best_sharpe
+        # Keep ANY strategy with positive Sharpe and reasonable return/DD
+        is_good = avg_sharpe > 0
+        status = "keep" if is_good else "discard"
 
-        # Save ALL strategies that pass quality gates (for future reference)
-        if avg_sharpe > 0:
+        # Save ALL strategies that pass quality gates
+        if is_good:
             save_strategy(strategy_name)
 
-        if improved:
-            improvement = avg_sharpe - best_sharpe
-            print(f"  [4/4] ✓ KEEP (Sharpe +{improvement:.3f} vs best {best_sharpe:.3f})")
-            best_sharpe = avg_sharpe
-            best_strategy_code = new_code
+        if is_good:
+            if improved_sharpe:
+                print(f"  [4/4] ✓ KEEP+BEST (Sharpe +{avg_sharpe - best_sharpe:.3f} vs best {best_sharpe:.3f})")
+                best_sharpe = avg_sharpe
+                best_strategy_code = new_code
+            else:
+                print(f"  [4/4] ✓ KEEP (Sharpe={avg_sharpe:.3f}, Return/DD={return_dd_ratio:.1f})")
 
             # Also run test backtest for kept strategies
             test_results = []

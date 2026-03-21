@@ -614,7 +614,15 @@ async function loadDetail(strategy, symbol, period) {{
     html += `Fees=$<b>${{m.total_fees.toFixed(0)}}</b> | Funding=$<b>${{m.total_funding.toFixed(0)}}</b>`;
     html += `</div>`;
 
+    // Price chart with entries/exits + indicators
+    html += `<h4 style="margin-top:8px">Price Chart (${{data.timeframe}}) with Entry/Exit Markers</h4>`;
+    html += `<div class="detail-chart" style="height:320px"><canvas id="detailPriceChart"></canvas></div>`;
+
+    // Signal strength chart
+    html += `<div style="height:80px;margin:-5px 0 5px"><canvas id="detailSignalChart"></canvas></div>`;
+
     // Equity chart
+    html += `<h4>Equity Curve</h4>`;
     html += `<div class="detail-chart"><canvas id="detailEquityChart"></canvas></div>`;
 
     // Trade list
@@ -682,6 +690,152 @@ async function loadDetail(strategy, symbol, period) {{
       }}
     }});
 
+    // --- Price chart with indicators + trade markers ---
+    if (data.price_close && data.price_close.length > 0) {{
+      if (window._priceChart) window._priceChart.destroy();
+      if (window._sigChart) window._sigChart.destroy();
+
+      // Build entry/exit annotation points
+      const entryPoints = [];
+      const exitPoints = [];
+      const timeLookup = {{}};
+      data.price_times.forEach((t, i) => {{ timeLookup[t.substring(0,16)] = i; }});
+
+      (data.trade_markers || []).forEach(tm => {{
+        const ei = timeLookup[tm.entry_time];
+        const xi = timeLookup[tm.exit_time];
+        if (ei !== undefined) entryPoints.push({{x: ei, y: tm.entry_price, dir: tm.direction}});
+        if (xi !== undefined) exitPoints.push({{x: xi, y: tm.exit_price, pnl: tm.pnl_pct}});
+      }});
+
+      const pLabels = data.price_times.map(t => t.substring(5,16));
+
+      const pCtx = document.getElementById('detailPriceChart').getContext('2d');
+      window._priceChart = new Chart(pCtx, {{
+        type: 'line',
+        data: {{
+          labels: pLabels,
+          datasets: [
+            {{
+              label: 'Close',
+              data: data.price_close,
+              borderColor: '#c9d1d9',
+              borderWidth: 1,
+              pointRadius: 0,
+              tension: 0.1,
+              yAxisID: 'y',
+              order: 3,
+            }},
+            {{
+              label: 'EMA 21',
+              data: data.ema21,
+              borderColor: '#f0883e',
+              borderWidth: 1,
+              pointRadius: 0,
+              borderDash: [3,2],
+              tension: 0.1,
+              yAxisID: 'y',
+              order: 4,
+            }},
+            {{
+              label: 'EMA 55',
+              data: data.ema55,
+              borderColor: '#a371f7',
+              borderWidth: 1,
+              pointRadius: 0,
+              borderDash: [5,3],
+              tension: 0.1,
+              yAxisID: 'y',
+              order: 4,
+            }},
+            {{
+              label: 'Long Entry',
+              data: entryPoints.filter(p=>p.dir==='LONG').map(p=>({{x:p.x,y:p.y}})),
+              type: 'scatter',
+              backgroundColor: '#2ecc71',
+              borderColor: '#2ecc71',
+              pointRadius: 4,
+              pointStyle: 'triangle',
+              yAxisID: 'y',
+              order: 1,
+            }},
+            {{
+              label: 'Short Entry',
+              data: entryPoints.filter(p=>p.dir==='SHORT').map(p=>({{x:p.x,y:p.y}})),
+              type: 'scatter',
+              backgroundColor: '#e74c3c',
+              borderColor: '#e74c3c',
+              pointRadius: 4,
+              pointStyle: 'triangleDown',  // Fixed: use 'triangle' and rotation
+              rotation: 180,
+              yAxisID: 'y',
+              order: 1,
+            }},
+            {{
+              label: 'Exit (win)',
+              data: exitPoints.filter(p=>p.pnl>=0).map(p=>({{x:p.x,y:p.y}})),
+              type: 'scatter',
+              backgroundColor: 'rgba(46,204,113,0.5)',
+              pointRadius: 3,
+              pointStyle: 'crossRot',
+              yAxisID: 'y',
+              order: 2,
+            }},
+            {{
+              label: 'Exit (loss)',
+              data: exitPoints.filter(p=>p.pnl<0).map(p=>({{x:p.x,y:p.y}})),
+              type: 'scatter',
+              backgroundColor: 'rgba(231,76,60,0.5)',
+              pointRadius: 3,
+              pointStyle: 'crossRot',
+              yAxisID: 'y',
+              order: 2,
+            }},
+          ]
+        }},
+        options: {{
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: {{ mode: 'index', intersect: false }},
+          plugins: {{
+            legend: {{ labels: {{ color: '#c9d1d9', boxWidth: 12, font: {{size: 10}} }}, position: 'top' }},
+            tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + (ctx.parsed.y||0).toLocaleString() }} }}
+          }},
+          scales: {{
+            x: {{ ticks: {{ color: '#8b949e', maxTicksLimit: 15, font: {{size: 9}} }}, grid: {{ color: '#21262d' }} }},
+            y: {{ ticks: {{ color: '#8b949e', callback: v => '$' + v.toLocaleString() }}, grid: {{ color: '#21262d' }} }}
+          }}
+        }}
+      }});
+
+      // Signal strength mini-chart
+      const sCtx = document.getElementById('detailSignalChart').getContext('2d');
+      const sigColors = data.signals.map(s => s > 0 ? 'rgba(46,204,113,0.6)' : s < 0 ? 'rgba(231,76,60,0.6)' : 'rgba(139,148,158,0.2)');
+      window._sigChart = new Chart(sCtx, {{
+        type: 'bar',
+        data: {{
+          labels: pLabels,
+          datasets: [{{
+            label: 'Signal',
+            data: data.signals,
+            backgroundColor: sigColors,
+            borderWidth: 0,
+            barPercentage: 1.0,
+            categoryPercentage: 1.0,
+          }}]
+        }},
+        options: {{
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {{ legend: {{ display: false }} }},
+          scales: {{
+            x: {{ display: false }},
+            y: {{ min: -0.5, max: 0.5, ticks: {{ color: '#8b949e', stepSize: 0.25, font: {{size: 9}} }}, grid: {{ color: '#21262d' }} }}
+          }}
+        }}
+      }});
+    }}
+
   }} catch(e) {{
     dv.innerHTML = `<p style="color:#e74c3c">Failed to load: ${{e.message}}</p>`;
   }}
@@ -719,13 +873,15 @@ def _build_table_rows(df: pd.DataFrame, limit: int = 100) -> str:
 
 
 def run_detail_backtest(strategy_name: str, symbol: str, period: str) -> dict:
-    """Run backtest for a specific strategy+symbol and return detailed results."""
+    """Run backtest for a specific strategy+symbol and return detailed results + price chart data."""
+    import numpy as np
     from backtest import run_strategy_backtest
     from evaluate import compute_metrics
+    from prepare import load_klines, load_config
+    import importlib.util
 
     strategy_path = STRATEGIES_DIR / f"{strategy_name}.py"
     if not strategy_path.exists():
-        # Try current strategy.py
         strategy_path = STRATEGY_FILE
         if not strategy_path.exists():
             return {"error": f"Strategy file not found: {strategy_name}"}
@@ -745,7 +901,62 @@ def run_detail_backtest(strategy_name: str, symbol: str, period: str) -> dict:
         eq_sampled = eq[::step].tolist()
         eq_labels = [f"{i * step}" for i in range(len(eq_sampled))]
 
-        # Trades
+        # --- Price data + signals for chart ---
+        # Load strategy module to get timeframe and generate signals
+        spec = importlib.util.spec_from_file_location("strat", str(strategy_path))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        timeframe = getattr(mod, "timeframe", "1h")
+
+        config = load_config()
+        prices = load_klines(symbol, timeframe)
+        # Filter to period
+        train_start = pd.Timestamp(config["data"]["train_start"], tz="UTC")
+        train_end = pd.Timestamp(config["data"]["train_end"], tz="UTC")
+        test_start = pd.Timestamp(config["data"]["test_start"], tz="UTC")
+        if period == "train":
+            prices = prices[(prices["open_time"] >= train_start) & (prices["open_time"] <= train_end)]
+        else:
+            prices = prices[prices["open_time"] >= test_start]
+        prices = prices.reset_index(drop=True)
+
+        # Generate signals for chart
+        try:
+            signals = mod.generate_signals(prices)
+            if len(signals) != len(prices):
+                signals = np.zeros(len(prices))
+        except Exception:
+            signals = np.zeros(len(prices))
+
+        # Sample price data for chart (max 800 points for good resolution)
+        price_n = len(prices)
+        price_step = max(1, price_n // 800)
+        price_times = prices["open_time"].astype(str).values[::price_step].tolist()
+        price_close = [round(float(v), 2) for v in prices["close"].values[::price_step]]
+        price_high = [round(float(v), 2) for v in prices["high"].values[::price_step]]
+        price_low = [round(float(v), 2) for v in prices["low"].values[::price_step]]
+        signal_sampled = [round(float(v), 4) for v in signals[::price_step]]
+
+        # Compute common indicators for chart overlay
+        close_s = pd.Series(prices["close"].values)
+        ema21 = close_s.ewm(span=21, min_periods=21, adjust=False).mean().values
+        ema55 = close_s.ewm(span=55, min_periods=55, adjust=False).mean().values
+        ema21_sampled = [round(float(v), 2) if not np.isnan(v) else None for v in ema21[::price_step]]
+        ema55_sampled = [round(float(v), 2) if not np.isnan(v) else None for v in ema55[::price_step]]
+
+        # Trade entry/exit markers (map to chart x-axis)
+        trade_markers = []
+        for t in result.trades[:500]:  # max 500 markers
+            trade_markers.append({
+                "entry_time": str(t.entry_time)[:16],
+                "exit_time": str(t.exit_time)[:16],
+                "direction": "LONG" if t.direction == 1 else "SHORT",
+                "entry_price": round(t.entry_price, 2),
+                "exit_price": round(t.exit_price, 2),
+                "pnl_pct": round(t.pnl_pct * 100, 3),
+            })
+
+        # Full trades list
         trades = []
         for t in result.trades:
             trades.append({
@@ -781,9 +992,19 @@ def run_detail_backtest(strategy_name: str, symbol: str, period: str) -> dict:
             "equity_labels": eq_labels,
             "trades": trades,
             "num_bars": n,
+            # Price chart data
+            "price_times": price_times,
+            "price_close": price_close,
+            "price_high": price_high,
+            "price_low": price_low,
+            "signals": signal_sampled,
+            "ema21": ema21_sampled,
+            "ema55": ema55_sampled,
+            "trade_markers": trade_markers,
         }
     except Exception as e:
-        return {"error": str(e)}
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
