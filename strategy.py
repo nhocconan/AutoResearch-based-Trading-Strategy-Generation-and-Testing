@@ -1,42 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #262: 4h Choppiness Regime + RSI Mean Reversion + Daily HMA Bias
-Hypothesis: 2025 test period is bear/range market. Pure trend following fails (see #256).
-Use Choppiness Index to detect regime: CHOP>61.8 = range (fade extremes), CHOP<38.2 = trend.
-In range: RSI mean reversion at 30/70 levels. In trend: pullback entries with Daily HMA bias.
-This adapts to changing market conditions better than fixed logic. Loose RSI thresholds
-(25-75) ensure sufficient trades. Position sizing: 0.30 max, discrete levels to minimize churn.
-Stoploss: 2.5*ATR trailing. Target: Beat Sharpe=0.499 from current best.
+Experiment #263: 12h Momentum + Z-Score Mean Reversion with Daily/Weekly HMA Trend Filter
+Hypothesis: Simpler entry conditions than previous attempts. Use ROC momentum + Z-score 
+to avoid extreme entries, with 1d/1w HMA for trend bias. Key insight from failures: 
+too many conflicting filters = 0 trades. This strategy uses OR logic for entries 
+(multiple paths to entry) rather than AND logic. Z-score filter prevents buying tops 
+or selling bottoms. Position sizing: 0.25 entry, 0.125 half at 2R. Stoploss: 2.5*ATR.
+Target: Beat Sharpe=0.499 with more consistent trades across all symbols.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_chop_regime_rsi_daily_hma_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_momentum_zscore_daily_weekly_hma_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_choppiness(high, low, close, period=14):
-    """Calculate Choppiness Index (100*(sum(TR)/HH-LL)/ln(HH-LL))."""
+def calculate_atr(high, low, close, period=14):
+    """Calculate ATR using Wilder's smoothing."""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    
-    sum_tr = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    hh = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    ll = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    hhll = hh - ll
-    with np.errstate(divide='ignore', invalid='ignore'):
-        chop = 100 * (sum_tr / hhll) / np.log(hhll)
-    chop = np.nan_to_num(chop, nan=50.0)
-    chop = np.clip(chop, 0, 100)
-    return chop
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
 
 def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average."""
+    """Calculate Hull Moving Average for faster trend response."""
     close_s = pd.Series(close)
     half = max(1, period // 2)
     sqrt_period = max(1, int(np.sqrt(period)))
@@ -44,6 +35,20 @@ def calculate_hma(close, period=21):
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
+
+def calculate_roc(close, period=10):
+    """Calculate Rate of Change momentum indicator."""
+    close_s = pd.Series(close)
+    roc = close_s.pct_change(periods=period) * 100
+    return roc.values
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion detection."""
+    close_s = pd.Series(close)
+    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
+    rolling_std = close_s.rolling(window=period, min_periods=period).std()
+    zscore = (close_s - rolling_mean) / rolling_std
+    return zscore.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -57,15 +62,10 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_atr(high, low, close, period=14):
-    """Calculate ATR using Wilder's smoothing."""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average."""
+    close_s = pd.Series(close)
+    return close_s.rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -75,85 +75,106 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
     hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
-    chop = calculate_choppiness(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
+    rsi = calculate_rsi(close, 14)
+    roc = calculate_roc(close, 10)
+    zscore = calculate_zscore(close, 20)
+    sma_50 = calculate_sma(close, 50)
     
-    # Previous values for crossover detection
+    # Track previous values for momentum detection
+    prev_roc = np.roll(roc, 1)
+    prev_roc[0] = roc[0]
     prev_rsi = np.roll(rsi, 1)
     prev_rsi[0] = rsi[0]
-    prev_chop = np.roll(chop, 1)
-    prev_chop[0] = chop[0]
     
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
     entry_price = 0.0
     trailing_stop = 0.0
+    position_reduced = False
     highest_close = 0.0
     lowest_close = 0.0
-    position_reduced = False
     
-    for i in range(60, n):
-        # Daily trend bias
+    for i in range(100, n):
+        # HTF trend filters
         daily_bullish = close[i] > hma_1d_aligned[i]
         daily_bearish = close[i] < hma_1d_aligned[i]
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # Regime detection
-        is_ranging = chop[i] > 55.0
-        is_trending = chop[i] < 45.0
+        # Momentum signals (ROC)
+        roc_positive = roc[i] > 0
+        roc_negative = roc[i] < 0
+        roc_improving = roc[i] > prev_roc[i]
+        roc_worsening = roc[i] < prev_roc[i]
+        roc_cross_up = prev_roc[i] <= 0 and roc[i] > 0
+        roc_cross_down = prev_roc[i] >= 0 and roc[i] < 0
         
-        # RSI levels (loose thresholds for more trades)
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
-        rsi_rising = rsi[i] > prev_rsi[i]
-        rsi_falling = rsi[i] < prev_rsi[i]
-        rsi_cross_up = prev_rsi[i] <= 45 and rsi[i] > 45
-        rsi_cross_down = prev_rsi[i] >= 55 and rsi[i] < 55
+        # RSI signals (loose filters to ensure trades)
+        rsi_bullish = rsi[i] > 45
+        rsi_bearish = rsi[i] < 55
+        rsi_not_overbought = rsi[i] < 70
+        rsi_not_oversold = rsi[i] > 30
+        
+        # Z-score filter (avoid extremes)
+        zscore_neutral = -1.5 < zscore[i] < 1.5
+        zscore_bullish = zscore[i] < 0.5  # Not too extended upward
+        zscore_bearish = zscore[i] > -0.5  # Not too extended downward
+        
+        # Price vs SMA50
+        above_sma = close[i] > sma_50[i]
+        below_sma = close[i] < sma_50[i]
         
         new_signal = 0.0
         
-        # === RANGE REGIME: Mean Reversion ===
-        if is_ranging:
-            # Long: RSI oversold + starting to rise
-            if rsi_oversold and rsi_rising:
-                new_signal = SIZE
-            # Short: RSI overbought + starting to fall
-            elif rsi_overbought and rsi_falling:
-                new_signal = -SIZE
+        # === LONG ENTRY (multiple paths - OR logic for more trades) ===
+        # Path 1: ROC cross up + daily bullish + not overbought
+        if roc_cross_up and daily_bullish and rsi_not_overbought:
+            new_signal = SIZE_ENTRY
         
-        # === TREND REGIME: Trend Following ===
-        elif is_trending:
-            # Long: Daily bullish + RSI pullback
-            if daily_bullish and 40 < rsi[i] < 60 and rsi_rising:
-                new_signal = SIZE
-            # Short: Daily bearish + RSI pullback
-            elif daily_bearish and 40 < rsi[i] < 60 and rsi_falling:
-                new_signal = -SIZE
-            # Momentum long
-            elif daily_bullish and rsi_cross_up:
-                new_signal = SIZE
-            # Momentum short
-            elif daily_bearish and rsi_cross_down:
-                new_signal = -SIZE
+        # Path 2: ROC positive + improving + weekly bullish + zscore ok
+        elif roc_positive and roc_improving and weekly_bullish and zscore_bullish:
+            new_signal = SIZE_ENTRY
         
-        # === NEUTRAL REGIME: Use Daily HMA Only ===
-        else:
-            # Simple bias-based entries
-            if daily_bullish and rsi_oversold and rsi_rising:
-                new_signal = SIZE
-            elif daily_bearish and rsi_overbought and rsi_falling:
-                new_signal = -SIZE
+        # Path 3: RSI bullish cross + above SMA + daily bullish
+        elif prev_rsi[i] <= 50 and rsi[i] > 50 and above_sma and daily_bullish:
+            new_signal = SIZE_ENTRY
+        
+        # Path 4: Pullback in uptrend (daily bullish + zscore slightly negative)
+        elif daily_bullish and -1.0 < zscore[i] < 0 and roc_positive:
+            new_signal = SIZE_ENTRY
+        
+        # === SHORT ENTRY (multiple paths - OR logic for more trades) ===
+        # Path 1: ROC cross down + daily bearish + not oversold
+        if roc_cross_down and daily_bearish and rsi_not_oversold:
+            new_signal = -SIZE_ENTRY
+        
+        # Path 2: ROC negative + worsening + weekly bearish + zscore ok
+        elif roc_negative and roc_worsening and weekly_bearish and zscore_bearish:
+            new_signal = -SIZE_ENTRY
+        
+        # Path 3: RSI bearish cross + below SMA + daily bearish
+        elif prev_rsi[i] >= 50 and rsi[i] < 50 and below_sma and daily_bearish:
+            new_signal = -SIZE_ENTRY
+        
+        # Path 4: Rally in downtrend (daily bearish + zscore slightly positive)
+        elif daily_bearish and 0 < zscore[i] < 1.0 and roc_negative:
+            new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
@@ -174,12 +195,12 @@ def generate_signals(prices):
                 risk = 2.5 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
-                    new_signal = SIZE / 2
+                    new_signal = SIZE_HALF
                     position_reduced = True
         
         if position_side < 0 and entry_price > 0:
             # Update lowest close for trailing
-            if lowest_close == 0.0 or close[i] < lowest_close:
+            if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
             # Calculate trailing stop (2.5*ATR from lowest)
@@ -195,7 +216,7 @@ def generate_signals(prices):
                 risk = 2.5 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
-                    new_signal = -SIZE / 2
+                    new_signal = -SIZE_HALF
                     position_reduced = True
         
         # Update position tracking AFTER signal calculation
