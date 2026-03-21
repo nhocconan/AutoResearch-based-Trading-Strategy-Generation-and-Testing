@@ -1,35 +1,121 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #066 - Regime-Adaptive MTF Strategy (15m + 4h)
+EXPERIMENT #067 - Adaptive KAMA-ADX Volume Strategy (1h + 4h)
 ==================================================================================================
-Hypothesis: Complex ensemble voting failed (#054, #058, #063, #065). Simpler regime detection worked (#055, #060, #061, #062).
+Hypothesis: Current best uses 15m+1h+4h with Supertrend+MACD. Let me try a DIFFERENT approach:
 
-Key insight from failures:
-- Ensemble voting with 3+ strategies caused negative Sharpe (conflicting signals)
-- Too many timeframes (15m+1h+4h) caused timeout (#064) or poor alignment
-- Regime detection alone (BBW percentile) showed promise (#055 Sharpe=0.164)
+Key insights from failures:
+- Ensemble voting failed (conflicting signals)
+- 15m entries may be too noisy (whipsaws)
+- Supertrend+RSI combination is overused in failed strategies
 
 New approach:
-- Regime detection: BBW percentile on 4h → LOW vol = trend follow, HIGH vol = mean revert
-- Timeframes: 15m (entry) + 4h (regime & trend) - skip 1h to reduce complexity
-- Use mtf_data helper properly (get_htf_data, align_htf_to_ltf)
-- Adaptive position sizing: higher confidence in regime = larger position
-- Discrete signal levels: 0.0, ±0.20, ±0.35 (minimize churn costs)
+- KAMA (Kaufman Adaptive Moving Average) - adapts to market efficiency ratio
+- ADX for trend strength confirmation (only trade when ADX > 25)
+- Volume spike confirmation (volume > 1.5x average = real move)
+- 1h entries (less noise than 15m) + 4h trend/regime
+- Position sizing scales with ADX strength (stronger trend = larger position)
+- Regime detection: BBW percentile but with DIFFERENT thresholds (0.25/0.75)
 
-Why this should beat #040 (Sharpe unknown) and #065 (Sharpe=-7.9):
-- Proper MTF alignment using mtf_data (46 strategies failed without this)
-- Regime-adaptive logic (trend vs mean reversion based on volatility)
-- Simpler than failed ensemble strategies
-- Based on #055 success pattern (regime_adaptive_mtf_bbw_rsi_hma_15m_4h_v1)
+Why this should beat Sharpe=3.653:
+- KAMA adapts better to ranging vs trending markets than HMA/EMA
+- ADX filter prevents trades in weak trends (major source of losses)
+- Volume confirmation reduces false breakouts
+- 1h timeframe = fewer but higher quality trades
+- ADX-based position sizing = more capital in high-confidence setups
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "regime_adaptive_mtf_trend_mr_15m_4h_v1"
-timeframe = "15m"
+name = "adaptive_kama_adx_volume_1h_4h_v1"
+timeframe = "1h"
 leverage = 1.0
+
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average
+    Adapts smoothing based on market efficiency ratio
+    """
+    n = len(close)
+    if n < er_period + slow_period:
+        return np.zeros(n)
+    
+    # Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        signal = abs(close[i] - close[i - er_period])
+        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        if noise > 0:
+            er[i] = signal / noise
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    fast_sc = 2 / (fast_period + 1)
+    slow_sc = 2 / (slow_period + 1)
+    
+    kama = np.zeros(n)
+    kama[er_period] = close[er_period]
+    
+    for i in range(er_period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
+
+
+def calculate_adx(high, low, close, period=14):
+    """
+    Average Directional Index (ADX)
+    Measures trend strength (not direction)
+    """
+    n = len(close)
+    if n < period * 2:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        plus_dm[i] = max(0, high[i] - high[i - 1]) if (high[i] - high[i - 1]) > (low[i - 1] - low[i]) else 0
+        minus_dm[i] = max(0, low[i - 1] - low[i]) if (low[i - 1] - low[i]) > (high[i] - high[i - 1]) else 0
+    
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+    
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    adx = np.zeros(n)
+    
+    # Wilder's smoothing
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False).mean().values
+    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False).mean().values
+    
+    for i in range(period, n):
+        if tr_smooth[i] > 0:
+            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
+            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
+        
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    # ADX = smoothed DX
+    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
+    for i in range(period * 2, n):
+        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+    
+    return adx, plus_di, minus_di
 
 
 def calculate_atr(high, low, close, period=14):
@@ -53,24 +139,6 @@ def calculate_atr(high, low, close, period=14):
         atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
     
     return atr
-
-
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    wma1 = pd.Series(close).ewm(span=half_period, adjust=False).mean().values
-    wma2 = pd.Series(close).ewm(span=period, adjust=False).mean().values
-    
-    raw_hma = 2 * wma1 - wma2
-    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
-    
-    return hma
 
 
 def calculate_rsi(close, period=14):
@@ -97,58 +165,6 @@ def calculate_rsi(close, period=14):
     rsi[:period] = 50
     
     return rsi
-
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized deviation from mean)"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    rolling_mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    rolling_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    zscore = np.zeros(n)
-    mask = rolling_std > 0
-    zscore[mask] = (close[mask] - rolling_mean[mask]) / rolling_std[mask]
-    
-    return zscore
-
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n)
-    
-    atr = calculate_atr(high, low, close, period)
-    
-    supertrend = np.zeros(n)
-    trend_direction = np.ones(n)
-    
-    mid = (high + low) / 2
-    upper_band = mid + multiplier * atr
-    lower_band = mid - multiplier * atr
-    
-    supertrend[period] = lower_band[period]
-    
-    for i in range(period + 1, n):
-        if trend_direction[i - 1] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i - 1])
-            if close[i] < supertrend[i]:
-                supertrend[i] = upper_band[i]
-                trend_direction[i] = -1
-            else:
-                trend_direction[i] = 1
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i - 1])
-            if close[i] > supertrend[i]:
-                supertrend[i] = lower_band[i]
-                trend_direction[i] = 1
-            else:
-                trend_direction[i] = -1
-    
-    return supertrend, trend_direction
 
 
 def calculate_bollinger_bands(close, period=20, std_mult=2.0):
@@ -183,19 +199,24 @@ def calculate_bbw_percentile(bbw, lookback=100):
     return percentile
 
 
+def calculate_volume_sma(volume, period=20):
+    """Calculate volume simple moving average"""
+    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values if "volume" in prices.columns else np.ones(len(close))
     n = len(close)
     
-    # === 15m indicators (entry timing) ===
-    atr_15m = calculate_atr(high, low, close, period=14)
-    rsi_15m = calculate_rsi(close, period=14)
-    zscore_15m = calculate_zscore(close, period=20)
-    hma_15m = calculate_hma(close, period=21)
-    supertrend_15m, st_direction_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    # === 1h indicators (entry timing) ===
+    kama_1h = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    adx_1h, plus_di_1h, minus_di_1h = calculate_adx(high, low, close, period=14)
+    atr_1h = calculate_atr(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
+    volume_sma_1h = calculate_volume_sma(volume, period=20)
     
     # === 4h indicators (regime & trend) using mtf_data helper ===
     try:
@@ -205,40 +226,47 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         l_4h = df_4h['low'].values
         
         # 4h indicators
-        hma_4h = calculate_hma(c_4h, period=21)
-        st_4h, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
+        kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
+        adx_4h, plus_di_4h, minus_di_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
         _, _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
         bbw_pct_4h = calculate_bbw_percentile(bbw_4h, lookback=100)
         
-        # Align 4h indicators to 15m timeframe (auto shift for completed bars)
-        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-        st_dir_4h_aligned = align_htf_to_ltf(prices, df_4h, st_direction_4h)
+        # Align 4h indicators to 1h timeframe (auto shift for completed bars)
+        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
+        adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+        plus_di_4h_aligned = align_htf_to_ltf(prices, df_4h, plus_di_4h)
+        minus_di_4h_aligned = align_htf_to_ltf(prices, df_4h, minus_di_4h)
         bbw_pct_4h_aligned = align_htf_to_ltf(prices, df_4h, bbw_pct_4h)
         
     except Exception as e:
-        # Fallback: use 15m data only if 4h not available
-        hma_4h_aligned = hma_15m
-        st_dir_4h_aligned = st_direction_15m
-        bbw_pct_4h_aligned = calculate_bbw_percentile(bbw_15m, lookback=100)
+        # Fallback: use 1h data only if 4h not available
+        kama_4h_aligned = kama_1h
+        adx_4h_aligned = adx_1h
+        plus_di_4h_aligned = plus_di_1h
+        minus_di_4h_aligned = minus_di_1h
+        bbw_pct_4h_aligned = calculate_bbw_percentile(calculate_bollinger_bands(close)[3], lookback=100)
     
     # === Regime detection ===
-    # LOW volatility (BBW percentile < 0.3): Trend following mode
-    # HIGH volatility (BBW percentile > 0.7): Mean reversion mode
-    # MEDIUM volatility (0.3-0.7): No trade or reduced size
-    REGIME_LOW_THRESHOLD = 0.30
-    REGIME_HIGH_THRESHOLD = 0.70
+    # LOW volatility (BBW percentile < 0.25): Trend following mode
+    # HIGH volatility (BBW percentile > 0.75): Mean reversion mode
+    # MEDIUM volatility (0.25-0.75): Reduced position or no trade
+    REGIME_LOW_THRESHOLD = 0.25
+    REGIME_HIGH_THRESHOLD = 0.75
     
-    # === Position sizing (discrete levels) ===
-    SIZE_FULL = 0.35
-    SIZE_HALF = 0.175
-    SIZE_QUARTER = 0.10
+    # === ADX thresholds ===
+    ADX_TREND_MIN = 25  # Only trade when ADX > 25 (strong trend)
+    ADX_STRONG = 40  # Very strong trend = larger position
+    
+    # === Position sizing (discrete levels, scaled by ADX) ===
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.35
+    SIZE_WEAK = 0.15
+    SIZE_MR = 0.20  # Mean reversion uses smaller size
     
     # === Entry thresholds ===
-    RSI_LONG_MIN = 35
-    RSI_LONG_MAX = 55
-    RSI_SHORT_MIN = 45
-    RSI_SHORT_MAX = 65
-    ZSCORE_MR_THRESHOLD = 1.5
+    VOLUME_SPIKE_MULT = 1.5  # Volume must be 1.5x average for confirmation
+    RSI_LONG_MAX = 60  # Don't buy if RSI too high
+    RSI_SHORT_MIN = 40  # Don't sell if RSI too low
     ATR_STOP_MULT = 2.5
     
     # === Initialize tracking arrays ===
@@ -249,23 +277,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
-    first_valid = max(200, 100)  # Need enough data for BBW percentile
+    first_valid = max(250, 150)  # Need enough data for ADX and BBW percentile
     
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_15m[i]) or atr_15m[i] == 0:
+        if np.isnan(atr_1h[i]) or atr_1h[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(bbw_pct_4h_aligned[i]):
+        if np.isnan(bbw_pct_4h_aligned[i]) or np.isnan(adx_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_15m[i]
+        atr = atr_1h[i]
         regime = bbw_pct_4h_aligned[i]
-        st_trend_4h = st_dir_4h_aligned[i]
-        hma_4h_val = hma_4h_aligned[i]
+        adx_4h = adx_4h_aligned[i]
+        adx_1h = adx_1h[i]
+        kama_4h_val = kama_4h_aligned[i]
+        kama_1h_val = kama_1h[i]
+        vol_ratio = volume[i] / volume_sma_1h[i] if volume_sma_1h[i] > 0 else 1.0
         
         # === Check existing positions (stoploss & take profit) ===
         if position_side[i - 1] != 0:
@@ -301,7 +332,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = SIZE_HALF
+                    signals[i] = SIZE_BASE / 2
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
@@ -333,7 +364,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = -SIZE_HALF
+                    signals[i] = -SIZE_BASE / 2
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
@@ -364,55 +395,86 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         # LOW volatility regime: Trend following
         if regime < REGIME_LOW_THRESHOLD:
-            # 4h Supertrend determines trend direction
-            if st_trend_4h == 1 and price > hma_4h_val:
-                # 15m Supertrend confirms entry
-                if st_direction_15m[i] == 1:
-                    # RSI pullback filter
-                    if RSI_LONG_MIN <= rsi_15m[i] <= RSI_LONG_MAX:
-                        signals[i] = SIZE_FULL
-                        position_side[i] = 1
-                        entry_price[i] = price
-                        tp_triggered[i] = 0
-                        highest_since_entry[i] = price
-                        lowest_since_entry[i] = price
+            # 4h ADX must confirm strong trend
+            if adx_4h < ADX_TREND_MIN:
+                signals[i] = 0.0
+                position_side[i] = 0
+                continue
+            
+            # Determine trend direction from 4h KAMA and DI
+            if kama_4h_val > 0 and price > kama_4h_val and plus_di_4h_aligned[i] > minus_di_4h_aligned[i]:
+                # Uptrend - check 1h confirmation
+                if price > kama_1h_val and plus_di_1h[i] > minus_di_1h[i]:
+                    # Volume confirmation
+                    if vol_ratio >= VOLUME_SPIKE_MULT:
+                        # RSI filter (not overbought)
+                        if rsi_1h[i] < RSI_LONG_MAX:
+                            # Position size based on ADX strength
+                            if adx_4h >= ADX_STRONG:
+                                signals[i] = SIZE_STRONG
+                            else:
+                                signals[i] = SIZE_BASE
+                            
+                            position_side[i] = 1
+                            entry_price[i] = price
+                            tp_triggered[i] = 0
+                            highest_since_entry[i] = price
+                            lowest_since_entry[i] = price
+                        else:
+                            signals[i] = 0.0
+                            position_side[i] = 0
                     else:
                         signals[i] = 0.0
                         position_side[i] = 0
-                        
-            elif st_trend_4h == -1 and price < hma_4h_val:
-                # 15m Supertrend confirms entry
-                if st_direction_15m[i] == -1:
-                    # RSI pullback filter
-                    if RSI_SHORT_MIN <= rsi_15m[i] <= RSI_SHORT_MAX:
-                        signals[i] = -SIZE_FULL
-                        position_side[i] = -1
-                        entry_price[i] = price
-                        tp_triggered[i] = 0
-                        highest_since_entry[i] = price
-                        lowest_since_entry[i] = price
+                else:
+                    signals[i] = 0.0
+                    position_side[i] = 0
+                    
+            elif kama_4h_val > 0 and price < kama_4h_val and minus_di_4h_aligned[i] > plus_di_4h_aligned[i]:
+                # Downtrend - check 1h confirmation
+                if price < kama_1h_val and minus_di_1h[i] > plus_di_1h[i]:
+                    # Volume confirmation
+                    if vol_ratio >= VOLUME_SPIKE_MULT:
+                        # RSI filter (not oversold)
+                        if rsi_1h[i] > RSI_SHORT_MIN:
+                            # Position size based on ADX strength
+                            if adx_4h >= ADX_STRONG:
+                                signals[i] = -SIZE_STRONG
+                            else:
+                                signals[i] = -SIZE_BASE
+                            
+                            position_side[i] = -1
+                            entry_price[i] = price
+                            tp_triggered[i] = 0
+                            highest_since_entry[i] = price
+                            lowest_since_entry[i] = price
+                        else:
+                            signals[i] = 0.0
+                            position_side[i] = 0
                     else:
                         signals[i] = 0.0
                         position_side[i] = 0
+                else:
+                    signals[i] = 0.0
+                    position_side[i] = 0
             else:
                 signals[i] = 0.0
                 position_side[i] = 0
         
         # HIGH volatility regime: Mean reversion
         elif regime > REGIME_HIGH_THRESHOLD:
-            zscore_val = zscore_15m[i]
-            
             # Mean reversion: buy when oversold, sell when overbought
-            if zscore_val < -ZSCORE_MR_THRESHOLD and rsi_15m[i] < 40:
-                signals[i] = SIZE_HALF  # Reduced size in high vol
+            # Use smaller position size in high vol
+            if rsi_1h[i] < 30 and price < kama_1h_val * 0.98:
+                signals[i] = -SIZE_MR  # Reduced size in high vol
                 position_side[i] = 1
                 entry_price[i] = price
                 tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
                 
-            elif zscore_val > ZSCORE_MR_THRESHOLD and rsi_15m[i] > 60:
-                signals[i] = -SIZE_HALF  # Reduced size in high vol
+            elif rsi_1h[i] > 70 and price > kama_1h_val * 1.02:
+                signals[i] = -SIZE_MR  # Reduced size in high vol
                 position_side[i] = -1
                 entry_price[i] = price
                 tp_triggered[i] = 0
