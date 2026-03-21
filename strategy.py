@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #105: 1h RSI Pullback with 4h HMA Trend + Volatility Filter
-Hypothesis: Recent failures show complex regime-adaptive strategies overfit. 
-Return to proven components: 4h HMA trend filter + RSI pullback entries.
-Add volatility filter to avoid entering during extreme moves (reduces whipsaw).
-Use simpler entry logic to ensure 10+ trades per symbol (learning from 0-trade failures).
-1h timeframe should balance trade frequency vs noise better than 15m/30m failures.
-Position sizing: 0.25 entry, 0.125 at 2R profit, stoploss at 2.5*ATR trailing.
+Experiment #106: 4h Donchian Breakout with Daily HMA Trend Filter
+Hypothesis: Donchian channel breakouts capture trend initiation cleanly without
+the whipsaw of Supertrend flips. Combined with Daily HMA for trend direction
+bias, this should catch major moves while avoiding counter-trend trades.
+Simpler than Supertrend/MACD/RSI combinations that have been failing recently.
+Key insight from failures: too many filters = 0 trades or late entries.
+Position sizing: 0.25 entry, 0.125 at 1.5R profit, stoploss at 2.5*ATR trailing.
+Timeframe: 4h (required for this experiment) with 1d HTF trend filter.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_rsi_pullback_4h_hma_vol_filter_v1"
-timeframe = "1h"
+name = "mtf_4h_donchian_daily_hma_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -40,23 +41,32 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI indicator."""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
-    rsi = 100 - 100 / (1 + rs)
-    rsi = np.clip(rsi, 0, 100)
-    return rsi
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel high and low."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    donchian_high = high_s.rolling(window=period, min_periods=period).max().values
+    donchian_low = low_s.rolling(window=period, min_periods=period).min().values
+    return donchian_high, donchian_low
 
-def calculate_sma(close, period):
-    """Calculate Simple Moving Average."""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    return sma
+    change = (close_s - close_s.shift(er_period)).abs()
+    volatility = close_s.diff().abs().rolling(window=er_period, min_periods=er_period).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    
+    fast_sc = (2 / (fast_period + 1)) ** 2
+    slow_sc = (2 / (slow_period + 1)) ** 2
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    kama = pd.Series(index=close_s.index, dtype=float)
+    kama.iloc[0] = close_s.iloc[0]
+    for i in range(1, len(close_s)):
+        kama.iloc[i] = kama.iloc[i-1] + sc.iloc[i] * (close_s.iloc[i] - kama.iloc[i-1])
+    
+    return kama.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -65,22 +75,18 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    sma_200 = calculate_sma(close, 200)
-    
-    # Volatility filter: ATR percentile
-    atr_sma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / np.maximum(atr_sma, 1e-10)
+    donchian_high, donchian_low = calculate_donchian(high, low, 20)
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -93,51 +99,32 @@ def generate_signals(prices):
     position_reduced = False
     highest_close = 0.0
     lowest_close = 0.0
-    entry_atr = 0.0
     
-    for i in range(250, n):
-        # 4h trend filter (HTF)
-        hma_4h_valid = not np.isnan(hma_4h_aligned[i])
-        if not hma_4h_valid:
-            signals[i] = 0.0
-            continue
-            
-        daily_bullish = close[i] > hma_4h_aligned[i]
-        daily_bearish = close[i] < hma_4h_aligned[i]
+    for i in range(100, n):
+        # Daily trend filter (HTF) - price relative to Daily HMA
+        daily_bullish = close[i] > hma_1d_aligned[i]
+        daily_bearish = close[i] < hma_1d_aligned[i]
         
-        # SMA200 filter for additional trend confirmation
-        sma_200_valid = not np.isnan(sma_200[i])
-        if sma_200_valid:
-            above_sma200 = close[i] > sma_200[i]
-            below_sma200 = close[i] < sma_200[i]
-        else:
-            above_sma200 = True
-            below_sma200 = True
+        # KAMA trend direction on 4h
+        kama_bullish = close[i] > kama[i]
+        kama_bearish = close[i] < kama[i]
         
-        # Volatility filter: avoid extreme volatility (ratio > 2.0 or < 0.5)
-        vol_normal = 0.5 < atr_ratio[i] < 2.0 if not np.isnan(atr_ratio[i]) else True
-        
-        # RSI pullback signals (simpler thresholds to ensure trades)
-        rsi_oversold = rsi[i] < 45  # Buy pullback in uptrend
-        rsi_overbought = rsi[i] > 55  # Sell pullback in downtrend
-        
-        # RSI momentum confirmation
-        rsi_rising = i > 0 and rsi[i] > rsi[i-1]
-        rsi_falling = i > 0 and rsi[i] < rsi[i-1]
+        # Donchian breakout signals (break previous bar's channel)
+        breakout_long = close[i] > donchian_high[i-1] if i > 0 else False
+        breakout_short = close[i] < donchian_low[i-1] if i > 0 else False
         
         new_signal = 0.0
         
-        # LONG ENTRY: 4h bullish + RSI pullback + normal vol
-        if daily_bullish and above_sma200 and rsi_oversold and vol_normal:
-            if rsi_rising or (i > 1 and rsi[i] > rsi[i-2]):
-                new_signal = SIZE_ENTRY
+        # LONG ENTRY: Donchian breakout + Daily bullish + KAMA bullish
+        # Simpler conditions = more trades (learning from 0-trade failures)
+        if breakout_long and daily_bullish and kama_bullish:
+            new_signal = SIZE_ENTRY
         
-        # SHORT ENTRY: 4h bearish + RSI pullback + normal vol
-        if daily_bearish and below_sma200 and rsi_overbought and vol_normal:
-            if rsi_falling or (i > 1 and rsi[i] < rsi[i-2]):
-                new_signal = -SIZE_ENTRY
+        # SHORT ENTRY: Donchian breakout + Daily bearish + KAMA bearish
+        if breakout_short and daily_bearish and kama_bearish:
+            new_signal = -SIZE_ENTRY
         
-        # Stoploss logic (Rule 6) - check BEFORE updating position tracking
+        # Stoploss logic - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
             # Update highest close for trailing
             if close[i] > highest_close:
@@ -152,10 +139,10 @@ def generate_signals(prices):
             if close[i] < trailing_stop:
                 new_signal = 0.0
             elif not position_reduced:
-                # Take profit at 2R
+                # Take profit at 1.5R
                 profit = close[i] - entry_price
-                risk = 2.5 * entry_atr
-                if profit >= 2.0 * risk:
+                risk = 2.5 * atr[i]
+                if profit >= 1.5 * risk:
                     new_signal = SIZE_HALF
                     position_reduced = True
         
@@ -173,10 +160,10 @@ def generate_signals(prices):
             if close[i] > trailing_stop:
                 new_signal = 0.0
             elif not position_reduced:
-                # Take profit at 2R
+                # Take profit at 1.5R
                 profit = entry_price - close[i]
-                risk = 2.5 * entry_atr
-                if profit >= 2.0 * risk:
+                risk = 2.5 * atr[i]
+                if profit >= 1.5 * risk:
                     new_signal = -SIZE_HALF
                     position_reduced = True
         
@@ -191,7 +178,6 @@ def generate_signals(prices):
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
-            entry_atr = atr[i]
         
         # Position reversed
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
@@ -201,7 +187,6 @@ def generate_signals(prices):
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
-            entry_atr = atr[i]
         
         # Position reduced (take profit)
         elif new_signal != 0.0 and prev_signal != 0.0 and np.abs(new_signal) < np.abs(prev_signal):
@@ -215,7 +200,6 @@ def generate_signals(prices):
             highest_close = 0.0
             lowest_close = 0.0
             position_reduced = False
-            entry_atr = 0.0
         
         signals[i] = new_signal
     
