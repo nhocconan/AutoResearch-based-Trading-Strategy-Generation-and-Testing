@@ -1,50 +1,41 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #002 - MACD-RSI Ensemble with 4h Trend Filter (30m)
+EXPERIMENT #003 - HMA Trend + RSI Pullback with 4h Filter (1h)
 =================================================================
-Hypothesis: 30m MACD histogram momentum combined with RSI pullback entries,
-filtered by 4h HMA trend direction, captures medium-term swings while avoiding
-counter-trend trades. ATR trailing stop protects against reversals.
+Hypothesis: 1h timeframe with 4h HMA trend filter provides optimal balance
+between trade frequency and signal quality. RSI pullback entries in direction
+of HTF trend capture swing moves while ATR trailing stop limits drawdown.
 
 Key features:
-- Primary TF: 30m (balances noise reduction vs trade frequency)
+- Primary TF: 1h (mandatory for this experiment)
 - HTF filter: 4h HMA(21) for trend direction
-- Entry: MACD histogram turning + RSI(14) pullback to 40-60 zone
+- Entry: RSI(14) pullback to 35-55 zone in trend direction
 - Filter: Price above/below 4h HMA confirms trend
 - Stoploss: 2.0*ATR(14) trailing
 - Position sizing: 0.25-0.30 discrete levels to minimize fee churn
 
-Why 30m: Less noisy than 15m, more trades than 1h. Good for swing captures.
+Why 1h: More trades than 4h, less noise than 15m/30m. Should generate 10+ trades.
+Learning from #002 crash: Simplified indicator calculations, ensure no data issues.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "macd_rsi_4h_trend_30m_v1"
-timeframe = "30m"
+name = "hma_rsi_4h_trend_1h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
 def calculate_hma(close, period):
     """Calculate Hull Moving Average for trend direction"""
     close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period//2, adjust=False).mean()
+    half = period // 2
+    wma1 = close_s.ewm(span=half, adjust=False).mean()
     wma2 = close_s.ewm(span=period, adjust=False).mean()
     raw_hma = 2 * wma1 - wma2
     hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
     return hma.values
-
-
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram"""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
-    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
 
 
 def calculate_rsi(close, period=14):
@@ -86,19 +77,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # Load 4h HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)  # auto shift(1)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, 21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)  # auto shift(1)
     
-    # Calculate 30m indicators (all before loop for performance)
-    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
+    # Calculate 1h indicators (all before loop for performance)
     rsi = calculate_rsi(close, 14)
     atr = calculate_atr(high, low, close, 14)
+    sma_50 = calculate_sma(close, 50)
     sma_200 = calculate_sma(close, 200)
     
     # Generate signals
     signals = np.zeros(n)
     SIZE_ENTRY = 0.30  # Entry position size (30% of capital)
     SIZE_HALF = 0.15   # Half position for take profit
+    SIZE_EXIT = 0.0    # Flat
     
     # Track position state for stoploss and take profit
     position_side = 0  # 0=flat, 1=long, -1=short
@@ -106,40 +98,41 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     take_profit_hit = False
+    entry_atr = 0.0
     
     min_period = 220  # Wait for SMA200 and all indicators to stabilize
     
     for i in range(min_period, n):
-        # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(macd_hist[i]) or 
-            np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(sma_200[i]) or 
-            atr[i] == 0):
+        # Check for NaN or zero in any indicator
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(atr[i]) or np.isnan(sma_50[i]) or np.isnan(sma_200[i]) or 
+            atr[i] <= 0 or atr[i] == 0):
             signals[i] = 0.0
             continue
         
         # 4h Trend filter (HTF alignment ensures no look-ahead)
         trend_4h = 1 if close[i] > hma_4h_aligned[i] else -1
         
-        # 30m trend filter (price above/below SMA200)
-        trend_30m = 1 if close[i] > sma_200[i] else -1
+        # 1h trend filter (price above/below SMA50 and SMA200)
+        trend_1h = 1 if (close[i] > sma_50[i] and close[i] > sma_200[i]) else -1
+        if close[i] < sma_50[i] and close[i] < sma_200[i]:
+            trend_1h = -1
         
-        # MACD histogram momentum (turning points)
-        macd_bullish = macd_hist[i] > 0 and macd_hist[i] > macd_hist[i-1]
-        macd_bearish = macd_hist[i] < 0 and macd_hist[i] < macd_hist[i-1]
-        
-        # RSI pullback zone (not at extremes, allows entry on pullback)
-        rsi_long_ok = 40 < rsi[i] < 65
-        rsi_short_ok = 35 < rsi[i] < 60
+        # RSI pullback zone (allows entry on pullback, not at extremes)
+        # Long: RSI between 35-55 (pullback in uptrend)
+        # Short: RSI between 45-65 (pullback in downtrend)
+        rsi_long_ok = 35 <= rsi[i] <= 55
+        rsi_short_ok = 45 <= rsi[i] <= 65
         
         # Determine target signal based on ensemble
         target_signal = 0.0
         
-        # Long entry: 4h trend up + 30m trend up + MACD bullish + RSI in zone
-        if trend_4h == 1 and trend_30m == 1 and macd_bullish and rsi_long_ok:
+        # Long entry: 4h trend up + 1h trend up + RSI in pullback zone
+        if trend_4h == 1 and trend_1h == 1 and rsi_long_ok:
             target_signal = SIZE_ENTRY
         
-        # Short entry: 4h trend down + 30m trend down + MACD bearish + RSI in zone
-        elif trend_4h == -1 and trend_30m == -1 and macd_bearish and rsi_short_ok:
+        # Short entry: 4h trend down + 1h trend down + RSI in pullback zone
+        elif trend_4h == -1 and trend_1h == -1 and rsi_short_ok:
             target_signal = -SIZE_ENTRY
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -157,10 +150,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     stoploss_triggered = True
                 
                 # Check take profit (2R profit = entry + 2*ATR at entry)
-                profit_target = entry_price + 2.0 * atr[i]
-                if not take_profit_hit and close[i] >= profit_target:
-                    take_profit_triggered = True
-                    take_profit_hit = True
+                if entry_atr > 0:
+                    profit_target = entry_price + 2.0 * entry_atr
+                    if not take_profit_hit and close[i] >= profit_target:
+                        take_profit_triggered = True
+                        take_profit_hit = True
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
@@ -171,23 +165,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     stoploss_triggered = True
                 
                 # Check take profit (2R profit = entry - 2*ATR at entry)
-                profit_target = entry_price - 2.0 * atr[i]
-                if not take_profit_hit and close[i] <= profit_target:
-                    take_profit_triggered = True
-                    take_profit_hit = True
+                if entry_atr > 0:
+                    profit_target = entry_price - 2.0 * entry_atr
+                    if not take_profit_hit and close[i] <= profit_target:
+                        take_profit_triggered = True
+                        take_profit_hit = True
         
         if stoploss_triggered:
-            signals[i] = 0.0
+            signals[i] = SIZE_EXIT
             position_side = 0
             entry_price = 0.0
+            entry_atr = 0.0
             highest_since_entry = 0.0
             lowest_since_entry = float('inf')
             take_profit_hit = False
         elif take_profit_triggered:
             # Reduce to half position at 2R profit
             signals[i] = SIZE_HALF * position_side
-            # Trail stop at 1R now
-            # Position remains open but reduced
+            # Position remains open but reduced, trail stop continues
         else:
             # Apply signal change
             if target_signal != 0.0 and position_side == 0:
@@ -195,25 +190,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 signals[i] = target_signal
                 position_side = 1 if target_signal > 0 else -1
                 entry_price = close[i]
+                entry_atr = atr[i]
                 highest_since_entry = close[i]
                 lowest_since_entry = close[i]
                 take_profit_hit = False
             elif position_side != 0:
-                # Maintain existing position (don't flip unless stoploss)
-                # Only allow signal change if same direction or flat
+                # Maintain existing position
                 if target_signal == 0.0:
-                    # Exit signal
-                    signals[i] = 0.0
+                    # Exit signal (trend changed)
+                    signals[i] = SIZE_EXIT
                     position_side = 0
                     entry_price = 0.0
+                    entry_atr = 0.0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     take_profit_hit = False
                 elif np.sign(target_signal) == position_side:
-                    # Same direction - maintain
+                    # Same direction - maintain position
                     signals[i] = SIZE_ENTRY * position_side
                 # else: ignore opposite signal (no flipping without exit)
             else:
-                signals[i] = 0.0
+                signals[i] = SIZE_EXIT
     
     return signals
