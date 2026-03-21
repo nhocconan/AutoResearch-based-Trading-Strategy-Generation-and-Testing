@@ -1,35 +1,35 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #004 - 4h Primary with 1d HMA Trend Filter + Supertrend Entries
+EXPERIMENT #004 - Donchian Breakout + 1d HMA Trend + RSI Filter (4h primary)
 =====================================================================================
-Hypothesis: 4h timeframe captures meaningful crypto swings without excessive noise.
-Using 1d HMA(21) as the major trend filter ensures we trade with the weekly momentum.
-4h Supertrend(10,3) provides clear entry/exit signals, while RSI(14) pullback entries
-improve risk/reward by avoiding chasing breakouts. ADX(14) > 20 ensures we only trade
-when there's actual trend strength (lower threshold than 25 to generate more trades).
+Hypothesis: 4h Donchian breakouts capture sustained momentum moves in crypto.
+Adding 1d HMA(21) trend filter ensures we only trade breakouts in the major trend direction.
+RSI(14) filter avoids entering at extreme overbought/oversold levels where reversals are likely.
+ADX(14) > 20 ensures we trade only when there's sufficient trend strength.
 
 Key features:
-- Primary TF: 4h (this experiment's requirement)
+- Primary TF: 4h (required for this experiment)
 - HTF filter: 1d HMA(21) for major trend direction
-- Trend: Supertrend(10, 3) for entry signals
-- Entry: RSI pullback within trend (RSI < 50 long, RSI > 50 short)
-- Strength: ADX(14) > 20 filter (lower than 25 to generate more trades)
+- Entry: Donchian(20) breakout (price breaks 20-bar high/low)
+- Filter: RSI(14) between 35-65 to avoid extremes
+- Strength: ADX(14) > 20 filter
 - Stoploss: 2.0*ATR(14) trailing
-- Position sizing: 0.25-0.30 discrete levels (conservative to avoid blowup)
+- Position sizing: 0.25-0.30 discrete levels
 - Take profit: Reduce to half at 2R profit
 
-Why this should work on 4h:
-- 4h bars capture multi-day swings in crypto (perfect for BTC/ETH/SOL)
-- 1d HMA filter removes counter-trend trades that lose in chop
-- Lower ADX threshold (20 vs 25) generates more trades (avoid 0-trade failure)
-- Conservative sizing (0.25-0.30) survived 2022's 77% BTC crash with only ~25% DD
+Why this should work:
+- 4h timeframe balances signal frequency and noise (more trades than 1d, fewer than 15m)
+- Donchian breakouts work well in trending crypto markets
+- 1d HMA filter removes counter-trend breakout traps
+- RSI filter avoids buying tops/selling bottoms
+- Conservative sizing controls drawdown during crypto crashes
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "supertrend_rsi_1dhma_4h_v1"
+name = "donchian_1dhma_rsi_4h_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -45,47 +45,6 @@ def calculate_atr(high, low, close, period=14):
                     abs(low[i] - close[i - 1]))
     atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
     return atr
-
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator"""
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    supertrend = np.zeros(n)
-    supertrend_direction = np.zeros(n)  # 1 = bullish, -1 = bearish
-    
-    hl2 = (high + low) / 2.0
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend[0] = upper_band[0]
-    supertrend_direction[0] = -1
-    
-    for i in range(1, n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            supertrend[i] = supertrend[i - 1]
-            supertrend_direction[i] = supertrend_direction[i - 1]
-            continue
-        
-        if upper_band[i] < supertrend[i - 1] or close[i - 1] > supertrend[i - 1]:
-            upper_band[i] = hl2[i] + multiplier * atr[i]
-        else:
-            upper_band[i] = supertrend[i - 1]
-            
-        if lower_band[i] > supertrend[i - 1] or close[i - 1] < supertrend[i - 1]:
-            lower_band[i] = hl2[i] - multiplier * atr[i]
-        else:
-            lower_band[i] = supertrend[i - 1]
-        
-        if close[i] <= supertrend[i - 1]:
-            supertrend[i] = upper_band[i]
-            supertrend_direction[i] = -1
-        else:
-            supertrend[i] = lower_band[i]
-            supertrend_direction[i] = 1
-    
-    return supertrend, supertrend_direction
 
 
 def calculate_rsi(close, period=14):
@@ -172,33 +131,49 @@ def calculate_hma(close, period):
     return hma.values
 
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (20-bar high/low)"""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    upper[:period - 1] = np.nan
+    lower[:period - 1] = np.nan
+    
+    return upper, lower
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    # Load HTF data ONCE before loop (Rule 1)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d HMA for major trend filter
+    # Calculate 1d HMA for trend filter
     hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     # Calculate 4h indicators
-    supertrend, st_direction = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    rsi = calculate_rsi(close, period=14)
     adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     # Generate signals
     signals = np.zeros(n)
     BASE_SIZE = 0.28  # Base position size (28% of capital)
     MAX_SIZE = 0.35   # Max position size with strong ADX
     MIN_SIZE = 0.20   # Min position size
-    HALF_SIZE = 0.14  # Half position for take profit
+    HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
     position_side = 0  # 0=flat, 1=long, -1=short
@@ -208,13 +183,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_atr = 0.0
     profit_target_hit = False
     
-    min_period = 50  # Wait for indicators to stabilize (4h has fewer bars)
+    min_period = 100  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1d_aligned[i]) or np.isnan(supertrend[i]) or
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(donchian_upper[i]) or
             np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(adx[i]) or
-            atr[i] == 0):
+            atr[i] == 0 or adx[i] == 0):
             signals[i] = 0.0
             continue
         
@@ -222,61 +197,67 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         price_above_1d_hma = close[i] > hma_1d_aligned[i]
         hma_trend = 1 if price_above_1d_hma else -1
         
-        # Supertrend direction
-        st_trend = st_direction[i]
-        
-        # ADX strength filter (ADX > 20 for more trades than ADX > 25)
+        # ADX strength filter (only trade when ADX > 20)
         adx_strong = adx[i] > 20
         
-        # RSI pullback conditions (less strict for more trades)
-        rsi_pullback_long = rsi[i] < 50  # Pullback in uptrend
-        rsi_pullback_short = rsi[i] > 50  # Pullback in downtrend
+        # RSI filter (avoid extremes: 35 < RSI < 65)
+        rsi_neutral = 35 < rsi[i] < 65
+        
+        # Donchian breakout signals
+        breakout_long = close[i] > donchian_upper[i - 1] if not np.isnan(donchian_upper[i - 1]) else False
+        breakout_short = close[i] < donchian_lower[i - 1] if not np.isnan(donchian_lower[i - 1]) else False
         
         # DI+ vs DI- for trend confirmation
         di_bullish = plus_di[i] > minus_di[i]
         di_bearish = minus_di[i] > plus_di[i]
         
-        # Calculate position size based on ADX strength
-        adx_multiplier = min(1.0 + (adx[i] - 20) / 50, 1.25)
+        # Calculate position size based on ADX strength (dynamic sizing)
+        adx_multiplier = min(1.0 + (adx[i] - 20) / 50, 1.25)  # Max 1.25x
         position_size = min(MAX_SIZE, max(MIN_SIZE, BASE_SIZE * adx_multiplier))
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: Supertrend bullish + 1d HMA bullish + ADX strong + RSI pullback + DI+ > DI-
-        if (st_trend == 1 and hma_trend == 1 and adx_strong and 
-            rsi_pullback_long and di_bullish):
+        # Long entry: Donchian breakout + 1d HMA bullish + ADX strong + RSI neutral + DI+ > DI-
+        if (breakout_long and hma_trend == 1 and adx_strong and 
+            rsi_neutral and di_bullish):
             target_signal = position_size
         
-        # Short entry: Supertrend bearish + 1d HMA bearish + ADX strong + RSI pullback + DI- > DI+
-        elif (st_trend == -1 and hma_trend == -1 and adx_strong and 
-              rsi_pullback_short and di_bearish):
+        # Short entry: Donchian breakout + 1d HMA bearish + ADX strong + RSI neutral + DI- > DI+
+        elif (breakout_short and hma_trend == -1 and adx_strong and 
+              rsi_neutral and di_bearish):
             target_signal = -position_size
         
-        # Stoploss and take profit logic
+        # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
         take_profit_triggered = False
         
         if position_side != 0:
             if position_side == 1:
+                # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
                 trailing_stop = highest_since_entry - 2.0 * atr[i]
                 
+                # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
+                # Check take profit (2R from entry, where R = 2*ATR at entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 4.0 * entry_atr:
+                    if close[i] >= entry_price + 4.0 * entry_atr:  # 2R = 4*ATR
                         take_profit_triggered = True
             else:
+                # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
                 trailing_stop = lowest_since_entry + 2.0 * atr[i]
                 
+                # Check stoploss
                 if close[i] > trailing_stop:
                     stoploss_triggered = True
                 
+                # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 4.0 * entry_atr:
+                    if close[i] <= entry_price - 4.0 * entry_atr:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -288,10 +269,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             entry_atr = 0.0
             profit_target_hit = False
         elif take_profit_triggered:
+            # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
+            # Apply signal change
             if target_signal != 0.0 and position_side == 0:
+                # New entry
                 signals[i] = target_signal
                 position_side = 1 if target_signal > 0 else -1
                 highest_since_entry = close[i]
@@ -300,12 +284,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 entry_atr = atr[i]
                 profit_target_hit = False
             elif position_side != 0:
-                st_reversal_long = st_trend == -1
-                st_reversal_short = st_trend == 1
+                # Maintain existing position (check if trend reversed)
+                # Exit if 1d HMA alignment breaks
                 hma_alignment_broken = (position_side == 1 and hma_trend == -1) or \
                                        (position_side == -1 and hma_trend == 1)
                 
-                if st_reversal_long or st_reversal_short or hma_alignment_broken:
+                if hma_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
@@ -314,6 +298,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     entry_atr = 0.0
                     profit_target_hit = False
                 else:
+                    # Maintain position
                     signals[i] = position_size * position_side if not profit_target_hit else HALF_SIZE * position_side
             else:
                 signals[i] = 0.0
