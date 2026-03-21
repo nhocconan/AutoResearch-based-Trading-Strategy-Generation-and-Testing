@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #359: 12h Donchian Breakout + Daily/Weekly HMA Trend + RSI Momentum + ATR Stop
-Hypothesis: 12h timeframe captures medium-term trends better than 4h (less noise) and 1d (more signals).
-Donchian(20) breakout provides clear entry triggers. Daily HMA gives intermediate trend bias.
-Weekly HMA provides macro regime filter. RSI(14) with loose thresholds (25-75) ensures trade frequency.
-ATR(14) stoploss at 2.5x protects during reversals. Build on #353 (Sharpe=0.073) by adding weekly filter.
-Timeframe: 12h (REQUIRED), HTF: 1d + 1w for trend bias via mtf_data helper.
+Experiment #360: 1d KAMA Trend + Weekly HMA Bias + RSI Pullback + Choppiness Regime + ATR Stop
+Hypothesis: Daily timeframe captures major trend shifts with less noise than 12h/4h.
+KAMA (Kaufman Adaptive MA) adapts to volatility better than HMA/EMA for trend direction.
+Weekly HMA provides macro trend confirmation via mtf_data helper.
+Choppiness Index filters range vs trend regimes to adapt entry logic.
+RSI pullback entries (not breakouts) work better on 1d for risk/reward.
+Timeframe: 1d (REQUIRED), HTF: 1w for trend bias via mtf_data helper.
 Target: Beat Sharpe=0.499 with 30-60 trades total across train+test.
-Key insight: 12h is underutilized - fewer whipsaws than 4h, more opportunities than 1d.
+Key insight: 1d needs looser entry filters than lower TFs to ensure trade frequency.
+Multiple OR conditions ensure minimum trades while maintaining quality.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_daily_weekly_hma_rsi_momentum_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_weekly_hma_rsi_chop_regime_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -27,8 +29,35 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average."""
+    n = len(close)
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    
+    for i in range(1, n):
+        if i < period:
+            kama[i] = close[i]
+            continue
+        
+        # Efficiency Ratio
+        change = np.abs(close[i] - close[i - period])
+        volatility = np.sum(np.abs(np.diff(close[i - period:i + 1])))
+        
+        if volatility == 0:
+            er = 0
+        else:
+            er = change / volatility
+        
+        # Smoothing constant
+        sc = (er * (2.0 / (fast + 1) - 2.0 / (slow + 1)) + 2.0 / (slow + 1)) ** 2
+        
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
+
 def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for faster trend response."""
+    """Calculate Hull Moving Average."""
     close_s = pd.Series(close)
     half = max(1, period // 2)
     sqrt_period = max(1, int(np.sqrt(period)))
@@ -49,17 +78,29 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel upper and lower bands."""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
+def calculate_choppiness(high, low, close, period=14):
+    """Calculate Choppiness Index (CHOP)."""
+    n = len(close)
+    chop = np.zeros(n)
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
+    for i in range(period, n):
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        
+        # Sum of ATR over period
+        atr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j - 1]), abs(low[j] - close[j - 1]))
+            atr_sum += tr
+        
+        range_hl = highest_high - lowest_low
+        if range_hl > 0 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / range_hl) / np.log10(period)
+        else:
+            chop[i] = 50.0
     
-    return upper, lower
+    chop = np.clip(chop, 0, 100)
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -68,24 +109,19 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
+    kama = calculate_kama(close, 10)
     rsi = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    
-    # Donchian middle band
-    donchian_middle = (donchian_upper + donchian_lower) / 2
+    chop = calculate_choppiness(high, low, close, 14)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.30
@@ -101,62 +137,66 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(kama[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        # Weekly macro trend bias (SOFT filter - boosts confidence)
+        # Weekly macro trend bias
         weekly_bullish = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
         weekly_bearish = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
         
-        # Daily intermediate trend bias
-        daily_bullish = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
-        daily_bearish = not np.isnan(hma_1d_aligned[i]) and close[i] < hma_1d_aligned[i]
+        # Daily trend via KAMA
+        daily_bullish = close[i] > kama[i]
+        daily_bearish = close[i] < kama[i]
         
-        # Donchian breakout signals
-        donchian_breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
-        donchian_breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
+        # KAMA slope (trend strength)
+        kama_slope_up = kama[i] > kama[i - 5] if i >= 5 else False
+        kama_slope_down = kama[i] < kama[i - 5] if i >= 5 else False
         
-        # Price position relative to Donchian channel
-        price_in_upper_half = close[i] > donchian_middle[i]
-        price_in_lower_half = close[i] < donchian_middle[i]
+        # Choppiness regime
+        is_trending = chop[i] < 45.0  # Lower threshold for more trend signals
+        is_ranging = chop[i] > 55.0  # Lower threshold for more range signals
         
-        # RSI momentum filter (LOOSE for 12h - ensure trades)
-        rsi_ok_long = rsi[i] > 25  # Not deeply oversold
-        rsi_ok_short = rsi[i] < 75  # Not deeply overbought
-        
-        # RSI confirmation
-        rsi_strong_long = rsi[i] > 35
-        rsi_strong_short = rsi[i] < 65
+        # RSI levels (LOOSE for 1d to ensure trades)
+        rsi_ok_long = rsi[i] < 55  # Not overbought
+        rsi_ok_short = rsi[i] > 45  # Not oversold
+        rsi_pullback_long = rsi[i] < 45  # Pullback in uptrend
+        rsi_pullback_short = rsi[i] > 55  # Pullback in downtrend
         
         new_signal = 0.0
         
         # === LONG ENTRIES ===
-        # Primary: Donchian breakout + Daily bullish + Weekly bullish + RSI ok
-        if donchian_breakout_long and daily_bullish and weekly_bullish and rsi_ok_long:
+        # Primary: Trending + Weekly bullish + Daily bullish + RSI pullback
+        if is_trending and weekly_bullish and daily_bullish and rsi_pullback_long:
             new_signal = SIZE_ENTRY
-        # Secondary: Donchian breakout + Daily bullish + RSI strong (weekly neutral ok)
-        elif donchian_breakout_long and daily_bullish and rsi_strong_long:
+        # Secondary: Weekly bullish + KAMA slope up + RSI ok
+        elif weekly_bullish and kama_slope_up and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        # Tertiary: Price in upper Donchian half + Daily bullish + RSI ok (momentum continuation)
-        elif price_in_upper_half and daily_bullish and rsi[i] > 40 and rsi[i] < 70:
+        # Tertiary: Ranging + Weekly bullish + RSI low (mean reversion)
+        elif is_ranging and weekly_bullish and rsi[i] < 40:
             new_signal = SIZE_ENTRY
-        # Quaternary: Donchian breakout alone (ensures minimum trade frequency)
-        elif donchian_breakout_long and rsi[i] > 30:
+        # Quaternary: Ensure trade frequency - Weekly bullish + KAMA bullish
+        elif weekly_bullish and daily_bullish and rsi[i] > 30 and rsi[i] < 70:
+            new_signal = SIZE_ENTRY
+        # Quintenary: KAMA cross up (momentum)
+        elif close[i] > kama[i] and close[i - 1] <= kama[i - 1] and rsi[i] > 35:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES ===
-        # Primary: Donchian breakout + Daily bearish + Weekly bearish + RSI ok
-        if donchian_breakout_short and daily_bearish and weekly_bearish and rsi_ok_short:
+        # Primary: Trending + Weekly bearish + Daily bearish + RSI pullback
+        if is_trending and weekly_bearish and daily_bearish and rsi_pullback_short:
             new_signal = -SIZE_ENTRY
-        # Secondary: Donchian breakout + Daily bearish + RSI strong (weekly neutral ok)
-        elif donchian_breakout_short and daily_bearish and rsi_strong_short:
+        # Secondary: Weekly bearish + KAMA slope down + RSI ok
+        elif weekly_bearish and kama_slope_down and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        # Tertiary: Price in lower Donchian half + Daily bearish + RSI ok (momentum continuation)
-        elif price_in_lower_half and daily_bearish and rsi[i] > 30 and rsi[i] < 60:
+        # Tertiary: Ranging + Weekly bearish + RSI high (mean reversion)
+        elif is_ranging and weekly_bearish and rsi[i] > 60:
             new_signal = -SIZE_ENTRY
-        # Quaternary: Donchian breakout alone (ensures minimum trade frequency)
-        elif donchian_breakout_short and rsi[i] < 70:
+        # Quaternary: Ensure trade frequency - Weekly bearish + KAMA bearish
+        elif weekly_bearish and daily_bearish and rsi[i] > 30 and rsi[i] < 70:
+            new_signal = -SIZE_ENTRY
+        # Quintenary: KAMA cross down (momentum)
+        elif close[i] < kama[i] and close[i - 1] >= kama[i - 1] and rsi[i] < 65:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -203,7 +243,7 @@ def generate_signals(prices):
                     position_reduced = True
         
         # Update position tracking AFTER signal calculation
-        prev_signal = signals[i-1] if i > 0 else 0.0
+        prev_signal = signals[i - 1] if i > 0 else 0.0
         
         # New position opened
         if new_signal != 0.0 and prev_signal == 0.0:
