@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #077 - ADAPTIVE_KAMA_RSI_REGIME_1H_4H_V1
+EXPERIMENT #078 - MTF_ZSCORE_REGIME_ENSEMBLE_1H_4H_V1
 ==================================================================================================
-Hypothesis: Simplify the ensemble approach by using cleaner regime detection (ADX + BBW combined)
-with adaptive signal selection. Use KAMA for trend (adapts to volatility) + RSI for momentum.
-1h entries with 4h trend filter (proven in #072 with Sharpe=0.589).
-
-Key improvements from failed experiments:
-- Simpler signal logic (2 signals instead of 3) - reduces noise and overfitting
-- Combined regime detection (ADX > 25 AND BBW percentile < 0.4 = trend regime)
-- KAMA adapts smoothing based on market efficiency ratio (better than HMA in chop)
-- RSI with dynamic thresholds based on regime (stricter in trend, looser in mean-reversion)
-- Conservative sizing: 0.25 base, 0.35 max on high confidence
-- Clear stoploss/takeprofit logic with proper state tracking
+Hypothesis: Combine Z-score mean reversion with trend-following in a regime-aware framework.
+Use 4h HMA for trend direction, 1h Z-score + RSI for entries, BBW for regime detection.
+Key insight from #070 (Sharpe=1.256): KAMA + Donchian worked well. Let's try Z-score + HMA.
 
 Why this should work:
-- #072 showed 1h/4h MTF works well (Sharpe=0.589)
-- KAMA outperformed HMA in #070 (Sharpe=1.256)
-- Simpler logic reduces overfitting risk from #076 crash
-- Proper variable scoping avoids 'close' and 'prev_side' errors
+- Z-score(20) captures extreme deviations from mean (proven in mean reversion)
+- HMA(16/48) provides smooth trend detection with less lag than SMA
+- 4h trend filter prevents counter-trend trades (reduces drawdown)
+- BBW percentile detects volatility regime for signal weighting
+- Conservative sizing (0.25 base, 0.35 max) controls drawdown
+- Proper stoploss (2*ATR) + takeprofit (2R then trail) locks in gains
+
+Position sizing rules:
+- MAX signal: 0.35 (never 1.0 - BTC crashed 77% in 2022)
+- Discrete levels: 0.0, ±0.25, ±0.35 (reduces churn costs)
+- Each signal change costs 0.10% fees
+- Stoploss: signal→0 when price moves 2*ATR against position
 """
 
 import numpy as np
 import pandas as pd
 
-name = "adaptive_kama_rsi_regime_1h_4h_v1"
+name = "mtf_zscore_regime_ensemble_1h_4h_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -52,28 +52,59 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average"""
+def calculate_hma(close, short_period=16, long_period=48):
+    """Calculate Hull Moving Average"""
     n = len(close)
-    if n < er_period + slow_period:
+    if n < long_period:
         return np.zeros(n)
     
-    kama = np.zeros(n)
-    kama[er_period] = close[er_period]
+    hma = np.zeros(n)
     
-    for i in range(er_period + 1, n):
-        change = abs(close[i] - close[i - er_period])
-        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+    for i in range(long_period - 1, n):
+        wma_short = np.zeros(i + 1)
+        wma_long = np.zeros(i + 1)
+        wma_total = np.zeros(i + 1)
         
-        if volatility > 0:
-            er = change / volatility
+        for j in range(short_period - 1, i + 1):
+            weights_short = np.arange(1, short_period + 1)
+            wma_short[j] = np.sum(close[j - short_period + 1:j + 1] * weights_short) / np.sum(weights_short)
+        
+        for j in range(long_period - 1, i + 1):
+            weights_long = np.arange(1, long_period + 1)
+            wma_long[j] = np.sum(close[j - long_period + 1:j + 1] * weights_long) / np.sum(weights_long)
+        
+        sqrt_long = int(np.sqrt(long_period))
+        if i >= sqrt_long - 1:
+            diff = 2 * wma_short[i] - wma_long[i]
+            weights_total = np.arange(1, sqrt_long + 1)
+            start_idx = max(0, i - sqrt_long + 1)
+            window = np.array([2 * wma_short[k] - wma_long[k] for k in range(start_idx, i + 1)])
+            if len(window) >= sqrt_long:
+                hma[i] = np.sum(window[-sqrt_long:] * weights_total) / np.sum(weights_total)
+            else:
+                hma[i] = np.mean(window)
+    
+    return hma
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score (standardized deviation from mean)"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    zscore = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        window = close[i - period + 1:i + 1]
+        mean = np.mean(window)
+        std = np.std(window)
+        if std > 0:
+            zscore[i] = (close[i] - mean) / std
         else:
-            er = 0
-        
-        sc = (er * (2.0 / (fast_period + 1) - 2.0 / (slow_period + 1)) + 2.0 / (slow_period + 1)) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+            zscore[i] = 0
     
-    return kama
+    return zscore
 
 
 def calculate_rsi(close, period=14):
@@ -282,15 +313,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # Position sizing constants
+    # Position sizing constants (MAX 0.35 to control drawdown)
     SIZE_BASE = 0.25
     SIZE_HIGH = 0.35
     SIZE_LOW = 0.15
     
     # Regime thresholds
     ADX_TREND_THRESHOLD = 25
-    BBW_TREND_PERCENTILE = 0.40  # Below 40th percentile = low vol (trend)
-    BBW_MR_PERCENTILE = 0.70  # Above 70th percentile = high vol (mean reversion)
+    BBW_TREND_PERCENTILE = 0.40
+    BBW_MR_PERCENTILE = 0.70
+    
+    # Z-score thresholds
+    ZSCORE_EXTREME = 2.0
+    ZSCORE_MODERATE = 1.0
     
     # RSI thresholds by regime
     RSI_TREND_LONG = 55
@@ -307,25 +342,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Base timeframe (1h) indicators
     atr_1h = calculate_atr(high, low, close, period=14)
     rsi_1h = calculate_rsi(close, period=14)
-    kama_1h = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    hma_1h = calculate_hma(close, short_period=16, long_period=48)
+    zscore_1h = calculate_zscore(close, period=20)
     adx_1h = calculate_adx(high, low, close, period=14)
     bb_upper_1h, bb_mid_1h, bb_lower_1h, bbw_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     supertrend_1h, st_dir_1h = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
     
     # 4h timeframe indicators for trend filter
     c_4h, h_4h, l_4h = resample_to_timeframe(close, high, low, bars_per_4h)
-    kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
+    hma_4h = calculate_hma(c_4h, short_period=16, long_period=48)
     adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
     _, _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
     bbw_pct_4h = calculate_bbw_percentile(bbw_4h, lookback=100)
     
     # Map 4h indicators to 1h
-    kama_4h_mapped = map_tf_to_base(kama_4h, bars_per_4h, n)
+    hma_4h_mapped = map_tf_to_base(hma_4h, bars_per_4h, n)
     adx_4h_mapped = map_tf_to_base(adx_4h, bars_per_4h, n)
     bbw_pct_4h_mapped = map_tf_to_base(bbw_pct_4h, bars_per_4h, n)
     
     # Minimum warmup period
-    first_valid = max(200, 100 * bars_per_4h, 28, 45)
+    first_valid = max(200, 100 * bars_per_4h, 48, 45)
     
     # Initialize output arrays
     signals = np.zeros(n)
@@ -345,30 +381,40 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         price = close[i]
         atr = atr_1h[i]
         rsi_val = rsi_1h[i]
+        zscore_val = zscore_1h[i]
         adx_4h_val = adx_4h_mapped[i]
         bbw_pct = bbw_pct_4h_mapped[i]
         
         # === REGIME DETECTION ===
-        # Trend regime: ADX > 25 AND BBW percentile < 0.40
-        # Mean reversion regime: BBW percentile > 0.70
-        # Neutral: everything else
         is_trend_regime = (adx_4h_val > ADX_TREND_THRESHOLD) and (bbw_pct < BBW_TREND_PERCENTILE)
         is_mr_regime = bbw_pct > BBW_MR_PERCENTILE
         is_neutral = not is_trend_regime and not is_mr_regime
         
         # === 4H TREND FILTER ===
         kama_4h_idx = i // bars_per_4h
-        if kama_4h_idx < len(kama_4h):
-            trend_4h = 1 if c_4h[kama_4h_idx] > kama_4h[kama_4h_idx] else -1
+        if kama_4h_idx < len(hma_4h) and hma_4h[kama_4h_idx] > 0:
+            trend_4h = 1 if c_4h[kama_4h_idx] > hma_4h[kama_4h_idx] else -1
         else:
             trend_4h = 0
         
         # === 1H SIGNALS ===
-        # KAMA trend signal
-        kama_signal_1h = 1 if close[i] > kama_1h[i] else -1
+        # HMA trend signal
+        hma_signal_1h = 1 if close[i] > hma_1h[i] else -1
         
         # Supertrend signal
         st_signal_1h = st_dir_1h[i]
+        
+        # Z-score signal (mean reversion)
+        if zscore_val < -ZSCORE_EXTREME:
+            zscore_signal = 1  # Oversold
+        elif zscore_val > ZSCORE_EXTREME:
+            zscore_signal = -1  # Overbought
+        elif zscore_val < -ZSCORE_MODERATE:
+            zscore_signal = 0.5
+        elif zscore_val > ZSCORE_MODERATE:
+            zscore_signal = -0.5
+        else:
+            zscore_signal = 0
         
         # RSI momentum signal
         if is_trend_regime:
@@ -388,62 +434,60 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if is_trend_regime:
             # Trend following: require 4h trend alignment + 1h confirmation
             if trend_4h == 1:
-                # Long setup
                 trend_votes = 0
-                if kama_signal_1h == 1:
+                if hma_signal_1h == 1:
                     trend_votes += 1
                 if st_signal_1h == 1:
                     trend_votes += 1
-                if rsi_signal == 1:
-                    trend_votes += 1
+                if rsi_signal >= 0:
+                    trend_votes += 0.5
                 
                 if trend_votes >= 2:
                     final_signal = 1
-                    signal_confidence = trend_votes / 3.0
+                    signal_confidence = min(1.0, trend_votes / 3.0)
             
             elif trend_4h == -1:
-                # Short setup
                 trend_votes = 0
-                if kama_signal_1h == -1:
+                if hma_signal_1h == -1:
                     trend_votes += 1
                 if st_signal_1h == -1:
                     trend_votes += 1
-                if rsi_signal == -1:
-                    trend_votes += 1
+                if rsi_signal <= 0:
+                    trend_votes += 0.5
                 
                 if trend_votes >= 2:
                     final_signal = -1
-                    signal_confidence = trend_votes / 3.0
+                    signal_confidence = min(1.0, trend_votes / 3.0)
         
         elif is_mr_regime:
-            # Mean reversion: fade extremes
+            # Mean reversion: fade extremes with Z-score
             mr_votes_long = 0
+            if zscore_signal >= 0.5:
+                mr_votes_long += 1
             if bb_signal == 1:
                 mr_votes_long += 1
             if rsi_signal == 1:
                 mr_votes_long += 1
-            if kama_signal_1h == -1 and price < kama_1h[i] - atr:
-                mr_votes_long += 1
             
             mr_votes_short = 0
+            if zscore_signal <= -0.5:
+                mr_votes_short += 1
             if bb_signal == -1:
                 mr_votes_short += 1
             if rsi_signal == -1:
                 mr_votes_short += 1
-            if kama_signal_1h == 1 and price > kama_1h[i] + atr:
-                mr_votes_short += 1
             
             if mr_votes_long >= 2:
                 final_signal = 1
-                signal_confidence = mr_votes_long / 3.0
+                signal_confidence = min(1.0, mr_votes_long / 3.0)
             elif mr_votes_short >= 2:
                 final_signal = -1
-                signal_confidence = mr_votes_short / 3.0
+                signal_confidence = min(1.0, mr_votes_short / 3.0)
         
         else:
             # Neutral regime: require strong agreement
             neutral_votes = 0
-            if kama_signal_1h == 1 and trend_4h == 1:
+            if hma_signal_1h == 1 and trend_4h >= 0:
                 neutral_votes += 1
             if st_signal_1h == 1:
                 neutral_votes += 1
@@ -452,10 +496,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             
             if neutral_votes >= 2:
                 final_signal = 1
-                signal_confidence = neutral_votes / 3.0
+                signal_confidence = min(1.0, neutral_votes / 3.0)
             else:
                 neutral_votes_neg = 0
-                if kama_signal_1h == -1 and trend_4h == -1:
+                if hma_signal_1h == -1 and trend_4h <= 0:
                     neutral_votes_neg += 1
                 if st_signal_1h == -1:
                     neutral_votes_neg += 1
@@ -464,7 +508,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 if neutral_votes_neg >= 2:
                     final_signal = -1
-                    signal_confidence = neutral_votes_neg / 3.0
+                    signal_confidence = min(1.0, neutral_votes_neg / 3.0)
         
         # === POSITION MANAGEMENT ===
         prev_side = position_side[i - 1]
