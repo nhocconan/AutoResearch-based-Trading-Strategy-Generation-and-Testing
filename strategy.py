@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #012 - MTF Supertrend+HMA+RSI+MACD+Volume+Z-score (15m+1h+4h v1)
+EXPERIMENT #013 - MTF HMA+Supertrend+Stoch+RSI+ADX+Zscore (15m+1h+4h v1)
 ==================================================================================================
-Hypothesis: Combine proven 4h Supertrend trend (#004 winner) with 1h HMA confirmation,
-15m RSI+MACD entry timing (new combo), and volume filter (untried in winners).
+Hypothesis: Combine 4h HMA trend (from reported Sharpe=5.4 baseline) with 1h Supertrend 
+confirmation, 15m Stochastic+RSI dual entry timing (new combo), and ADX strength filter 
+(untried in recent winners). Z-score prevents extreme entries.
 
-Key differences from #040:
-- Add 4h Supertrend as primary trend filter (from #004 Sharpe=3.653 winner)
-- Replace ADX with MACD histogram for momentum confirmation
-- Add volume filter (volume > 1.5x 20-period SMA) - NEW
-- Wider stoploss: 2.5*ATR (reduce whipsaw exits)
-- Position size: 0.30 (more conservative than 0.35)
-- RSI thresholds: 35-65 (wider range for more entries)
+Key differences from #012:
+- Replace 4h Supertrend with 4h HMA (reported best in instructions)
+- Add 1h Supertrend as secondary trend confirmation
+- Replace MACD with Stochastic (14,3,3) for entry timing - NEW
+- Add ADX(14) > 25 filter for trend strength - NEW
+- Keep RSI + Z-score filters from proven strategies
+- Position size: 0.28 (balanced between 0.25-0.30)
+- Stoploss: 2.0*ATR (tighter than 2.5*ATR to reduce drawdown)
 
-Why this should beat #040:
-- 4h Supertrend proved best trend filter in #004
-- MACD histogram adds momentum confirmation (not used in #004)
-- Volume filter reduces false breakouts (never tested in winners)
-- Based on winning #004 formula but with better entry timing
+Why this should beat #004 and #012:
+- 4h HMA reported as Sharpe=5.4 baseline in instructions
+- Stochastic adds overbought/oversold timing MACD lacks
+- ADX filter removes weak trend periods (major drawdown source)
+- Based on winning formula but with better entry/exit timing
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_supertrend_hma_rsi_macd_volume_zscore_15m_1h_4h_v1"
+name = "mtf_hma_supertrend_stoch_rsi_adx_zscore_15m_1h_4h_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -114,34 +116,87 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD (MACD line, Signal line, Histogram)"""
+def calculate_stochastic(high, low, close, k_period=14, d_period=3):
+    """Calculate Stochastic Oscillator (%K and %D)"""
     n = len(close)
-    if n < slow + signal:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
+    if n < k_period:
+        return np.zeros(n), np.zeros(n)
     
-    ema_fast = np.zeros(n)
-    ema_slow = np.zeros(n)
+    k_line = np.zeros(n)
+    d_line = np.zeros(n)
     
-    ema_fast[fast - 1] = np.mean(close[:fast])
-    for i in range(fast, n):
-        ema_fast[i] = ema_fast[i - 1] + (2.0 / (fast + 1)) * (close[i] - ema_fast[i - 1])
+    for i in range(k_period - 1, n):
+        lowest_low = np.min(low[i - k_period + 1:i + 1])
+        highest_high = np.max(high[i - k_period + 1:i + 1])
+        
+        if highest_high - lowest_low > 0:
+            k_line[i] = 100 * (close[i] - lowest_low) / (highest_high - lowest_low)
+        else:
+            k_line[i] = 50
     
-    ema_slow[slow - 1] = np.mean(close[:slow])
-    for i in range(slow, n):
-        ema_slow[i] = ema_slow[i - 1] + (2.0 / (slow + 1)) * (close[i] - ema_slow[i - 1])
+    for i in range(k_period - 1 + d_period - 1, n):
+        d_line[i] = np.mean(k_line[i - d_period + 1:i + 1])
     
-    macd_line = ema_fast - ema_slow
+    return k_line, d_line
+
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    if n < period * 3:
+        return np.zeros(n)
     
-    signal_line = np.zeros(n)
-    valid_start = slow + signal - 1
-    signal_line[valid_start] = np.mean(macd_line[slow:valid_start + 1])
-    for i in range(valid_start + 1, n):
-        signal_line[i] = signal_line[i - 1] + (2.0 / (signal + 1)) * (macd_line[i] - signal_line[i - 1])
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
     
-    histogram = macd_line - signal_line
+    for i in range(1, n):
+        high_diff = high[i] - high[i - 1]
+        low_diff = low[i - 1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+        
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
     
-    return macd_line, signal_line, histogram
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    adx = np.zeros(n)
+    
+    plus_di_smooth = np.zeros(n)
+    minus_di_smooth = np.zeros(n)
+    tr_smooth = np.zeros(n)
+    
+    plus_di_smooth[period - 1] = np.sum(plus_dm[1:period])
+    minus_di_smooth[period - 1] = np.sum(minus_dm[1:period])
+    tr_smooth[period - 1] = np.sum(tr[1:period])
+    
+    for i in range(period, n):
+        plus_di_smooth[i] = plus_di_smooth[i - 1] - plus_di_smooth[i - 1] / period + plus_dm[i]
+        minus_di_smooth[i] = minus_di_smooth[i - 1] - minus_di_smooth[i - 1] / period + minus_dm[i]
+        tr_smooth[i] = tr_smooth[i - 1] - tr_smooth[i - 1] / period + tr[i]
+    
+    for i in range(period, n):
+        if tr_smooth[i] > 0:
+            plus_di[i] = 100 * plus_di_smooth[i] / tr_smooth[i]
+            minus_di[i] = 100 * minus_di_smooth[i] / tr_smooth[i]
+        
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
+    for i in range(period * 2, n):
+        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+    
+    return adx
 
 
 def calculate_zscore(close, period=20):
@@ -209,20 +264,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # 15m indicators for entry timing
     atr_15m = calculate_atr(high, low, close, period=14)
     rsi_15m = calculate_rsi(close, period=14)
     zscore_15m = calculate_zscore(close, period=20)
-    macd_15m, macd_sig_15m, macd_hist_15m = calculate_macd(close, fast=12, slow=26, signal=9)
-    
-    # Volume SMA for filter
-    volume_sma_15m = np.zeros(n)
-    vol_period = 20
-    for i in range(vol_period - 1, n):
-        volume_sma_15m[i] = np.mean(volume[i - vol_period + 1:i + 1])
+    stoch_k_15m, stoch_d_15m = calculate_stochastic(high, low, close, k_period=14, d_period=3)
+    adx_15m = calculate_adx(high, low, close, period=14)
     
     # Get 1h HTF data using mtf_data helper (MANDATORY - no manual resampling)
     try:
@@ -231,63 +280,60 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         h_1h = df_1h['high'].values
         l_1h = df_1h['low'].values
         
-        # 1h HMA for trend confirmation
-        hma_1h_raw = calculate_hma(c_1h, period=21)
-        hma_1h = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
+        # 1h Supertrend for trend confirmation
+        _, st_direction_1h_raw = calculate_supertrend(h_1h, l_1h, c_1h, period=10, multiplier=3.0)
+        st_direction_1h = align_htf_to_ltf(prices, df_1h, st_direction_1h_raw)
         
-        # 1h MACD for momentum
-        macd_1h_raw, _, macd_hist_1h_raw = calculate_macd(c_1h, fast=12, slow=26, signal=9)
-        macd_hist_1h = align_htf_to_ltf(prices, df_1h, macd_hist_1h_raw)
+        # 1h ADX for trend strength
+        adx_1h_raw = calculate_adx(h_1h, l_1h, c_1h, period=14)
+        adx_1h = align_htf_to_ltf(prices, df_1h, adx_1h_raw)
     except Exception:
-        # Fallback if mtf_data fails
-        hma_1h = np.zeros(n)
-        macd_hist_1h = np.zeros(n)
+        st_direction_1h = np.ones(n)
+        adx_1h = np.zeros(n)
     
     # Get 4h HTF data using mtf_data helper (MANDATORY)
     try:
         df_4h = get_htf_data(prices, '4h')
         c_4h = df_4h['close'].values
-        h_4h = df_4h['high'].values
-        l_4h = df_4h['low'].values
         
-        # 4h Supertrend for primary trend direction
-        _, st_direction_4h_raw = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
-        st_direction_4h = align_htf_to_ltf(prices, df_4h, st_direction_4h_raw)
-        
-        # 4h HMA for secondary confirmation
+        # 4h HMA for primary trend direction
         hma_4h_raw = calculate_hma(c_4h, period=21)
         hma_4h = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+        
+        # 4h HMA(48) for secondary confirmation
+        hma_48_4h_raw = calculate_hma(c_4h, period=48)
+        hma_48_4h = align_htf_to_ltf(prices, df_4h, hma_48_4h_raw)
     except Exception:
-        # Fallback if mtf_data fails
-        st_direction_4h = np.ones(n)
         hma_4h = np.zeros(n)
+        hma_48_4h = np.zeros(n)
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.30  # More conservative than 0.35
-    SIZE_HALF = 0.15
+    SIZE_FULL = 0.28  # Conservative position size
+    SIZE_HALF = 0.14
     
-    # RSI thresholds for pullback entries (wider range for more entries)
-    RSI_LONG_MIN = 35
-    RSI_LONG_MAX = 65
-    RSI_SHORT_MIN = 35
-    RSI_SHORT_MAX = 65
+    # RSI thresholds for pullback entries
+    RSI_LONG_MIN = 40
+    RSI_LONG_MAX = 60
+    RSI_SHORT_MIN = 40
+    RSI_SHORT_MAX = 60
+    
+    # Stochastic thresholds
+    STOC_LONG_MAX = 40  # Enter when %K crosses above from oversold
+    STOC_SHORT_MIN = 60  # Enter when %K crosses below from overbought
     
     # Z-score threshold for mean reversion filter
-    ZSCORE_MAX = 2.5
+    ZSCORE_MAX = 2.0
     
-    # MACD histogram threshold for momentum
-    MACD_MIN = 0.0
+    # ADX threshold for trend strength
+    ADX_MIN = 25
     
-    # Volume filter threshold
-    VOLUME_MULT = 1.5
+    # ATR stoploss multiplier
+    ATR_STOP_MULT = 2.0
     
-    # ATR stoploss multiplier (wider to reduce whipsaws)
-    ATR_STOP_MULT = 2.5
-    
-    first_valid = max(200, 40, 26 + 9, 20)
+    first_valid = max(200, 42, 20, 28)
     
     # Track position state
     position_side = np.zeros(n)
@@ -296,28 +342,36 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
+    # Track stochastic cross for entry timing
+    prev_stoch_k = np.zeros(n)
+    
     for i in range(first_valid, n):
+        prev_stoch_k[i] = stoch_k_15m[i - 1] if i > 0 else stoch_k_15m[i]
+        
         if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(zscore_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
             continue
         
-        # 4h trend filters (primary)
-        st_trend_4h = st_direction_4h[i]
+        # 4h trend filters (primary) - HMA alignment
         hma_4h_trend = 1 if close[i] > hma_4h[i] else (-1 if close[i] < hma_4h[i] else 0)
+        hma_48_4h_trend = 1 if hma_4h[i] > hma_48_4h[i] else (-1 if hma_4h[i] < hma_48_4h[i] else 0)
         
         # 1h trend filters (secondary)
-        hma_1h_trend = 1 if close[i] > hma_1h[i] else (-1 if close[i] < hma_1h[i] else 0)
-        macd_1h_momentum = 1 if macd_hist_1h[i] > MACD_MIN else (-1 if macd_hist_1h[i] < -MACD_MIN else 0)
+        st_trend_1h = st_direction_1h[i]
+        adx_1h_strength = adx_1h[i]
         
         # 15m entry filters
         rsi_val = rsi_15m[i]
         zscore_val = zscore_15m[i]
-        macd_hist_val = macd_hist_15m[i]
+        stoch_k_val = stoch_k_15m[i]
+        stoch_d_val = stoch_d_15m[i]
+        adx_15m_val = adx_15m[i]
         price = close[i]
         atr = atr_15m[i]
         
-        # Volume filter
-        volume_ok = volume[i] > VOLUME_MULT * volume_sma_15m[i] if volume_sma_15m[i] > 0 else False
+        # Stochastic cross detection
+        stoch_cross_long = prev_stoch_k[i] < STOC_LONG_MAX and stoch_k_val >= STOC_LONG_MAX
+        stoch_cross_short = prev_stoch_k[i] > STOC_SHORT_MIN and stoch_k_val <= STOC_SHORT_MIN
         
         # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
@@ -338,7 +392,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.5*ATR)
+            # Stoploss check (2.0*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -412,13 +466,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h Supertrend + 4h HMA + 1h HMA + 1h MACD + 15m RSI + MACD + Volume + Z-score
-        if st_trend_4h == 1 and hma_4h_trend == 1 and hma_1h_trend == 1 and macd_1h_momentum == 1:
+        # Entry logic: 4h HMA trend + 1h Supertrend + ADX + 15m Stoch+RSI+Zscore
+        if hma_4h_trend == 1 and hma_48_4h_trend == 1 and st_trend_1h == 1:
             # Bullish trend confirmed on 4h and 1h
-            if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
+            if (adx_1h_strength > ADX_MIN and
+                RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
                 abs(zscore_val) < ZSCORE_MAX and
-                macd_hist_val > 0 and
-                volume_ok):
+                stoch_cross_long and
+                stoch_k_val > stoch_d_val):
                 signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = price
@@ -426,12 +481,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
                 
-        elif st_trend_4h == -1 and hma_4h_trend == -1 and hma_1h_trend == -1 and macd_1h_momentum == -1:
+        elif hma_4h_trend == -1 and hma_48_4h_trend == -1 and st_trend_1h == -1:
             # Bearish trend confirmed on 4h and 1h
-            if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
+            if (adx_1h_strength > ADX_MIN and
+                RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
                 abs(zscore_val) < ZSCORE_MAX and
-                macd_hist_val < 0 and
-                volume_ok):
+                stoch_cross_short and
+                stoch_k_val < stoch_d_val):
                 signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = price
