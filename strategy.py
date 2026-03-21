@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #005 - MTF KAMA+Donchian+RSI (1h+4h+1d v1)
+EXPERIMENT #002 - MTF DEMA+Supertrend+RSI+Zscore (1h+4h v1)
 ==================================================================================================
-Hypothesis: Use 1h primary timeframe with 4h KAMA adaptive trend + 1d Donchian trend filter + 
-1h RSI pullback entries. This differs from current best by:
-- KAMA instead of HMA (adaptive to volatility, less whipsaw in chop)
-- 1d Donchian for stronger trend filter (20-day high/low break)
-- 1h primary instead of 15m (fewer trades, lower fees, cleaner signals)
-- No BBW/Z-score filter (simpler, less overfitting)
+Hypothesis: Switch to 1h primary timeframe (vs 15m) for cleaner signals with fewer trades.
+Combine 4h Supertrend (trend filter) + 1h DEMA crossover (fast entry) + RSI pullback + Z-score regime.
 
 Why this should work:
-- KAMA adapts to market regime (fast in trends, slow in chop)
-- Daily Donchian ensures we only trade with major trend
-- 1h timeframe reduces fee drag vs 15m while keeping good entry timing
-- Simpler logic = more robust across BTC/ETH/SOL
+- 1h timeframe reduces noise vs 15m (fewer false signals, lower fee drag)
+- DEMA (Double EMA) reacts faster than regular EMA for entry timing
+- 4h Supertrend provides clear trend direction (proven in literature)
+- Z-score filter avoids extreme mean-reversion conditions
+- Fewer trades = lower fee impact (0.10% per signal change)
+
+Position sizing: MAX 0.35, discrete levels (0.0, ±0.20, ±0.35)
+Stoploss: 2*ATR trailing, Take profit: 2R reduce to half, trail at 1R
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_kama_donchian_rsi_1h_4h_1d_v1"
+name = "mtf_dema_supertrend_rsi_zscore_1h_4h_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -48,37 +48,18 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
-    """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts to market volatility - fast in trends, slow in chop
-    """
+def calculate_dema(close, period=21):
+    """Calculate Double Exponential Moving Average"""
     n = len(close)
-    if n < period + slow_period:
+    if n < period:
         return np.zeros(n)
     
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(period, n):
-        price_change = abs(close[i] - close[i - period])
-        volatility = np.sum(np.abs(np.diff(close[i - period:i + 1])))
-        if volatility > 0:
-            er[i] = price_change / volatility
-        else:
-            er[i] = 0
+    ema1 = pd.Series(close).ewm(span=period, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, adjust=False).mean().values
     
-    # Calculate smoothing constant
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
+    dema = 2 * ema1 - ema2
     
-    kama = np.zeros(n)
-    kama[period] = close[period]  # Initialize
-    
-    for i in range(period + 1, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
+    return dema
 
 
 def calculate_rsi(close, period=14):
@@ -106,29 +87,63 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_donchian_trend(high, low, period=20):
-    """
-    Donchian Channel trend detection
-    Returns: 1 if price near upper band (bullish), -1 if near lower (bearish), 0 if middle
-    """
-    n = len(high)
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n), np.zeros(n)
+    
+    atr = calculate_atr(high, low, close, period)
+    
+    supertrend = np.zeros(n)
+    trend_direction = np.ones(n)
+    
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    
+    for i in range(n):
+        mid = (high[i] + low[i]) / 2
+        upper_band[i] = mid + multiplier * atr[i]
+        lower_band[i] = mid - multiplier * atr[i]
+    
+    supertrend[period - 1] = lower_band[period - 1]
+    
+    for i in range(period, n):
+        if trend_direction[i - 1] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i - 1])
+            if close[i] < supertrend[i]:
+                supertrend[i] = upper_band[i]
+                trend_direction[i] = -1
+            else:
+                trend_direction[i] = 1
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i - 1])
+            if close[i] > supertrend[i]:
+                supertrend[i] = lower_band[i]
+                trend_direction[i] = 1
+            else:
+                trend_direction[i] = -1
+    
+    return supertrend, trend_direction
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score (standardized price deviation)"""
+    n = len(close)
     if n < period:
         return np.zeros(n)
     
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     
-    trend = np.zeros(n)
-    for i in range(period, n):
-        mid = (upper[i] + lower[i]) / 2
-        if upper[i] > 0:
-            price_position = (high[i] - lower[i]) / (upper[i] - lower[i])
-            if price_position > 0.6:
-                trend[i] = 1
-            elif price_position < 0.4:
-                trend[i] = -1
+    zscore = np.zeros(n)
+    for i in range(n):
+        if std[i] > 0:
+            zscore[i] = (close[i] - mean[i]) / std[i]
+        else:
+            zscore[i] = 0
     
-    return trend
+    return zscore
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -140,7 +155,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # 1h indicators for entry timing
     atr_1h = calculate_atr(high, low, close, period=14)
     rsi_1h = calculate_rsi(close, period=14)
-    kama_1h = calculate_kama(close, period=10, fast_period=2, slow_period=30)
+    zscore_1h = calculate_zscore(close, period=20)
+    dema_fast_1h = calculate_dema(close, period=8)
+    dema_slow_1h = calculate_dema(close, period=21)
     
     # Get 4h data using mtf_data helper (MUST use this for proper alignment)
     try:
@@ -149,41 +166,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         h_4h = df_4h['high'].values
         l_4h = df_4h['low'].values
         
-        # 4h KAMA for adaptive trend
-        kama_4h = calculate_kama(c_4h, period=10, fast_period=2, slow_period=30)
+        # 4h Supertrend for trend direction
+        _, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
         rsi_4h = calculate_rsi(c_4h, period=14)
         
         # Align 4h indicators to 1h timeframe (auto shift for completed bars)
-        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
+        st_direction_4h_aligned = align_htf_to_ltf(prices, df_4h, st_direction_4h)
         rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-        
-        # Calculate 4h trend direction (price vs KAMA)
-        trend_4h = np.zeros(n)
-        for i in range(n):
-            if i < len(kama_4h_aligned) and kama_4h_aligned[i] > 0:
-                if close[i] > kama_4h_aligned[i]:
-                    trend_4h[i] = 1
-                elif close[i] < kama_4h_aligned[i]:
-                    trend_4h[i] = -1
     except Exception:
-        kama_4h_aligned = np.zeros(n)
-        rsi_4h_aligned = np.zeros(n)
-        trend_4h = np.zeros(n)
-    
-    # Get 1d data using mtf_data helper for major trend filter
-    try:
-        df_1d = get_htf_data(prices, '1d')
-        c_1d = df_1d['close'].values
-        h_1d = df_1d['high'].values
-        l_1d = df_1d['low'].values
-        
-        # Daily Donchian trend (20-day channel)
-        donchian_1d = calculate_donchian_trend(h_1d, l_1d, period=20)
-        
-        # Align daily Donchian to 1h timeframe
-        donchian_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_1d)
-    except Exception:
-        donchian_1d_aligned = np.zeros(n)
+        # Fallback if mtf_data fails
+        st_direction_4h_aligned = np.zeros(n)
+        rsi_4h_aligned = np.zeros(n) + 50
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
@@ -198,10 +191,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     RSI_SHORT_MIN = 45
     RSI_SHORT_MAX = 65
     
+    # Z-score filter (avoid extreme overbought/oversold)
+    ZSCORE_MAX = 2.0
+    
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.0
     
-    first_valid = max(200, 30, 20)
+    first_valid = max(100, 21 * 2, 14 * 2, 20)
     
     # Track position state
     position_side = np.zeros(n)
@@ -216,13 +212,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             continue
         
         # Get aligned MTF values
-        kama_4h_val = kama_4h_aligned[i] if i < len(kama_4h_aligned) else 0
+        st_trend_4h = st_direction_4h_aligned[i] if i < len(st_direction_4h_aligned) else 0
         rsi_4h_val = rsi_4h_aligned[i] if i < len(rsi_4h_aligned) else 50
-        trend_4h_val = trend_4h[i] if i < len(trend_4h) else 0
-        donchian_1d_val = donchian_1d_aligned[i] if i < len(donchian_1d_aligned) else 0
         
-        # Daily Donchian trend filter (must agree with 4h trend)
-        if donchian_1d_val != 0 and donchian_1d_val != trend_4h_val:
+        # Z-score filter - avoid extreme conditions
+        if abs(zscore_1h[i]) > ZSCORE_MAX:
+            signals[i] = 0.0
+            position_side[i] = 0
+            continue
+        
+        # 4h trend filter (Supertrend direction + RSI confirmation)
+        # Long only if 4h Supertrend bullish AND 4h RSI not overbought
+        # Short only if 4h Supertrend bearish AND 4h RSI not oversold
+        trend_bullish = (st_trend_4h == 1 and rsi_4h_val < 70)
+        trend_bearish = (st_trend_4h == -1 and rsi_4h_val > 30)
+        
+        if not trend_bullish and not trend_bearish:
             signals[i] = 0.0
             if i > 0 and position_side[i - 1] != 0:
                 position_side[i] = 0
@@ -238,14 +243,15 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             prev_high = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else prev_entry
             prev_low = lowest_since_entry[i - 1] if lowest_since_entry[i - 1] > 0 else prev_entry
             
-            # Update highest/lowest since entry
             price = close[i]
+            
+            # Update highest/lowest since entry
             if prev_side == 1:
-                current_high = max(prev_high, price) if prev_high > 0 else price
-                current_low = min(prev_low, price) if prev_low > 0 else price
+                current_high = max(prev_high, price)
+                current_low = min(prev_low, price)
             else:
-                current_high = max(prev_high, price) if prev_high > 0 else price
-                current_low = min(prev_low, price) if prev_low > 0 else price
+                current_high = max(prev_high, price)
+                current_low = min(prev_low, price)
             
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
@@ -315,31 +321,40 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         lowest_since_entry[i] = 0
                         continue
             
-            # Hold position if no exit triggered
-            signals[i] = signals[i - 1]
-            position_side[i] = position_side[i - 1]
-            entry_price[i] = entry_price[i - 1]
-            tp_triggered[i] = tp_triggered[i - 1]
-            highest_since_entry[i] = highest_since_entry[i - 1]
-            lowest_since_entry[i] = lowest_since_entry[i - 1]
+            # Hold position if no exit triggered AND trend still valid
+            if (prev_side == 1 and trend_bullish) or (prev_side == -1 and trend_bearish):
+                signals[i] = signals[i - 1]
+                position_side[i] = position_side[i - 1]
+                entry_price[i] = entry_price[i - 1]
+                tp_triggered[i] = tp_triggered[i - 1]
+                highest_since_entry[i] = highest_since_entry[i - 1]
+                lowest_since_entry[i] = lowest_since_entry[i - 1]
+            else:
+                # Exit if trend reverses
+                signals[i] = 0.0
+                position_side[i] = 0
             continue
         
-        # Entry logic: 4h KAMA trend + 1h RSI pullback + 1d Donchian confirmation
+        # Entry logic: 4h trend + 1h DEMA crossover + RSI pullback
         price = close[i]
         
-        # Long entry: 4h bullish + 1d bullish + RSI pullback
-        if trend_4h_val == 1 and (donchian_1d_val == 1 or donchian_1d_val == 0):
-            if RSI_LONG_MIN <= rsi_1h[i] <= RSI_LONG_MAX:
+        # DEMA crossover signal
+        dema_crossover_long = (dema_fast_1h[i] > dema_slow_1h[i]) and (dema_fast_1h[i-1] <= dema_slow_1h[i-1])
+        dema_crossover_short = (dema_fast_1h[i] < dema_slow_1h[i]) and (dema_fast_1h[i-1] >= dema_slow_1h[i-1])
+        
+        if trend_bullish:
+            # DEMA crossover OR RSI pullback entry
+            if (dema_crossover_long or (dema_fast_1h[i] > dema_slow_1h[i])) and RSI_LONG_MIN <= rsi_1h[i] <= RSI_LONG_MAX:
                 signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = price
                 tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
-        
-        # Short entry: 4h bearish + 1d bearish + RSI pullback
-        elif trend_4h_val == -1 and (donchian_1d_val == -1 or donchian_1d_val == 0):
-            if RSI_SHORT_MIN <= rsi_1h[i] <= RSI_SHORT_MAX:
+                
+        elif trend_bearish:
+            # DEMA crossover OR RSI pullback entry
+            if (dema_crossover_short or (dema_fast_1h[i] < dema_slow_1h[i])) and RSI_SHORT_MIN <= rsi_1h[i] <= RSI_SHORT_MAX:
                 signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = price
