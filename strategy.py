@@ -1,35 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #021 - KAMA RSI Pullback with 4h Trend Filter (30m Primary)
+EXPERIMENT #022 - DEMA Bollinger Mean Reversion with MTF Trend Filter (1h Primary)
 ==================================================================================================
-Hypothesis: Current best uses HMA+RSI on 1h. This tests KAMA (Kaufman Adaptive Moving Average) 
-on 30m timeframe with 4h trend filter. KAMA adapts to volatility better than HMA/EMA.
+Hypothesis: Current best (Sharpe=0.537) uses 4h HMA+RSI pullback. This uses 1h DEMA+Bollinger
+for more frequent entries while maintaining quality via 4h+1d trend filters.
 
-Why this should beat current best (Sharpe=0.537):
-1. 30m timeframe = more trade opportunities than 1h (2x bars per day)
-2. KAMA adapts to market noise via Efficiency Ratio - less whipsaw in chop
-3. Simpler entry logic than #020 (no MACD histogram, no complex momentum filters)
-4. 4h KAMA trend filter (proven MTF approach from #013, #019)
-5. Conservative position sizing: 0.25 base, max 0.35 (controls drawdown)
+Key innovations:
+1. 1h PRIMARY + 4h/1d HTF: More trades than 4h, cleaner than 15m/30m
+2. DEMA for faster trend detection than HMA (Double EMA reduces lag further)
+3. Bollinger Band position: Enter when price near lower band in uptrend (mean reversion)
+4. RSI confirmation: Avoid entering at extremes (>70 or <30)
+5. ATR-based dynamic sizing: size = base * (target_ATR / current_ATR)
+6. Tighter stoploss: 1.5*ATR vs 2.0*ATR (faster exits on wrong trades)
 
-Key differences from failed attempts:
-- #014 EMA+ADX failed (Sharpe=-0.341) - ADX too laggy
-- #015 KAMA+MACD+RSI+Z-score failed (DD=-51.8%) - over-filtered, too many signal changes
-- This uses KAMA+RSI only (simpler = fewer fees, cleaner signals)
-
-Risk management:
-- Position size: 0.25 base (25% of capital), max 0.35
-- Stoploss: 2.0*ATR trailing stop
-- Take profit: reduce to half at 2R, trail at 1R
-- Discrete signal levels: 0.0, ±0.25, ±0.35 (minimize fee churn)
+Why this should beat hma_rsi_pullback_daily_trend_4h_v1 (Sharpe=0.537):
+- 1h timeframe = 4x more potential trades than 4h
+- DEMA faster response than HMA = catch trends earlier
+- Bollinger position filter = better entry timing (buy low in uptrend)
+- Dynamic sizing = reduce position when volatility spikes (protects during crashes)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_rsi_pullback_mtf_30m_4h_v1"
-timeframe = "30m"
+name = "dema_bb_mean_reversion_mtf_1h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
@@ -56,39 +52,37 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+def calculate_dema(close, period=21):
     """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts to market noise via Efficiency Ratio
+    Double Exponential Moving Average - faster than EMA, less lag
+    DEMA = 2*EMA(n) - EMA(EMA(n))
     """
     n = len(close)
-    if n < er_period + slow_period:
+    if n < period:
         return np.zeros(n)
     
-    kama = np.zeros(n)
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=period, adjust=False, min_periods=period).mean()
+    ema2 = ema1.ewm(span=period, adjust=False, min_periods=period).mean()
     
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        signal = abs(close[i] - close[i - er_period])
-        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0
+    dema = 2 * ema1 - ema2
+    return dema.values
+
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
     
-    # Calculate smoothing constant
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
+    close_series = pd.Series(close)
+    middle = close_series.rolling(window=period, min_periods=period).mean().values
+    std = close_series.rolling(window=period, min_periods=period).std().values
     
-    # Initialize KAMA
-    kama[er_period] = close[er_period]
+    upper = middle + std_mult * std
+    lower = middle - std_mult * std
     
-    for i in range(er_period + 1, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
+    return upper, middle, lower
 
 
 def calculate_rsi(close, period=14):
@@ -113,16 +107,72 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
+def calculate_supertrend(high, low, close, atr, multiplier=3.0):
+    """
+    Supertrend indicator - trend following with ATR-based stops
+    Returns: supertrend_values, trend_direction (1=up, -1=down)
+    """
+    n = len(close)
+    if n < len(atr) or len(atr) == 0:
+        return np.zeros(n), np.zeros(n)
+    
+    supertrend = np.zeros(n)
+    trend = np.zeros(n)
+    
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    
+    for i in range(n):
+        if atr[i] == 0:
+            continue
+        upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
+        lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
+    
+    first_valid = np.where(atr > 0)[0]
+    if len(first_valid) == 0:
+        return supertrend, trend
+    
+    start_idx = first_valid[0]
+    supertrend[start_idx] = upper_band[start_idx]
+    trend[start_idx] = 1
+    
+    for i in range(start_idx + 1, n):
+        if atr[i] == 0:
+            supertrend[i] = supertrend[i - 1]
+            trend[i] = trend[i - 1]
+            continue
+        
+        if trend[i - 1] == 1:
+            if close[i] > lower_band[i]:
+                supertrend[i] = max(supertrend[i - 1], lower_band[i])
+                trend[i] = 1
+            else:
+                supertrend[i] = upper_band[i]
+                trend[i] = -1
+        else:
+            if close[i] < upper_band[i]:
+                supertrend[i] = min(supertrend[i - 1], upper_band[i])
+                trend[i] = -1
+            else:
+                supertrend[i] = lower_band[i]
+                trend[i] = 1
+    
+    return supertrend, trend
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     n = len(close)
     
-    # ========== 30m INDICATORS (PRIMARY TIMEFRAME) ==========
-    atr_30m = calculate_atr(high, low, close, period=14)
-    rsi_30m = calculate_rsi(close, period=14)
-    kama_30m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    # ========== 1h INDICATORS (PRIMARY TIMEFRAME) ==========
+    atr_1h = calculate_atr(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
+    dema_1h_fast = calculate_dema(close, period=8)
+    dema_1h_slow = calculate_dema(close, period=21)
+    bb_upper_1h, bb_middle_1h, bb_lower_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    supertrend_1h, st_trend_1h = calculate_supertrend(high, low, close, atr_1h, multiplier=3.0)
     
     # ========== 4h INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
@@ -131,33 +181,51 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         high_4h = df_4h['high'].values
         low_4h = df_4h['low'].values
         
-        # 4h KAMA for master trend direction
-        kama_4h = calculate_kama(close_4h, er_period=10, fast_period=2, slow_period=30)
+        dema_4h = calculate_dema(close_4h, period=21)
+        atr_4h = calculate_atr(high_4h, low_4h, close_4h, period=14)
+        _, st_trend_4h = calculate_supertrend(high_4h, low_4h, close_4h, atr_4h, multiplier=3.0)
         
-        # Align to 30m timeframe (auto shift for completed bars)
-        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
+        dema_4h_aligned = align_htf_to_ltf(prices, df_4h, dema_4h)
+        st_trend_4h_aligned = align_htf_to_ltf(prices, df_4h, st_trend_4h)
+        atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
         
     except Exception:
-        kama_4h_aligned = np.zeros(n)
+        dema_4h_aligned = np.zeros(n)
+        st_trend_4h_aligned = np.zeros(n)
+        atr_4h_aligned = np.zeros(n)
+    
+    # ========== 1d INDICATORS (REGIME FILTER) - PROPER MTF ==========
+    try:
+        df_1d = get_htf_data(prices, '1d')
+        close_1d = df_1d['close'].values
+        
+        dema_1d = calculate_dema(close_1d, period=21)
+        
+        dema_1d_aligned = align_htf_to_ltf(prices, df_1d, dema_1d)
+        
+    except Exception:
+        dema_1d_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
     
-    # Position sizing - CONSERVATIVE
-    SIZE_BASE = 0.25      # Base position (25%)
-    SIZE_HIGH = 0.35      # High conviction (35%)
+    # Position sizing - DYNAMIC based on ATR
+    SIZE_BASE = 0.20
+    SIZE_HIGH = 0.30
+    TARGET_ATR_PCT = 0.02  # Target 2% ATR
     
-    # ATR stoploss
-    ATR_STOP_MULT = 2.0
+    # Stoploss - TIGHTER than baseline
+    ATR_STOP_MULT = 1.5
     
-    # RSI filter thresholds (pullback zones)
-    RSI_LONG_MIN = 40
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 60
+    # RSI filter zones
+    RSI_LONG_MIN = 35
+    RSI_LONG_MAX = 65
+    RSI_SHORT_MIN = 35
+    RSI_SHORT_MAX = 65
     
-    # KAMA trend confirmation
-    KAMA_LOOKBACK = 5  # bars to confirm trend
+    # Bollinger Band position thresholds
+    BB_LONG_THRESHOLD = 0.15  # Price within 15% of lower band
+    BB_SHORT_THRESHOLD = 0.15  # Price within 15% of upper band
     
     first_valid = max(100, 50)
     
@@ -170,35 +238,53 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_30m[i]) or atr_30m[i] == 0 or np.isnan(rsi_30m[i]) or np.isnan(kama_30m[i]):
+        if np.isnan(atr_1h[i]) or atr_1h[i] == 0 or np.isnan(rsi_1h[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(bb_lower_1h[i]) or np.isnan(bb_upper_1h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_30m[i]
-        rsi_val = rsi_30m[i]
-        kama_val = kama_30m[i]
+        atr = atr_1h[i]
+        rsi_val = rsi_1h[i]
+        st_trend_val = st_trend_1h[i]
+        dema_fast = dema_1h_fast[i]
+        dema_slow = dema_1h_slow[i]
         
-        # 4h trend filter (MASTER FILTER)
-        kama_4h_val = kama_4h_aligned[i]
+        # Bollinger Band position
+        bb_range = bb_upper_1h[i] - bb_lower_1h[i]
+        if bb_range > 0:
+            bb_position = (price - bb_lower_1h[i]) / bb_range  # 0=lower, 1=upper
+        else:
+            bb_position = 0.5
+        
+        # 4h trend filters
+        dema_4h_val = dema_4h_aligned[i]
+        st_trend_4h_val = st_trend_4h_aligned[i]
+        
+        # 1d regime filter
+        dema_1d_val = dema_1d_aligned[i]
         
         # Determine 4h trend direction
-        if i > KAMA_LOOKBACK:
-            kama_4h_slope = kama_4h_val - kama_4h_aligned[i - KAMA_LOOKBACK]
-            trend_4h_up = kama_4h_slope > 0 and price > kama_4h_val
-            trend_4h_down = kama_4h_slope < 0 and price < kama_4h_val
-        else:
-            trend_4h_up = False
-            trend_4h_down = False
+        trend_4h = 0
+        if dema_4h_val > 0 and price > dema_4h_val:
+            trend_4h = 1
+        elif dema_4h_val > 0 and price < dema_4h_val:
+            trend_4h = -1
         
-        # Determine 30m trend direction
-        if i > KAMA_LOOKBACK:
-            kama_30m_slope = kama_val - kama_30m[i - KAMA_LOOKBACK]
-            trend_30m_up = kama_30m_slope > 0 and price > kama_val
-            trend_30m_down = kama_30m_slope < 0 and price < kama_val
-        else:
-            trend_30m_up = False
-            trend_30m_down = False
+        if st_trend_4h_val == 1:
+            trend_4h = max(trend_4h, 1)
+        elif st_trend_4h_val == -1:
+            trend_4h = min(trend_4h, -1)
+        
+        # Determine 1d regime
+        regime_1d = 0
+        if dema_1d_val > 0 and price > dema_1d_val:
+            regime_1d = 1
+        elif dema_1d_val > 0 and price < dema_1d_val:
+            regime_1d = -1
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -219,7 +305,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.0*ATR)
+            # Stoploss check (1.5*ATR - tighter)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -234,7 +320,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = SIZE_BASE / 2
+                    # Dynamic sizing for TP
+                    current_atr_pct = atr / prev_entry if prev_entry > 0 else 0.02
+                    size_mult = min(2.0, TARGET_ATR_PCT / current_atr_pct) if current_atr_pct > 0 else 1.0
+                    signals[i] = SIZE_BASE * size_mult
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -266,7 +355,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = -SIZE_BASE / 2
+                    current_atr_pct = atr / prev_entry if prev_entry > 0 else 0.02
+                    size_mult = min(2.0, TARGET_ATR_PCT / current_atr_pct) if current_atr_pct > 0 else 1.0
+                    signals[i] = -SIZE_BASE * size_mult
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -293,28 +384,37 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ========== ENTRY LOGIC - KAMA TREND + RSI PULLBACK ==========
-        # LONG: 4h KAMA up + 30m KAMA up + RSI pullback to 40-60 zone
+        # ========== ENTRY LOGIC - BOLLINGER MEAN REVERSION IN TREND ==========
+        # Dynamic position sizing based on current ATR
+        current_atr_pct = atr / price if price > 0 else 0.02
+        size_mult = min(2.0, TARGET_ATR_PCT / current_atr_pct) if current_atr_pct > 0 else 1.0
+        
+        # LONG: 4h trend up + 1d regime up + Price near BB lower + RSI not oversold + DEMA fast > slow
         long_condition = (
-            trend_4h_up and
-            trend_30m_up and
-            rsi_val >= RSI_LONG_MIN and rsi_val <= RSI_LONG_MAX
+            trend_4h == 1 and
+            regime_1d >= 0 and
+            bb_position <= BB_LONG_THRESHOLD and
+            rsi_val >= RSI_LONG_MIN and rsi_val <= RSI_LONG_MAX and
+            dema_fast > dema_slow and
+            st_trend_val == 1
         )
         
-        # SHORT: 4h KAMA down + 30m KAMA down + RSI pullback to 40-60 zone
+        # SHORT: 4h trend down + 1d regime down + Price near BB upper + RSI not overbought + DEMA fast < slow
         short_condition = (
-            trend_4h_down and
-            trend_30m_down and
-            rsi_val >= RSI_SHORT_MIN and rsi_val <= RSI_SHORT_MAX
+            trend_4h == -1 and
+            regime_1d <= 0 and
+            bb_position >= (1 - BB_SHORT_THRESHOLD) and
+            rsi_val >= RSI_SHORT_MIN and rsi_val <= RSI_SHORT_MAX and
+            dema_fast < dema_slow and
+            st_trend_val == -1
         )
         
-        # Determine position size based on conviction
-        # High conviction: RSI near 50 (neutral pullback, not extended)
-        high_conviction_long = long_condition and rsi_val >= 45 and rsi_val <= 55
-        high_conviction_short = short_condition and rsi_val >= 45 and rsi_val <= 55
+        # High conviction: 1d regime aligns with 4h trend
+        high_conviction_long = long_condition and regime_1d == 1
+        high_conviction_short = short_condition and regime_1d == -1
         
         if long_condition:
-            size = SIZE_HIGH if high_conviction_long else SIZE_BASE
+            size = min(SIZE_HIGH * size_mult, 0.40) if high_conviction_long else min(SIZE_BASE * size_mult, 0.30)
             signals[i] = size
             position_side[i] = 1
             entry_price[i] = price
@@ -323,7 +423,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = price
         
         elif short_condition:
-            size = SIZE_HIGH if high_conviction_short else SIZE_BASE
+            size = min(SIZE_HIGH * size_mult, 0.40) if high_conviction_short else min(SIZE_BASE * size_mult, 0.30)
             signals[i] = -size
             position_side[i] = -1
             entry_price[i] = price
