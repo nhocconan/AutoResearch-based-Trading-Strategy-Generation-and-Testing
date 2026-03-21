@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #090 - Regime Adaptive Ensemble with Signal Voting (1h + 4h)
+EXPERIMENT #091 - Confidence-Weighted Ensemble with ADX Trend Strength (1h + 4h)
 ==================================================================================================
-Hypothesis: Combine 3 independent signal generators with majority voting, adapt position size
-by regime (BBW percentile). Low vol = trend follow (larger size), High vol = mean revert (smaller).
+Hypothesis: Enhance ensemble voting by adding MACD as 4th signal, use ADX to filter weak trends,
+and scale position size by signal confidence (more agreement = larger position). Add Z-score
+filter to avoid entering at extreme extensions.
 
-Key changes from current best:
-- 3-signal ensemble voting (Supertrend, HMA, KAMA) - need 2/3 agreement
-- Regime detection via BBW 100-bar percentile
-- Adaptive position sizing: 0.35 in low vol, 0.20 in high vol
-- 1h entries with 4h trend filter (cleaner than 15m+1h)
-- Proper state tracking without read-only array issues
-- Discrete signal levels to minimize churn costs
+Key improvements over #090:
+- 4-signal ensemble (Supertrend, HMA, KAMA, MACD) instead of 3
+- ADX(14) > 25 filter to ensure strong trend before entering
+- Z-score(20) filter: don't enter if |z| > 2.0 (overextended)
+- Confidence-based sizing: 4/4 agree=0.35, 3/4=0.25, 2/4=0.15
+- 1h entries with 4h trend filter + ADX confirmation
+- Proper state tracking using lists (no read-only array issues)
 
 Why this should work:
-- Ensemble reduces false signals (need agreement)
-- Regime adaptation matches position size to market conditions
-- Based on kept strategies #082, #085, #087 which used ensemble approaches
-- Conservative sizing controls drawdown
+- MACD adds momentum confirmation missing from pure trend indicators
+- ADX filters choppy markets where ensemble gives false signals
+- Z-score prevents buying tops/selling bottoms
+- Confidence sizing maximizes returns when signals strongly agree
+- Based on successful #090 but with additional filters for quality
 """
 
 import numpy as np
 import pandas as pd
 
-name = "regime_ensemble_voting_adaptive_1h_4h_v1"
+name = "confidence_ensemble_adx_zscore_1h_4h_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -105,36 +107,134 @@ def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
     return kama
 
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI"""
+def calculate_macd(close, fast=12, slow=26, signal_period=9):
+    """Calculate MACD histogram"""
     n = len(close)
-    if n < period + 1:
+    if n < slow + signal_period:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    ema_fast = np.zeros(n)
+    ema_slow = np.zeros(n)
+    macd_line = np.zeros(n)
+    signal_line = np.zeros(n)
+    histogram = np.zeros(n)
+    
+    # Calculate EMA fast
+    multiplier_fast = 2.0 / (fast + 1)
+    ema_fast[fast - 1] = np.mean(close[:fast])
+    for i in range(fast, n):
+        ema_fast[i] = (close[i] - ema_fast[i - 1]) * multiplier_fast + ema_fast[i - 1]
+    
+    # Calculate EMA slow
+    multiplier_slow = 2.0 / (slow + 1)
+    ema_slow[slow - 1] = np.mean(close[:slow])
+    for i in range(slow, n):
+        ema_slow[i] = (close[i] - ema_slow[i - 1]) * multiplier_slow + ema_slow[i - 1]
+    
+    # MACD line
+    for i in range(slow - 1, n):
+        macd_line[i] = ema_fast[i] - ema_slow[i]
+    
+    # Signal line
+    multiplier_signal = 2.0 / (signal_period + 1)
+    first_signal = slow - 1 + signal_period - 1
+    if first_signal < n:
+        signal_line[first_signal] = np.mean(macd_line[slow - 1:first_signal + 1])
+        for i in range(first_signal + 1, n):
+            signal_line[i] = (macd_line[i] - signal_line[i - 1]) * multiplier_signal + signal_line[i - 1]
+    
+    # Histogram
+    for i in range(n):
+        histogram[i] = macd_line[i] - signal_line[i]
+    
+    return macd_line, signal_line, histogram
+
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    if n < period * 2:
         return np.zeros(n)
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
     
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    
-    avg_gain[period] = np.mean(gain[:period + 1])
-    avg_loss[period] = np.mean(loss[:period + 1])
-    
-    for i in range(period + 1, n):
-        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
-    
-    rs = np.zeros(n)
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rs[i] = 100
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+        
+        if high[i] - high[i - 1] > low[i - 1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i - 1], 0)
         else:
-            rs[i] = avg_gain[i] / avg_loss[i]
+            plus_dm[i] = 0
+        
+        if low[i - 1] - low[i] > high[i] - high[i - 1]:
+            minus_dm[i] = max(low[i - 1] - low[i], 0)
+        else:
+            minus_dm[i] = 0
     
-    rsi = 100 - (100 / (1 + rs))
+    # Smooth with Wilder's method
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    adx = np.zeros(n)
     
-    return rsi
+    # Initial sums
+    sum_tr = np.sum(tr[1:period + 1])
+    sum_plus_dm = np.sum(plus_dm[1:period + 1])
+    sum_minus_dm = np.sum(minus_dm[1:period + 1])
+    
+    for i in range(period, n):
+        if i == period:
+            pass
+        else:
+            sum_tr = sum_tr - tr[i] + tr[i]
+            sum_plus_dm = sum_plus_dm - plus_dm[i] + plus_dm[i]
+            sum_minus_dm = sum_minus_dm - minus_dm[i] + minus_dm[i]
+        
+        if sum_tr > 0:
+            plus_di[i] = 100 * sum_plus_dm / sum_tr
+            minus_di[i] = 100 * sum_minus_dm / sum_tr
+        else:
+            plus_di[i] = 0
+            minus_di[i] = 0
+        
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+        else:
+            dx[i] = 0
+    
+    # ADX = SMA of DX
+    for i in range(period * 2 - 1, n):
+        adx[i] = np.mean(dx[i - period + 1:i + 1])
+    
+    return adx
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score (standardized price)"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    zscore = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        window = close[i - period + 1:i + 1]
+        mean = np.mean(window)
+        std = np.std(window)
+        
+        if std > 0:
+            zscore[i] = (close[i] - mean) / std
+        else:
+            zscore[i] = 0
+    
+    return zscore
 
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
@@ -224,11 +324,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # 1h indicators for entry timing
     atr_1h = calculate_atr(high, low, close, period=14)
-    rsi_1h = calculate_rsi(close, period=14)
     hma_1h = calculate_hma(close, period=21)
     kama_1h = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     supertrend_1h, st_direction_1h = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
     _, _, _, bbw_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    macd_1h, signal_1h, hist_1h = calculate_macd(close, fast=12, slow=26, signal_period=9)
+    adx_1h = calculate_adx(high, low, close, period=14)
+    zscore_1h = calculate_zscore(close, period=20)
     bbw_pct_1h = calculate_bbw_percentile(bbw_1h, lookback=100)
     
     # Resample to 4h for trend filters (4 x 1h = 4h)
@@ -251,13 +353,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     hma_4h = calculate_hma(c_4h, period=21)
     kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
     supertrend_4h, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
+    macd_4h, signal_4h, hist_4h = calculate_macd(c_4h, fast=12, slow=26, signal_period=9)
+    adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
     _, _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
+    bbw_pct_4h = calculate_bbw_percentile(bbw_4h, lookback=100)
     
     # Map 4h indicators back to 1h timeframe
     trend_4h_hma = np.zeros(n)
     trend_4h_kama = np.zeros(n)
     trend_4h_st = np.zeros(n)
-    bbw_pct_4h = np.zeros(n)
+    trend_4h_macd = np.zeros(n)
+    adx_4h_mapped = np.zeros(n)
     
     for i in range(n):
         idx_4h = i // bars_per_4h
@@ -274,16 +380,18 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             
             trend_4h_st[i] = st_direction_4h[idx_4h]
             
-            # 4h BBW percentile for regime
-            if idx_4h >= 100:
-                bbw_window = bbw_4h[idx_4h - 99:idx_4h + 1]
-                rank = np.sum(bbw_window <= bbw_4h[idx_4h])
-                bbw_pct_4h[i] = rank / 100
+            if hist_4h[idx_4h] > 0:
+                trend_4h_macd[i] = 1
+            elif hist_4h[idx_4h] < 0:
+                trend_4h_macd[i] = -1
+            
+            adx_4h_mapped[i] = adx_4h[idx_4h]
     
-    # 1h signal generators (3 independent signals for voting)
+    # 1h signal generators (4 independent signals for voting)
     signal_supertrend = np.zeros(n)
     signal_hma = np.zeros(n)
     signal_kama = np.zeros(n)
+    signal_macd = np.zeros(n)
     
     for i in range(100, n):
         # Supertrend signal (1h)
@@ -300,24 +408,32 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             signal_kama[i] = 1
         elif close[i] < kama_1h[i]:
             signal_kama[i] = -1
+        
+        # MACD signal (1h)
+        if hist_1h[i] > 0:
+            signal_macd[i] = 1
+        elif hist_1h[i] < 0:
+            signal_macd[i] = -1
     
     # Generate signals with ensemble voting
     signals = np.zeros(n)
     
-    # Position sizing - DISCRETE levels based on regime
-    SIZE_LOW_VOL = 0.35  # BBW percentile < 50 (trending)
-    SIZE_HIGH_VOL = 0.20  # BBW percentile >= 50 (choppy)
-    SIZE_HALF_LOW = 0.175
-    SIZE_HALF_HIGH = 0.10
-    
-    # RSI thresholds for pullback entries
-    RSI_LONG_MIN = 40
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 60
+    # Position sizing - DISCRETE levels based on confidence
+    SIZE_4OF4 = 0.35  # All 4 signals agree
+    SIZE_3OF4 = 0.25  # 3 of 4 signals agree
+    SIZE_2OF4 = 0.15  # 2 of 4 signals agree (minimum)
+    SIZE_HALF_4OF4 = 0.175
+    SIZE_HALF_3OF4 = 0.125
+    SIZE_HALF_2OF4 = 0.075
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.0
+    
+    # ADX threshold for strong trend
+    ADX_MIN = 25.0
+    
+    # Z-score threshold (don't enter if overextended)
+    ZSCORE_MAX = 2.0
     
     first_valid = max(200, 40 * bars_per_4h, 100)
     
@@ -329,23 +445,49 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = [0.0] * n
     
     for i in range(first_valid, n):
-        if np.isnan(atr_1h[i]) or np.isnan(rsi_1h[i]) or atr_1h[i] == 0:
+        if np.isnan(atr_1h[i]) or atr_1h[i] == 0:
             signals[i] = 0.0
             continue
         
         # Regime detection (4h BBW percentile)
         regime_low_vol = bbw_pct_4h[i] < 0.50
         
-        # Select position size based on regime
-        size_full = SIZE_LOW_VOL if regime_low_vol else SIZE_HIGH_VOL
-        size_half = SIZE_HALF_LOW if regime_low_vol else SIZE_HALF_HIGH
+        # 4h trend filter - need at least 3/4 indicators to agree
+        trend_votes_long = 0
+        trend_votes_short = 0
         
-        # 4h trend filter - all three must agree
-        trend_4h = trend_4h_hma[i]
-        if trend_4h == 0 or trend_4h != trend_4h_kama[i] or trend_4h != trend_4h_st[i]:
-            signals[i] = 0.0
-            position_side[i] = 0
-            continue
+        if trend_4h_hma[i] == 1:
+            trend_votes_long += 1
+        elif trend_4h_hma[i] == -1:
+            trend_votes_short += 1
+        
+        if trend_4h_kama[i] == 1:
+            trend_votes_long += 1
+        elif trend_4h_kama[i] == -1:
+            trend_votes_short += 1
+        
+        if trend_4h_st[i] == 1:
+            trend_votes_long += 1
+        elif trend_4h_st[i] == -1:
+            trend_votes_short += 1
+        
+        if trend_4h_macd[i] == 1:
+            trend_votes_long += 1
+        elif trend_4h_macd[i] == -1:
+            trend_votes_short += 1
+        
+        # Determine 4h trend direction
+        trend_4h = 0
+        if trend_votes_long >= 3:
+            trend_4h = 1
+        elif trend_votes_short >= 3:
+            trend_4h = -1
+        
+        # ADX filter - only trade if trend is strong enough
+        adx_strong = adx_4h_mapped[i] > ADX_MIN
+        
+        # Z-score filter - don't enter if overextended
+        zscore_ok = abs(zscore_1h[i]) < ZSCORE_MAX
         
         # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
@@ -381,7 +523,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr_1h[i]
                 if not prev_tp and close[i] >= tp_price:
-                    signals[i] = size_half
+                    # Determine half size based on original confidence
+                    if abs(signals[i - 1]) >= SIZE_4OF4 - 0.01:
+                        signals[i] = SIZE_HALF_4OF4
+                    elif abs(signals[i - 1]) >= SIZE_3OF4 - 0.01:
+                        signals[i] = SIZE_HALF_3OF4
+                    else:
+                        signals[i] = SIZE_HALF_2OF4
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
@@ -413,7 +561,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr_1h[i]
                 if not prev_tp and close[i] <= tp_price:
-                    signals[i] = -size_half
+                    # Determine half size based on original confidence
+                    if abs(signals[i - 1]) >= SIZE_4OF4 - 0.01:
+                        signals[i] = -SIZE_HALF_4OF4
+                    elif abs(signals[i - 1]) >= SIZE_3OF4 - 0.01:
+                        signals[i] = -SIZE_HALF_3OF4
+                    else:
+                        signals[i] = -SIZE_HALF_2OF4
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
@@ -440,43 +594,58 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Ensemble voting: need 2/3 signals to agree with 4h trend
-        vote_long = 0
-        vote_short = 0
+        # 1h ensemble voting: count agreement with 4h trend
+        vote_count = 0
         
-        if signal_supertrend[i] == 1:
-            vote_long += 1
-        elif signal_supertrend[i] == -1:
-            vote_short += 1
+        if trend_4h == 1:
+            if signal_supertrend[i] == 1:
+                vote_count += 1
+            if signal_hma[i] == 1:
+                vote_count += 1
+            if signal_kama[i] == 1:
+                vote_count += 1
+            if signal_macd[i] == 1:
+                vote_count += 1
+        elif trend_4h == -1:
+            if signal_supertrend[i] == -1:
+                vote_count += 1
+            if signal_hma[i] == -1:
+                vote_count += 1
+            if signal_kama[i] == -1:
+                vote_count += 1
+            if signal_macd[i] == -1:
+                vote_count += 1
         
-        if signal_hma[i] == 1:
-            vote_long += 1
-        elif signal_hma[i] == -1:
-            vote_short += 1
-        
-        if signal_kama[i] == 1:
-            vote_long += 1
-        elif signal_kama[i] == -1:
-            vote_short += 1
-        
-        # Entry logic: 4h trend + 2/3 voting + RSI pullback
-        if trend_4h == 1 and vote_long >= 2:
-            if RSI_LONG_MIN <= rsi_1h[i] <= RSI_LONG_MAX:
-                signals[i] = size_full
-                position_side[i] = 1
-                entry_price[i] = close[i]
-                tp_triggered[i] = 0
-                highest_since_entry[i] = close[i]
-                lowest_since_entry[i] = close[i]
+        # Entry logic: 4h trend + ADX strong + Z-score ok + minimum 2/4 voting
+        if trend_4h == 1 and adx_strong and zscore_ok and vote_count >= 2:
+            # Determine position size by confidence
+            if vote_count == 4:
+                signals[i] = SIZE_4OF4
+            elif vote_count == 3:
+                signals[i] = SIZE_3OF4
+            else:
+                signals[i] = SIZE_2OF4
+            
+            position_side[i] = 1
+            entry_price[i] = close[i]
+            tp_triggered[i] = 0
+            highest_since_entry[i] = close[i]
+            lowest_since_entry[i] = close[i]
                 
-        elif trend_4h == -1 and vote_short >= 2:
-            if RSI_SHORT_MIN <= rsi_1h[i] <= RSI_SHORT_MAX:
-                signals[i] = -size_full
-                position_side[i] = -1
-                entry_price[i] = close[i]
-                tp_triggered[i] = 0
-                highest_since_entry[i] = close[i]
-                lowest_since_entry[i] = close[i]
+        elif trend_4h == -1 and adx_strong and zscore_ok and vote_count >= 2:
+            # Determine position size by confidence
+            if vote_count == 4:
+                signals[i] = -SIZE_4OF4
+            elif vote_count == 3:
+                signals[i] = -SIZE_3OF4
+            else:
+                signals[i] = -SIZE_2OF4
+            
+            position_side[i] = -1
+            entry_price[i] = close[i]
+            tp_triggered[i] = 0
+            highest_since_entry[i] = close[i]
+            lowest_since_entry[i] = close[i]
         
         else:
             signals[i] = 0.0
