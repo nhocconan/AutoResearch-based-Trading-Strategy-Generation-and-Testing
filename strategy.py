@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #316: 4h Supertrend + Daily HMA Bias + RSI Pullback + ATR Stops
-Hypothesis: 4h Supertrend captures medium-term trends while Daily HMA provides
-macro bias to filter counter-trend trades. RSI pullback entries (not breakouts)
+Experiment #317: 12h KAMA/HMA Trend + Daily HMA Bias + RSI Pullback + ATR Stops
+Hypothesis: 12h timeframe captures medium-term trends with less noise than 4h/1h.
+KAMA adapts to volatility (fast in trends, slow in ranges). HMA provides faster
+trend confirmation. Daily HMA gives macro bias. RSI pullback entries (not breakouts)
 reduce false signals and improve win rate. ATR trailing stops protect capital.
-4h timeframe balances signal quality vs trade frequency - fewer trades than 1h
-but more responsive than 12h/1d. Target: Beat Sharpe=0.499 with cleaner entries.
-Timeframe: 4h (required for this experiment), HTF: 1d for trend bias.
+Timeframe: 12h (required for this experiment), HTF: 1d for trend bias.
+Target: Beat Sharpe=0.499 with cleaner entries and better risk/reward.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_supertrend_daily_hma_rsi_pullback_atr_v3"
-timeframe = "4h"
+name = "mtf_12h_kama_hma_daily_bias_rsi_pullback_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -26,53 +26,39 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator."""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA).
+    Adapts smoothing based on market efficiency (trend vs noise).
+    ER = 10, Fast SC = 2/(2+1), Slow SC = 2/(30+1)
+    """
     n = len(close)
-    final_upper = np.zeros(n)
-    final_lower = np.zeros(n)
-    supertrend = np.zeros(n)
-    trend = np.ones(n)  # 1 = bullish, -1 = bearish
+    close = np.asarray(close, dtype=float)
     
-    final_upper[0] = upper_band[0]
-    final_lower[0] = lower_band[0]
-    supertrend[0] = lower_band[0]
+    # Efficiency Ratio
+    change = np.abs(close - np.roll(close, er_period))
+    change[:er_period] = np.nan
+    volatility = np.zeros(n)
+    for i in range(er_period, n):
+        volatility[i] = np.sum(np.abs(close[i-er_period+1:i+1] - np.roll(close[i-er_period+1:i+1], 1)[1:]))
     
+    er = np.zeros(n)
+    mask = volatility > 0
+    er[mask] = change[mask] / volatility[mask]
+    er[:er_period] = 0.0
+    
+    # Smoothing Constant
+    fast_sc = 2.0 / (fast_period + 1.0)
+    slow_sc = 2.0 / (slow_period + 1.0)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
     for i in range(1, n):
-        # Calculate final upper/lower bands
-        if upper_band[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]:
-            final_upper[i] = upper_band[i]
-        else:
-            final_upper[i] = final_upper[i-1]
-        
-        if lower_band[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]:
-            final_lower[i] = lower_band[i]
-        else:
-            final_lower[i] = final_lower[i-1]
-        
-        # Determine trend and supertrend value
-        if trend[i-1] == 1:
-            if close[i] < final_lower[i]:
-                trend[i] = -1
-                supertrend[i] = final_upper[i]
-            else:
-                trend[i] = 1
-                supertrend[i] = final_lower[i]
-        else:
-            if close[i] > final_upper[i]:
-                trend[i] = 1
-                supertrend[i] = final_lower[i]
-            else:
-                trend[i] = -1
-                supertrend[i] = final_upper[i]
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    return supertrend, trend
+    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -96,9 +82,36 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_sma(close, period=200):
-    """Calculate Simple Moving Average."""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX for trend strength."""
+    n = len(close)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx, plus_di, minus_di
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -115,19 +128,12 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
-    sma_200 = calculate_sma(close, 200)
-    
-    # Track previous values
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    prev_rsi = np.roll(rsi, 1)
-    prev_rsi[0] = rsi[0]
-    prev_st_trend = np.roll(st_trend, 1)
-    prev_st_trend[0] = st_trend[0]
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    hma = calculate_hma(close, 21)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -141,9 +147,9 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(250, n):  # Start after SMA200 is ready
+    for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(supertrend[i]) or np.isnan(atr[i]) or np.isnan(rsi[i]):
+        if np.isnan(kama[i]) or np.isnan(hma[i]) or np.isnan(atr[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
@@ -151,56 +157,56 @@ def generate_signals(prices):
         daily_bullish = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
         daily_bearish = not np.isnan(hma_1d_aligned[i]) and close[i] < hma_1d_aligned[i]
         
-        # Long-term trend filter
-        above_sma200 = not np.isnan(sma_200[i]) and close[i] > sma_200[i]
-        below_sma200 = not np.isnan(sma_200[i]) and close[i] < sma_200[i]
+        # 12h trend direction (KAMA vs HMA crossover)
+        kama_above_hma = kama[i] > hma[i]
+        kama_below_hma = kama[i] < hma[i]
         
-        # Supertrend signals
-        st_bullish = st_trend[i] == 1
-        st_bearish = st_trend[i] == -1
+        # KAMA slope (trend momentum)
+        kama_slope = kama[i] - kama[i-5] if i >= 5 else 0.0
+        kama_rising = kama_slope > 0
+        kama_falling = kama_slope < 0
         
-        # Supertrend flip (entry signal)
-        st_flip_long = st_bullish and prev_st_trend[i] == -1
-        st_flip_short = st_bearish and prev_st_trend[i] == 1
-        
-        # RSI pullback zones (enter on dips in trend, not breakouts)
-        rsi_pullback_long = 35 < rsi[i] < 55  # Dip in uptrend
-        rsi_pullback_short = 45 < rsi[i] < 65  # Rally in downtrend
+        # RSI pullback zones (not extremes - entry on pullback in trend)
+        rsi_pullback_long = 35 < rsi[i] < 50  # Pullback in uptrend
+        rsi_pullback_short = 50 < rsi[i] < 65  # Pullback in downtrend
         rsi_momentum_long = rsi[i] > 50
         rsi_momentum_short = rsi[i] < 50
         
-        # Price above/below supertrend
-        above_st = close[i] > supertrend[i]
-        below_st = close[i] < supertrend[i]
+        # ADX trend strength filter
+        trending = adx[i] > 20  # Minimum trend strength
+        
+        # DI crossover confirmation
+        di_bullish = plus_di[i] > minus_di[i]
+        di_bearish = plus_di[i] < minus_di[i]
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Primary: Daily bullish + Supertrend flip + RSI pullback
-        if daily_bullish and st_flip_long and rsi_pullback_long:
+        # Primary: Daily bullish + KAMA>HMA + RSI pullback + ADX trending
+        if daily_bullish and kama_above_hma and rsi_pullback_long and trending:
             new_signal = SIZE_ENTRY
-        # Secondary: Daily bullish + Supertrend bullish + RSI momentum + Above SMA200
-        elif daily_bullish and st_bullish and rsi_momentum_long and above_sma200:
+        # Secondary: Daily bullish + KAMA rising + DI bullish + RSI > 45
+        elif daily_bullish and kama_rising and di_bullish and rsi[i] > 45:
             new_signal = SIZE_ENTRY
-        # Tertiary: Supertrend flip + Above SMA200 + RSI 40-60 (momentum)
-        elif st_flip_long and above_sma200 and 40 < rsi[i] < 60:
+        # Tertiary: KAMA>HMA + KAMA rising + RSI 40-55 + ADX > 15
+        elif kama_above_hma and kama_rising and 40 < rsi[i] < 55 and adx[i] > 15:
             new_signal = SIZE_ENTRY
-        # Quaternary: Above supertrend + Daily bullish + RSI > 45 (simple trend)
-        elif above_st and daily_bullish and rsi[i] > 45:
+        # Quaternary: DI bullish + RSI > 50 + KAMA rising (momentum continuation)
+        elif di_bullish and rsi_momentum_long and kama_rising and trending:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Primary: Daily bearish + Supertrend flip + RSI pullback
-        if daily_bearish and st_flip_short and rsi_pullback_short:
+        # Primary: Daily bearish + KAMA<HMA + RSI pullback + ADX trending
+        if daily_bearish and kama_below_hma and rsi_pullback_short and trending:
             new_signal = -SIZE_ENTRY
-        # Secondary: Daily bearish + Supertrend bearish + RSI momentum + Below SMA200
-        elif daily_bearish and st_bearish and rsi_momentum_short and below_sma200:
+        # Secondary: Daily bearish + KAMA falling + DI bearish + RSI < 55
+        elif daily_bearish and kama_falling and di_bearish and rsi[i] < 55:
             new_signal = -SIZE_ENTRY
-        # Tertiary: Supertrend flip + Below SMA200 + RSI 40-60 (momentum)
-        elif st_flip_short and below_sma200 and 40 < rsi[i] < 60:
+        # Tertiary: KAMA<HMA + KAMA falling + RSI 45-60 + ADX > 15
+        elif kama_below_hma and kama_falling and 45 < rsi[i] < 60 and adx[i] > 15:
             new_signal = -SIZE_ENTRY
-        # Quaternary: Below supertrend + Daily bearish + RSI < 55 (simple trend)
-        elif below_st and daily_bearish and rsi[i] < 55:
+        # Quaternary: DI bearish + RSI < 50 + KAMA falling (momentum continuation)
+        elif di_bearish and rsi_momentum_short and kama_falling and trending:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
