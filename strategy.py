@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #259: 15m Supertrend + 4h HMA Trend + Volume Momentum
-Hypothesis: 15m Supertrend provides clean entry signals while 4h HMA filters 
-the macro trend direction. Volume momentum (taker buy ratio) confirms conviction.
-RSI is used as soft confirmation only (not hard filter) to ensure sufficient trades.
-This differs from failed RSI pullback strategies by making Supertrend the primary 
-trigger, not RSI. Position sizing: 0.25 entry, stoploss at 2.5*ATR trailing.
-Target: Beat Sharpe=0.499 with more consistent 15m momentum captures.
+Experiment #260: 30m Donchian Breakout with 4h HMA Trend Filter
+Hypothesis: Simple Donchian channel breakouts on 30m with 4h HMA trend filter
+can capture momentum moves while avoiding whipsaws. Fewer filters = more trades.
+Key insight from 259 failed experiments: TOO MANY CONDITIONS = 0 TRADES.
+This strategy uses MINIMAL filters: just trend direction + breakout + volume confirmation.
+Position sizing: 0.25 entry, 0.125 half at 2R. Stoploss: 2.5*ATR trailing.
+Target: Generate 50+ trades per symbol, Sharpe > 0.5, DD < -30%.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_supertrend_4h_hma_volume_momentum_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_donchian_breakout_4h_hma_volume_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -36,71 +36,24 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_supertrend(high, low, close, atr, multiplier=3.0):
-    """Calculate Supertrend indicator (trend following)."""
-    n = len(close)
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
-    supertrend = np.zeros(n)
-    trend = np.ones(n)  # 1 = bullish, -1 = bearish
-    
-    for i in range(n):
-        if i == 0:
-            upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
-            lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
-            supertrend[i] = upper_band[i]
-            continue
-        
-        # Calculate basic bands
-        prev_upper = upper_band[i-1]
-        prev_lower = lower_band[i-1]
-        hl_mid = (high[i] + low[i]) / 2
-        
-        # Upper band: only moves up
-        upper_band[i] = max(hl_mid + multiplier * atr[i], prev_upper) if close[i-1] > prev_upper else hl_mid + multiplier * atr[i]
-        
-        # Lower band: only moves down
-        lower_band[i] = min(hl_mid - multiplier * atr[i], prev_lower) if close[i-1] < prev_lower else hl_mid - multiplier * atr[i]
-        
-        # Determine trend and supertrend value
-        if close[i] > prev_upper:
-            trend[i] = 1
-            supertrend[i] = lower_band[i]
-        elif close[i] < prev_lower:
-            trend[i] = -1
-            supertrend[i] = upper_band[i]
-        else:
-            trend[i] = trend[i-1]
-            supertrend[i] = lower_band[i] if trend[i] == 1 else upper_band[i]
-    
-    return supertrend, trend
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI indicator."""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
-    rsi = 100 - 100 / (1 + rs)
-    rsi = np.clip(rsi, 0, 100)
-    return rsi
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (upper/lower bounds)."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2
+    return upper, lower, mid
 
 def calculate_volume_ratio(taker_buy_volume, volume):
     """Calculate taker buy volume ratio (0-1, >0.5 = bullish)."""
     ratio = np.where(volume > 0, taker_buy_volume / volume, 0.5)
     return ratio
 
-def calculate_momentum(close, period=10):
-    """Calculate price momentum (ROC-like)."""
-    mom = np.zeros(len(close))
+def calculate_roc(close, period=10):
+    """Calculate Rate of Change for momentum confirmation."""
+    roc = np.zeros(len(close))
     for i in range(period, len(close)):
-        if close[i-period] > 0:
-            mom[i] = (close[i] - close[i-period]) / close[i-period] * 100
-        else:
-            mom[i] = 0.0
-    return mom
+        roc[i] = (close[i] - close[i - period]) / close[i - period] * 100
+    return roc
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -119,18 +72,19 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, 20)
     vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
-    momentum = calculate_momentum(close, 10)
+    roc = calculate_roc(close, 10)
     
-    # Calculate Supertrend
-    supertrend, st_trend = calculate_supertrend(high, low, close, atr, 3.0)
-    
-    # Track previous values for signal changes
-    prev_st_trend = np.roll(st_trend, 1)
-    prev_st_trend[0] = st_trend[0]
+    # Track previous values for breakout detection
+    prev_donchian_upper = np.roll(donchian_upper, 1)
+    prev_donchian_lower = np.roll(donchian_lower, 1)
+    prev_donchian_upper[0] = donchian_upper[0]
+    prev_donchian_lower[0] = donchian_lower[0]
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -145,71 +99,55 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filter (4h HMA)
-        hma_4h_bullish = close[i] > hma_4h_aligned[i]
-        hma_4h_bearish = close[i] < hma_4h_aligned[i]
+        # HTF trend filter (4h HMA - simple and effective)
+        trend_bullish = close[i] > hma_4h_aligned[i]
+        trend_bearish = close[i] < hma_4h_aligned[i]
         
-        # Supertrend signals (primary trigger)
-        st_bullish = st_trend[i] == 1
-        st_bearish = st_trend[i] == -1
-        st_cross_up = prev_st_trend[i] == -1 and st_trend[i] == 1
-        st_cross_down = prev_st_trend[i] == 1 and st_trend[i] == -1
+        # Donchian breakout detection
+        breakout_long = close[i] > prev_donchian_upper[i]
+        breakout_short = close[i] < prev_donchian_lower[i]
         
-        # RSI soft confirmation (not hard filter)
-        rsi_bullish = rsi[i] > 45
-        rsi_bearish = rsi[i] < 55
-        rsi_not_extreme = 25 < rsi[i] < 75
+        # Volume confirmation (loose threshold to ensure trades)
+        vol_bullish = vol_ratio[i] > 0.48
+        vol_bearish = vol_ratio[i] < 0.52
         
-        # Volume confirmation
-        vol_bullish = vol_ratio[i] > 0.50
-        vol_bearish = vol_ratio[i] < 0.50
-        vol_strong = vol_ratio[i] > 0.55 or vol_ratio[i] < 0.45
+        # Momentum confirmation (loose threshold)
+        mom_bullish = roc[i] > -2.0
+        mom_bearish = roc[i] < 2.0
         
-        # Momentum confirmation
-        mom_positive = momentum[i] > 0.5
-        mom_negative = momentum[i] < -0.5
+        # Price position in channel
+        above_mid = close[i] > donchian_mid[i]
+        below_mid = close[i] < donchian_mid[i]
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Supertrend cross up with HTF trend (primary signal)
-        if st_cross_up:
-            if hma_4h_bullish:
+        # Breakout long with trend confirmation (MINIMAL filters)
+        if breakout_long:
+            if trend_bullish:
                 new_signal = SIZE_ENTRY
-            elif rsi_bullish and vol_bullish:
+            elif above_mid and vol_bullish:
                 new_signal = SIZE_ENTRY
         
-        # Supertrend already bullish + pullback entry
-        elif st_bullish and hma_4h_bullish:
-            # Price near supertrend support
-            if close[i] < supertrend[i] * 1.02 and close[i] > supertrend[i]:
-                if rsi_not_extreme or vol_bullish:
+        # Continuation long in uptrend
+        elif trend_bullish and above_mid:
+            if vol_bullish and mom_bullish:
+                if close[i] > prev_close[i] * 1.002:  # price moving up
                     new_signal = SIZE_ENTRY
         
-        # Momentum breakout with trend
-        elif mom_positive and hma_4h_bullish:
-            if st_bullish and vol_strong:
-                new_signal = SIZE_ENTRY
-        
         # === SHORT ENTRY ===
-        # Supertrend cross down with HTF trend (primary signal)
-        if st_cross_down:
-            if hma_4h_bearish:
+        # Breakout short with trend confirmation (MINIMAL filters)
+        if breakout_short:
+            if trend_bearish:
                 new_signal = -SIZE_ENTRY
-            elif rsi_bearish and vol_bearish:
+            elif below_mid and vol_bearish:
                 new_signal = -SIZE_ENTRY
         
-        # Supertrend already bearish + pullback entry
-        elif st_bearish and hma_4h_bearish:
-            # Price near supertrend resistance
-            if close[i] > supertrend[i] * 0.98 and close[i] < supertrend[i]:
-                if rsi_not_extreme or vol_bearish:
+        # Continuation short in downtrend
+        elif trend_bearish and below_mid:
+            if vol_bearish and mom_bearish:
+                if close[i] < prev_close[i] * 0.998:  # price moving down
                     new_signal = -SIZE_ENTRY
-        
-        # Momentum breakdown with trend
-        elif mom_negative and hma_4h_bearish:
-            if st_bearish and vol_strong:
-                new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
