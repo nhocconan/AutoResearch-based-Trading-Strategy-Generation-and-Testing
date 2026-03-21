@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #440: 30m Donchian Breakout + 4h HMA Trend Bias + ADX/RSI Filters + ATR Stop
-Hypothesis: Donchian channel breakouts (Turtle Trading) on 30m timeframe capture medium-term
-trends while 4h HMA provides higher timeframe bias to filter false breakouts. 30m offers more
-trade opportunities than 1d/12h while maintaining trend-following edge. ADX > 20 ensures we
-only trade when trend strength is present. RSI filter avoids entering at extremes. Multiple
-entry paths ensure >=10 trades per symbol. ATR-based trailing stop (2.5*ATR) controls drawdown.
-Position size: 0.25 discrete (conservative for 30m volatility), stoploss 2.5*ATR.
-Timeframe: 30m (REQUIRED), HTF: 4h for trend bias via mtf_data helper.
+Experiment #441: 1h Regime-Adaptive Strategy with 4h HMA Bias
+Hypothesis: Different market regimes require different approaches. 
+- Trending regimes (CHOP < 38.2): Follow 4h HMA trend with 1h momentum
+- Ranging regimes (CHOP > 61.8): Mean revert with RSI extremes + Bollinger
+- Transition regimes: Stay flat or reduce position size
+This adapts to market conditions instead of using one rigid approach.
+4h HMA provides higher timeframe bias (proven in successful strategies).
+Position size: 0.25 discrete, stoploss 2.5*ATR, ensure >=10 trades per symbol.
+Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_donchian_4h_hma_adx_rsi_breakout_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_regime_adaptive_4h_hma_chop_rsi_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -49,30 +50,50 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_donchian(high, low, period=20):
+def calculate_choppiness(high, low, close, period=14):
     """
-    Calculate Donchian Channel (Turtle Trading breakout system).
-    Upper = highest high over N periods
-    Lower = lowest low over N periods
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = ranging market (mean reversion)
+    CHOP < 38.2 = trending market (trend following)
     """
-    n = len(high)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    n = len(close)
+    chop = np.zeros(n)
+    chop[:] = np.nan
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
+    for i in range(period, n):
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        atr_sum = 0.0
+        for j in range(i-period+1, i+1):
+            tr1 = high[j] - low[j]
+            tr2 = abs(high[j] - close[j-1]) if j > 0 else tr1
+            tr3 = abs(low[j] - close[j-1]) if j > 0 else tr1
+            atr_sum += max(tr1, tr2, tr3)
+        
+        if atr_sum > 0 and (highest_high - lowest_low) > 0:
+            chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+        else:
+            chop[i] = 50.0
     
-    return upper, lower
+    return chop
 
-def calculate_sma(close, period=50):
-    """Calculate Simple Moving Average."""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return upper, lower, sma
+
+def calculate_ema(close, period=21):
+    """Calculate Exponential Moving Average."""
+    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
 def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index)."""
     n = len(close)
-    adx = np.full(n, np.nan)
+    adx = np.zeros(n)
+    adx[:] = np.nan
     
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
@@ -97,33 +118,19 @@ def calculate_adx(high, low, close, period=14):
     
     return adx, plus_di, minus_di
 
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average (KAMA)."""
-    n = len(close)
-    kama = np.full(n, np.nan)
-    
-    if n < period:
-        return kama
-    
-    er = np.zeros(n)
-    for i in range(1, n):
-        change = np.abs(close[i] - close[i-period+1]) if i >= period - 1 else np.abs(close[i] - close[0])
-        volatility = np.sum(np.abs(np.diff(close[max(0, i-period+1):i+1])))
-        er[i] = change / (volatility + 1e-10) if volatility > 0 else 0
-    
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    
-    kama[period-1] = close[period-1]
-    for i in range(period, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD indicator."""
+    ema_fast = pd.Series(close).ewm(span=fast, min_periods=fast, adjust=False).mean().values
+    ema_slow = pd.Series(close).ewm(span=slow, min_periods=slow, adjust=False).mean().values
+    macd_line = ema_fast - ema_slow
+    signal_line = pd.Series(macd_line).ewm(span=signal, min_periods=signal, adjust=False).mean().values
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -135,16 +142,15 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    sma50 = calculate_sma(close, 50)
+    chop = calculate_choppiness(high, low, close, 14)
+    bb_upper, bb_lower, bb_sma = calculate_bollinger(close, 20, 2.0)
+    ema21 = calculate_ema(close, 21)
+    ema50 = calculate_ema(close, 50)
     adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
-    kama = calculate_kama(close, 10)
-    
-    # Volume MA for confirmation
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -160,104 +166,110 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or atr[i] == 0:
+        if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(sma50[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(ema21[i]) or np.isnan(ema50[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(chop[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(kama[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(macd_hist[i]):
             signals[i] = 0.0
             continue
         
-        # 4h trend bias (higher timeframe direction)
-        hma_4h_bullish = close[i] > hma_4h_aligned[i]
-        hma_4h_bearish = close[i] < hma_4h_aligned[i]
+        # === REGIME DETECTION ===
+        in_trend_regime = chop[i] < 45.0  # Trending market
+        in_range_regime = chop[i] > 55.0  # Ranging market
+        # Neutral regime: 45-55, reduce position or stay flat
         
-        # 30m trend filters
-        above_sma50 = close[i] > sma50[i]
-        below_sma50 = close[i] < sma50[i]
-        above_kama = close[i] > kama[i]
-        below_kama = close[i] < kama[i]
+        # === 4H TREND BIAS ===
+        hma_bullish = close[i] > hma_4h_aligned[i]
+        hma_bearish = close[i] < hma_4h_aligned[i]
         
-        # ADX trend strength filter (only trade when ADX > 18)
-        trend_strength = adx[i] > 18
-        adx_rising = adx[i] > adx[i-1] if not np.isnan(adx[i-1]) else False
+        # === 1H TREND FILTERS ===
+        ema_bullish = ema21[i] > ema50[i]
+        ema_bearish = ema21[i] < ema50[i]
+        price_above_ema21 = close[i] > ema21[i]
+        price_below_ema21 = close[i] < ema21[i]
         
-        # RSI filter (avoid extremes, favor momentum zone)
-        rsi_not_overbought = rsi[i] < 72
-        rsi_not_oversold = rsi[i] > 28
-        rsi_momentum_long = rsi[i] > 45 and rsi[i] < 68
-        rsi_momentum_short = rsi[i] > 32 and rsi[i] < 55
-        
-        # Volume confirmation
-        volume_above_avg = volume[i] > vol_sma[i] if not np.isnan(vol_sma[i]) else True
-        
-        # Donchian breakout signals (breakout from previous bar's channel)
-        breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
-        breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
-        
-        # DI crossover signals
+        # === MOMENTUM FILTERS ===
+        macd_bullish = macd_hist[i] > 0 and macd_hist[i] > macd_hist[i-1] if not np.isnan(macd_hist[i-1]) else macd_hist[i] > 0
+        macd_bearish = macd_hist[i] < 0 and macd_hist[i] < macd_hist[i-1] if not np.isnan(macd_hist[i-1]) else macd_hist[i] < 0
+        adx_strong = adx[i] > 20
         di_bullish = plus_di[i] > minus_di[i]
         di_bearish = plus_di[i] < minus_di[i]
         
-        # Channel position
-        near_upper = close[i] > donchian_upper[i] * 0.985 if not np.isnan(donchian_upper[i]) else False
-        near_lower = close[i] < donchian_lower[i] * 1.015 if not np.isnan(donchian_lower[i]) else False
+        # === RSI FILTERS ===
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
+        rsi_neutral_long = rsi[i] > 40 and rsi[i] < 65
+        rsi_neutral_short = rsi[i] > 35 and rsi[i] < 60
+        
+        # === BOLLINGER FILTERS ===
+        near_bb_lower = close[i] < bb_lower[i] * 1.005
+        near_bb_upper = close[i] > bb_upper[i] * 0.995
+        bb_squeeze = (bb_upper[i] - bb_lower[i]) / bb_sma[i] < 0.10
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (multiple paths to ensure >=10 trades) ===
-        # Path 1: Donchian breakout + 4h bullish + ADX trend + RSI not overbought
-        if breakout_long and hma_4h_bullish and trend_strength and rsi_not_overbought:
-            new_signal = SIZE_ENTRY
-        # Path 2: Donchian breakout + Above SMA50 + DI bullish + RSI momentum
-        elif breakout_long and above_sma50 and di_bullish and rsi_momentum_long:
-            new_signal = SIZE_ENTRY
-        # Path 3: Near upper Donchian + 4h bullish + ADX > 22 + Volume
-        elif near_upper and hma_4h_bullish and adx[i] > 22 and volume_above_avg and rsi[i] > 45:
-            new_signal = SIZE_ENTRY
-        # Path 4: Breakout + 4h bullish + Above KAMA + RSI 45-65
-        elif breakout_long and hma_4h_bullish and above_kama and rsi[i] > 45 and rsi[i] < 65:
-            new_signal = SIZE_ENTRY
-        # Path 5: DI bullish + 4h bullish + Above SMA50 + ADX rising
-        elif di_bullish and hma_4h_bullish and above_sma50 and adx_rising and adx[i] > 16:
-            new_signal = SIZE_ENTRY
-        # Path 6: Above KAMA + 4h bullish + ADX > 20 + RSI > 50
-        elif above_kama and hma_4h_bullish and adx[i] > 20 and rsi[i] > 50 and rsi[i] < 70:
-            new_signal = SIZE_ENTRY
-        # Path 7: Breakout + Volume spike + 4h bullish
-        elif breakout_long and volume_above_avg and hma_4h_bullish and rsi[i] > 40:
-            new_signal = SIZE_ENTRY
+        # === TREND REGIME ENTRIES (CHOP < 45) ===
+        if in_trend_regime:
+            # Long: 4h HMA bullish + 1h EMA bullish + MACD positive + ADX strong
+            if hma_bullish and ema_bullish and macd_bullish and adx_strong and rsi_neutral_long:
+                new_signal = SIZE_ENTRY
+            # Long: 4h HMA bullish + Price above EMA21 + DI bullish + RSI > 45
+            elif hma_bullish and price_above_ema21 and di_bullish and rsi[i] > 45 and rsi[i] < 70:
+                new_signal = SIZE_ENTRY
+            # Long: MACD crossover + 4h HMA bullish + ADX rising
+            elif macd_hist[i] > 0 and macd_hist[i-1] <= 0 if not np.isnan(macd_hist[i-1]) else False and hma_bullish and adx[i] > adx[i-1] if not np.isnan(adx[i-1]) else adx[i] > 18:
+                new_signal = SIZE_ENTRY
+            
+            # Short: 4h HMA bearish + 1h EMA bearish + MACD negative + ADX strong
+            if hma_bearish and ema_bearish and macd_bearish and adx_strong and rsi_neutral_short:
+                new_signal = -SIZE_ENTRY
+            # Short: 4h HMA bearish + Price below EMA21 + DI bearish + RSI < 55
+            elif hma_bearish and price_below_ema21 and di_bearish and rsi[i] > 30 and rsi[i] < 55:
+                new_signal = -SIZE_ENTRY
+            # Short: MACD crossover down + 4h HMA bearish + ADX rising
+            elif macd_hist[i] < 0 and macd_hist[i-1] >= 0 if not np.isnan(macd_hist[i-1]) else False and hma_bearish and adx[i] > adx[i-1] if not np.isnan(adx[i-1]) else adx[i] > 18:
+                new_signal = -SIZE_ENTRY
         
-        # === SHORT ENTRIES (multiple paths to ensure >=10 trades) ===
-        # Path 1: Donchian breakout + 4h bearish + ADX trend + RSI not oversold
-        if breakout_short and hma_4h_bearish and trend_strength and rsi_not_oversold:
-            new_signal = -SIZE_ENTRY
-        # Path 2: Donchian breakout + Below SMA50 + DI bearish + RSI momentum
-        elif breakout_short and below_sma50 and di_bearish and rsi_momentum_short:
-            new_signal = -SIZE_ENTRY
-        # Path 3: Near lower Donchian + 4h bearish + ADX > 22 + Volume
-        elif near_lower and hma_4h_bearish and adx[i] > 22 and volume_above_avg and rsi[i] < 55:
-            new_signal = -SIZE_ENTRY
-        # Path 4: Breakout + 4h bearish + Below KAMA + RSI 35-55
-        elif breakout_short and hma_4h_bearish and below_kama and rsi[i] > 35 and rsi[i] < 55:
-            new_signal = -SIZE_ENTRY
-        # Path 5: DI bearish + 4h bearish + Below SMA50 + ADX rising
-        elif di_bearish and hma_4h_bearish and below_sma50 and adx_rising and adx[i] > 16:
-            new_signal = -SIZE_ENTRY
-        # Path 6: Below KAMA + 4h bearish + ADX > 20 + RSI < 50
-        elif below_kama and hma_4h_bearish and adx[i] > 20 and rsi[i] < 50 and rsi[i] > 30:
-            new_signal = -SIZE_ENTRY
-        # Path 7: Breakout + Volume spike + 4h bearish
-        elif breakout_short and volume_above_avg and hma_4h_bearish and rsi[i] < 60:
-            new_signal = -SIZE_ENTRY
+        # === RANGE REGIME ENTRIES (CHOP > 55) ===
+        elif in_range_regime:
+            # Long: RSI oversold + Near BB lower + 4h HMA not strongly bearish
+            if rsi_oversold and near_bb_lower and not (hma_bearish and adx_strong):
+                new_signal = SIZE_ENTRY
+            # Long: RSI < 35 + Price near BB lower + MACD histogram improving
+            elif rsi[i] < 35 and near_bb_lower and macd_hist[i] > macd_hist[i-1] if not np.isnan(macd_hist[i-1]) else True:
+                new_signal = SIZE_ENTRY
+            # Long: Mean reversion from BB lower + RSI 25-40
+            elif near_bb_lower and rsi[i] > 25 and rsi[i] < 40:
+                new_signal = SIZE_ENTRY
+            
+            # Short: RSI overbought + Near BB upper + 4h HMA not strongly bullish
+            if rsi_overbought and near_bb_upper and not (hma_bullish and adx_strong):
+                new_signal = -SIZE_ENTRY
+            # Short: RSI > 65 + Price near BB upper + MACD histogram worsening
+            elif rsi[i] > 65 and near_bb_upper and macd_hist[i] < macd_hist[i-1] if not np.isnan(macd_hist[i-1]) else True:
+                new_signal = -SIZE_ENTRY
+            # Short: Mean reversion from BB upper + RSI 60-75
+            elif near_bb_upper and rsi[i] > 60 and rsi[i] < 75:
+                new_signal = -SIZE_ENTRY
+        
+        # === NEUTRAL REGIME (45 <= CHOP <= 55) ===
+        # Only take high-confidence signals with reduced size
+        else:
+            # Long: Strong confluence (4h HMA + EMA + MACD + RSI)
+            if hma_bullish and ema_bullish and macd_bullish and rsi[i] > 45 and rsi[i] < 60:
+                new_signal = SIZE_HALF
+            # Short: Strong confluence
+            elif hma_bearish and ema_bearish and macd_bearish and rsi[i] > 40 and rsi[i] < 55:
+                new_signal = -SIZE_HALF
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
@@ -265,7 +277,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR from highest for 30m timeframe)
+            # Calculate trailing stop (2.5*ATR for 1h timeframe)
             current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -286,7 +298,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR from lowest for 30m timeframe)
+            # Calculate trailing stop (2.5*ATR for 1h timeframe)
             current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
