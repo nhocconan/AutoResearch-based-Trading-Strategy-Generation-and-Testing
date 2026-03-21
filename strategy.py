@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #005: 12h HMA Trend + Daily Filter + RSI Pullback
-Hypothesis: 12h timeframe captures multi-day swings with less noise than intraday.
-Daily HMA provides major trend regime filter (bull/bear).
-12h HMA crossover gives entry signals with RSI pullback confirmation.
-ATR-based stoploss (2.5x) protects against crashes like 2022.
-Position sizing capped at 0.30 with discrete levels to minimize fee churn.
+Experiment #006: Daily EMA Trend + Weekly Regime + ATR Stop
+Hypothesis: Daily timeframe captures major crypto swings with minimal noise.
+Weekly HTF provides major bull/bear regime filter (avoid counter-trend trades in crashes).
+Daily EMA crossover (12/26) gives entry signals with RSI confirmation.
 Relaxed entry conditions to ensure ≥10 trades/symbol on train data.
+ATR-based stoploss (3x) protects against crashes like 2022.
+Position sizing at 0.35 with discrete levels to minimize fee churn.
+
+Key differences from #005:
+- Primary TF is 1d (not 12h) = fewer but higher quality trades
+- Weekly regime filter (not daily) = better major trend alignment
+- Simpler entry logic = more reliable signals, more trades
+- Wider ATR stop (3x vs 2.5x) for daily timeframe volatility
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_hma_rsi_daily_v1"
-timeframe = "12h"
+name = "daily_ema_weekly_regime_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -26,13 +32,9 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for faster trend response."""
-    close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period//2, min_periods=period//2, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
-    return wma3.values
+def calculate_ema(close, period):
+    """Calculate EMA."""
+    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -46,27 +48,6 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator."""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    upper = hl2 + multiplier * atr
-    lower = hl2 - multiplier * atr
-    
-    supertrend = np.zeros(len(close))
-    direction = np.ones(len(close))  # 1 = bullish, -1 = bearish
-    
-    supertrend[0] = upper[0]
-    for i in range(1, len(close)):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = lower[i]
-            direction[i] = 1
-        else:
-            supertrend[i] = upper[i]
-            direction[i] = -1
-    
-    return supertrend, direction
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -74,102 +55,99 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load daily HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Load weekly HTF data ONCE before loop (Rule 1)
+    df_1w = get_htf_data(prices, '1w')
+    ema_1w = calculate_ema(df_1w['close'].values, 21)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 12h indicators
+    # Calculate daily indicators
     atr = calculate_atr(high, low, close, 14)
-    hma_fast = calculate_hma(close, 16)
-    hma_slow = calculate_hma(close, 48)
+    ema_fast = calculate_ema(close, 12)
+    ema_slow = calculate_ema(close, 26)
     rsi = calculate_rsi(close, 14)
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
     
-    # Volume SMA for confirmation
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_sma = np.nan_to_num(vol_sma, nan=1.0)
+    # Price momentum for confirmation
+    roc_5 = np.zeros(n)
+    roc_5[5:] = (close[5:] - close[:-5]) / close[:-5] * 100
     
     signals = np.zeros(n)
-    SIZE = 0.30
-    HALF_SIZE = 0.15
+    SIZE = 0.35
+    HALF_SIZE = 0.18
     
     # Track positions for stoploss
     entry_price = np.zeros(n)
     position_side = 0
-    trailing_stop = np.zeros(n)
+    max_close = np.zeros(n)
+    min_close = np.zeros(n)
     
-    for i in range(100, n):
-        # Daily trend filter (major regime)
-        daily_bullish = hma_1d_aligned[i] > 0 and close[i] > hma_1d_aligned[i]
-        daily_bearish = hma_1d_aligned[i] > 0 and close[i] < hma_1d_aligned[i]
+    for i in range(50, n):
+        # Weekly trend filter (major regime) - soft filter
+        weekly_bullish = ema_1w_aligned[i] > 0 and close[i] > ema_1w_aligned[i]
+        weekly_bearish = ema_1w_aligned[i] > 0 and close[i] < ema_1w_aligned[i]
         
-        # 12h HMA trend
-        hma_trend_long = hma_fast[i] > hma_slow[i]
-        hma_trend_short = hma_fast[i] < hma_slow[i]
+        # Daily EMA crossover
+        ema_cross_long = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
+        ema_cross_short = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
         
-        # HMA crossover signals
-        hma_cross_long = hma_fast[i] > hma_slow[i] and hma_fast[i-1] <= hma_slow[i-1]
-        hma_cross_short = hma_fast[i] < hma_slow[i] and hma_fast[i-1] >= hma_slow[i-1]
+        # EMA trend
+        ema_trend_long = ema_fast[i] > ema_slow[i]
+        ema_trend_short = ema_fast[i] < ema_slow[i]
         
-        # Supertrend confirmation
-        st_long = st_direction[i] == 1
-        st_short = st_direction[i] == -1
+        # RSI filter (relaxed for more trades)
+        rsi_ok_long = rsi[i] > 25 and rsi[i] < 75
+        rsi_ok_short = rsi[i] > 25 and rsi[i] < 75
         
-        # RSI pullback entries (relaxed for more trades)
-        rsi_pullback_long = rsi[i] > 35 and rsi[i] < 65  # Not extreme
-        rsi_pullback_short = rsi[i] > 35 and rsi[i] < 65  # Same range
-        rsi_rising = rsi[i] > rsi[i-5] if i > 5 else True
-        rsi_falling = rsi[i] < rsi[i-5] if i > 5 else True
-        
-        # Volume confirmation (relaxed)
-        vol_confirm = volume[i] > vol_sma[i] * 0.7 if vol_sma[i] > 0 else True
+        # Momentum confirmation
+        mom_long = roc_5[i] > -5  # Not strongly negative
+        mom_short = roc_5[i] < 5  # Not strongly positive
         
         # Entry logic - relaxed conditions to ensure trades
         new_signal = 0.0
         
-        # Long entry: daily bullish + HMA trend + Supertrend + RSI ok
-        if daily_bullish and hma_trend_long and st_long and rsi_pullback_long:
+        # Long entry: weekly bullish + EMA trend + RSI ok
+        if weekly_bullish and ema_trend_long and rsi_ok_long:
             new_signal = SIZE
-        # Also enter on HMA crossover with daily support
-        elif daily_bullish and hma_cross_long and rsi[i] > 30:
+        # Long on EMA crossover with weekly support
+        elif ema_cross_long and (weekly_bullish or rsi[i] > 40):
             new_signal = SIZE
-        # Long on Supertrend flip with volume
-        elif st_direction[i] == 1 and st_direction[i-1] == -1 and vol_confirm:
+        # Long on RSI oversold bounce with EMA support
+        elif rsi[i] < 35 and ema_trend_long and mom_long:
             new_signal = SIZE
         
-        # Short entry: daily bearish + HMA trend + Supertrend + RSI ok
-        elif daily_bearish and hma_trend_short and st_short and rsi_pullback_short:
+        # Short entry: weekly bearish + EMA trend + RSI ok
+        elif weekly_bearish and ema_trend_short and rsi_ok_short:
             new_signal = -SIZE
-        # Also enter on HMA crossover with daily resistance
-        elif daily_bearish and hma_cross_short and rsi[i] < 70:
+        # Short on EMA crossover with weekly resistance
+        elif ema_cross_short and (weekly_bearish or rsi[i] < 60):
             new_signal = -SIZE
-        # Short on Supertrend flip with volume
-        elif st_direction[i] == -1 and st_direction[i-1] == 1 and vol_confirm:
+        # Short on RSI overbought drop with EMA resistance
+        elif rsi[i] > 65 and ema_trend_short and mom_short:
             new_signal = -SIZE
         
-        # Stoploss logic (Rule 6) - ATR based
+        # Stoploss logic - ATR based (3x for daily timeframe)
         if position_side > 0 and entry_price[i-1] > 0:
-            stop_loss = entry_price[i-1] - 2.5 * atr[i]
+            stop_loss = entry_price[i-1] - 3.0 * atr[i]
             if close[i] < stop_loss:
                 new_signal = 0.0  # Stoploss hit
-            # Trail stop for longs - update trailing stop
+            # Trail stop for longs
             else:
-                trailing_stop[i] = max(trailing_stop[i-1] if i > 0 else 0, close[i] - 2.5 * atr[i])
-                if close[i] < trailing_stop[i] and trailing_stop[i] > 0:
+                max_close[i] = max(max_close[i-1] if i > 0 else 0, close[i])
+                trail_stop = max_close[i] - 3.0 * atr[i]
+                if close[i] < trail_stop and trail_stop > entry_price[i-1]:
                     new_signal = 0.0
                 # Take partial profit at 3R
                 elif close[i] > entry_price[i-1] + 3.0 * atr[i] and new_signal == SIZE:
                     new_signal = HALF_SIZE
         
         if position_side < 0 and entry_price[i-1] > 0:
-            stop_loss = entry_price[i-1] + 2.5 * atr[i]
+            stop_loss = entry_price[i-1] + 3.0 * atr[i]
             if close[i] > stop_loss:
                 new_signal = 0.0  # Stoploss hit
             # Trail stop for shorts
             else:
-                trailing_stop[i] = min(trailing_stop[i-1] if i > 0 else 999999, close[i] + 2.5 * atr[i])
-                if close[i] > trailing_stop[i] and trailing_stop[i] < 999999:
+                min_close[i] = min(min_close[i-1] if i > 0 else 999999, close[i])
+                trail_stop = min_close[i] + 3.0 * atr[i]
+                if close[i] > trail_stop and trail_stop < entry_price[i-1]:
                     new_signal = 0.0
                 # Take partial profit at 3R
                 elif close[i] < entry_price[i-1] - 3.0 * atr[i] and new_signal == -SIZE:
@@ -179,17 +157,21 @@ def generate_signals(prices):
         if new_signal != 0 and position_side == 0:
             entry_price[i] = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop[i] = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            max_close[i] = close[i]
+            min_close[i] = close[i]
         elif new_signal != 0 and position_side != 0:
             if np.sign(new_signal) != position_side:
                 entry_price[i] = close[i]
                 position_side = np.sign(new_signal)
-                trailing_stop[i] = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+                max_close[i] = close[i]
+                min_close[i] = close[i]
             else:
-                trailing_stop[i] = trailing_stop[i-1] if i > 0 else trailing_stop[i]
+                max_close[i] = max_close[i-1] if i > 0 else close[i]
+                min_close[i] = min_close[i-1] if i > 0 else close[i]
         else:
             entry_price[i] = entry_price[i-1] if i > 0 else 0
-            trailing_stop[i] = trailing_stop[i-1] if i > 0 else 0
+            max_close[i] = max_close[i-1] if i > 0 else 0
+            min_close[i] = min_close[i-1] if i > 0 else 0
             if position_side != 0 and new_signal == 0:
                 position_side = 0  # Position closed
         
