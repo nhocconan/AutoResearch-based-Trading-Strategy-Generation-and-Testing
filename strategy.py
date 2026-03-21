@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #151: 15m Multi-Timeframe Regime-Adaptive Strategy with 4h/1h Filters
-Hypothesis: 15m timeframe needs strong HTF filters to avoid noise whipsaws.
-Using 4h HMA for major trend bias + 1h RSI for pullback timing + Bollinger Band
-regime detection (squeeze vs expansion). Long when 4h bullish + 1h RSI oversold +
-BB squeeze breaking out. Short when 4h bearish + 1h RSI overbought + BB expansion.
-This combines trend-following (HTF) with mean-reversion (RSI pullbacks) for
-better risk-adjusted returns in both bull and bear markets. ATR stoploss at 2.5x
-protects capital. Position sizing: 0.25 entry, 0.125 at 2R profit (discrete levels).
-Key innovation: Bollinger Band Width percentile detects regime - only enter breakouts
-when BBW expanding from squeeze, avoid choppy markets.
+Experiment #152: 30m Trend-Following with 4h HMA Filter and Donchian Breakout
+Hypothesis: 30m timeframe needs stronger trend filter to avoid whipsaw. Using 4h HMA
+for major trend direction, 30m Donchian(20) breakout for entry trigger, RSI(14) to
+avoid entering at extremes, and volume confirmation. This combines proven elements
+from best strategies (4h HMA trend filter) with breakout mechanics that work in
+both bull and bear markets. Conservative position sizing (0.25) with 2.5*ATR stop
+controls drawdown. Fewer but higher quality trades target 30-50 per year.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_regime_4h_hma_1h_rsi_bbw_v1"
-timeframe = "15m"
+name = "mtf_30m_4h_hma_donchian_rsi_vol_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -55,42 +52,36 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel upper and lower bands."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_volume_sma(volume, period=20):
+    """Calculate SMA of volume."""
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_sma
+
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bbw = np.where(sma > 0, (upper - lower) / sma * 100, 0.0)
-    return upper, lower, bbw
-
-def calculate_bb_percentile(bbw, lookback=100):
-    """Calculate BBW percentile for regime detection."""
-    bbw_s = pd.Series(bbw)
-    bbw_percentile = bbw_s.rolling(window=lookback, min_periods=lookback).apply(
-        lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min()) if x.max() > x.min() else 0.5,
-        raw=False
-    ).values
-    bbw_percentile = np.nan_to_num(bbw_percentile, nan=0.5)
-    return bbw_percentile
-
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs recent average."""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean().values
-    vol_ratio = np.where(vol_avg > 0, volume / vol_avg, 1.0)
-    return vol_ratio
-
-def calculate_momentum(close, period=10):
-    """Calculate Rate of Change momentum."""
-    momentum = np.zeros(len(close))
-    for i in range(period, len(close)):
-        if close[i-period] > 0:
-            momentum[i] = (close[i] - close[i-period]) / close[i-period] * 100
-        else:
-            momentum[i] = 0.0
-    return momentum
+    # Calculate Efficiency Ratio
+    change = np.abs(close - np.roll(close, period))
+    change[0:period] = 0.0
+    volatility = pd.Series(np.abs(close - np.roll(close, 1))).rolling(window=period, min_periods=period).sum().values
+    volatility[0] = change[0]
+    er = np.where(volatility > 0, change / volatility, 0.0)
+    
+    # Calculate smoothing constant
+    sc = (er * (2.0/(fast+1) - 2.0/(slow+1)) + 2.0/(slow+1)) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(len(close))
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -101,23 +92,19 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
-    df_1h = get_htf_data(prices, '1h')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
     
-    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
+    # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi_15m = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bbw = calculate_bollinger(close, 20, 2.0)
-    bbw_pct = calculate_bb_percentile(bbw, 100)
-    vol_ratio = calculate_volume_ratio(volume, 20)
-    momentum = calculate_momentum(close, 10)
+    rsi = calculate_rsi(close, 14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    vol_sma = calculate_volume_sma(volume, 20)
+    kama = calculate_kama(close, 10)
     hma_20 = calculate_hma(close, 20)
     hma_50 = calculate_hma(close, 50)
     
@@ -135,60 +122,62 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # 4h trend filter (major trend direction)
-        hma_4h_valid = hma_4h_aligned[i] > 0
-        trend_4h_bullish = hma_4h_valid and close[i] > hma_4h_aligned[i]
-        trend_4h_bearish = hma_4h_valid and close[i] < hma_4h_aligned[i]
+        trend_4h_bullish = hma_4h_aligned[i] > 0 and close[i] > hma_4h_aligned[i]
+        trend_4h_bearish = hma_4h_aligned[i] > 0 and close[i] < hma_4h_aligned[i]
         
-        # 1h RSI for pullback timing
-        rsi_1h_oversold = rsi_1h_aligned[i] < 45
-        rsi_1h_overbought = rsi_1h_aligned[i] > 55
-        rsi_1h_neutral = 40 < rsi_1h_aligned[i] < 60
+        # 30m trend filter
+        trend_30m_bullish = hma_20[i] > hma_50[i] and close[i] > hma_20[i]
+        trend_30m_bearish = hma_20[i] < hma_50[i] and close[i] < hma_20[i]
         
-        # 15m RSI for entry timing
-        rsi_15m_oversold = rsi_15m[i] < 35
-        rsi_15m_overbought = rsi_15m[i] > 65
+        # KAMA trend
+        kama_bullish = close[i] > kama[i]
+        kama_bearish = close[i] < kama[i]
         
-        # Bollinger Band regime detection
-        bbw_squeeze = bbw_pct[i] < 0.3  # BBW in bottom 30% of range
-        bbw_expanding = bbw[i] > bbw[i-5] if i > 5 else False
-        bbw_breakout = bbw_squeeze and bbw_expanding
+        # Donchian breakout signals
+        donchian_breakout_long = close[i] > donchian_upper[i-1] and donchian_upper[i] > 0
+        donchian_breakout_short = close[i] < donchian_lower[i-1] and donchian_lower[i] > 0
+        
+        # RSI filter (avoid extremes for trend following)
+        rsi_not_overbought = rsi[i] < 70
+        rsi_not_oversold = rsi[i] > 30
+        rsi_momentum_long = rsi[i] > 50 and rsi[i] > rsi[i-3] if i > 3 else False
+        rsi_momentum_short = rsi[i] < 50 and rsi[i] < rsi[i-3] if i > 3 else False
         
         # Volume confirmation
-        volume_confirmed = vol_ratio[i] > 1.2
+        volume_confirmed = volume[i] > 1.2 * vol_sma[i] if vol_sma[i] > 0 else False
         
-        # Daily trend (local)
-        trend_15m_bullish = hma_20[i] > hma_50[i]
-        trend_15m_bearish = hma_20[i] < hma_50[i]
-        
-        # Momentum
-        mom_strong_pos = momentum[i] > 2.0
-        mom_strong_neg = momentum[i] < -2.0
+        # ATR volatility filter (avoid low vol chop)
+        atr_ratio = atr[i] / close[i] * 100 if close[i] > 0 else 0
+        vol_ok = atr_ratio > 0.5  # At least 0.5% ATR
         
         new_signal = 0.0
         
-        # LONG ENTRY: 4h bullish + 1h RSI pullback + 15m confirmation
-        if trend_4h_bullish and rsi_1h_oversold:
-            # Entry when 15m RSI oversold + volume + momentum
-            if rsi_15m_oversold and volume_confirmed:
-                new_signal = SIZE_ENTRY
-            # Or breakout from BB squeeze
-            elif bbw_breakout and close[i] > bb_upper[i] and volume_confirmed:
-                new_signal = SIZE_ENTRY
-            # Or trend continuation with neutral RSI
-            elif trend_15m_bullish and rsi_1h_neutral and mom_strong_pos:
-                new_signal = SIZE_ENTRY
+        # LONG ENTRY: 4h bullish + Donchian breakout + RSI momentum + Volume
+        if donchian_breakout_long and trend_4h_bullish:
+            if (trend_30m_bullish or kama_bullish) and rsi_not_overbought and rsi_momentum_long:
+                if volume_confirmed and vol_ok:
+                    new_signal = SIZE_ENTRY
+                elif not volume_confirmed and rsi[i] > 55:
+                    new_signal = SIZE_ENTRY * 0.8
         
-        # SHORT ENTRY: 4h bearish + 1h RSI pullback + 15m confirmation
-        elif trend_4h_bearish and rsi_1h_overbought:
-            # Entry when 15m RSI overbought + volume + momentum
-            if rsi_15m_overbought and volume_confirmed:
-                new_signal = -SIZE_ENTRY
-            # Or breakdown from BB squeeze
-            elif bbw_breakout and close[i] < bb_lower[i] and volume_confirmed:
-                new_signal = -SIZE_ENTRY
-            # Or trend continuation with neutral RSI
-            elif trend_15m_bearish and rsi_1h_neutral and mom_strong_neg:
-                new_signal = -SIZE_ENTRY
+        # SHORT ENTRY: 4h bearish + Donchian breakdown + RSI momentum + Volume
+        elif donchian_breakout_short and trend_4h_bearish:
+            if (trend_30m_bearish or kama_bearish) and rsi_not_oversold and rsi_momentum_short:
+                if volume_confirmed and vol_ok:
+                    new_signal = -SIZE_ENTRY
+                elif not volume_confirmed and rsi[i] < 45:
+                    new_signal = -SIZE_ENTRY * 0.8
+        
+        # PULLBACK ENTRY: Trend established, RSI pullback
+        elif trend_4h_bullish and trend_30m_bullish:
+            if rsi[i] < 45 and rsi[i] > rsi[i-2] if i > 2 else False:
+                if close[i] > hma_4h_aligned[i] and vol_ok:
+                    new_signal = SIZE_ENTRY * 0.6
+        
+        elif trend_4h_bearish and trend_30m_bearish:
+            if rsi[i] > 55 and rsi[i] < rsi[i-2] if i > 2 else False:
+                if close[i] < hma_4h_aligned[i] and vol_ok:
+                    new_signal = -SIZE_ENTRY * 0.6
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
