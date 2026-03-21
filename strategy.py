@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #263: 12h Momentum + Z-Score Mean Reversion with Daily/Weekly HMA Trend Filter
-Hypothesis: Simpler entry conditions than previous attempts. Use ROC momentum + Z-score 
-to avoid extreme entries, with 1d/1w HMA for trend bias. Key insight from failures: 
-too many conflicting filters = 0 trades. This strategy uses OR logic for entries 
-(multiple paths to entry) rather than AND logic. Z-score filter prevents buying tops 
-or selling bottoms. Position sizing: 0.25 entry, 0.125 half at 2R. Stoploss: 2.5*ATR.
-Target: Beat Sharpe=0.499 with more consistent trades across all symbols.
+Experiment #264: 1d HMA Trend + RSI Pullback with Weekly Bias
+Hypothesis: Daily timeframe needs simpler logic to generate sufficient trades. 
+Previous multi-filter strategies failed with 0 trades. This uses:
+- HMA(21) crossover for trend direction (faster response than EMA)
+- RSI(14) pullback entries (40-60 range, not extremes - ensures trades)
+- Weekly HMA(21) for macro bias (loose filter, not hard requirement)
+- Volume confirmation via taker buy ratio
+- ATR(14) trailing stop at 2.5*ATR
+Key difference: Fewer filters, looser conditions to guarantee ≥10 trades.
+Position sizing: 0.25 entry, 0.125 half at 2R profit. Target: Beat Sharpe=0.499.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_momentum_zscore_daily_weekly_hma_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_hma_rsi_pullback_weekly_bias_volume_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -36,20 +39,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_roc(close, period=10):
-    """Calculate Rate of Change momentum indicator."""
-    close_s = pd.Series(close)
-    roc = close_s.pct_change(periods=period) * 100
-    return roc.values
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion detection."""
-    close_s = pd.Series(close)
-    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - rolling_mean) / rolling_std
-    return zscore.values
-
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -62,40 +51,41 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_sma(close, period=50):
-    """Calculate Simple Moving Average."""
-    close_s = pd.Series(close)
-    return close_s.rolling(window=period, min_periods=period).mean().values
+def calculate_volume_ratio(taker_buy_volume, volume):
+    """Calculate taker buy volume ratio (0-1, >0.5 = bullish)."""
+    ratio = np.where(volume > 0, taker_buy_volume / volume, 0.5)
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    roc = calculate_roc(close, 10)
-    zscore = calculate_zscore(close, 20)
-    sma_50 = calculate_sma(close, 50)
+    hma_21 = calculate_hma(close, 21)
+    hma_48 = calculate_hma(close, 48)
+    vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
     
-    # Track previous values for momentum detection
-    prev_roc = np.roll(roc, 1)
-    prev_roc[0] = roc[0]
+    # Track previous values for crossover detection
+    prev_hma_21 = np.roll(hma_21, 1)
+    prev_hma_48 = np.roll(hma_48, 1)
     prev_rsi = np.roll(rsi, 1)
+    prev_hma_21[0] = hma_21[0]
+    prev_hma_48[0] = hma_48[0]
     prev_rsi[0] = rsi[0]
     
     signals = np.zeros(n)
@@ -111,70 +101,59 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filters
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        # Weekly trend bias (loose - just preference, not hard filter)
         weekly_bullish = close[i] > hma_1w_aligned[i]
         weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # Momentum signals (ROC)
-        roc_positive = roc[i] > 0
-        roc_negative = roc[i] < 0
-        roc_improving = roc[i] > prev_roc[i]
-        roc_worsening = roc[i] < prev_roc[i]
-        roc_cross_up = prev_roc[i] <= 0 and roc[i] > 0
-        roc_cross_down = prev_roc[i] >= 0 and roc[i] < 0
+        # Daily HMA crossover signals (primary trend)
+        hma_bullish = hma_21[i] > hma_48[i]
+        hma_bearish = hma_21[i] < hma_48[i]
+        hma_cross_up = prev_hma_21[i] <= prev_hma_48[i] and hma_21[i] > hma_48[i]
+        hma_cross_down = prev_hma_21[i] >= prev_hma_48[i] and hma_21[i] < hma_48[i]
         
-        # RSI signals (loose filters to ensure trades)
-        rsi_bullish = rsi[i] > 45
-        rsi_bearish = rsi[i] < 55
-        rsi_not_overbought = rsi[i] < 70
-        rsi_not_oversold = rsi[i] > 30
+        # Price relative to HMA
+        price_above_hma = close[i] > hma_21[i]
+        price_below_hma = close[i] < hma_21[i]
         
-        # Z-score filter (avoid extremes)
-        zscore_neutral = -1.5 < zscore[i] < 1.5
-        zscore_bullish = zscore[i] < 0.5  # Not too extended upward
-        zscore_bearish = zscore[i] > -0.5  # Not too extended downward
+        # RSI signals (loose range to ensure trades)
+        rsi_bullish = rsi[i] > 40
+        rsi_bearish = rsi[i] < 60
+        rsi_rising = rsi[i] > prev_rsi[i]
+        rsi_falling = rsi[i] < prev_rsi[i]
         
-        # Price vs SMA50
-        above_sma = close[i] > sma_50[i]
-        below_sma = close[i] < sma_50[i]
+        # Volume confirmation
+        vol_bullish = vol_ratio[i] > 0.50
+        vol_bearish = vol_ratio[i] < 0.50
         
         new_signal = 0.0
         
-        # === LONG ENTRY (multiple paths - OR logic for more trades) ===
-        # Path 1: ROC cross up + daily bullish + not overbought
-        if roc_cross_up and daily_bullish and rsi_not_overbought:
-            new_signal = SIZE_ENTRY
+        # === LONG ENTRY ===
+        # HMA crossover with RSI confirmation
+        if hma_cross_up:
+            if rsi_bullish and (weekly_bullish or vol_bullish):
+                new_signal = SIZE_ENTRY
+        # Pullback to HMA in uptrend
+        elif hma_bullish and price_below_hma:
+            if prev_rsi[i] <= 45 and rsi[i] > 40 and rsi_rising:
+                new_signal = SIZE_ENTRY
+        # Price above HMA with momentum
+        elif hma_bullish and price_above_hma:
+            if rsi_bullish and rsi_rising and vol_bullish:
+                new_signal = SIZE_ENTRY
         
-        # Path 2: ROC positive + improving + weekly bullish + zscore ok
-        elif roc_positive and roc_improving and weekly_bullish and zscore_bullish:
-            new_signal = SIZE_ENTRY
-        
-        # Path 3: RSI bullish cross + above SMA + daily bullish
-        elif prev_rsi[i] <= 50 and rsi[i] > 50 and above_sma and daily_bullish:
-            new_signal = SIZE_ENTRY
-        
-        # Path 4: Pullback in uptrend (daily bullish + zscore slightly negative)
-        elif daily_bullish and -1.0 < zscore[i] < 0 and roc_positive:
-            new_signal = SIZE_ENTRY
-        
-        # === SHORT ENTRY (multiple paths - OR logic for more trades) ===
-        # Path 1: ROC cross down + daily bearish + not oversold
-        if roc_cross_down and daily_bearish and rsi_not_oversold:
-            new_signal = -SIZE_ENTRY
-        
-        # Path 2: ROC negative + worsening + weekly bearish + zscore ok
-        elif roc_negative and roc_worsening and weekly_bearish and zscore_bearish:
-            new_signal = -SIZE_ENTRY
-        
-        # Path 3: RSI bearish cross + below SMA + daily bearish
-        elif prev_rsi[i] >= 50 and rsi[i] < 50 and below_sma and daily_bearish:
-            new_signal = -SIZE_ENTRY
-        
-        # Path 4: Rally in downtrend (daily bearish + zscore slightly positive)
-        elif daily_bearish and 0 < zscore[i] < 1.0 and roc_negative:
-            new_signal = -SIZE_ENTRY
+        # === SHORT ENTRY ===
+        # HMA crossover with RSI confirmation
+        if hma_cross_down:
+            if rsi_bearish and (weekly_bearish or vol_bearish):
+                new_signal = -SIZE_ENTRY
+        # Pullback to HMA in downtrend
+        elif hma_bearish and price_above_hma:
+            if prev_rsi[i] >= 55 and rsi[i] < 60 and rsi_falling:
+                new_signal = -SIZE_ENTRY
+        # Price below HMA with momentum
+        elif hma_bearish and price_below_hma:
+            if rsi_bearish and rsi_falling and vol_bearish:
+                new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
