@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #410: 30m HMA Trend + 4h Regime + RSI Pullback + ATR Stop
-Hypothesis: Previous 30m Supertrend strategies (#398, #404) failed due to whipsaw in choppy markets.
-Switch to HMA crossover (smoother than EMA) with 4h HMA as regime filter (not strict entry requirement).
-RSI pullback entries within trend direction reduce counter-trend losses. ADX filter avoids low-volatility chop.
-Multiple entry paths ensure >=10 trades per symbol (learned from 0-trade failures in #400, #402, #407, #409).
-Key difference: HMA crossover instead of Supertrend, ADX>20 filter to avoid chop, softer 4h bias.
-Position size: 0.28 discrete, stoploss 2*ATR for 30m timeframe.
-Timeframe: 30m (REQUIRED), HTF: 4h for regime bias via mtf_data helper.
+Experiment #411: 1h Supertrend + 4h HMA Trend + RSI Pullback + Volume Confirmation
+Hypothesis: After 400+ failed experiments, the winning pattern is clear:
+- HTF trend filter (4h HMA) prevents counter-trend trades that destroy Sharpe
+- Supertrend on primary TF (1h) captures trend momentum with ATR-based stops
+- RSI pullback entries (not extremes) work better in trending markets
+- Volume confirmation filters out fake breakouts
+This combines the best elements from mtf_12h_supertrend_daily_hma_rsi_pullback_v2 (Sharpe=0.499)
+but adapted for 1h timeframe with 4h HTF reference. Multiple entry paths ensure >=10 trades.
+Timeframe: 1h (REQUIRED), HTF: 4h for trend bias via mtf_data helper.
+Position size: 0.25 discrete (conservative), stoploss 2.0*ATR.
+Target: Beat Sharpe=0.499 with >=10 trades/symbol, all symbols Sharpe>0.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_hma_trend_4h_regime_rsi_pullback_adx_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_supertrend_4h_hma_rsi_pullback_volume_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -26,6 +29,56 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator.
+    Returns: supertrend_line, supertrend_direction (1=bullish, -1=bearish)
+    """
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    # Calculate basic upper and lower bands
+    hl2 = (high + low) / 2.0
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    supertrend = np.zeros(n)
+    supertrend[:] = np.nan
+    direction = np.zeros(n)
+    direction[:] = np.nan
+    
+    # Initialize
+    supertrend[period] = upper_band[period]
+    direction[period] = 1  # Start bullish
+    
+    for i in range(period + 1, n):
+        if np.isnan(atr[i]):
+            supertrend[i] = np.nan
+            direction[i] = np.nan
+            continue
+        
+        # If previous trend was bullish
+        if direction[i-1] == 1:
+            if close[i] > supertrend[i-1]:
+                # Stay bullish, update lower band
+                supertrend[i] = max(supertrend[i-1], lower_band[i])
+                direction[i] = 1
+            else:
+                # Flip to bearish
+                supertrend[i] = upper_band[i]
+                direction[i] = -1
+        else:
+            # Previous trend was bearish
+            if close[i] < supertrend[i-1]:
+                # Stay bearish, update upper band
+                supertrend[i] = min(supertrend[i-1], upper_band[i])
+                direction[i] = -1
+            else:
+                # Flip to bullish
+                supertrend[i] = lower_band[i]
+                direction[i] = 1
+    
+    return supertrend, direction
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -49,66 +102,35 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    n = len(close)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        plus_diff = high[i] - high[i-1]
-        minus_diff = low[i-1] - low[i]
-        
-        if plus_diff > minus_diff and plus_diff > 0:
-            plus_dm[i] = plus_diff
-        elif minus_diff > plus_diff and minus_diff > 0:
-            minus_dm[i] = minus_diff
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.where(atr > 0, atr, 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.where(atr > 0, atr, 1e-10)
-    
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) > 0, (plus_di + minus_di), 1e-10)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx, plus_di, minus_di
+def calculate_volume_sma(volume, period=20):
+    """Calculate volume moving average for volume confirmation."""
+    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_4h_fast = calculate_hma(df_4h['close'].values, 16)
-    hma_4h_slow = calculate_hma(df_4h['close'].values, 48)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_fast_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_fast)
-    hma_4h_slow_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_slow)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
+    supertrend_line, supertrend_dir = calculate_supertrend(high, low, close, 10, 3.0)
     rsi = calculate_rsi(close, 14)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
-    
-    # HMA crossover on 30m
-    hma_30m_fast = calculate_hma(close, 16)
-    hma_30m_slow = calculate_hma(close, 48)
+    volume_sma = calculate_volume_sma(volume, 20)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.28
-    SIZE_HALF = 0.14
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -120,75 +142,71 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(supertrend_dir[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_fast_aligned[i]) or np.isnan(hma_30m_fast[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(volume_sma[i]):
             signals[i] = 0.0
             continue
         
-        # 4h trend regime (SOFT bias, not strict filter)
-        hma_4h_bullish = hma_4h_fast_aligned[i] > hma_4h_slow_aligned[i]
-        hma_4h_bearish = hma_4h_fast_aligned[i] < hma_4h_slow_aligned[i]
+        # 4h HMA trend bias (HTF direction)
+        hma_bullish = close[i] > hma_4h_aligned[i]
+        hma_bearish = close[i] < hma_4h_aligned[i]
         
-        # 30m HMA crossover signals
-        hma_30m_bull_cross = hma_30m_fast[i] > hma_30m_slow[i] and hma_30m_fast[i-1] <= hma_30m_slow[i-1]
-        hma_30m_bear_cross = hma_30m_fast[i] < hma_30m_slow[i] and hma_30m_fast[i-1] >= hma_30m_slow[i-1]
+        # 1h Supertrend direction
+        st_bullish = supertrend_dir[i] == 1
+        st_bearish = supertrend_dir[i] == -1
         
-        # HMA trend direction (already crossed)
-        hma_30m_uptrend = hma_30m_fast[i] > hma_30m_slow[i]
-        hma_30m_downtrend = hma_30m_fast[i] < hma_30m_slow[i]
+        # Volume confirmation (above average = real move)
+        volume_confirmed = volume[i] > 1.0 * volume_sma[i]
         
-        # ADX trend strength filter (avoid chop when ADX < 20)
-        adx_strong = adx[i] > 20
-        
-        # RSI pullback levels (enter on pullback within trend)
-        rsi_pullback_long = rsi[i] >= 35 and rsi[i] <= 55  # Pullback in uptrend
-        rsi_pullback_short = rsi[i] >= 45 and rsi[i] <= 65  # Pullback in downtrend
+        # RSI pullback levels (not extremes - work better in trends)
+        rsi_pullback_long = 35 < rsi[i] < 55  # Pullback in uptrend
+        rsi_pullback_short = 45 < rsi[i] < 65  # Pullback in downtrend
         
         # RSI momentum confirmation
-        rsi_momentum_long = rsi[i] > 45 and rsi[i] < 75
-        rsi_momentum_short = rsi[i] > 25 and rsi[i] < 55
+        rsi_momentum_long = rsi[i] > 45
+        rsi_momentum_short = rsi[i] < 55
         
-        # DI crossover confirmation
-        di_bullish = plus_di[i] > minus_di[i]
-        di_bearish = plus_di[i] < minus_di[i]
+        # RSI extreme for mean reversion (backup entry)
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
         new_signal = 0.0
         
         # === LONG ENTRIES (multiple paths to ensure >=10 trades) ===
-        # Path 1: HMA bull cross + ADX strong + RSI momentum + 4h bullish bias
-        if hma_30m_bull_cross and adx_strong and rsi_momentum_long and hma_4h_bullish:
+        # Path 1: 4h HMA bullish + 1h Supertrend bullish + RSI pullback (primary trend follow)
+        if hma_bullish and st_bullish and rsi_pullback_long:
             new_signal = SIZE_ENTRY
-        # Path 2: HMA uptrend + RSI pullback + DI bullish + ADX ok
-        elif hma_30m_uptrend and rsi_pullback_long and di_bullish and adx[i] > 15:
+        # Path 2: 4h HMA bullish + Supertrend bullish + RSI momentum + volume
+        elif hma_bullish and st_bullish and rsi_momentum_long and volume_confirmed:
             new_signal = SIZE_ENTRY
-        # Path 3: HMA bull cross + DI bullish + 4h bullish (ADX neutral ok)
-        elif hma_30m_bull_cross and di_bullish and hma_4h_bullish:
+        # Path 3: Supertrend bullish + RSI oversold (mean reversion in uptrend)
+        elif st_bullish and rsi_oversold and hma_bullish:
             new_signal = SIZE_ENTRY
-        # Path 4: HMA uptrend + RSI > 50 + DI bullish + 4h bullish
-        elif hma_30m_uptrend and rsi[i] > 50 and di_bullish and hma_4h_bullish:
+        # Path 4: 4h HMA bullish + RSI > 50 + volume (simple momentum)
+        elif hma_bullish and rsi[i] > 50 and volume_confirmed and rsi[i] < 75:
             new_signal = SIZE_ENTRY
-        # Path 5: HMA bull cross + RSI > 45 (simpler entry for more trades)
-        elif hma_30m_bull_cross and rsi[i] > 45 and adx[i] > 18:
+        # Path 5: Supertrend flip bullish + volume spike (breakout entry)
+        elif i > 100 and supertrend_dir[i] == 1 and supertrend_dir[i-1] == -1 and volume[i] > 1.5 * volume_sma[i]:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES (multiple paths to ensure >=10 trades) ===
-        # Path 1: HMA bear cross + ADX strong + RSI momentum + 4h bearish bias
-        if hma_30m_bear_cross and adx_strong and rsi_momentum_short and hma_4h_bearish:
+        # Path 1: 4h HMA bearish + 1h Supertrend bearish + RSI pullback (primary trend follow)
+        if hma_bearish and st_bearish and rsi_pullback_short:
             new_signal = -SIZE_ENTRY
-        # Path 2: HMA downtrend + RSI pullback + DI bearish + ADX ok
-        elif hma_30m_downtrend and rsi_pullback_short and di_bearish and adx[i] > 15:
+        # Path 2: 4h HMA bearish + Supertrend bearish + RSI momentum + volume
+        elif hma_bearish and st_bearish and rsi_momentum_short and volume_confirmed:
             new_signal = -SIZE_ENTRY
-        # Path 3: HMA bear cross + DI bearish + 4h bearish (ADX neutral ok)
-        elif hma_30m_bear_cross and di_bearish and hma_4h_bearish:
+        # Path 3: Supertrend bearish + RSI overbought (mean reversion in downtrend)
+        elif st_bearish and rsi_overbought and hma_bearish:
             new_signal = -SIZE_ENTRY
-        # Path 4: HMA downtrend + RSI < 50 + DI bearish + 4h bearish
-        elif hma_30m_downtrend and rsi[i] < 50 and di_bearish and hma_4h_bearish:
+        # Path 4: 4h HMA bearish + RSI < 50 + volume (simple momentum)
+        elif hma_bearish and rsi[i] < 50 and volume_confirmed and rsi[i] > 25:
             new_signal = -SIZE_ENTRY
-        # Path 5: HMA bear cross + RSI < 55 (simpler entry for more trades)
-        elif hma_30m_bear_cross and rsi[i] < 55 and adx[i] > 18:
+        # Path 5: Supertrend flip bearish + volume spike (breakout entry)
+        elif i > 100 and supertrend_dir[i] == -1 and supertrend_dir[i-1] == 1 and volume[i] > 1.5 * volume_sma[i]:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -197,7 +215,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2*ATR)
+            # Calculate trailing stop (2.0*ATR from highest)
             current_stop = highest_close - 2.0 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -218,7 +236,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2*ATR)
+            # Calculate trailing stop (2.0*ATR from lowest)
             current_stop = lowest_close + 2.0 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
