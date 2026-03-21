@@ -285,7 +285,10 @@ def render_html() -> str:
   .mini-stat .v {{ font-size: 1.4em; font-weight: bold; }}
   .mini-stat .l {{ font-size: 0.72em; color: #8b949e; }}
   table {{ width: 100%; border-collapse: collapse; background: #161b22; border-radius: 8px; overflow: hidden; }}
-  th {{ background: #21262d; padding: 8px; text-align: left; color: #8b949e; font-size: 0.8em; }}
+  th {{ background: #21262d; padding: 8px; text-align: left; color: #8b949e; font-size: 0.8em; cursor: pointer; user-select: none; }}
+  th:hover {{ color: #58a6ff; }}
+  th.sorted-asc::after {{ content: ' ▲'; color: #58a6ff; }}
+  th.sorted-desc::after {{ content: ' ▼'; color: #58a6ff; }}
   td {{ padding: 6px 8px; border-top: 1px solid #30363d; font-size: 0.8em; }}
   tr[data-strategy]:hover td {{ background: #1c2128; cursor: pointer; }}
   .chart-container {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin: 20px 0; height: 280px; }}
@@ -610,6 +613,34 @@ function filterTable(tableId, symbol) {{
   const info = document.getElementById(tableId + '-filter-info');
   if (info && symbol === 'AVG') info.textContent = 'Showing average across all symbols per strategy';
 }}
+
+// --- Column sort ---
+document.querySelectorAll('th').forEach(th => {{
+  th.addEventListener('click', function() {{
+    const table = this.closest('table');
+    if (!table) return;
+    const tbody = table.querySelector('tbody[style*="display: none"]') ? null : table.querySelector('tbody:not([style*="display: none"])');
+    if (!tbody) return;
+    const rows = Array.from(tbody.querySelectorAll('tr[data-strategy]'));
+    if (rows.length === 0) return;
+    const colIdx = Array.from(this.parentNode.children).indexOf(this);
+    const isDesc = this.classList.contains('sorted-asc');
+    // Clear all sort indicators in this header row
+    this.parentNode.querySelectorAll('th').forEach(h => h.classList.remove('sorted-asc','sorted-desc'));
+    this.classList.add(isDesc ? 'sorted-desc' : 'sorted-asc');
+    rows.sort((a, b) => {{
+      let aVal = a.children[colIdx]?.textContent.replace(/[%$+,]/g,'').trim() || '';
+      let bVal = b.children[colIdx]?.textContent.replace(/[%$+,]/g,'').trim() || '';
+      const aNum = parseFloat(aVal);
+      const bNum = parseFloat(bVal);
+      if (!isNaN(aNum) && !isNaN(bNum)) {{
+        return isDesc ? aNum - bNum : bNum - aNum;
+      }}
+      return isDesc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+    }});
+    rows.forEach(row => tbody.appendChild(row));
+  }});
+}});
 
 // --- Timeframe filter ---
 function filterTF(tableId, tf) {{
