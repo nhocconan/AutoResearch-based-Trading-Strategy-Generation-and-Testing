@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #014 - HMA Crossover + RSI Pullback + Z-Score Filter (30m primary, 4h/1d HTF)
-========================================================================================
-Hypothesis: 30m HMA(8/21) crossover provides timely entry signals, but only when
-aligned with 4h HMA(21) trend and 1d HMA(50) major trend. RSI(14) in neutral zone
-(45-55) ensures we enter on pullbacks, not extremes. Z-score(20) filter avoids
-entering when price is extended (>2 std dev). This differs from failed strategies
-by using HMA (faster, less lag) instead of Supertrend/KAMA, and combining 3 signal
-types for confirmation.
+EXPERIMENT #001 - 15m Supertrend + RSI Pullback + 4h HMA Trend Filter
+======================================================================
+Hypothesis: 15m timeframe captures intraday momentum while 4h HMA(21) provides
+major trend alignment. Supertrend(10,3) identifies trend direction on 15m,
+RSI(14) pullback to 45-55 zone provides optimal entry timing, and Bollinger
+Band Width percentile filter ensures we trade only in trending regimes.
+This differs from 4h strategies by capturing more intraday moves while still
+respecting the higher timeframe trend direction.
 
 Key features:
-- Primary TF: 30m (as required for this experiment)
-- HTF filter 1: 4h HMA(21) for intermediate trend
-- HTF filter 2: 1d HMA(50) for major trend alignment
-- Entry: 30m HMA(8) crosses HMA(21) in trend direction
-- Timing: RSI(14) in 45-55 zone (pullback, not extreme)
-- Filter: Z-score(20) < 2.0 (price not extended)
+- Primary TF: 15m (intrday momentum)
+- HTF filter: 4h HMA(21) for major trend direction
+- Trend: Supertrend(10, 3) on 15m
+- Entry: RSI(14) pullback to 45-55 zone in trend direction
+- Regime: Bollinger Band Width > 40th percentile (trending market)
 - Stoploss: 2.0*ATR(14) trailing
 - Position sizing: 0.25-0.30 discrete levels
+- Take profit: Reduce to half at 2R profit, trail stop
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "hma_rsi_zscore_30m_4h_1d_v1"
-timeframe = "30m"
+name = "supertrend_rsi_15m_4h_v1"
+timeframe = "15m"
 leverage = 1.0
 
 
 def calculate_hma(close, period):
-    """Calculate Hull Moving Average - faster response than EMA"""
+    """Calculate Hull Moving Average"""
     close_s = pd.Series(close)
     wma1 = close_s.ewm(span=period // 2, adjust=False).mean()
     wma2 = close_s.ewm(span=period, adjust=False).mean()
@@ -52,6 +52,35 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
+def calculate_supertrend(high, low, close, period=10, multiplier=3):
+    """Calculate Supertrend indicator"""
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    hl2 = (high + low) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    supertrend = np.zeros(n)
+    direction = np.ones(n)  # 1 = bullish, -1 = bearish
+    
+    supertrend[0] = upper_band[0]
+    
+    for i in range(1, n):
+        if close[i - 1] <= supertrend[i - 1]:
+            supertrend[i] = min(upper_band[i], supertrend[i - 1])
+            if close[i] > supertrend[i]:
+                direction[i] = 1
+                supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = max(lower_band[i], supertrend[i - 1])
+            if close[i] < supertrend[i]:
+                direction[i] = -1
+                supertrend[i] = upper_band[i]
+    
+    return supertrend, direction
+
+
 def calculate_rsi(close, period=14):
     """Calculate RSI"""
     close_s = pd.Series(close)
@@ -65,60 +94,53 @@ def calculate_rsi(close, period=14):
     return rsi.values
 
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized deviation from mean)"""
+def calculate_bollinger_bands(close, period=20, std_dev=2):
+    """Calculate Bollinger Bands and Band Width"""
     close_s = pd.Series(close)
     sma = close_s.rolling(window=period, min_periods=period).mean()
     std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - sma) / (std + 1e-10)
-    return zscore.values
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    band_width = (upper - lower) / sma
+    return upper.values, lower.values, band_width.values
 
 
-def calculate_hma_crossover(hma_fast, hma_slow):
-    """Detect HMA crossover signals"""
-    n = len(hma_fast)
-    crossover = np.zeros(n)
+def calculate_percentile_rank(series, window=100):
+    """Calculate rolling percentile rank"""
+    n = len(series)
+    pr = np.zeros(n)
+    pr[:] = np.nan
     
-    for i in range(1, n):
-        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
-            continue
-        # Bullish crossover: fast crosses above slow
-        if hma_fast[i-1] <= hma_slow[i-1] and hma_fast[i] > hma_slow[i]:
-            crossover[i] = 1
-        # Bearish crossover: fast crosses below slow
-        elif hma_fast[i-1] >= hma_slow[i-1] and hma_fast[i] < hma_slow[i]:
-            crossover[i] = -1
+    for i in range(window - 1, n):
+        if not np.isnan(series[i]):
+            window_data = series[i - window + 1:i + 1]
+            window_data = window_data[~np.isnan(window_data)]
+            if len(window_data) > 0:
+                pr[i] = np.sum(window_data <= series[i]) / len(window_data)
     
-    return crossover
+    return pr
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
+    volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    # Load 4h HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 4h HMA(21) for intermediate trend
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)  # auto shift(1)
     
-    # Calculate 1d HMA(50) for major trend
-    hma_1d = calculate_hma(df_1d['close'].values, 50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-    
-    # Calculate 30m indicators
-    hma_8 = calculate_hma(close, 8)
-    hma_21 = calculate_hma(close, 21)
+    # Calculate 15m indicators
+    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3)
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    zscore = calculate_zscore(close, 20)
+    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2)
     
-    # Detect HMA crossovers
-    hma_cross = calculate_hma_crossover(hma_8, hma_21)
+    # Calculate Bollinger Band Width percentile rank (regime filter)
+    bb_width_pr = calculate_percentile_rank(bb_width, 100)
     
     # Generate signals
     signals = np.zeros(n)
@@ -132,40 +154,38 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_price = 0.0
     profit_target_hit = False
     
-    min_period = 100  # Wait for all indicators to stabilize
+    min_period = 120  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]) or
-            np.isnan(hma_8[i]) or np.isnan(hma_21[i]) or np.isnan(atr[i]) or
-            np.isnan(rsi[i]) or np.isnan(zscore[i]) or atr[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(supertrend[i]) or 
+            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_width_pr[i]) or 
+            atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # HTF Trend filters
-        htf_4h_trend = 1 if close[i] > hma_4h_aligned[i] else -1
-        htf_1d_trend = 1 if close[i] > hma_1d_aligned[i] else -1
+        # 4h trend filter (HTF)
+        hma_4h_trend = 1 if close[i] > hma_4h_aligned[i] else -1
         
-        # 30m HMA crossover signal
-        cross_signal = hma_cross[i]
+        # 15m Supertrend direction
+        st_trend = int(st_direction[i])
         
-        # RSI pullback zone (45-55 = neutral, not extreme)
-        rsi_neutral = 45 <= rsi[i] <= 55
+        # Regime filter: only trade when BB Width is in top 60% (trending market)
+        regime_valid = bb_width_pr[i] > 0.40
         
-        # Z-score filter (avoid extended moves > 2 std dev)
-        zscore_valid = abs(zscore[i]) < 2.0
+        # RSI pullback zone (45-55 for entry timing - neutral zone)
+        rsi_pullback_long = 45 <= rsi[i] <= 55
+        rsi_pullback_short = 45 <= rsi[i] <= 55
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: HTF trends bullish + HMA bullish cross + RSI neutral + Z-score valid
-        if (htf_4h_trend == 1 and htf_1d_trend == 1 and 
-            cross_signal == 1 and rsi_neutral and zscore_valid):
+        # Long entry: Supertrend bullish + 4h trend bullish + RSI pullback + Regime valid
+        if st_trend == 1 and hma_4h_trend == 1 and rsi_pullback_long and regime_valid:
             target_signal = SIZE
         
-        # Short entry: HTF trends bearish + HMA bearish cross + RSI neutral + Z-score valid
-        elif (htf_4h_trend == -1 and htf_1d_trend == -1 and 
-              cross_signal == -1 and rsi_neutral and zscore_valid):
+        # Short entry: Supertrend bearish + 4h trend bearish + RSI pullback + Regime valid
+        elif st_trend == -1 and hma_4h_trend == -1 and rsi_pullback_short and regime_valid:
             target_signal = -SIZE
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -182,7 +202,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry, where R = 2*ATR)
+                # Check take profit (2R from entry, where R = 2.0*ATR)
                 if not profit_target_hit:
                     if close[i] >= entry_price + 4.0 * atr[i]:  # 2R = 4*ATR
                         take_profit_triggered = True
@@ -223,16 +243,16 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                if position_side == 1 and htf_4h_trend == -1:
-                    # 4h trend reversed, exit long
+                if position_side == 1 and st_trend == -1:
+                    # Trend reversed, exit long
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
                     profit_target_hit = False
-                elif position_side == -1 and htf_4h_trend == 1:
-                    # 4h trend reversed, exit short
+                elif position_side == -1 and st_trend == 1:
+                    # Trend reversed, exit short
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
