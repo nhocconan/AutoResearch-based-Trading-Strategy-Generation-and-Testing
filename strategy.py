@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #416: 30m RSI Pullback + 4h HMA Trend + Z-Score Mean Reversion + ATR Stop
-Hypothesis: 30m timeframe captures swing trades better than 15m (less noise) and 1h (more signals).
-Combined with 4h HMA for trend bias and Z-score for mean reversion confirmation, this should
-generate sufficient trades (>=10/symbol) while maintaining positive Sharpe. Key insight from
-failures: Supertrend and Fisher on shorter TFs failed badly. RSI pullback with loose thresholds
-works better for generating trades. Multiple entry paths ensure we don't get 0 trades.
-Timeframe: 30m (REQUIRED), HTF: 4h for trend bias via mtf_data helper.
-Position size: 0.25-0.30 discrete, stoploss 2.5*ATR for 30m timeframe.
+Experiment #417: 1h RSI Pullback with 4h HMA Trend + ATR Stop
+Hypothesis: 1h timeframe failed in previous experiments (#405, #410, #411) due to overly complex
+filters causing whipsaw. This strategy simplifies to: 4h HMA(21) for trend direction, 1h RSI(14)
+for pullback entries, ATR(14) 2.5x stoploss. Key insight: fewer filters = more trades = better
+statistics. Previous 1h strategies had Sharpe=-2.6 to -3.3 with DD=-77% to -94%. This uses
+discrete position sizing (0.25) and relaxed RSI thresholds (40/60 instead of 30/70) to ensure
+>=10 trades/symbol. Target: Beat Sharpe=0.499 from current best (12h strategy).
+Timeframe: 1h (REQUIRED), HTF: 4h for trend via mtf_data helper.
+Position size: 0.25 discrete, stoploss 2.5*ATR.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_rsi_pullback_4h_hma_zscore_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_rsi_pullback_4h_hma_trend_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -49,21 +50,9 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion detection."""
-    close_s = pd.Series(close)
-    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - rolling_mean) / rolling_std
-    return zscore.values
-
 def calculate_sma(close, period=50):
     """Calculate Simple Moving Average."""
     return pd.Series(close).rolling(window=period, min_periods=period).mean().values
-
-def calculate_ema(close, period=21):
-    """Calculate Exponential Moving Average."""
-    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -80,16 +69,14 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    zscore = calculate_zscore(close, 20)
     sma50 = calculate_sma(close, 50)
-    ema21 = calculate_ema(close, 21)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -101,74 +88,52 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(zscore[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(sma50[i]) or np.isnan(ema21[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(sma50[i]):
             signals[i] = 0.0
             continue
         
-        # 4h trend bias (long-term direction) - SOFT filter
-        trend_4h_bullish = close[i] > hma_4h_aligned[i]
-        trend_4h_bearish = close[i] < hma_4h_aligned[i]
+        # 4h trend bias (long-term direction)
+        trend_bullish = close[i] > hma_4h_aligned[i]
+        trend_bearish = close[i] < hma_4h_aligned[i]
         
-        # 30m trend filter
-        above_sma50 = close[i] > sma50[i]
-        below_sma50 = close[i] < sma50[i]
-        above_ema21 = close[i] > ema21[i]
-        below_ema21 = close[i] < ema21[i]
+        # RSI pullback levels (RELAXED for more trades)
+        rsi_oversold = rsi[i] < 45
+        rsi_overbought = rsi[i] > 55
         
-        # RSI levels (LOOSE thresholds to ensure trades)
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
-        rsi_neutral_long = rsi[i] > 35 and rsi[i] < 70
-        rsi_neutral_short = rsi[i] > 30 and rsi[i] < 65
-        
-        # Z-score mean reversion
-        zscore_oversold = zscore[i] < -1.0
-        zscore_overbought = zscore[i] > 1.0
-        zscore_extreme_long = zscore[i] < -1.5
-        zscore_extreme_short = zscore[i] > 1.5
-        
-        # RSI momentum
+        # RSI momentum confirmation
         rsi_rising = rsi[i] > rsi[i-1] if i > 0 else False
         rsi_falling = rsi[i] < rsi[i-1] if i > 0 else False
+        
+        # Price vs SMA50 filter
+        above_sma50 = close[i] > sma50[i]
+        below_sma50 = close[i] < sma50[i]
         
         new_signal = 0.0
         
         # === LONG ENTRIES (multiple paths to ensure >=10 trades) ===
-        # Path 1: 4h bullish + RSI pullback + Z-score oversold (primary)
-        if trend_4h_bullish and rsi_oversold and zscore_oversold:
+        # Path 1: 4h bullish + RSI pullback (primary)
+        if trend_bullish and rsi_oversold:
             new_signal = SIZE_ENTRY
-        # Path 2: 4h bullish + RSI rising + above EMA21
-        elif trend_4h_bullish and rsi_rising and above_ema21 and rsi[i] > 45:
+        # Path 2: 4h bullish + RSI rising from oversold
+        elif trend_bullish and rsi[i] < 50 and rsi_rising and above_sma50:
             new_signal = SIZE_ENTRY
-        # Path 3: Above SMA50 + RSI neutral + Z-score extreme
-        elif above_sma50 and rsi_neutral_long and zscore_extreme_long:
-            new_signal = SIZE_ENTRY
-        # Path 4: 4h bullish + RSI crossing up from oversold
-        elif trend_4h_bullish and rsi[i] > 40 and rsi[i-1] <= 40 and rsi_rising:
-            new_signal = SIZE_ENTRY
-        # Path 5: Simple momentum - 4h bullish + above EMA21 + RSI > 50
-        elif trend_4h_bullish and above_ema21 and rsi[i] > 50:
+        # Path 3: Strong trend + RSI momentum
+        elif trend_bullish and above_sma50 and rsi[i] > 45 and rsi[i] < 65:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES (multiple paths to ensure >=10 trades) ===
-        # Path 1: 4h bearish + RSI overbought + Z-score overbought (primary)
-        if trend_4h_bearish and rsi_overbought and zscore_overbought:
+        # Path 1: 4h bearish + RSI pullback (primary)
+        if trend_bearish and rsi_overbought:
             new_signal = -SIZE_ENTRY
-        # Path 2: 4h bearish + RSI falling + below EMA21
-        elif trend_4h_bearish and rsi_falling and below_ema21 and rsi[i] < 55:
+        # Path 2: 4h bearish + RSI falling from overbought
+        elif trend_bearish and rsi[i] > 50 and rsi_falling and below_sma50:
             new_signal = -SIZE_ENTRY
-        # Path 3: Below SMA50 + RSI neutral + Z-score extreme
-        elif below_sma50 and rsi_neutral_short and zscore_extreme_short:
-            new_signal = -SIZE_ENTRY
-        # Path 4: 4h bearish + RSI crossing down from overbought
-        elif trend_4h_bearish and rsi[i] < 60 and rsi[i-1] >= 60 and rsi_falling:
-            new_signal = -SIZE_ENTRY
-        # Path 5: Simple momentum - 4h bearish + below EMA21 + RSI < 50
-        elif trend_4h_bearish and below_ema21 and rsi[i] < 50:
+        # Path 3: Strong trend + RSI momentum
+        elif trend_bearish and below_sma50 and rsi[i] < 55 and rsi[i] > 35:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -177,7 +142,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR from highest for 30m timeframe)
+            # Calculate trailing stop (2.5*ATR from highest)
             current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -198,7 +163,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR from lowest for 30m timeframe)
+            # Calculate trailing stop (2.5*ATR from lowest)
             current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
