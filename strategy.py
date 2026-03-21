@@ -1,32 +1,64 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #004 - KAMA Adaptive Trend + MACD Momentum + Volume Filter (4h primary, 1d HTF)
-==========================================================================================
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise better than EMA/HMA,
-providing cleaner trend signals in crypto's volatile environment. Combined with MACD histogram
-for momentum confirmation and volume filter for breakout validity, plus 1d HMA(50) for major
-trend alignment. This differs from previous attempts by using KAMA's efficiency ratio to
-filter choppy periods automatically.
+EXPERIMENT #005 - KAMA Adaptive Trend + RSI Pullback + ADX Filter (12h primary, 1d HTF)
+======================================================================================
+Hypothesis: 12h timeframe captures medium-term swings with less noise than 4h/1h.
+KAMA (Kaufman Adaptive Moving Average) adapts to market efficiency - moves fast
+in trending markets, slow in chop. Combined with 1d HMA(50) for major trend filter,
+RSI(14) pullback to 45-55 zone for entry timing, and ADX(14)>25 for trend strength
+confirmation. This differs from failed strategies by using adaptive MA instead of
+fixed EMA/HMA, and adding ADX to avoid trading in weak trends.
 
 Key features:
-- Primary TF: 4h (as required for experiment #004)
+- Primary TF: 12h (medium-term swing capture)
 - HTF filter: 1d HMA(50) for major trend direction
-- Trend: KAMA(10, 2, 30) on 4h with Efficiency Ratio filter
-- Momentum: MACD(12, 26, 9) histogram confirmation
-- Volume: Volume > 20-period MA (breakout confirmation)
-- Regime: ER > 0.3 (trending market, not choppy)
+- Trend: KAMA(10,2,30) adaptive moving average on 12h
+- Entry: RSI(14) pullback to 45-55 zone in trend direction
+- Trend strength: ADX(14) > 25 (avoid weak/choppy trends)
 - Stoploss: 2.5*ATR(14) trailing
 - Position sizing: 0.25-0.30 discrete levels
-- Take profit: Reduce to half at 2R profit
+- Take profit: Reduce to half at 2R profit, trail stop
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_macd_volume_4h_1d_v1"
-timeframe = "4h"
+name = "kama_rsi_adx_12h_1d_v1"
+timeframe = "12h"
 leverage = 1.0
+
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA)
+    KAMA adapts to market efficiency - moves fast in trends, slow in chop
+    """
+    n = len(close)
+    close_s = pd.Series(close)
+    
+    # Calculate Efficiency Ratio (ER)
+    change = close_s.diff(er_period).abs()
+    volatility = close_s.diff().abs().rolling(window=er_period, min_periods=er_period).sum()
+    er = change / (volatility + 1e-10)
+    er = er.fillna(0)
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    # Initialize with SMA
+    kama[er_period] = close_s.iloc[:er_period+1].mean()
+    
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
 
 def calculate_hma(close, period):
@@ -37,51 +69,6 @@ def calculate_hma(close, period):
     raw_hma = 2 * wma1 - wma2
     hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
     return hma.values
-
-
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """
-    Calculate Kaufman Adaptive Moving Average
-    KAMA adapts to market noise using Efficiency Ratio
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        price_change = abs(close[i] - close[i - er_period])
-        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        if volatility > 0:
-            er[i] = price_change / volatility
-        else:
-            er[i] = 0
-    
-    # Calculate smoothing constant
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Initialize KAMA
-    kama[er_period] = close[er_period]
-    
-    # Calculate KAMA
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama, er
-
-
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD indicator"""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, adjust=False, min_periods=fast).mean()
-    ema_slow = close_s.ewm(span=slow, adjust=False, min_periods=slow).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
 
 
 def calculate_atr(high, low, close, period=14):
@@ -97,11 +84,60 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_volume_ma(volume, period=20):
-    """Calculate volume moving average"""
-    vol_s = pd.Series(volume)
-    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_ma
+def calculate_rsi(close, period=14):
+    """Calculate RSI"""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
+
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    
+    # Calculate +DM and -DM
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    # Calculate TR
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i-1]),
+                    abs(low[i] - close[i-1]))
+    
+    # Smooth using Wilder's method (EMA with alpha = 1/period)
+    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    # Calculate +DI and -DI
+    plus_di = 100 * plus_dm_smooth / (tr_smooth + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (tr_smooth + 1e-10)
+    
+    # Calculate DX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    
+    # Calculate ADX (smoothed DX)
+    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return adx, plus_di, minus_di
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -111,16 +147,16 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load 1d HTF data ONCE before loop (Rule 1)
+    # Load 1d HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
     hma_1d = calculate_hma(df_1d['close'].values, 50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
-    kama, er = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
+    # Calculate 12h indicators
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     atr = calculate_atr(high, low, close, 14)
-    vol_ma = calculate_volume_ma(volume, 20)
+    rsi = calculate_rsi(close, 14)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
     
     # Generate signals
     signals = np.zeros(n)
@@ -133,45 +169,46 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = float('inf')
     entry_price = 0.0
     profit_target_hit = False
+    entry_atr = 1.0  # ATR at entry for R calculation
     
     min_period = 100  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
         if (np.isnan(hma_1d_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(er[i]) or np.isnan(macd_hist[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma[i]) or 
-            atr[i] == 0 or vol_ma[i] == 0):
+            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]) or 
+            atr[i] == 0 or atr[i] < 1e-10):
             signals[i] = 0.0
             continue
         
         # Daily trend filter (HTF) - price above/below 1d HMA(50)
         daily_trend = 1 if close[i] > hma_1d_aligned[i] else -1
         
-        # 4h KAMA trend direction
+        # 12h KAMA trend direction
         kama_trend = 1 if close[i] > kama[i] else -1
         
-        # Efficiency Ratio filter - only trade in trending markets (ER > 0.3)
-        regime_valid = er[i] > 0.30
+        # ADX trend strength filter (>25 = trending market)
+        trend_strong = adx[i] > 25.0
         
-        # MACD histogram momentum confirmation
-        macd_bullish = macd_hist[i] > 0
-        macd_bearish = macd_hist[i] < 0
+        # RSI pullback zone (45-55 for entry timing in trend direction)
+        rsi_pullback_long = 45 <= rsi[i] <= 55
+        rsi_pullback_short = 45 <= rsi[i] <= 55
         
-        # Volume confirmation - volume > 20-period MA
-        volume_confirmed = volume[i] > vol_ma[i]
+        # DI confirmation
+        di_confirmed_long = plus_di[i] > minus_di[i]
+        di_confirmed_short = minus_di[i] > plus_di[i]
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: KAMA bullish + Daily trend bullish + MACD bullish + Volume confirmed + Regime valid
-        if (kama_trend == 1 and daily_trend == 1 and macd_bullish and 
-            volume_confirmed and regime_valid):
+        # Long entry: KAMA bullish + Daily trend bullish + RSI pullback + ADX strong + DI confirmed
+        if (kama_trend == 1 and daily_trend == 1 and rsi_pullback_long and 
+            trend_strong and di_confirmed_long):
             target_signal = SIZE
         
-        # Short entry: KAMA bearish + Daily trend bearish + MACD bearish + Volume confirmed + Regime valid
-        elif (kama_trend == -1 and daily_trend == -1 and macd_bearish and 
-              volume_confirmed and regime_valid):
+        # Short entry: KAMA bearish + Daily trend bearish + RSI pullback + ADX strong + DI confirmed
+        elif (kama_trend == -1 and daily_trend == -1 and rsi_pullback_short and 
+              trend_strong and di_confirmed_short):
             target_signal = -SIZE
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -188,9 +225,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry, where R = 2.5*ATR)
+                # Check take profit (2R from entry, where R = 2.5*ATR at entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 5.0 * atr[i]:  # 2R = 5*ATR
+                    if close[i] >= entry_price + 5.0 * entry_atr:  # 2R = 5*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
@@ -203,7 +240,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 5.0 * atr[i]:  # 2R profit
+                    if close[i] <= entry_price - 5.0 * entry_atr:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -212,6 +249,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry = 0.0
             lowest_since_entry = float('inf')
             entry_price = 0.0
+            entry_atr = 1.0
             profit_target_hit = False
         elif take_profit_triggered:
             # Reduce position to half at 2R profit
@@ -226,6 +264,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry = close[i]
                 lowest_since_entry = close[i]
                 entry_price = close[i]
+                entry_atr = atr[i]
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
@@ -236,6 +275,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
+                    entry_atr = 1.0
                     profit_target_hit = False
                 elif position_side == -1 and kama_trend == 1:
                     # Trend reversed, exit short
@@ -244,6 +284,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
+                    entry_atr = 1.0
                     profit_target_hit = False
                 else:
                     # Maintain position
