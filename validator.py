@@ -36,7 +36,14 @@ LOOK_AHEAD_PATTERNS = [
 
 SYNTHETIC_RESAMPLE_PATTERNS = [
     (r"date_range\s*\(\s*(?:start\s*=\s*)?['\"]202", "SYNTHETIC: pd.date_range('202x...') — use mtf_data.get_htf_data() instead"),
-    (r"\.resample\s*\(\s*['\"][14]", "Manual resample to HTF detected — use mtf_data.get_htf_data() for correct Binance boundaries"),
+    (r"\.resample\s*\(\s*['\"][14]", "Manual .resample() to HTF — use mtf_data.get_htf_data()"),
+]
+
+# Patterns that indicate manual positional MTF (i//N) without mtf_data
+MANUAL_MTF_PATTERNS = [
+    (r"//\s*bars_per_", "Manual MTF via i//bars_per_N — uses unclosed HTF bars (look-ahead). Use mtf_data.get_htf_data()"),
+    (r"idx_\d+h\s*=\s*i\s*//", "Manual MTF index mapping — use mtf_data.align_htf_to_ltf()"),
+    (r"n_\d+h\s*=.*//", "Manual HTF bar count — use mtf_data.get_htf_data()"),
 ]
 
 
@@ -97,6 +104,13 @@ def validate_strategy(code: str) -> ValidationResult:
         if re.search(pattern, code):
             result.errors.append(msg)
             result.valid = False
+
+    # --- 3c. Manual positional MTF (i//N) without mtf_data ---
+    if "get_htf_data" not in code and "mtf_data" not in code:
+        for pattern, msg in MANUAL_MTF_PATTERNS:
+            if re.search(pattern, code):
+                result.errors.append(msg)
+                result.valid = False
 
     # --- 4. AST: extract metadata values ---
     leverage_found = None
