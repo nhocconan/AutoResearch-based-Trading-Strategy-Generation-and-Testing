@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #018 - EMA Crossover + Weekly Trend + Volume Confirmation (1d primary, 1w HTF)
-=========================================================================================
-Hypothesis: Daily EMA crossover (12/26) captures medium-term trends, but only when 
-aligned with weekly HMA(21) major trend. Volume confirmation (above 20-day avg) 
-filters false breakouts. RSI(14) prevents chasing overbought/oversold levels.
-This differs from previous attempts by using 1w HTF (not 1d/4h) for stronger trend filter
-and volume confirmation which was missing in failed EMA strategies.
+EXPERIMENT #019 - HMA Trend + Supertrend + ADX Filter (15m primary, 1h/4h HTF)
+================================================================================
+Hypothesis: 15m timeframe needs strong HTF filtering to avoid whipsaws. 
+Using 4h HMA(50) for major trend direction, 1h Supertrend(10,3) for intermediate
+trend confirmation, and ADX(14)>25 to ensure we only trade in trending markets.
+15m RSI(14) pullback to 45-55 zone provides entry timing. This differs from
+previous attempts by using dual-HTF confirmation (4h + 1h) instead of single HTF.
 
 Key features:
-- Primary TF: 1d (daily candles)
-- HTF filter: 1w HMA(21) for major trend direction
-- Trend: EMA(12) vs EMA(26) crossover on 1d
-- Volume: Current volume > 1.2 * 20-day avg volume
-- RSI filter: 30 < RSI < 70 (avoid extremes)
+- Primary TF: 15m (as required for experiment #019)
+- HTF filter 1: 4h HMA(50) for major trend direction
+- HTF filter 2: 1h Supertrend(10,3) for intermediate trend
+- Entry filter: ADX(14) > 25 (trending market only)
+- Entry timing: RSI(14) pullback to 45-55 zone
 - Stoploss: 2.5*ATR(14) trailing
 - Position sizing: 0.25-0.30 discrete levels
-- Take profit: Reduce to half at 2R profit
+- Take profit: Reduce to half at 2R profit, trail stop
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "ema_cross_volume_weekly_1d_1w_v1"
-timeframe = "1d"
+name = "hma_supertrend_adx_15m_1h_4h_v1"
+timeframe = "15m"
 leverage = 1.0
 
 
@@ -51,11 +51,33 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
-    close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
-    return ema.values
+def calculate_supertrend(high, low, close, period=10, multiplier=3):
+    """Calculate Supertrend indicator"""
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    hl2 = (high + low) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    supertrend = np.zeros(n)
+    direction = np.ones(n)  # 1 = bullish, -1 = bearish
+    
+    supertrend[0] = upper_band[0]
+    
+    for i in range(1, n):
+        if close[i - 1] <= supertrend[i - 1]:
+            supertrend[i] = min(upper_band[i], supertrend[i - 1])
+            if close[i] > supertrend[i]:
+                direction[i] = 1
+                supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = max(lower_band[i], supertrend[i - 1])
+            if close[i] < supertrend[i]:
+                direction[i] = -1
+                supertrend[i] = upper_band[i]
+    
+    return supertrend, direction
 
 
 def calculate_rsi(close, period=14):
@@ -71,31 +93,76 @@ def calculate_rsi(close, period=14):
     return rsi.values
 
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume simple moving average"""
-    vol_s = pd.Series(volume)
-    vol_sma = vol_s.rolling(window=period, min_periods=period).mean()
-    return vol_sma.values
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    
+    # Calculate +DM and -DM
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i - 1]
+        low_diff = low[i - 1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+    
+    # Calculate TR
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i - 1]),
+                    abs(low[i] - close[i - 1]))
+    
+    # Smooth using Wilder's method (EMA with span=period)
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    # Calculate +DI and -DI
+    plus_di = 100 * plus_dm_s / (tr_s + 1e-10)
+    minus_di = 100 * minus_dm_s / (tr_s + 1e-10)
+    
+    # Calculate DX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    
+    # Calculate ADX (smoothed DX)
+    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return adx
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
-    volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load 1w HTF data ONCE before loop (Rule 1)
-    df_1w = get_htf_data(prices, '1w')
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Load HTF data ONCE before loop (Rule 1)
+    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 1d indicators
-    ema_fast = calculate_ema(close, 12)
-    ema_slow = calculate_ema(close, 26)
+    # Calculate 1h Supertrend
+    st_1h, st_dir_1h = calculate_supertrend(
+        df_1h['high'].values,
+        df_1h['low'].values,
+        df_1h['close'].values,
+        10, 3
+    )
+    st_dir_1h_aligned = align_htf_to_ltf(prices, df_1h, st_dir_1h)
+    
+    # Calculate 4h HMA
+    hma_4h = calculate_hma(df_4h['close'].values, 50)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    vol_sma = calculate_volume_sma(volume, 20)
+    adx = calculate_adx(high, low, close, 14)
     
     # Generate signals
     signals = np.zeros(n)
@@ -109,41 +176,37 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_price = 0.0
     profit_target_hit = False
     
-    min_period = 60  # Wait for all indicators to stabilize (26 EMA + 20 vol + 14 RSI + weekly alignment)
+    min_period = 100  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1w_aligned[i]) or np.isnan(ema_fast[i]) or 
-            np.isnan(ema_slow[i]) or np.isnan(atr[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_sma[i]) or atr[i] == 0 or vol_sma[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(st_dir_1h_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]) or 
+            atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter (HTF) - major trend direction
-        weekly_trend = 1 if close[i] > hma_1w_aligned[i] else -1
+        # 4h HMA trend filter (major trend)
+        major_trend = 1 if close[i] > hma_4h_aligned[i] else -1
         
-        # Daily EMA crossover signal
-        ema_cross = 0
-        if ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]:
-            ema_cross = 1  # Bullish crossover
-        elif ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]:
-            ema_cross = -1  # Bearish crossover
+        # 1h Supertrend direction (intermediate trend)
+        intermediate_trend = int(st_dir_1h_aligned[i])
         
-        # Volume confirmation (current volume > 1.2 * 20-day avg)
-        volume_confirmed = volume[i] > 1.2 * vol_sma[i]
+        # ADX filter - only trade when ADX > 25 (trending market)
+        trend_strength = adx[i] > 25
         
-        # RSI filter (avoid overbought/oversold)
-        rsi_valid = 30 < rsi[i] < 70
+        # RSI pullback zone (45-55 for entry timing in trend direction)
+        rsi_neutral = 45 <= rsi[i] <= 55
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: EMA bullish crossover + Weekly trend bullish + Volume confirmed + RSI valid
-        if ema_cross == 1 and weekly_trend == 1 and volume_confirmed and rsi_valid:
+        # Long entry: Major trend up + Intermediate trend up + ADX strong + RSI pullback
+        if major_trend == 1 and intermediate_trend == 1 and trend_strength and rsi_neutral:
             target_signal = SIZE
         
-        # Short entry: EMA bearish crossover + Weekly trend bearish + Volume confirmed + RSI valid
-        elif ema_cross == -1 and weekly_trend == -1 and volume_confirmed and rsi_valid:
+        # Short entry: Major trend down + Intermediate trend down + ADX strong + RSI pullback
+        elif major_trend == -1 and intermediate_trend == -1 and trend_strength and rsi_neutral:
             target_signal = -SIZE
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -162,7 +225,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit (2R from entry, where R = 2.5*ATR)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 5.0 * atr[entry_idx if 'entry_idx' in dir() else i]:
+                    if close[i] >= entry_price + 5.0 * atr[entry_idx] if 'entry_idx' in dir() else entry_price + 5.0 * atr[i]:
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
@@ -175,7 +238,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 5.0 * atr[entry_idx if 'entry_idx' in dir() else i]:
+                    if close[i] <= entry_price - 5.0 * atr[i]:
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -202,16 +265,16 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                if position_side == 1 and ema_fast[i] < ema_slow[i]:
-                    # EMA crossed bearish, exit long
+                if position_side == 1 and (intermediate_trend == -1 or major_trend == -1):
+                    # Trend reversed, exit long
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
                     profit_target_hit = False
-                elif position_side == -1 and ema_fast[i] > ema_slow[i]:
-                    # EMA crossed bullish, exit short
+                elif position_side == -1 and (intermediate_trend == 1 or major_trend == 1):
+                    # Trend reversed, exit short
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
