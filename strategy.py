@@ -1,87 +1,81 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #003 - KAMA Adaptive Trend + MACD Momentum Strategy (1h)
-====================================================================
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility
-better than HMA/EMA, reducing whipsaws in choppy markets. Combined with MACD
-histogram for momentum confirmation and ADX for trend strength filtering, this
-should capture trending moves while avoiding range-bound losses.
+EXPERIMENT #004 - Donchian Breakout + Daily Trend Filter Strategy (4h)
+=======================================================================
+Hypothesis: Donchian Channel breakouts capture momentum moves well on 4h timeframe.
+Combined with 1d HMA for major trend direction filter and ADX for trend strength,
+this should capture sustained trending moves while avoiding counter-trend traps.
 
-Key differences from failed #001/#002:
-- KAMA instead of HMA (adaptive to volatility, fewer false signals)
-- MACD histogram for momentum confirmation (not just RSI pullback)
-- ADX filter: only trade when ADX > 25 (strong trend)
-- 1h primary timeframe (this experiment's rotation)
-- 4h KAMA for trend direction filter
-- Smaller position size (0.25 max) for better drawdown control
-- Proper stoploss at 2*ATR with signal→0 exit
+Key differences from failed experiments:
+- 4h primary timeframe (this experiment's rotation)
+- 1d HMA for major trend filter (higher TF = more reliable trend)
+- Donchian(20) breakouts for clean entry signals
+- Volume confirmation to filter false breakouts
+- ATR-based stoploss at 2.5*ATR (wider for 4h timeframe)
+- Conservative position size (0.30 max) for drawdown control
+- Fixed signal values to avoid read-only array issues
 
-Primary TF: 1h | HTF: 4h KAMA trend filter
+Primary TF: 4h | HTF: 1d HMA trend filter
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_macd_adx_1h_v1"
-timeframe = "1h"
+name = "donchian_daily_trend_4h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 
-def calculate_kama(close: np.ndarray, er_period: int = 10, fast_sc: int = 2, slow_sc: int = 30) -> np.ndarray:
+def calculate_hma(close: np.ndarray, period: int = 21) -> np.ndarray:
     """
-    Calculate Kaufman Adaptive Moving Average (KAMA)
-    KAMA adapts smoothing based on market efficiency ratio (ER)
-    High ER (trending) = fast smoothing, Low ER (choppy) = slow smoothing
+    Calculate Hull Moving Average (HMA)
+    HMA = WMA(2*WMA(n/2) - WMA(n)) with sqrt(n) period
+    More responsive than EMA with less lag
     """
     n = len(close)
-    if n < er_period + slow_sc:
+    if n < period:
         return np.full(n, np.nan)
     
     close_s = pd.Series(close)
     
-    # Calculate Efficiency Ratio (ER)
-    change = close_s.diff(er_period).abs()
-    volatility = close_s.diff().abs().rolling(window=er_period, min_periods=er_period).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
     
-    # Calculate Smoothing Constant (SC)
-    fast_sc_val = 2 / (fast_sc + 1)
-    slow_sc_val = 2 / (slow_sc + 1)
-    sc = (er * (fast_sc_val - slow_sc_val) + slow_sc_val) ** 2
+    wma_half = close_s.ewm(span=half_period, min_periods=half_period, adjust=False).mean()
+    wma_full = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[er_period] = close[er_period]  # Initialize with price
+    hull_input = 2 * wma_half - wma_full
+    hma = hull_input.ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-    
-    kama[:er_period] = np.nan
-    return kama
+    hma_values = hma.values
+    hma_values[:period] = np.nan
+    return hma_values
 
 
-def calculate_macd(close: np.ndarray, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple:
+def calculate_donchian(high: np.ndarray, low: np.ndarray, period: int = 20) -> tuple:
     """
-    Calculate MACD line, signal line, and histogram
-    Returns: (macd_line, signal_line, histogram)
+    Calculate Donchian Channel (upper, lower, middle)
+    Upper = highest high over period
+    Lower = lowest low over period
+    Middle = (upper + lower) / 2
     """
-    n = len(close)
-    if n < slow + signal:
+    n = len(high)
+    if n < period:
         return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    close_s = pd.Series(close)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
     
-    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
-    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    upper = high_s.rolling(window=period, min_periods=period).max().values
+    lower = low_s.rolling(window=period, min_periods=period).min().values
+    middle = (upper + lower) / 2
     
-    macd_line = (ema_fast - ema_slow).values
-    signal_line = pd.Series(macd_line).ewm(span=signal, min_periods=signal, adjust=False).mean().values
-    histogram = macd_line - signal_line
+    upper[:period] = np.nan
+    lower[:period] = np.nan
+    middle[:period] = np.nan
     
-    histogram[:slow + signal] = np.nan
-    return macd_line, signal_line, histogram
+    return upper, lower, middle
 
 
 def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
@@ -127,6 +121,9 @@ def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
 def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
     """Calculate ATR with proper min_periods"""
     n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     
@@ -136,34 +133,51 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
                     abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    atr[:period] = np.nan
     return atr
+
+
+def calculate_volume_sma(volume: np.ndarray, period: int = 20) -> np.ndarray:
+    """Calculate volume SMA for volume confirmation"""
+    n = len(volume)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    vol_s = pd.Series(volume)
+    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
+    vol_sma[:period] = np.nan
+    return vol_sma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Extract price data
-    close = prices["close"].values
-    high = prices["high"].values
-    low = prices["low"].values
-    volume = prices["volume"].values
+    close = prices["close"].values.copy()
+    high = prices["high"].values.copy()
+    low = prices["low"].values.copy()
+    volume = prices["volume"].values.copy()
     n = len(close)
     
     # === LOAD HTF DATA ONCE BEFORE LOOP (CRITICAL RULE #1) ===
-    df_4h = get_htf_data(prices, '4h')
-    kama_4h = calculate_kama(df_4h['close'].values, er_period=10, fast_sc=2, slow_sc=30)
-    kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)  # auto shift(1)
+    df_1d = get_htf_data(prices, '1d')
+    hma_1d = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)  # auto shift(1)
     
-    # === CALCULATE 1h INDICATORS (vectorized before loop) ===
-    kama_1h = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
-    macd_line, macd_signal, macd_hist = calculate_macd(close, fast=12, slow=26, signal=9)
+    # === CALCULATE 4h INDICATORS (vectorized before loop) ===
+    donchian_upper, donchian_lower, donchian_middle = calculate_donchian(high, low, period=20)
     adx = calculate_adx(high, low, close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    volume_sma = calculate_volume_sma(volume, period=20)
+    
+    # Also calculate 4h HMA for additional trend confirmation
+    hma_4h = calculate_hma(close, period=21)
     
     # === SIGNAL PARAMETERS ===
-    SIZE_ENTRY = 0.25      # 25% position on entry (conservative)
-    SIZE_HALF = 0.125      # 12.5% after take profit
-    STOPLOSS_MULT = 2.0    # 2*ATR stoploss
+    SIZE_ENTRY = 0.30      # 30% position on entry
+    SIZE_HALF = 0.15       # 15% after take profit
+    STOPLOSS_MULT = 2.5    # 2.5*ATR stoploss (wider for 4h)
     TAKEPROFIT_MULT = 2.0  # 2R take profit
     ADX_THRESHOLD = 25     # Only trade when ADX > 25 (strong trend)
+    VOLUME_MULT = 1.2      # Volume must be > 1.2x average for confirmation
     
     signals = np.zeros(n)
     
@@ -174,56 +188,54 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = 0.0
     trailing_stop = 0.0
     
-    min_lookback = max(100, 30)  # Ensure all indicators are valid
+    min_lookback = 100  # Ensure all indicators are valid
     
     for i in range(min_lookback, n):
         # Skip if any indicator is NaN
-        if (np.isnan(kama_4h_aligned[i]) or np.isnan(kama_1h[i]) or 
-            np.isnan(macd_hist[i]) or np.isnan(adx[i]) or np.isnan(atr[i])):
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(adx[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_sma[i]) or np.isnan(hma_4h[i])):
             signals[i] = 0.0
-            if position_side != 0:
-                position_side = 0
-                entry_price = 0.0
+            position_side = 0
+            entry_price = 0.0
+            trailing_stop = 0.0
             continue
         
         current_atr = atr[i]
         current_price = close[i]
         current_adx = adx[i]
-        current_kama_4h = kama_4h_aligned[i]
-        current_kama_1h = kama_1h[i]
-        current_macd_hist = macd_hist[i]
+        current_hma_1d = hma_1d_aligned[i]
+        current_hma_4h = hma_4h[i]
+        current_volume = volume[i]
+        current_volume_sma = volume_sma[i]
         
-        # === TREND FILTER (4h KAMA) ===
-        # Price above 4h KAMA = uptrend, below = downtrend
-        trend_up = current_price > current_kama_4h
-        trend_down = current_price < current_kama_4h
+        upper_breakout = donchian_upper[i]
+        lower_breakout = donchian_lower[i]
+        
+        # === TREND FILTER (1d HMA) ===
+        # Price above 1d HMA = major uptrend, below = major downtrend
+        major_trend_up = current_price > current_hma_1d
+        major_trend_down = current_price < current_hma_1d
         
         # === TREND STRENGTH FILTER (ADX) ===
         strong_trend = current_adx > ADX_THRESHOLD
         
-        # === MOMENTUM FILTER (MACD Histogram) ===
-        # MACD hist > 0 and rising = bullish momentum
-        # MACD hist < 0 and falling = bearish momentum
-        macd_bullish = current_macd_hist > 0
-        macd_bearish = current_macd_hist < 0
+        # === VOLUME CONFIRMATION ===
+        volume_confirmed = current_volume > (current_volume_sma * VOLUME_MULT)
         
-        # Check MACD histogram direction (compare to previous)
-        if i > min_lookback:
-            prev_macd_hist = macd_hist[i-1]
-            macd_rising = current_macd_hist > prev_macd_hist
-            macd_falling = current_macd_hist < prev_macd_hist
-        else:
-            macd_rising = False
-            macd_falling = False
+        # === 4h TREND CONFIRMATION ===
+        trend_4h_up = current_price > current_hma_4h
+        trend_4h_down = current_price < current_hma_4h
         
         # === ENTRY SIGNALS ===
         new_signal = 0.0
         
         if position_side == 0:
-            # === LONG ENTRY: uptrend + strong ADX + MACD bullish ===
-            if trend_up and strong_trend and macd_bullish and macd_rising:
-                # Confirm 1h KAMA also supportive (price above KAMA)
-                if current_price > current_kama_1h:
+            # === LONG ENTRY: major uptrend + 4h uptrend + ADX strong + volume + breakout ===
+            if (major_trend_up and trend_4h_up and strong_trend and 
+                volume_confirmed and current_price > upper_breakout):
+                # Check previous bar didn't already breakout (avoid chasing)
+                if i > min_lookback and close[i-1] <= donchian_upper[i-1]:
                     new_signal = SIZE_ENTRY
                     entry_price = current_price
                     position_side = 1
@@ -231,10 +243,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     lowest_since_entry = current_price
                     trailing_stop = entry_price - STOPLOSS_MULT * current_atr
             
-            # === SHORT ENTRY: downtrend + strong ADX + MACD bearish ===
-            elif trend_down and strong_trend and macd_bearish and macd_falling:
-                # Confirm 1h KAMA also supportive (price below KAMA)
-                if current_price < current_kama_1h:
+            # === SHORT ENTRY: major downtrend + 4h downtrend + ADX strong + volume + breakout ===
+            elif (major_trend_down and trend_4h_down and strong_trend and 
+                  volume_confirmed and current_price < lower_breakout):
+                # Check previous bar didn't already breakout (avoid chasing)
+                if i > min_lookback and close[i-1] >= donchian_lower[i-1]:
                     new_signal = -SIZE_ENTRY
                     entry_price = current_price
                     position_side = -1
@@ -266,21 +279,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     # Update trailing stop to lock in profit
                     trailing_stop = entry_price + 0.5 * current_atr
             
-            # === EXIT: MACD momentum reversal ===
-            elif macd_bearish and macd_falling:
+            # === EXIT: Major trend reversal (1d HMA) ===
+            elif major_trend_down:
                 new_signal = 0.0
                 position_side = 0
                 entry_price = 0.0
                 trailing_stop = 0.0
             
-            # === EXIT: Trend reversal (4h KAMA) ===
-            elif trend_down:
+            # === EXIT: 4h trend reversal ===
+            elif trend_4h_down:
                 new_signal = 0.0
                 position_side = 0
                 entry_price = 0.0
                 trailing_stop = 0.0
             
             else:
+                # Maintain position
                 new_signal = SIZE_ENTRY if new_signal == 0 else new_signal
         
         elif position_side == -1:
@@ -289,7 +303,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             
             # === TRAILING STOP: move stop down as price falls ===
             new_trailing_stop = lowest_since_entry + STOPLOSS_MULT * current_atr
-            if new_trailing_stop < trailing_stop or trailing_stop == 0:
+            if trailing_stop == 0 or new_trailing_stop < trailing_stop:
                 trailing_stop = new_trailing_stop
             
             # === STOPLOSS: price rises above trailing stop ===
@@ -307,21 +321,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     # Update trailing stop to lock in profit
                     trailing_stop = entry_price - 0.5 * current_atr
             
-            # === EXIT: MACD momentum reversal ===
-            elif macd_bullish and macd_rising:
+            # === EXIT: Major trend reversal (1d HMA) ===
+            elif major_trend_up:
                 new_signal = 0.0
                 position_side = 0
                 entry_price = 0.0
                 trailing_stop = 0.0
             
-            # === EXIT: Trend reversal (4h KAMA) ===
-            elif trend_up:
+            # === EXIT: 4h trend reversal ===
+            elif trend_4h_up:
                 new_signal = 0.0
                 position_side = 0
                 entry_price = 0.0
                 trailing_stop = 0.0
             
             else:
+                # Maintain position
                 new_signal = -SIZE_ENTRY if new_signal == 0 else new_signal
         
         signals[i] = new_signal
