@@ -1,183 +1,226 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #009 - EMA Crossover + HTF Trend Filter + Volume Confirmation (1h)
-==============================================================================
-Hypothesis: Combining 1h EMA(8/21) crossover signals with 12h trend filter and 
-volume confirmation will reduce false breakouts while capturing sustained trends.
-The 12h EMA provides stronger trend filter than 4h, while volume confirmation
-ensures we only trade breakouts with institutional participation.
+EXPERIMENT #010 - Regime-Based HMA + Bollinger + RSI Strategy (4h)
+==================================================================
+Hypothesis: Combining HTF trend regime (1d HMA) with LTF volatility regime 
+(4h Bollinger Band Width) and momentum entry (4h RSI) will outperform pure 
+trend-following by avoiding choppy markets and entering on pullbacks within 
+established trends.
 
-Key features:
-- 12h EMA(21) for trend direction (loaded ONCE before loop via mtf_data)
-- 1h EMA(8)/EMA(21) crossover for entry timing
-- Volume ratio filter (>1.2x average) to confirm breakouts
-- ATR(14) trailing stoploss at 2*ATR
-- Discrete position sizing: 0.0, ±0.25 (25% of capital)
-- Take profit: reduce to half at 2R profit
+Key components:
+1. 1d HMA(21) - Long-term trend regime filter (only trade with HTF trend)
+2. 4h BB Width percentile - Volatility regime (avoid squeeze, trade expansion)
+3. 4h RSI(14) - Entry timing on pullbacks within trend
+4. ATR(14) stoploss - Dynamic risk management at 2*ATR
+
+Position sizing: 0.30 (30% of capital), discrete levels
+Stoploss: Signal → 0 when price moves 2*ATR against position
+Take profit: Reduce to half at 2R profit
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "ema_crossover_htf_volume_1h_v1"
-timeframe = "1h"
+name = "regime_hma_bb_rsi_4h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average with proper min_periods"""
+def calculate_hma(close: np.ndarray, period: int) -> np.ndarray:
+    """Calculate Hull Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
     close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    return ema.values
+    wma_half = close_s.ewm(span=period // 2, min_periods=period // 2, adjust=False).mean()
+    wma_full = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    raw_hma = 2 * wma_half - wma_full
+    hma = raw_hma.ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
+    
+    return hma.values
 
 
-def calculate_atr(high, low, close, period=14):
-    """Calculate ATR with proper min_periods"""
+def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    """Calculate Average True Range"""
     n = len(close)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
+    
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], 
                     abs(high[i] - close[i-1]), 
                     abs(low[i] - close[i-1]))
+    
     atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
     return atr
 
 
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs rolling average"""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean()
-    ratio = vol_s / (vol_avg + 1e-10)
-    return ratio.values
+def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+    """Calculate RSI"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    
+    rs = avg_gain / avg_loss.replace(0, np.inf)
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi.values
+
+
+def calculate_bollinger_bands(close: np.ndarray, period: int = 20, std_mult: float = 2.0) -> tuple:
+    """Calculate Bollinger Bands and Band Width"""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bw = (upper - lower) / sma  # Band width as % of price
+    
+    return upper.values, lower.values, bw.values
+
+
+def calculate_bb_percentile(bw: np.ndarray, lookback: int = 100) -> np.ndarray:
+    """Calculate BB Width percentile rank over lookback period"""
+    n = len(bw)
+    percentile = np.full(n, np.nan)
+    
+    for i in range(lookback, n):
+        window = bw[i-lookback:i+1]
+        valid = window[~np.isnan(window)]
+        if len(valid) > 0:
+            percentile[i] = np.sum(valid <= bw[i]) / len(valid)
+    
+    return percentile
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
-    close = prices["close"].values.copy()
-    high = prices["high"].values.copy()
-    low = prices["low"].values.copy()
-    volume = prices["volume"].values.copy()
+    close = prices["close"].values
+    high = prices["high"].values
+    low = prices["low"].values
     n = len(close)
     
-    # Load 12h HTF data ONCE before loop (CRITICAL - Rule 1)
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = calculate_ema(df_12h['close'].values, 21)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # === LOAD HTF DATA ONCE (1d for trend regime) ===
+    df_1d = get_htf_data(prices, '1d')
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
-    ema_fast = calculate_ema(close, 8)
-    ema_slow = calculate_ema(close, 21)
+    # === CALCULATE 4h INDICATORS ===
+    hma_4h = calculate_hma(close, 21)
     atr = calculate_atr(high, low, close, 14)
-    vol_ratio = calculate_volume_ratio(volume, 20)
+    rsi = calculate_rsi(close, 14)
+    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2.0)
+    bb_percentile = calculate_bb_percentile(bb_width, 100)
     
+    # === GENERATE SIGNALS ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size - conservative for drawdown control
+    SIZE = 0.30  # 30% position size
     
+    # Track position state for stoploss
+    position_side = 0  # 0=flat, 1=long, -1=short
     entry_price = 0.0
-    position_side = 0
-    highest_close = 0.0
-    lowest_close = 0.0
-    tp_triggered = False
+    highest_since_entry = 0.0
+    lowest_since_entry = np.inf
     
-    for i in range(50, n):
-        # Check for NaN values
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(ema_fast[i]) or 
-            np.isnan(ema_slow[i]) or np.isnan(atr[i]) or np.isnan(vol_ratio[i]) or 
-            atr[i] == 0):
+    first_valid = max(100, 21)  # Wait for all indicators to warm up
+    
+    for i in range(first_valid, n):
+        # Skip if any indicator is NaN
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(hma_4h[i]) or 
+            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_percentile[i])):
             signals[i] = 0.0
+            position_side = 0
             continue
         
-        # 12h trend filter
-        trend_12h = ema_12h_aligned[i]
-        trend_bullish = close[i] > trend_12h
-        trend_bearish = close[i] < trend_12h
+        # === HTF TREND REGIME (1d HMA slope) ===
+        hma_1d_slope = hma_1d_aligned[i] - hma_1d_aligned[i-1] if i > 0 else 0
+        long_regime = hma_1d_slope > 0  # 1d trend is up
+        short_regime = hma_1d_slope < 0  # 1d trend is down
         
-        # EMA crossover signals
-        ema_bullish_cross = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
-        ema_bearish_cross = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
+        # === VOLATILITY REGIME (BB Width percentile) ===
+        # Only trade when BB width is expanding (percentile > 0.5)
+        vol_expansion = bb_percentile[i] > 0.50
         
-        # Volume confirmation (must be >1.2x average)
-        volume_confirmed = vol_ratio[i] > 1.2
+        # === ENTRY SIGNALS ===
+        # Long: HTF uptrend + vol expansion + RSI pullback (30-50)
+        long_signal = (long_regime and vol_expansion and 
+                       30 <= rsi[i] <= 50 and 
+                       close[i] > hma_4h[i])
         
-        if position_side == 0:
-            # Enter long: bullish 12h trend + EMA bullish cross + volume confirmation
-            if trend_bullish and ema_bullish_cross and volume_confirmed:
-                signals[i] = SIZE
-                entry_price = close[i]
-                position_side = 1
-                highest_close = close[i]
-                tp_triggered = False
-            # Enter short: bearish 12h trend + EMA bearish cross + volume confirmation
-            elif trend_bearish and ema_bearish_cross and volume_confirmed:
-                signals[i] = -SIZE
-                entry_price = close[i]
-                position_side = -1
-                lowest_close = close[i]
-                tp_triggered = False
-            else:
-                signals[i] = 0.0
+        # Short: HTF downtrend + vol expansion + RSI rally (50-70)
+        short_signal = (short_regime and vol_expansion and 
+                        50 <= rsi[i] <= 70 and 
+                        close[i] < hma_4h[i])
         
-        elif position_side == 1:
-            # Long position management
-            highest_close = max(highest_close, close[i])
-            profit = close[i] - entry_price
-            profit_r = profit / atr[i] if atr[i] > 0 else 0
+        # === STOPLOSS LOGIC (2*ATR) ===
+        if position_side == 1:  # Long position
+            highest_since_entry = max(highest_since_entry, close[i])
+            stop_loss = entry_price - 2.0 * atr[i]
+            trail_stop = highest_since_entry - 2.0 * atr[i]
+            effective_stop = max(stop_loss, trail_stop)
             
-            # Take profit at 2R: reduce to half
-            if profit_r >= 2.0 and not tp_triggered:
-                signals[i] = SIZE / 2
-                tp_triggered = True
-            # Stoploss at -2R: close position
-            elif profit_r <= -2.0:
+            if close[i] < effective_stop:
                 signals[i] = 0.0
                 position_side = 0
-                entry_price = 0.0
-                tp_triggered = False
-            # Trailing stop: exit if price drops 2*ATR from highest
-            elif close[i] < highest_close - 2 * atr[i]:
+                continue
+        
+        elif position_side == -1:  # Short position
+            lowest_since_entry = min(lowest_since_entry, close[i])
+            stop_loss = entry_price + 2.0 * atr[i]
+            trail_stop = lowest_since_entry + 2.0 * atr[i]
+            effective_stop = min(stop_loss, trail_stop)
+            
+            if close[i] > effective_stop:
                 signals[i] = 0.0
                 position_side = 0
-                entry_price = 0.0
-                tp_triggered = False
-            # Trend reversal: exit if price crosses below 12h EMA
-            elif not trend_bullish:
-                signals[i] = 0.0
-                position_side = 0
-                entry_price = 0.0
-                tp_triggered = False
-            else:
-                signals[i] = SIZE if not tp_triggered else SIZE / 2
+                continue
+        
+        # === TAKE PROFIT (reduce at 2R) ===
+        if position_side == 1:
+            profit = close[i] - entry_price
+            risk = entry_price - (entry_price - 2.0 * atr[entry_idx]) if 'entry_idx' in dir() else atr[i]
+            if profit >= 2.0 * atr[i] and signals[i-1] == SIZE:
+                signals[i] = SIZE / 2  # Reduce to half
+                continue
         
         elif position_side == -1:
-            # Short position management
-            lowest_close = min(lowest_close, close[i])
             profit = entry_price - close[i]
-            profit_r = profit / atr[i] if atr[i] > 0 else 0
-            
-            # Take profit at 2R: reduce to half
-            if profit_r >= 2.0 and not tp_triggered:
-                signals[i] = -SIZE / 2
-                tp_triggered = True
-            # Stoploss at -2R: close position
-            elif profit_r <= -2.0:
+            if profit >= 2.0 * atr[i] and signals[i-1] == -SIZE:
+                signals[i] = -SIZE / 2  # Reduce to half
+                continue
+        
+        # === GENERATE SIGNAL ===
+        if long_signal and position_side != 1:
+            signals[i] = SIZE
+            position_side = 1
+            entry_price = close[i]
+            highest_since_entry = close[i]
+            entry_idx = i
+        
+        elif short_signal and position_side != -1:
+            signals[i] = -SIZE
+            position_side = -1
+            entry_price = close[i]
+            lowest_since_entry = close[i]
+            entry_idx = i
+        
+        elif not long_signal and not short_signal:
+            # Hold existing position or stay flat
+            if position_side == 0:
                 signals[i] = 0.0
-                position_side = 0
-                entry_price = 0.0
-                tp_triggered = False
-            # Trailing stop: exit if price rises 2*ATR from lowest
-            elif close[i] > lowest_close + 2 * atr[i]:
-                signals[i] = 0.0
-                position_side = 0
-                entry_price = 0.0
-                tp_triggered = False
-            # Trend reversal: exit if price crosses above 12h EMA
-            elif not trend_bearish:
-                signals[i] = 0.0
-                position_side = 0
-                entry_price = 0.0
-                tp_triggered = False
             else:
-                signals[i] = -SIZE if not tp_triggered else -SIZE / 2
+                signals[i] = signals[i-1]  # Hold position
     
     return signals
