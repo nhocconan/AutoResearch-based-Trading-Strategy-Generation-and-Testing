@@ -187,24 +187,17 @@ STRATEGY KNOWLEDGE:
 - REGIME: Bollinger BW percentile detection
 - RISK: ATR trailing stop = signal→0 when price < highest - 3*ATR
 
-MULTI-TIMEFRAME RESAMPLING — CRITICAL (46 strategies failed audit on this):
-NEVER use pd.date_range('2021-01-01', ...) — creates FAKE timestamps!
-NEVER set open=close for resampled bars!
-ALWAYS use actual open_time + SHIFT by 1 HTF bar to avoid using unclosed bar:
+MULTI-TIMEFRAME — USE mtf_data.py HELPER (mandatory for all MTF strategies):
+NEVER resample data yourself! NEVER use pd.date_range()!
+Use the mtf_data module which loads ACTUAL Binance HTF candles:
 ```
-prices_idx = prices.set_index('open_time')
-df_4h = prices_idx.resample('4h').agg(
-    open=('open','first'), high=('high','max'), low=('low','min'),
-    close=('close','last'), volume=('volume','sum')
-).dropna()
-trend_4h = compute_trend(df_4h)
-# CRITICAL: shift by 1 to only use COMPLETED 4h bars (avoid look-ahead!)
-trend_4h_shifted = trend_4h.shift(1)
-trend_aligned = trend_4h_shifted.reindex(prices_idx.index, method='ffill')
+from mtf_data import get_htf_data, align_htf_to_ltf
+df_4h = get_htf_data(prices, '4h')  # loads actual Binance 4h parquet
+ema_4h = pd.Series(df_4h['close'].values).ewm(span=21).mean().values
+ema_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # auto shift(1) for completed bars only
 ```
-The shift(1) ensures at 15m bar within a 4h window, you only see the PREVIOUS
-completed 4h bar, not the current one still forming. This is the #1 cause of
-look-ahead in MTF strategies.
+This ensures: correct 4h boundaries, no look-ahead (shift by 1 HTF bar),
+works on SOLUSDT with data gaps. 46 strategies failed audit without this.
 SOLUSDT has 2 data gaps of ~3 days. Synthetic date_range misaligns after gaps."""
 
 
@@ -317,8 +310,9 @@ INSTRUCTIONS:
 1. State your hypothesis in a comment at the top (which strategy, timeframe, why)
 2. Implement using REAL indicator formulas from quantitative trading literature
 3. Use conservative leverage (1.0-2.0x) and keep drawdown under control
-4. MULTI-TIMEFRAME: use prices.set_index('open_time').resample('4h').agg(open=first,high=max,low=min,close=last).dropna()
-   Then reindex back with method='ffill'. NEVER use pd.date_range('2021-...')!
+4. MULTI-TIMEFRAME: MUST use mtf_data helper (from mtf_data import get_htf_data, align_htf_to_ltf)
+   df_4h = get_htf_data(prices, '4h'); vals = your_indicator(df_4h); aligned = align_htf_to_ltf(prices, df_4h, vals)
+   NEVER resample yourself! NEVER pd.date_range()!
 5. CRITICAL: Use proper min_periods on all rolling calculations
 
 OUTPUT: Complete strategy.py code only. Start with #!/usr/bin/env python3"""
