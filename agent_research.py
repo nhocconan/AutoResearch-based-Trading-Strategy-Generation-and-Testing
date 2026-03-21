@@ -656,9 +656,10 @@ def main():
                 print(f"  [4/4] ✓ KEEP (Sharpe={avg_sharpe:.3f}, Return/DD={return_dd_ratio:.1f})")
 
             # Run test backtest — DISCARD if test Sharpe < 0 (overfit to train)
+            # No early_discard on test: test period is short, allow all symbols to complete
             test_results = []
             try:
-                test_results = run_backtest_all(symbols, str(STRATEGY_FILE), period="test", early_discard=True)
+                test_results = run_backtest_all(symbols, str(STRATEGY_FILE), period="test", early_discard=False)
                 test_sharpe = sum(r["sharpe_ratio"] for r in test_results) / len(test_results)
                 test_return = sum(r["total_return_pct"] for r in test_results) / len(test_results)
                 print(f"       Test: Sharpe={test_sharpe:.3f} | Return={test_return:+.1f}%")
