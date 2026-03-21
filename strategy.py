@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #043 - MTF KAMA+StochRSI+BBW 15m+4h Fixed State Management
+EXPERIMENT #044 - MTF Donchian+RSI+ATR 1h+4h Fixed State Management
 ==================================================================================================
-Hypothesis: Previous crashes (#040-#042) caused by numpy array mutation in loop.
-This version uses PURE Python lists for ALL state tracking - never modify numpy arrays.
-KAMA adapts to volatility, StochRSI gives precise entry timing, BBW filters volatility regime.
+Hypothesis: Donchian breakouts with 4h trend filter capture sustained moves while RSI avoids
+false breakouts at extremes. 1h+4h timeframe pair is more stable than 15m+4h (less noise).
+Previous crashes (#040-#043) were from numpy array mutation - using pure Python lists for state.
 
-Key changes from #042:
-- State tracking: 100% Python lists (position_state, entry_price, tp_hit, etc.)
-- Signal assignment: Only write signals[i] once per iteration, never modify in-place
-- Timeframe: 15m entries + 4h trend (more responsive than 1h+4h)
-- Indicators: KAMA (adaptive), StochRSI (momentum), BBW (volatility regime)
+Key changes from #043:
+- Timeframe: 1h entries + 4h trend (proven stable combination from best strategy)
+- Indicators: Donchian Channel (breakout), RSI (momentum filter), ATR (volatility/stop)
 - Position sizing: Base 0.25 with ATR dynamic (0.18-0.30 range)
-- Stoploss: 2.0*ATR with TP at 2R, trail at 1R
+- Stoploss: 2.5*ATR (wider to avoid noise exits)
+- Take profit: 3R with trail at 1.5R (let winners run)
+- State tracking: 100% Python lists (no numpy mutation crashes)
 
 Why this should work:
-- KAMA adapts to market conditions better than static EMAs
-- StochRSI provides cleaner overbought/oversold signals than RSI
-- BBW filter avoids trading during extreme volatility (major DD source)
-- Pure Python state tracking avoids numpy read-only crashes
-- Conservative sizing protects against 2022-style crashes
+- Donchian breakouts capture trend continuation (20-period high/low)
+- 4h trend filter ensures we trade with higher timeframe momentum
+- RSI filter avoids entering at overbought/oversold extremes (false breakouts)
+- Wider stops (2.5*ATR) reduce premature exits in volatile crypto markets
+- 1h timeframe balances responsiveness with noise reduction vs 15m
 """
 
 import numpy as np
@@ -27,67 +27,50 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 
-name = "mtf_kama_stochrsi_bbw_15m_4h_v1"
-timeframe = "15m"
+name = "mtf_donchian_rsi_atr_1h_4h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average"""
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (20-period high/low)"""
+    n = len(high)
+    if n < period:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    middle = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+        middle[i] = (upper[i] + lower[i]) / 2.0
+    
+    return upper, lower, middle
+
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI using Wilder's smoothing"""
     n = len(close)
-    if n < er_period + slow_period:
+    if n < period:
         return np.zeros(n)
     
-    kama = np.zeros(n)
-    
-    # Calculate Efficiency Ratio
-    change = np.abs(close - np.roll(close, er_period))
-    volatility = np.zeros(n)
-    for i in range(er_period, n):
-        vol_sum = 0.0
-        for j in range(1, er_period + 1):
-            vol_sum += np.abs(close[i - j + 1] - close[i - j])
-        volatility[i] = vol_sum if vol_sum > 0 else 0.0001
-    
-    er = np.zeros(n)
-    mask = volatility > 0
-    er[mask] = change[mask] / volatility[mask]
-    er = np.nan_to_num(er, nan=0.0)
-    
-    # Calculate smoothing constant
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    sc = np.zeros(n)
-    sc[er_period:] = (er[er_period:] * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Initialize KAMA
-    kama[er_period] = close[er_period]
-    
-    # Calculate KAMA
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
-
-def calculate_stoch_rsi(close, rsi_period=14, stoch_period=14, k_period=3, d_period=3):
-    """Calculate Stochastic RSI"""
-    n = len(close)
-    if n < rsi_period + stoch_period:
-        return np.zeros(n), np.zeros(n)
-    
-    # Calculate RSI first
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
     
-    avg_gain = pd.Series(gain).rolling(window=rsi_period, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).rolling(window=rsi_period, min_periods=rsi_period).mean().values
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
     
-    # Wilder's smoothing for RSI
-    for i in range(rsi_period, n):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
+    # Initial SMA
+    avg_gain[period - 1] = np.mean(gain[:period])
+    avg_loss[period - 1] = np.mean(loss[:period])
+    
+    # Wilder's smoothing
+    for i in range(period, n):
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
     
     rs = np.zeros(n)
     mask = avg_loss > 0
@@ -97,42 +80,7 @@ def calculate_stoch_rsi(close, rsi_period=14, stoch_period=14, k_period=3, d_per
     rsi = 100 - (100 / (1 + rs))
     rsi = np.nan_to_num(rsi, nan=50.0)
     
-    # Calculate Stochastic of RSI
-    stoch_rsi = np.zeros(n)
-    for i in range(stoch_period, n):
-        rsi_low = np.min(rsi[i - stoch_period + 1:i + 1])
-        rsi_high = np.max(rsi[i - stoch_period + 1:i + 1])
-        if rsi_high > rsi_low:
-            stoch_rsi[i] = 100 * (rsi[i] - rsi_low) / (rsi_high - rsi_low)
-        else:
-            stoch_rsi[i] = 50.0
-    
-    # %K and %D
-    k_line = pd.Series(stoch_rsi).rolling(window=k_period, min_periods=k_period).mean().values
-    d_line = pd.Series(k_line).rolling(window=d_period, min_periods=d_period).mean().values
-    
-    return np.nan_to_num(k_line, nan=50.0), np.nan_to_num(d_line, nan=50.0)
-
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
-    bb_width = (upper - lower) / middle * 100  # Band width as percentage
-    
-    return (
-        np.nan_to_num(upper, nan=0.0),
-        np.nan_to_num(lower, nan=0.0),
-        np.nan_to_num(middle, nan=0.0),
-        np.nan_to_num(bb_width, nan=0.0)
-    )
+    return rsi
 
 
 def calculate_atr(high, low, close, period=14):
@@ -145,17 +93,28 @@ def calculate_atr(high, low, close, period=14):
     for i in range(1, n):
         tr[i] = max(
             high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
         )
     
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    atr = np.zeros(n)
+    atr[period - 1] = np.mean(tr[:period])
     
     # Wilder's smoothing
     for i in range(period, n):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
     
     return np.nan_to_num(atr, nan=0.0)
+
+
+def calculate_sma(close, period=20):
+    """Calculate Simple Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return np.nan_to_num(sma, nan=0.0)
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -171,32 +130,32 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low_4h = df_4h['low'].values
     
     # Calculate 4h trend indicators
-    kama_4h_fast = calculate_kama(close_4h, er_period=10, fast_period=2, slow_period=30)
-    kama_4h_slow = calculate_kama(close_4h, er_period=10, fast_period=5, slow_period=50)
-    bb_upper_4h, bb_lower_4h, bb_mid_4h, bbw_4h = calculate_bollinger_bands(close_4h, period=20, std_mult=2.0)
+    donchian_upper_4h, donchian_lower_4h, donchian_mid_4h = calculate_donchian(high_4h, low_4h, period=20)
+    rsi_4h = calculate_rsi(close_4h, period=14)
+    sma_4h = calculate_sma(close_4h, period=50)
     
-    # Align 4h indicators to 15m timeframe (auto shift(1) for completed bars)
-    kama_4h_fast_aligned = align_htf_to_ltf(prices, df_4h, kama_4h_fast)
-    kama_4h_slow_aligned = align_htf_to_ltf(prices, df_4h, kama_4h_slow)
-    bbw_4h_aligned = align_htf_to_ltf(prices, df_4h, bbw_4h)
+    # Align 4h indicators to 1h timeframe (auto shift(1) for completed bars)
+    donchian_mid_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid_4h)
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    sma_4h_aligned = align_htf_to_ltf(prices, df_4h, sma_4h)
     
-    # 15m entry indicators
-    kama_15m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    stoch_k_15m, stoch_d_15m = calculate_stoch_rsi(close, rsi_period=14, stoch_period=14)
-    bb_upper_15m, bb_lower_15m, bb_mid_15m, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    atr_15m = calculate_atr(high, low, close, period=14)
+    # 1h entry indicators
+    donchian_upper_1h, donchian_lower_1h, donchian_mid_1h = calculate_donchian(high, low, period=20)
+    rsi_1h = calculate_rsi(close, period=14)
+    atr_1h = calculate_atr(high, low, close, period=14)
+    sma_1h = calculate_sma(close, period=50)
     
     # Parameters
     BASE_SIZE = 0.25
     MIN_SIZE = 0.18
     MAX_SIZE = 0.30
-    ATR_STOP_MULT = 2.0
-    TP_MULT = 2.0
-    TRAIL_MULT = 1.0
-    BBW_MIN = 2.0  # Avoid extremely low volatility
-    BBW_MAX = 15.0  # Avoid extremely high volatility
-    STCH_LONG_THRESHOLD = 20  # StochRSI oversold for long entry
-    STCH_SHORT_THRESHOLD = 80  # StochRSI overbought for short entry
+    ATR_STOP_MULT = 2.5  # Wider stops for crypto volatility
+    TP_MULT = 3.0  # Let winners run
+    TRAIL_MULT = 1.5  # Trail after TP hit
+    RSI_LONG_MIN = 35  # Avoid oversold breakouts (weak momentum)
+    RSI_LONG_MAX = 70  # Avoid overbought entries
+    RSI_SHORT_MIN = 30  # Avoid oversold shorts
+    RSI_SHORT_MAX = 65  # Avoid overbought breakouts (weak momentum)
     
     # Use Python lists for ALL mutable state (CRITICAL - avoids numpy read-only crash)
     signals_list = [0.0] * n
@@ -209,7 +168,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(first_valid, n):
         # Validate data
-        if np.isnan(atr_15m[i]) or atr_15m[i] <= 0:
+        if np.isnan(atr_1h[i]) or atr_1h[i] <= 0:
             position_state[i] = 0.0
             entry_price_list[i] = 0.0
             tp_triggered_list[i] = 0.0
@@ -217,7 +176,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             signals_list[i] = 0.0
             continue
         
-        if np.isnan(kama_4h_fast_aligned[i]) or np.isnan(bbw_4h_aligned[i]):
+        if np.isnan(donchian_mid_4h_aligned[i]) or np.isnan(rsi_4h_aligned[i]):
             position_state[i] = 0.0
             entry_price_list[i] = 0.0
             tp_triggered_list[i] = 0.0
@@ -226,25 +185,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             continue
         
         price = close[i]
-        atr = atr_15m[i]
+        atr = atr_1h[i]
         
-        # 4h trend direction (KAMA fast vs slow)
+        # 4h trend direction (price vs SMA50 + Donchian midpoint)
         trend_4h = 0
-        if kama_4h_fast_aligned[i] > kama_4h_slow_aligned[i]:
+        if price > sma_4h_aligned[i] and price > donchian_mid_4h_aligned[i]:
             trend_4h = 1
-        elif kama_4h_fast_aligned[i] < kama_4h_slow_aligned[i]:
+        elif price < sma_4h_aligned[i] and price < donchian_mid_4h_aligned[i]:
             trend_4h = -1
         
-        # 4h volatility regime filter (BB Width)
-        bbw = bbw_4h_aligned[i]
-        volatility_ok = BBW_MIN <= bbw <= BBW_MAX
+        # 4h RSI momentum filter
+        rsi_4h_val = rsi_4h_aligned[i]
+        momentum_ok_long = RSI_LONG_MIN <= rsi_4h_val <= RSI_LONG_MAX
+        momentum_ok_short = RSI_SHORT_MIN <= rsi_4h_val <= RSI_SHORT_MAX
         
         # Manage existing positions
-        if position_state[i-1] != 0:
-            prev_side = position_state[i-1]
-            prev_entry = entry_price_list[i-1] if entry_price_list[i-1] > 0 else price
-            prev_tp = tp_triggered_list[i-1]
-            prev_extreme = extreme_price_list[i-1] if extreme_price_list[i-1] > 0 else prev_entry
+        if position_state[i - 1] != 0:
+            prev_side = position_state[i - 1]
+            prev_entry = entry_price_list[i - 1] if entry_price_list[i - 1] > 0 else price
+            prev_tp = tp_triggered_list[i - 1]
+            prev_extreme = extreme_price_list[i - 1] if extreme_price_list[i - 1] > 0 else prev_entry
             
             # Update extreme price
             if prev_side > 0:
@@ -265,7 +225,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     signals_list[i] = 0.0
                     exited = True
                 
-                # Take profit at 2R
+                # Take profit at 3R
                 if not exited and not prev_tp:
                     tp_price = prev_entry + TP_MULT * ATR_STOP_MULT * atr
                     if price >= tp_price:
@@ -276,7 +236,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         signals_list[i] = BASE_SIZE * 0.5
                         exited = True
                 
-                # Trail stop at 1R after TP
+                # Trail stop at 1.5R after TP
                 if not exited and prev_tp:
                     trail_price = current_extreme - TRAIL_MULT * ATR_STOP_MULT * atr
                     if price < trail_price:
@@ -318,29 +278,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             
             # Hold position - copy previous state
             if not exited:
-                signals_list[i] = signals_list[i-1]
-                position_state[i] = position_state[i-1]
-                entry_price_list[i] = entry_price_list[i-1]
-                tp_triggered_list[i] = tp_triggered_list[i-1]
-                extreme_price_list[i] = extreme_price_list[i-1]
+                signals_list[i] = signals_list[i - 1]
+                position_state[i] = position_state[i - 1]
+                entry_price_list[i] = entry_price_list[i - 1]
+                tp_triggered_list[i] = tp_triggered_list[i - 1]
+                extreme_price_list[i] = extreme_price_list[i - 1]
             continue
         
-        # Skip entries when volatility is extreme
-        if not volatility_ok:
-            position_state[i] = 0.0
-            entry_price_list[i] = 0.0
-            tp_triggered_list[i] = 0.0
-            extreme_price_list[i] = 0.0
-            signals_list[i] = 0.0
-            continue
+        # Entry logic: Donchian breakout + 4h trend + RSI momentum
+        rsi_1h_val = rsi_1h[i]
         
-        # Entry logic: KAMA trend + StochRSI momentum + BBW regime
-        stoch_k = stoch_k_15m[i]
-        stoch_d = stoch_d_15m[i]
-        
-        # Long entry: 4h uptrend + StochRSI oversold + price above KAMA
-        if trend_4h == 1 and stoch_k < STCH_LONG_THRESHOLD and stoch_k > stoch_d:
-            if price > kama_15m[i]:
+        # Long entry: 4h uptrend + Donchian breakout + RSI momentum filter
+        if trend_4h == 1 and price > donchian_upper_1h[i] and momentum_ok_long:
+            if RSI_LONG_MIN <= rsi_1h_val <= RSI_LONG_MAX:
                 # Dynamic sizing based on ATR
                 atr_pct = atr / price
                 vol_ratio = 0.012 / max(atr_pct, 0.001)
@@ -354,9 +304,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 signals_list[i] = position_size
                 continue
         
-        # Short entry: 4h downtrend + StochRSI overbought + price below KAMA
-        elif trend_4h == -1 and stoch_k > STCH_SHORT_THRESHOLD and stoch_k < stoch_d:
-            if price < kama_15m[i]:
+        # Short entry: 4h downtrend + Donchian breakdown + RSI momentum filter
+        elif trend_4h == -1 and price < donchian_lower_1h[i] and momentum_ok_short:
+            if RSI_SHORT_MIN <= rsi_1h_val <= RSI_SHORT_MAX:
                 # Dynamic sizing based on ATR
                 atr_pct = atr / price
                 vol_ratio = 0.012 / max(atr_pct, 0.001)
