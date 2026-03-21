@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #243: 1h RSI Pullback with 4h HMA Trend Filter
-Hypothesis: Simple is better. Use 4h HMA for primary trend direction, enter on 1h RSI 
-pullbacks (RSI<45 for long in uptrend, RSI>55 for short in downtrend). This avoids 
-over-filtering that caused 200+ strategy failures. Volume confirmation is loose (>0.48). 
-Position sizing: 0.25 entry, stoploss at 2.5*ATR trailing. Target: Beat Sharpe=0.499 
-by generating consistent trades across BTC/ETH/SOL with fewer whipsaws than complex 
-multi-indicator strategies. Key insight from failures: fewer filters = more trades = 
-better statistical significance.
+Experiment #244: 4h Keltner Channel Breakout + Fisher Transform + ADX Trend Strength
+Hypothesis: 4h timeframe needs better entry timing than pure trend following. Keltner Channels
+(ADR-based) are more adaptive than Donchian for crypto volatility. Fisher Transform catches
+reversals at channel boundaries better than RSI. ADX(14) > 20 filters out choppy periods.
+Daily HMA provides trend bias, Weekly HMA confirms macro direction. Volume ratio adds conviction.
+This differs from failed 4h strategies by using Fisher for entry timing instead of RSI, and
+Keltner instead of Donchian/Supertrend. Position sizing: 0.25 entry, stoploss 2.5*ATR.
+Target: Beat Sharpe=0.499 with better entry timing on 4h timeframe.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_rsi_pullback_4h_hma_volume_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_keltner_fisher_adx_daily_weekly_hma_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -37,17 +37,72 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI indicator."""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
-    rsi = 100 - 100 / (1 + rs)
-    rsi = np.clip(rsi, 0, 100)
-    return rsi
+def calculate_fisher_transform(high, low, period=9):
+    """Calculate Ehlers Fisher Transform for reversal detection."""
+    hl2 = (high + low) / 2
+    hl2_s = pd.Series(hl2)
+    
+    # Calculate highest high and lowest low over period
+    highest = hl2_s.rolling(window=period, min_periods=period).max().values
+    lowest = hl2_s.rolling(window=period, min_periods=period).min().values
+    
+    # Normalize price position within range (0 to 1)
+    range_val = highest - lowest
+    range_val = np.where(range_val > 0, range_val, 1e-10)
+    normalized = (hl2 - lowest) / range_val
+    normalized = np.clip(normalized, 0.001, 0.999)  # Avoid log(0)
+    
+    # Fisher transform
+    fisher = 0.5 * np.log((1 + normalized) / (1 - normalized))
+    
+    # Signal line (1-period lag of fisher)
+    fisher_signal = np.roll(fisher, 1)
+    fisher_signal[0] = fisher[0]
+    
+    return fisher, fisher_signal
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    # True Range
+    tr1 = high_s - low_s
+    tr2 = np.abs(high_s - close_s.shift(1))
+    tr3 = np.abs(low_s - close_s.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    # Directional Movement
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    
+    plus_dm_s = pd.Series(plus_dm)
+    minus_dm_s = pd.Series(minus_dm)
+    
+    plus_di = 100 * (plus_dm_s.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    minus_di = 100 * (minus_dm_s.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (np.abs(plus_di + minus_di) + 1e-10)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    return adx.values, plus_di.values, minus_di.values
+
+def calculate_keltner_channels(high, low, close, atr_period=14, atr_mult=2.0, ema_period=20):
+    """Calculate Keltner Channels (EMA +/- ATR multiplier)."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
+    atr = calculate_atr(high, low, close, atr_period)
+    
+    upper = ema + atr_mult * atr
+    lower = ema - atr_mult * atr
+    
+    return upper, lower, ema
 
 def calculate_volume_ratio(taker_buy_volume, volume):
     """Calculate taker buy volume ratio (0-1, >0.5 = bullish)."""
@@ -63,27 +118,31 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h HMA trend
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    # Calculate HTF indicators
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
+    fisher, fisher_signal = calculate_fisher_transform(high, low, 9)
+    keltner_upper, keltner_lower, keltner_mid = calculate_keltner_channels(high, low, close, 14, 2.0, 20)
     vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
     
-    # Track RSI changes for pullback detection
-    prev_rsi = np.roll(rsi, 1)
-    prev_rsi[0] = rsi[0]
-    
-    # Track price momentum
-    price_change = np.diff(close, prepend=close[0])
-    prev_price_change = np.roll(price_change, 1)
-    prev_price_change[0] = price_change[0]
+    # Track previous values for breakout/cross detection
+    prev_fisher = np.roll(fisher, 1)
+    prev_fisher[0] = fisher[0]
+    prev_keltner_upper = np.roll(keltner_upper, 1)
+    prev_keltner_lower = np.roll(keltner_lower, 1)
+    prev_keltner_upper[0] = keltner_upper[0]
+    prev_keltner_lower[0] = keltner_lower[0]
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -97,48 +156,103 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(50, n):
-        # 4h trend filter (simple: price vs HMA)
-        trend_bullish = close[i] > hma_4h_aligned[i]
-        trend_bearish = close[i] < hma_4h_aligned[i]
+    for i in range(100, n):
+        # HTF trend filters (looser to ensure trades)
+        daily_bullish = close[i] > hma_1d_aligned[i]
+        daily_bearish = close[i] < hma_1d_aligned[i]
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # RSI pullback signals (loose thresholds for trades)
-        rsi_oversold = rsi[i] < 45
-        rsi_overbought = rsi[i] > 55
-        rsi_rising = rsi[i] > prev_rsi[i]
-        rsi_falling = rsi[i] < prev_rsi[i]
+        # ADX trend strength (must have some trend, but not too strict)
+        trend_strength = adx[i] > 20  # Lower threshold for more trades
         
-        # Volume confirmation (loose)
-        vol_bullish = vol_ratio[i] > 0.48
-        vol_bearish = vol_ratio[i] < 0.52
+        # DI crossover for direction
+        di_bullish = plus_di[i] > minus_di[i]
+        di_bearish = plus_di[i] < minus_di[i]
         
-        # Price momentum
-        mom_bullish = price_change[i] > 0
-        mom_bearish = price_change[i] < 0
+        # Fisher Transform signals (reversal detection)
+        # Long: Fisher crosses above -1.5 from below (oversold reversal)
+        fisher_cross_up = prev_fisher[i] < -1.0 and fisher[i] > -1.0
+        # Short: Fisher crosses below +1.5 from above (overbought reversal)
+        fisher_cross_down = prev_fisher[i] > 1.0 and fisher[i] < 1.0
+        # Extreme oversold/overbought
+        fisher_oversold = fisher[i] < -1.5
+        fisher_overbought = fisher[i] > 1.5
+        
+        # Volume confirmation
+        vol_bullish = vol_ratio[i] > 0.52
+        vol_bearish = vol_ratio[i] < 0.48
+        
+        # Keltner Channel breakout detection
+        breakout_long = close[i] > prev_keltner_upper[i]
+        breakout_short = close[i] < prev_keltner_lower[i]
+        
+        # Price position in channel
+        above_mid = close[i] > keltner_mid[i]
+        below_mid = close[i] < keltner_mid[i]
+        
+        # Channel squeeze (low volatility - potential breakout)
+        channel_width = (keltner_upper[i] - keltner_lower[i]) / keltner_mid[i]
+        prev_width = (prev_keltner_upper[i] - prev_keltner_lower[i]) / keltner_mid[i]
+        squeeze = channel_width < prev_width * 0.9  # Width decreasing
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # RSI pullback in uptrend (primary signal)
-        if trend_bullish and rsi_oversold:
-            if rsi_rising or vol_bullish:
+        # Breakout long with trend and momentum
+        if breakout_long:
+            if daily_bullish and trend_strength and di_bullish:
+                new_signal = SIZE_ENTRY
+            elif weekly_bullish and vol_bullish and above_mid:
                 new_signal = SIZE_ENTRY
         
-        # RSI crossing up from oversold
-        elif trend_bullish and prev_rsi[i] < 40 and rsi[i] >= 40:
-            if mom_bullish:
+        # Fisher reversal from oversold in uptrend
+        elif fisher_cross_up:
+            if daily_bullish and above_mid:
                 new_signal = SIZE_ENTRY
+            elif weekly_bullish and di_bullish and vol_bullish:
+                new_signal = SIZE_ENTRY
+        
+        # Fisher extreme oversold with trend support
+        elif fisher_oversold:
+            if daily_bullish and trend_strength:
+                new_signal = SIZE_ENTRY
+            elif weekly_bullish and above_mid:
+                new_signal = SIZE_ENTRY
+        
+        # Pullback to Keltner mid in uptrend
+        elif above_mid and daily_bullish:
+            if close[i-1] < keltner_mid[i-1] and close[i] > keltner_mid[i]:
+                if di_bullish or vol_bullish:
+                    new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # RSI pullback in downtrend (primary signal)
-        if trend_bearish and rsi_overbought:
-            if rsi_falling or vol_bearish:
+        # Breakout short with trend and momentum
+        if breakout_short:
+            if daily_bearish and trend_strength and di_bearish:
+                new_signal = -SIZE_ENTRY
+            elif weekly_bearish and vol_bearish and below_mid:
                 new_signal = -SIZE_ENTRY
         
-        # RSI crossing down from overbought
-        elif trend_bearish and prev_rsi[i] > 60 and rsi[i] <= 60:
-            if mom_bearish:
+        # Fisher reversal from overbought in downtrend
+        elif fisher_cross_down:
+            if daily_bearish and below_mid:
                 new_signal = -SIZE_ENTRY
+            elif weekly_bearish and di_bearish and vol_bearish:
+                new_signal = -SIZE_ENTRY
+        
+        # Fisher extreme overbought with trend support
+        elif fisher_overbought:
+            if daily_bearish and trend_strength:
+                new_signal = -SIZE_ENTRY
+            elif weekly_bearish and below_mid:
+                new_signal = -SIZE_ENTRY
+        
+        # Pullback to Keltner mid in downtrend
+        elif below_mid and daily_bearish:
+            if close[i-1] > keltner_mid[i-1] and close[i] < keltner_mid[i]:
+                if di_bearish or vol_bearish:
+                    new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
