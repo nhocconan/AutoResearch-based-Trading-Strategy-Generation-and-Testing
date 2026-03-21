@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #080 - SIMPLIFIED_MTF_REGIME_ENSEMBLE_15M_V4
+EXPERIMENT #081 - ROBUST_MTF_ENSEMBLE_1H_4H_V1
 ==================================================================================================
-Hypothesis: Simplify the ensemble to 3 core signals (HMA trend, Supertrend, RSI) with clean
-regime detection (BBW percentile + ADX). Fix the syntax errors from #079 by removing complex
-position management loops and using vectorized signal generation instead.
+Hypothesis: Build a cleaner, more robust ensemble using 1h entries with 4h trend filter.
+Fix the read-only array issues from #080 by creating new arrays instead of modifying views.
+Combine 4 core signals (HMA trend, Supertrend, RSI, Z-score) with regime-aware voting.
 
-Key improvements over #079:
-- Remove complex position management loops (source of syntax errors)
-- Use pure vectorized signal generation (no per-bar state tracking)
-- Cleaner regime detection with BBW percentile + ADX threshold
-- 3-signal ensemble: HMA slope, Supertrend direction, RSI momentum
-- Discrete signal levels (0.0, ±0.25, ±0.35) to minimize churn costs
-- 15m entries with 4h trend filter (proven in #070, #072)
+Key improvements over #080:
+- Fix read-only array assignment bugs (create new arrays, don't modify views)
+- Use 1h timeframe (fewer bars = faster, less noise than 15m)
+- 4h trend filter for directional bias (proven in #070, #072)
+- Add Z-score for mean reversion entries in high vol regimes
+- Cleaner signal voting with weighted ensemble
+- Discrete signal levels (0.0, ±0.25, ±0.35) to minimize churn
 
 Why this should work:
-- #070 achieved Sharpe=1.256 with similar MTF approach
-- #072 achieved Sharpe=0.589 with HMA+ST+RSI combination
-- Simpler code = fewer bugs, faster execution (avoid #078 timeout)
-- Regime-aware sizing reduces drawdown in choppy markets
+- #070 achieved Sharpe=1.256 with 15m/4h MTF approach
+- #072 achieved Sharpe=0.589 with HMA+ST+RSI on 1h/4h
+- Simpler vectorized code avoids timeout crashes (#078)
+- Proper array handling avoids read-only errors (#080)
+- Z-score adds mean reversion edge in choppy markets
 
 Position sizing:
 - MAX signal: 0.35 (controls drawdown during 2022 crash)
 - Discrete levels: 0.0, ±0.25, ±0.35
-- Regime-based: higher confidence in trend regime, lower in mean-reversion
+- Regime-based: higher confidence in trend regime
 """
 
 import numpy as np
 import pandas as pd
 
-name = "simplified_mtf_regime_ensemble_15m_v4"
-timeframe = "15m"
+name = "robust_mtf_ensemble_1h_4h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
@@ -194,6 +195,21 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     return supertrend, trend_direction
 
 
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    rolling_mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    rolling_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    zscore = (close - rolling_mean) / rolling_std
+    zscore[np.isnan(zscore)] = 0
+    
+    return zscore
+
+
 def resample_to_timeframe(close, high, low, bars_per_tf):
     """Resample data to higher timeframe"""
     n = len(close)
@@ -242,9 +258,9 @@ def calculate_bbw_percentile(bbw, lookback=100):
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
-    close = prices["close"].values
-    high = prices["high"].values
-    low = prices["low"].values
+    close = prices["close"].values.copy()
+    high = prices["high"].values.copy()
+    low = prices["low"].values.copy()
     n = len(close)
     
     # Position sizing constants (MAX 0.35 to control drawdown)
@@ -262,16 +278,21 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     RSI_MR_LONG = 35
     RSI_MR_SHORT = 65
     
-    # Timeframe conversion: 4h = 16 x 15m
-    bars_per_4h = 16
+    # Z-score thresholds
+    ZSCORE_MR_LONG = -2.0
+    ZSCORE_MR_SHORT = 2.0
     
-    # Base timeframe (15m) indicators
-    atr_15m = calculate_atr(high, low, close, period=14)
-    rsi_15m = calculate_rsi(close, period=14)
-    hma_15m = calculate_hma(close, short_period=16, long_period=48)
-    adx_15m = calculate_adx(high, low, close, period=14)
-    bb_upper_15m, bb_mid_15m, bb_lower_15m, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    supertrend_15m, st_dir_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    # Timeframe conversion: 4h = 4 x 1h
+    bars_per_4h = 4
+    
+    # Base timeframe (1h) indicators
+    atr_1h = calculate_atr(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
+    hma_1h = calculate_hma(close, short_period=16, long_period=48)
+    adx_1h = calculate_adx(high, low, close, period=14)
+    bb_upper_1h, bb_mid_1h, bb_lower_1h, bbw_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    supertrend_1h, st_dir_1h = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    zscore_1h = calculate_zscore(close, period=20)
     
     # 4h timeframe indicators for trend filter
     c_4h, h_4h, l_4h = resample_to_timeframe(close, high, low, bars_per_4h)
@@ -280,25 +301,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     _, _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
     bbw_pct_4h = calculate_bbw_percentile(bbw_4h, lookback=100)
     
-    # Map 4h indicators to 15m
+    # Map 4h indicators to 1h
     hma_4h_mapped = map_tf_to_base(hma_4h, bars_per_4h, n)
     adx_4h_mapped = map_tf_to_base(adx_4h, bars_per_4h, n)
     bbw_pct_4h_mapped = map_tf_to_base(bbw_pct_4h, bars_per_4h, n)
     
     # Calculate HMA slope (trend direction)
-    hma_slope_15m = np.zeros(n)
-    hma_slope_15m[5:] = np.sign(hma_15m[5:] - hma_15m[:-5])
+    hma_slope_1h = np.zeros(n)
+    hma_slope_1h[5:] = np.sign(hma_1h[5:] - hma_1h[:-5])
     
-    # Calculate 4h trend
+    # Calculate 4h trend direction
     trend_4h = np.zeros(n)
-    valid_4h = hma_4h_mapped > 0
-    trend_4h[valid_4h] = np.sign(c_4h[np.arange(n) // bars_per_4h] - hma_4h_mapped[valid_4h])
-    trend_4h = np.clip(trend_4h, -1, 1)
+    for i in range(n):
+        tf_idx = min(i // bars_per_4h, len(c_4h) - 1)
+        if hma_4h[tf_idx] > 0:
+            trend_4h[i] = np.sign(c_4h[tf_idx] - hma_4h[tf_idx])
     
     # Minimum warmup period
     first_valid = max(200, 100 * bars_per_4h, 48, 45)
     
-    # Initialize signals
+    # Initialize signals array
     signals = np.zeros(n)
     
     # Vectorized regime detection
@@ -306,38 +328,39 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     is_mr_regime = bbw_pct_4h_mapped > BBW_MR_PERCENTILE
     is_neutral = ~is_trend_regime & ~is_mr_regime
     
-    # Signal 1: HMA trend (15m)
+    # Signal 1: HMA trend (1h)
     hma_signal = np.zeros(n)
-    hma_signal[hma_15m > 0] = np.sign(close[hma_15m > 0] - hma_15m[hma_15m > 0])
+    hma_valid = hma_1h > 0
+    hma_signal[hma_valid] = np.sign(close[hma_valid] - hma_1h[hma_valid])
     
-    # Signal 2: Supertrend direction (15m)
-    st_signal = st_dir_15m
+    # Signal 2: Supertrend direction (1h)
+    st_signal = st_dir_1h.copy()
     
     # Signal 3: RSI momentum (regime-dependent)
     rsi_signal = np.zeros(n)
     
     # Trend regime RSI
-    trend_long_mask = is_trend_regime & (rsi_15m > RSI_TREND_LONG)
-    trend_short_mask = is_trend_regime & (rsi_15m < RSI_TREND_SHORT)
-    rsi_signal[trend_long_mask] = 1
-    rsi_signal[trend_short_mask] = -1
+    trend_long_mask = is_trend_regime & (rsi_1h > RSI_TREND_LONG)
+    trend_short_mask = is_trend_regime & (rsi_1h < RSI_TREND_SHORT)
+    rsi_signal = np.where(trend_long_mask, 1, rsi_signal)
+    rsi_signal = np.where(trend_short_mask, -1, rsi_signal)
     
     # Mean reversion regime RSI
-    mr_long_mask = is_mr_regime & (rsi_15m < RSI_MR_LONG)
-    mr_short_mask = is_mr_regime & (rsi_15m > RSI_MR_SHORT)
-    rsi_signal[mr_long_mask] = 1
-    rsi_signal[mr_short_mask] = -1
+    mr_long_mask = is_mr_regime & (rsi_1h < RSI_MR_LONG)
+    mr_short_mask = is_mr_regime & (rsi_1h > RSI_MR_SHORT)
+    rsi_signal = np.where(mr_long_mask, 1, rsi_signal)
+    rsi_signal = np.where(mr_short_mask, -1, rsi_signal)
     
     # Neutral regime RSI
-    neutral_long_mask = is_neutral & (rsi_15m > 55)
-    neutral_short_mask = is_neutral & (rsi_15m < 45)
-    rsi_signal[neutral_long_mask] = 1
-    rsi_signal[neutral_short_mask] = -1
+    neutral_long_mask = is_neutral & (rsi_1h > 55)
+    neutral_short_mask = is_neutral & (rsi_1h < 45)
+    rsi_signal = np.where(neutral_long_mask, 1, rsi_signal)
+    rsi_signal = np.where(neutral_short_mask, -1, rsi_signal)
     
-    # Signal 4: Bollinger position
-    bb_signal = np.zeros(n)
-    bb_signal[close < bb_lower_15m] = 1
-    bb_signal[close > bb_upper_15m] = -1
+    # Signal 4: Z-score mean reversion
+    zscore_signal = np.zeros(n)
+    zscore_signal = np.where(zscore_1h < ZSCORE_MR_LONG, 1, zscore_signal)
+    zscore_signal = np.where(zscore_1h > ZSCORE_MR_SHORT, -1, zscore_signal)
     
     # === ENSEMBLE VOTING ===
     votes_long = np.zeros(n)
@@ -346,39 +369,42 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # HMA vote (weighted by 4h trend alignment)
     hma_aligned_long = (hma_signal == 1) & (trend_4h >= 0)
     hma_aligned_short = (hma_signal == -1) & (trend_4h <= 0)
-    votes_long[hma_aligned_long] += 1.5
-    votes_short[hma_aligned_short] += 1.5
+    votes_long = np.where(hma_aligned_long, votes_long + 1.5, votes_long)
+    votes_short = np.where(hma_aligned_short, votes_short + 1.5, votes_short)
     
     # Supertrend vote
-    votes_long[st_signal == 1] += 1.0
-    votes_short[st_signal == -1] += 1.0
+    votes_long = np.where(st_signal == 1, votes_long + 1.0, votes_long)
+    votes_short = np.where(st_signal == -1, votes_short + 1.0, votes_short)
     
     # RSI vote
-    votes_long[rsi_signal == 1] += 1.0
-    votes_short[rsi_signal == -1] += 1.0
+    votes_long = np.where(rsi_signal == 1, votes_long + 1.0, votes_long)
+    votes_short = np.where(rsi_signal == -1, votes_short + 1.0, votes_short)
     
-    # Bollinger vote (mean reversion only)
-    votes_long[is_mr_regime & (bb_signal == 1)] += 0.5
-    votes_short[is_mr_regime & (bb_signal == -1)] += 0.5
-    
-    # Calculate confidence
-    total_votes = np.maximum(votes_long, votes_short)
-    confidence = np.clip(total_votes / 4.0, 0, 1)
+    # Z-score vote (mean reversion only, lower weight)
+    zscore_mr_mask = is_mr_regime | is_neutral
+    votes_long = np.where(zscore_mr_mask & (zscore_signal == 1), votes_long + 0.5, votes_long)
+    votes_short = np.where(zscore_mr_mask & (zscore_signal == -1), votes_short + 0.5, votes_short)
     
     # Generate final signals with discrete levels
     long_mask = (votes_long >= 2.5) & (votes_long > votes_short)
     short_mask = (votes_short >= 2.5) & (votes_short > votes_long)
     
-    # Apply regime-based sizing
-    signals[long_mask & is_trend_regime] = SIZE_HIGH
-    signals[long_mask & ~is_trend_regime] = SIZE_LOW
-    signals[short_mask & is_trend_regime] = -SIZE_HIGH
-    signals[short_mask & ~is_trend_regime] = -SIZE_LOW
+    # Create new signal array based on conditions
+    new_signals = np.zeros(n)
+    new_signals = np.where(long_mask & is_trend_regime, SIZE_HIGH, new_signals)
+    new_signals = np.where(long_mask & ~is_trend_regime, SIZE_LOW, new_signals)
+    new_signals = np.where(short_mask & is_trend_regime, -SIZE_HIGH, new_signals)
+    new_signals = np.where(short_mask & ~is_trend_regime, -SIZE_LOW, new_signals)
+    
+    signals = new_signals
     
     # Apply ATR filter (no trades in extremely high volatility)
-    atr_pct = atr_15m / close
-    high_vol_mask = atr_pct > np.percentile(atr_pct[~np.isnan(atr_pct)], 95)
-    signals[high_vol_mask] = 0
+    atr_pct = atr_1h / close
+    atr_valid = ~np.isnan(atr_pct)
+    if np.sum(atr_valid) > 0:
+        high_vol_threshold = np.percentile(atr_pct[atr_valid], 95)
+        high_vol_mask = atr_pct > high_vol_threshold
+        signals = np.where(high_vol_mask, 0, signals)
     
     # Warmup period
     signals[:first_valid] = 0
