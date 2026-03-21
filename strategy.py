@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #100: 4h RSI Pullback + MACD Momentum with Daily HMA Trend Filter
-Hypothesis: Previous 4h strategies failed due to too many conflicting filters.
-This uses simpler RSI pullback entries (RSI<40 in uptrend, RSI>60 in downtrend)
-with MACD histogram confirmation. Daily HMA provides HTF trend bias (proven).
-Fewer filters = more trades (critical for passing trade count requirements).
-Position sizing: 0.30 entry, 0.15 at 1.5R profit, stoploss at 2.0*ATR trailing.
-4h timeframe should generate 20-40 trades/year per symbol (enough for requirements).
+Experiment #101: 12h KAMA + Choppiness Regime + Daily HMA Trend
+Hypothesis: Recent failures show trend-following alone fails in bear/range markets (2025 test).
+Use Choppiness Index to detect regime: CHOP > 61.8 = range (mean revert with RSI),
+CHOP < 38.2 = trend (follow KAMA direction). KAMA adapts to volatility better than EMA.
+Daily HMA provides HTF trend bias. This regime-adaptive approach should work in both
+bull (2021-2024 train) and bear/range (2025 test) markets. Simpler entries ensure 10+ trades.
+Position sizing: 0.25 entry, 0.15 half at 1.5R, stoploss 2.5*ATR trailing.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_rsi_pullback_macd_daily_hma_v1"
-timeframe = "4h"
+name = "mtf_12h_kama_chop_regime_daily_hma_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -26,35 +26,38 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for faster trend response."""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average."""
     close_s = pd.Series(close)
-    half = period // 2
-    if half < 1:
-        half = 1
-    sqrt_period = int(np.sqrt(period))
-    if sqrt_period < 1:
-        sqrt_period = 1
+    
+    # Efficiency Ratio
+    change = (close_s - close_s.shift(er_period)).abs()
+    volatility = close_s.diff().abs().rolling(window=er_period, min_periods=er_period).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    
+    # Smoothing Constant
+    fast_sc = 2 / (fast_period + 1)
+    slow_sc = 2 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros(len(close))
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average."""
+    close_s = pd.Series(close)
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
     wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
-
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average."""
-    close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    return ema.values
-
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD indicator."""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
-    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -68,11 +71,28 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_sma(close, period):
-    """Calculate Simple Moving Average."""
+def calculate_choppiness(high, low, close, period=14):
+    """Calculate Choppiness Index (CHOP)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    return sma.values
+    
+    # Highest High and Lowest Low over period
+    hh = high_s.rolling(window=period, min_periods=period).max()
+    ll = low_s.rolling(window=period, min_periods=period).min()
+    
+    # True Range
+    tr1 = high_s - low_s
+    tr2 = (high_s - close_s.shift(1)).abs()
+    tr3 = (low_s - close_s.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    # Choppiness Index
+    chop = 100 * np.log10((hh - ll).replace(0, np.nan) / (atr * np.sqrt(period))) / np.log10(period)
+    chop = chop.fillna(50).clip(0, 100)
+    
+    return chop.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -89,22 +109,14 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    
-    # MACD
-    macd_line, signal_line, histogram = calculate_macd(close, 12, 26, 9)
-    
-    # EMA for trend
-    ema_21 = calculate_ema(close, 21)
-    ema_50 = calculate_ema(close, 50)
-    
-    # SMA for additional filter
-    sma_200 = calculate_sma(close, 200)
+    chop = calculate_choppiness(high, low, close, 14)
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
+    SIZE_ENTRY = 0.25
     SIZE_HALF = 0.15
     
     # Track positions for stoploss
@@ -115,58 +127,54 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(200, n):
-        # Daily trend filter (HTF) - price relative to Daily HMA
+    for i in range(100, n):
+        # Daily trend filter (HTF)
         daily_bullish = close[i] > hma_1d_aligned[i]
         daily_bearish = close[i] < hma_1d_aligned[i]
         
-        # 4h EMA trend
-        ema_trend_long = ema_21[i] > ema_50[i]
-        ema_trend_short = ema_21[i] < ema_50[i]
+        # Regime detection via Choppiness Index
+        is_ranging = chop[i] > 55  # Range market (mean revert)
+        is_trending = chop[i] < 45  # Trend market (follow trend)
         
-        # SMA 200 filter (long-term trend)
-        sma_trend_long = close[i] > sma_200[i]
-        sma_trend_short = close[i] < sma_200[i]
+        # KAMA trend direction
+        kama_rising = kama[i] > kama[i-1] if i > 0 else False
+        kama_falling = kama[i] < kama[i-1] if i > 0 else False
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
-        # MACD signals
-        macd_bullish = histogram[i] > 0
-        macd_bearish = histogram[i] < 0
-        macd_cross_long = histogram[i] > 0 and histogram[i-1] <= 0
-        macd_cross_short = histogram[i] < 0 and histogram[i-1] >= 0
-        
-        # RSI pullback signals (simpler than before)
-        # Long: RSI pulled back to 35-45 in uptrend
-        rsi_pullback_long = 30 < rsi[i] < 50
-        # Short: RSI rallied to 55-70 in downtrend
-        rsi_pullback_short = 50 < rsi[i] < 70
-        
-        # MACD momentum confirmation
-        macd_momentum_long = macd_bullish or macd_cross_long
-        macd_momentum_short = macd_bearish or macd_cross_short
+        # RSI levels for mean reversion
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
+        rsi_neutral = 35 <= rsi[i] <= 65
         
         new_signal = 0.0
         
-        # LONG ENTRY conditions (simpler to ensure trades)
-        # Condition 1: RSI pullback + Daily bullish + EMA trend + MACD bullish
-        if rsi_pullback_long and daily_bullish and ema_trend_long and macd_momentum_long:
-            new_signal = SIZE_ENTRY
-        # Condition 2: RSI pullback + SMA 200 bullish + MACD cross
-        elif rsi_pullback_long and sma_trend_long and macd_cross_long:
-            new_signal = SIZE_ENTRY
-        # Condition 3: MACD cross + Daily bullish + RSI not overbought
-        elif macd_cross_long and daily_bullish and rsi[i] < 65:
-            new_signal = SIZE_ENTRY
+        # TRENDING REGIME: Follow KAMA direction with Daily bias
+        if is_trending:
+            # Long: KAMA rising + price above KAMA + Daily bullish
+            if kama_rising and price_above_kama and daily_bullish:
+                new_signal = SIZE_ENTRY
+            # Short: KAMA falling + price below KAMA + Daily bearish
+            elif kama_falling and price_below_kama and daily_bearish:
+                new_signal = -SIZE_ENTRY
         
-        # SHORT ENTRY conditions
-        # Condition 1: RSI pullback + Daily bearish + EMA trend + MACD bearish
-        if rsi_pullback_short and daily_bearish and ema_trend_short and macd_momentum_short:
-            new_signal = -SIZE_ENTRY
-        # Condition 2: RSI pullback + SMA 200 bearish + MACD cross
-        elif rsi_pullback_short and sma_trend_short and macd_cross_short:
-            new_signal = -SIZE_ENTRY
-        # Condition 3: MACD cross + Daily bearish + RSI not oversold
-        elif macd_cross_short and daily_bearish and rsi[i] > 35:
-            new_signal = -SIZE_ENTRY
+        # RANGING REGIME: Mean revert with RSI extremes
+        elif is_ranging:
+            # Long: RSI oversold + Daily bullish (or neutral)
+            if rsi_oversold and (daily_bullish or not daily_bearish):
+                new_signal = SIZE_ENTRY
+            # Short: RSI overbought + Daily bearish (or neutral)
+            elif rsi_overbought and (daily_bearish or not daily_bullish):
+                new_signal = -SIZE_ENTRY
+        
+        # NEUTRAL REGIME: Use KAMA crossover
+        else:
+            # KAMA cross long
+            if price_above_kama and kama_rising and daily_bullish:
+                new_signal = SIZE_ENTRY
+            # KAMA cross short
+            elif price_below_kama and kama_falling and daily_bearish:
+                new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
@@ -174,8 +182,8 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.0*ATR from highest)
-            current_stop = highest_close - 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR from highest)
+            current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -184,7 +192,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 1.5R
-                risk = 2.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 1.5 * risk:
                     new_signal = SIZE_HALF
@@ -195,8 +203,8 @@ def generate_signals(prices):
             if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.0*ATR from lowest)
-            current_stop = lowest_close + 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR from lowest)
+            current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -205,7 +213,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 1.5R
-                risk = 2.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 1.5 * risk:
                     new_signal = -SIZE_HALF
@@ -218,7 +226,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
@@ -227,7 +235,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
