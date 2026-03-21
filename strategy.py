@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #308: 30m Regime-Adaptive Strategy with 4h HMA Bias + Choppiness Index
-Hypothesis: 30m timeframe captures intraday swings while 4h HMA provides trend bias.
-Choppiness Index (14) detects regime: CHOP>61.8=range(mean revert), CHOP<38.2=trend(follow).
-In range: RSI extremes (25/75) with Bollinger mean reversion. In trend: breakout + momentum.
-This adapts to 2022 crash (trend short) and 2025 bear/range (mean reversion). 
-Position size 0.25 balances risk. ATR stops at 2.5*ATR. Target: Beat Sharpe=0.499.
+Experiment #309: 1h Regime-Adaptive Strategy with Choppiness Index + 4h HMA Bias
+Hypothesis: Markets alternate between trending and ranging regimes. By detecting regime
+via Choppiness Index (CHOP), we can apply the right strategy: trend-following when CHOP<38.2
+(HMA crossover + momentum) and mean-reversion when CHOP>61.8 (RSI extremes + Bollinger).
+4h HMA provides macro trend bias to filter counter-trend trades. ATR stops control drawdown.
+This adaptive approach should work in both 2021-2024 (bull/bear) and 2025 (bear/range).
+Target: Beat Sharpe=0.499 with >=10 trades/symbol, DD > -50%.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_regime_chop_4h_hma_rsi_boll_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_regime_chop_4h_hma_adaptive_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -47,19 +48,11 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma
-
 def calculate_choppiness(high, low, close, period=14):
     """
     Calculate Choppiness Index (CHOP).
-    CHOP = 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    CHOP > 61.8 = choppy/range, CHOP < 38.2 = trending
+    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    CHOP > 61.8 = ranging market, CHOP < 38.2 = trending market
     """
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -68,36 +61,48 @@ def calculate_choppiness(high, low, close, period=14):
     tr[0] = tr1[0]
     
     atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    highest = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest = pd.Series(low).rolling(window=period, min_periods=period).min().values
     
-    price_range = highest_high - lowest_low
+    price_range = highest - lowest
     price_range = np.where(price_range > 0, price_range, 1e-10)
     
     chop = 100 * np.log10(atr_sum / price_range) / np.log10(period)
     chop = np.clip(chop, 0, 100)
     return chop
 
-def calculate_supertrend(high, low, close, period=10, mult=3.0):
-    """Calculate Supertrend indicator."""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return upper, lower, sma
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average."""
+    close_s = pd.Series(close)
     
-    upper = hl2 + mult * atr
-    lower = hl2 - mult * atr
+    # Efficiency Ratio
+    change = np.abs(close - np.roll(close, er_period))
+    change[0:er_period] = np.abs(close[0:er_period] - close[0])
+    volatility = pd.Series(np.abs(close - np.roll(close, 1))).rolling(window=er_period, min_periods=er_period).sum().values
+    volatility[0] = change[0]
+    volatility = np.where(volatility > 0, volatility, 1e-10)
+    er = change / volatility
     
-    supertrend = np.zeros(len(close))
-    direction = np.ones(len(close))
+    # Smoothing constants
+    fast_sc = 2 / (fast_period + 1)
+    slow_sc = 2 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
+    # KAMA calculation
+    kama = np.zeros(len(close))
+    kama[0] = close[0]
     for i in range(1, len(close)):
-        if close[i] > supertrend[i-1] if i > 0 else close[i] > lower[i]:
-            supertrend[i] = lower[i]
-            direction[i] = 1
-        else:
-            supertrend[i] = upper[i]
-            direction[i] = -1
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    return supertrend, direction
+    return kama
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -114,16 +119,28 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    boll_upper, boll_lower, boll_mid = calculate_bollinger(close, 20, 2.0)
     chop = calculate_choppiness(high, low, close, 14)
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
+    kama = calculate_kama(close, 10, 2, 30)
+    hma_16 = calculate_hma(close, 16)
+    hma_48 = calculate_hma(close, 48)
+    
+    # Track previous values
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    prev_rsi = np.roll(rsi, 1)
+    prev_rsi[0] = rsi[0]
+    prev_hma_16 = np.roll(hma_16, 1)
+    prev_hma_16[0] = hma_16[0]
+    prev_hma_48 = np.roll(hma_48, 1)
+    prev_hma_48[0] = hma_48[0]
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.28
-    SIZE_HALF = 0.14
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -135,74 +152,75 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(boll_upper[i]) or np.isnan(chop[i]):
+        if np.isnan(chop[i]) or np.isnan(atr[i]) or np.isnan(bb_upper[i]) or np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # 4h macro trend bias
-        hma_valid = not np.isnan(hma_4h_aligned[i])
-        trend_bullish = hma_valid and close[i] > hma_4h_aligned[i]
-        trend_bearish = hma_valid and close[i] < hma_4h_aligned[i]
+        # === REGIME DETECTION ===
+        trending_regime = chop[i] < 45  # Slightly relaxed from 38.2 for more trades
+        ranging_regime = chop[i] > 55   # Slightly relaxed from 61.8 for more trades
+        neutral_regime = not trending_regime and not ranging_regime
         
-        # Regime detection via Choppiness Index
-        is_range = chop[i] > 55.0  # Slightly lower threshold for more signals
-        is_trend = chop[i] < 45.0  # Slightly higher threshold for more signals
+        # === MACRO TREND BIAS (4h HMA) ===
+        macro_bullish = close[i] > hma_4h_aligned[i]
+        macro_bearish = close[i] < hma_4h_aligned[i]
         
-        # Supertrend direction
-        st_bullish = st_direction[i] > 0
-        st_bearish = st_direction[i] < 0
+        # === TREND FOLLOWING SIGNALS (when trending) ===
+        hma_golden_cross = hma_16[i] > hma_48[i] and prev_hma_16[i] <= prev_hma_48[i]
+        hma_death_cross = hma_16[i] < hma_48[i] and prev_hma_16[i] >= prev_hma_48[i]
+        above_kama = close[i] > kama[i]
+        below_kama = close[i] < kama[i]
         
-        # RSI conditions
+        # === MEAN REVERSION SIGNALS (when ranging) ===
         rsi_oversold = rsi[i] < 35
         rsi_overbought = rsi[i] > 65
-        rsi_neutral = 40 < rsi[i] < 60
-        
-        # Bollinger conditions
-        near_lower = close[i] < boll_lower[i] * 1.005
-        near_upper = close[i] > boll_upper[i] * 0.995
-        below_mid = close[i] < boll_mid[i]
-        above_mid = close[i] > boll_mid[i]
+        rsi_extreme_oversold = rsi[i] < 25
+        rsi_extreme_overbought = rsi[i] > 75
+        near_bb_lower = close[i] < bb_lower[i] * 1.005
+        near_bb_upper = close[i] > bb_upper[i] * 0.995
+        rsi_rising = rsi[i] > prev_rsi[i]
+        rsi_falling = rsi[i] < prev_rsi[i]
         
         new_signal = 0.0
         
-        # === LONG ENTRY ===
-        # Range regime: Mean reversion at Bollinger lower + RSI oversold
-        if is_range and near_lower and rsi_oversold:
+        # === LONG ENTRIES ===
+        # Trend regime: HMA golden cross + above KAMA + macro bullish
+        if trending_regime and hma_golden_cross and above_kama and macro_bullish:
             new_signal = SIZE_ENTRY
-        # Range regime: RSI < 30 + price above 4h HMA (bullish bias)
-        elif is_range and rsi[i] < 30 and trend_bullish:
+        # Trend regime: Above both HMA + macro bullish + RSI momentum
+        elif trending_regime and hma_16[i] > hma_48[i] and above_kama and macro_bullish and rsi[i] > 45:
             new_signal = SIZE_ENTRY
-        # Trend regime: Supertrend bullish + breakout above Bollinger mid
-        elif is_trend and st_bullish and above_mid and rsi[i] > 45:
+        # Range regime: RSI oversold + near BB lower + macro bullish (counter-trend long)
+        elif ranging_regime and rsi_oversold and near_bb_lower and macro_bullish:
             new_signal = SIZE_ENTRY
-        # Trend regime: 4h HMA bullish + Supertrend flip bullish
-        elif trend_bullish and st_bullish and rsi[i] > 40:
+        # Range regime: RSI extreme oversold + rsi rising (reversal)
+        elif ranging_regime and rsi_extreme_oversold and rsi_rising:
             new_signal = SIZE_ENTRY
-        # Simple: RSI < 35 + Supertrend bullish (catches reversals)
-        elif rsi[i] < 35 and st_bullish:
+        # Neutral regime: Simple HMA cross + RSI confirmation
+        elif neutral_regime and hma_golden_cross and rsi[i] > 40:
             new_signal = SIZE_ENTRY
-        # Simple: Price at Bollinger lower + 4h HMA bullish
-        elif near_lower and trend_bullish:
+        # Fallback: Macro bullish + above KAMA + RSI > 50 (simple trend)
+        elif macro_bullish and above_kama and rsi[i] > 50 and hma_16[i] > hma_48[i]:
             new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRY ===
-        # Range regime: Mean reversion at Bollinger upper + RSI overbought
-        if is_range and near_upper and rsi_overbought:
+        # === SHORT ENTRIES ===
+        # Trend regime: HMA death cross + below KAMA + macro bearish
+        if trending_regime and hma_death_cross and below_kama and macro_bearish:
             new_signal = -SIZE_ENTRY
-        # Range regime: RSI > 70 + price below 4h HMA (bearish bias)
-        elif is_range and rsi[i] > 70 and trend_bearish:
+        # Trend regime: Below both HMA + macro bearish + RSI momentum
+        elif trending_regime and hma_16[i] < hma_48[i] and below_kama and macro_bearish and rsi[i] < 55:
             new_signal = -SIZE_ENTRY
-        # Trend regime: Supertrend bearish + breakdown below Bollinger mid
-        elif is_trend and st_bearish and below_mid and rsi[i] < 55:
+        # Range regime: RSI overbought + near BB upper + macro bearish (counter-trend short)
+        elif ranging_regime and rsi_overbought and near_bb_upper and macro_bearish:
             new_signal = -SIZE_ENTRY
-        # Trend regime: 4h HMA bearish + Supertrend flip bearish
-        elif trend_bearish and st_bearish and rsi[i] < 60:
+        # Range regime: RSI extreme overbought + rsi falling (reversal)
+        elif ranging_regime and rsi_extreme_overbought and rsi_falling:
             new_signal = -SIZE_ENTRY
-        # Simple: RSI > 65 + Supertrend bearish (catches reversals)
-        elif rsi[i] > 65 and st_bearish:
+        # Neutral regime: Simple HMA cross + RSI confirmation
+        elif neutral_regime and hma_death_cross and rsi[i] < 60:
             new_signal = -SIZE_ENTRY
-        # Simple: Price at Bollinger upper + 4h HMA bearish
-        elif near_upper and trend_bearish:
+        # Fallback: Macro bearish + below KAMA + RSI < 50 (simple trend)
+        elif macro_bearish and below_kama and rsi[i] < 50 and hma_16[i] < hma_48[i]:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
