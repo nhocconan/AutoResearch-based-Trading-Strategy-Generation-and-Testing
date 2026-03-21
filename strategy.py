@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #245: 12h Choppiness Index Regime-Adaptive with Daily/Weekly HMA Trend Filter
-Hypothesis: Market regime (trending vs ranging) determines which strategy works best.
-Choppiness Index (CHOP) identifies regime: CHOP<38.2=trending (use breakout), CHOP>61.8=ranging
-(use mean reversion). Daily HMA provides primary trend bias, Weekly HMA confirms macro.
-This differs from previous attempts by using CHOP as the PRIMARY regime filter instead of
-RSI/Supertrend alone. Simpler entry conditions to ensure sufficient trades. Position sizing:
-0.25 entry, 0.15 half at 2R profit. Stoploss: 2.5*ATR trailing stop. Target: Beat Sharpe=0.499.
+Experiment #246: 1d KAMA Adaptive Trend + Weekly HMA + ROC Momentum
+Hypothesis: Daily KAMA (Kaufman Adaptive Moving Average) adapts to volatility changes
+better than fixed EMA/HMA, reducing whipsaws in ranging markets. Weekly HMA provides
+macro trend bias. ROC(10) momentum filter ensures we only enter when momentum confirms.
+Simple 2-condition entry (KAMA crossover + weekly trend) to ensure sufficient trades.
+Position sizing: 0.25 entry, 0.125 half at 2R profit. Stoploss: 2.5*ATR trailing.
+Target: Beat Sharpe=0.499 with fewer whipsaws in 2025 bear market.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_chop_regime_daily_weekly_hma_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_weekly_hma_roc_momentum_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -26,6 +26,41 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average.
+    KAMA adapts to market noise - moves fast in trends, slow in ranges.
+    """
+    close_s = pd.Series(close)
+    n = len(close)
+    
+    # Change = absolute price change over er_period
+    change = np.abs(close - np.roll(close, er_period))
+    change[:er_period] = np.nan
+    
+    # Volatility = sum of absolute single-period changes
+    volatility = np.zeros(n)
+    for i in range(er_period, n):
+        volatility[i] = np.sum(np.abs(close[i-er_period+1:i+1] - np.roll(close[i-er_period+1:i+1], 1)))
+    
+    # Efficiency Ratio (ER) = change / volatility
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility != 0)
+    er = np.nan_to_num(er, nan=0.0)
+    
+    # Smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[er_period] = close[er_period]  # Initialize with price
+    
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
     close_s = pd.Series(close)
@@ -36,29 +71,11 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
-    CHOP > 61.8 = ranging market, CHOP < 38.2 = trending market
-    """
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    price_range = highest_high - lowest_low
-    price_range = np.where(price_range > 0, price_range, 1e-10)
-    
-    chop = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-    chop = np.clip(chop, 0, 100)
-    chop[:period] = 50  # Initialize early values
-    return chop
+def calculate_roc(close, period=10):
+    """Calculate Rate of Change momentum indicator."""
+    close_s = pd.Series(close)
+    roc = close_s.pct_change(periods=period) * 100
+    return roc.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -72,22 +89,6 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion signals."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    std = np.where(std > 0, std, 1e-10)
-    zscore = (close - sma) / std
-    return zscore
-
-def calculate_momentum(close, period=10):
-    """Calculate Rate of Change (ROC) momentum."""
-    prev_close = np.roll(close, period)
-    prev_close[:period] = close[0]
-    roc = (close - prev_close) / prev_close * 100
-    return roc
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -95,35 +96,30 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    kama_fast = calculate_kama(close, er_period=5, fast_period=2, slow_period=15)
+    roc = calculate_roc(close, 10)
     rsi = calculate_rsi(close, 14)
-    chop = calculate_choppiness(high, low, close, 14)
-    zscore = calculate_zscore(close, 20)
-    momentum = calculate_momentum(close, 10)
     
     # Track previous values for crossover detection
-    prev_rsi = np.roll(rsi, 1)
-    prev_rsi[0] = rsi[0]
-    prev_zscore = np.roll(zscore, 1)
-    prev_zscore[0] = zscore[0]
-    prev_momentum = np.roll(momentum, 1)
-    prev_momentum[0] = momentum[0]
+    prev_kama = np.roll(kama, 1)
+    prev_kama_fast = np.roll(kama_fast, 1)
+    prev_kama[0] = kama[0]
+    prev_kama_fast[0] = kama_fast[0]
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.28
+    SIZE_HALF = 0.14
     
     # Track positions for stoploss
     position_side = 0
@@ -134,77 +130,71 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filters
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        # Weekly trend filter (macro bias)
         weekly_bullish = close[i] > hma_1w_aligned[i]
         weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # Regime detection via Choppiness Index
-        trending_regime = chop[i] < 38.2
-        ranging_regime = chop[i] > 61.8
-        neutral_regime = not trending_regime and not ranging_regime
+        # KAMA crossover signals (adaptive trend)
+        kama_cross_up = prev_kama[i] <= kama[i] and kama_fast[i] > kama[i]
+        kama_cross_down = prev_kama[i] >= kama[i] and kama_fast[i] < kama[i]
         
-        # RSI signals
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
-        rsi_cross_up = prev_rsi[i] < 40 and rsi[i] >= 40
-        rsi_cross_down = prev_rsi[i] > 60 and rsi[i] <= 60
+        # KAMA slope (trend direction)
+        kama_slope_up = kama[i] > prev_kama[i]
+        kama_slope_down = kama[i] < prev_kama[i]
         
-        # Z-score mean reversion signals
-        zscore_oversold = zscore[i] < -1.5
-        zscore_overbought = zscore[i] > 1.5
-        zscore_cross_up = prev_zscore[i] < -1.0 and zscore[i] >= -1.0
-        zscore_cross_down = prev_zscore[i] > 1.0 and zscore[i] <= 1.0
+        # Price vs KAMA position
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
-        # Momentum signals
-        momentum_positive = momentum[i] > 0
-        momentum_negative = momentum[i] < 0
-        momentum_cross_up = prev_momentum[i] <= 0 and momentum[i] > 0
-        momentum_cross_down = prev_momentum[i] >= 0 and momentum[i] < 0
+        # ROC momentum filter
+        roc_strong_long = roc[i] > 2.0
+        roc_strong_short = roc[i] < -2.0
+        roc_positive = roc[i] > 0
+        roc_negative = roc[i] < 0
+        
+        # RSI filter (not extreme)
+        rsi_ok_long = 35 < rsi[i] < 75
+        rsi_ok_short = 25 < rsi[i] < 65
         
         new_signal = 0.0
         
-        # === TRENDING REGIME (CHOP < 38.2) - Use breakout/momentum ===
-        if trending_regime:
-            # Long: momentum cross up + daily bullish
-            if momentum_cross_up and daily_bullish:
+        # === LONG ENTRY ===
+        # KAMA fast crosses above KAMA with weekly trend
+        if kama_cross_up:
+            if weekly_bullish and roc_positive and rsi_ok_long:
                 new_signal = SIZE_ENTRY
-            # Long: weekly bullish + momentum positive
-            elif weekly_bullish and momentum_positive and rsi[i] > 45:
+            elif price_above_kama and roc_strong_long:
                 new_signal = SIZE_ENTRY
-            
-            # Short: momentum cross down + daily bearish
-            if momentum_cross_down and daily_bearish:
+        
+        # Price crosses above KAMA with momentum
+        elif price_above_kama and prev_kama[i] >= close[i]:
+            if weekly_bullish and kama_slope_up:
+                new_signal = SIZE_ENTRY
+        
+        # Pullback to KAMA in uptrend
+        elif price_above_kama and weekly_bullish:
+            if close[i-1] < kama[i-1] and close[i] > kama[i]:
+                if roc_positive or kama_slope_up:
+                    new_signal = SIZE_ENTRY
+        
+        # === SHORT ENTRY ===
+        # KAMA fast crosses below KAMA with weekly trend
+        if kama_cross_down:
+            if weekly_bearish and roc_negative and rsi_ok_short:
                 new_signal = -SIZE_ENTRY
-            # Short: weekly bearish + momentum negative
-            elif weekly_bearish and momentum_negative and rsi[i] < 55:
+            elif price_below_kama and roc_strong_short:
                 new_signal = -SIZE_ENTRY
         
-        # === RANGING REGIME (CHOP > 61.8) - Use mean reversion ===
-        elif ranging_regime:
-            # Long: Z-score oversold + RSI oversold
-            if zscore_oversold and rsi_oversold:
-                new_signal = SIZE_ENTRY
-            # Long: Z-score cross up from oversold
-            elif zscore_cross_up and daily_bullish:
-                new_signal = SIZE_ENTRY
-            
-            # Short: Z-score overbought + RSI overbought
-            if zscore_overbought and rsi_overbought:
-                new_signal = -SIZE_ENTRY
-            # Short: Z-score cross down from overbought
-            elif zscore_cross_down and daily_bearish:
+        # Price crosses below KAMA with momentum
+        elif price_below_kama and prev_kama[i] <= close[i]:
+            if weekly_bearish and kama_slope_down:
                 new_signal = -SIZE_ENTRY
         
-        # === NEUTRAL REGIME - Use conservative entries ===
-        else:
-            # Long: RSI cross up + daily bullish
-            if rsi_cross_up and daily_bullish:
-                new_signal = SIZE_ENTRY
-            # Short: RSI cross down + daily bearish
-            elif rsi_cross_down and daily_bearish:
-                new_signal = -SIZE_ENTRY
+        # Pullback to KAMA in downtrend
+        elif price_below_kama and weekly_bearish:
+            if close[i-1] > kama[i-1] and close[i] < kama[i]:
+                if roc_negative or kama_slope_down:
+                    new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
