@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #279: 1h Mean Reversion with 4h Trend Filter and Bollinger Bands
-Hypothesis: 1h timeframe is too noisy for pure trend-following (see exp#267, #273 failures).
-Mean reversion works better on shorter timeframes. Use 4h HMA for trend bias,
-enter only on RSI extremes WITH Bollinger Band touches. This filters false signals.
-Position sizing: 0.25 entry, 0.125 half at 2R. Stoploss: 2.5*ATR trailing.
-Target: Generate 50+ trades/year on 1h while maintaining Sharpe > 0.5.
+Experiment #280: 4h Donchian Breakout with Daily/Weekly HMA Trend Filter
+Hypothesis: Donchian breakouts (20-period) capture strong trends while HMA filters reduce false signals.
+4h timeframe balances trade frequency with signal quality. Daily HMA provides primary trend bias,
+Weekly HMA confirms macro direction. RSI filter avoids entering at extremes. ATR stoploss protects
+capital. Simpler logic than previous 4h attempts to ensure sufficient trades (>10 train, >3 test).
+Position sizing: 0.28 entry, 0.14 half at 2R profit. Stoploss: 2.5*ATR trailing.
+Target: Beat Sharpe=0.499 from current best (mtf_12h_supertrend_daily_hma_rsi_pullback_v2)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_mr_4h_hma_bollinger_rsi_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_donchian_daily_weekly_hma_rsi_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -47,22 +48,11 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion signals."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    zscore = np.where(std > 0, (close - sma) / std, 0.0)
-    return zscore
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel upper and lower bands."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -71,29 +61,31 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
-    zscore = calculate_zscore(close, 20)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     # Track previous values
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
     prev_rsi = np.roll(rsi, 1)
     prev_rsi[0] = rsi[0]
-    prev_zscore = np.roll(zscore, 1)
-    prev_zscore[0] = zscore[0]
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.125
+    SIZE_ENTRY = 0.28
+    SIZE_HALF = 0.14
     
     # Track positions for stoploss
     position_side = 0
@@ -104,48 +96,55 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # 4h trend filter
-        trend_bullish = close[i] > hma_4h_aligned[i]
-        trend_bearish = close[i] < hma_4h_aligned[i]
+        # HTF trend filters
+        daily_bullish = close[i] > hma_1d_aligned[i]
+        daily_bearish = close[i] < hma_1d_aligned[i]
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # Mean reversion signals
-        bb_touch_lower = low[i] <= bb_lower[i]
-        bb_touch_upper = high[i] >= bb_upper[i]
-        bb_inside = bb_lower[i] < close[i] < bb_upper[i]
+        # Donchian breakout signals (price crosses above/below previous bar's channel)
+        breakout_long = close[i] > donchian_upper[i-1] and prev_close[i] <= donchian_upper[i-1]
+        breakout_short = close[i] < donchian_lower[i-1] and prev_close[i] >= donchian_lower[i-1]
         
-        # Z-score extremes
-        zscore_oversold = zscore[i] < -1.5
-        zscore_overbought = zscore[i] > 1.5
+        # Also allow continuation entries (price already above/below channel with momentum)
+        continuation_long = close[i] > donchian_upper[i] and rsi[i] > 50 and daily_bullish
+        continuation_short = close[i] < donchian_lower[i] and rsi[i] < 50 and daily_bearish
         
-        # RSI extremes with momentum
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
-        rsi_rising = rsi[i] > prev_rsi[i]
-        rsi_falling = rsi[i] < prev_rsi[i]
+        # RSI filter (avoid extremes - looser for more trades)
+        rsi_ok_long = rsi[i] < 75
+        rsi_ok_short = rsi[i] > 25
         
         new_signal = 0.0
         
-        # === LONG ENTRY (Mean Reversion in Uptrend) ===
-        # Primary: BB lower touch + RSI oversold + 4h bullish + RSI rising
-        if bb_touch_lower and rsi_oversold and trend_bullish and rsi_rising:
-            new_signal = SIZE_ENTRY
-        # Secondary: Z-score extreme + RSI rising + 4h bullish
-        elif zscore_oversold and rsi[i] < 40 and trend_bullish and rsi_rising:
-            new_signal = SIZE_ENTRY
-        # Tertiary: RSI deeply oversold in any trend (catch crashes)
-        elif rsi[i] < 25 and rsi_rising:
-            new_signal = SIZE_ENTRY
+        # === LONG ENTRY ===
+        # Breakout with daily trend confirmation
+        if breakout_long and rsi_ok_long:
+            if daily_bullish:
+                new_signal = SIZE_ENTRY
+            elif weekly_bullish:
+                new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRY (Mean Reversion in Downtrend) ===
-        # Primary: BB upper touch + RSI overbought + 4h bearish + RSI falling
-        if bb_touch_upper and rsi_overbought and trend_bearish and rsi_falling:
-            new_signal = -SIZE_ENTRY
-        # Secondary: Z-score extreme + RSI falling + 4h bearish
-        elif zscore_overbought and rsi[i] > 60 and trend_bearish and rsi_falling:
-            new_signal = -SIZE_ENTRY
-        # Tertiary: RSI deeply overbought in any trend (catch rallies)
-        elif rsi[i] > 75 and rsi_falling:
-            new_signal = -SIZE_ENTRY
+        # Continuation in strong trend
+        elif continuation_long and rsi_ok_long:
+            if daily_bullish and weekly_bullish:
+                new_signal = SIZE_ENTRY
+            elif daily_bullish and rsi[i] > 55:
+                new_signal = SIZE_ENTRY
+        
+        # === SHORT ENTRY ===
+        # Breakout with daily trend confirmation
+        if breakout_short and rsi_ok_short:
+            if daily_bearish:
+                new_signal = -SIZE_ENTRY
+            elif weekly_bearish:
+                new_signal = -SIZE_ENTRY
+        
+        # Continuation in strong trend
+        elif continuation_short and rsi_ok_short:
+            if daily_bearish and weekly_bearish:
+                new_signal = -SIZE_ENTRY
+            elif daily_bearish and rsi[i] < 45:
+                new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
@@ -163,12 +162,11 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.5 * atr[np.maximum(0, i-1)]
-                if risk > 0:
-                    profit = close[i] - entry_price
-                    if profit >= 2.0 * risk:
-                        new_signal = SIZE_HALF
-                        position_reduced = True
+                risk = 2.5 * atr[i]
+                profit = close[i] - entry_price
+                if profit >= 2.0 * risk:
+                    new_signal = SIZE_HALF
+                    position_reduced = True
         
         if position_side < 0 and entry_price > 0:
             # Update lowest close for trailing
@@ -185,12 +183,11 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.5 * atr[np.maximum(0, i-1)]
-                if risk > 0:
-                    profit = entry_price - close[i]
-                    if profit >= 2.0 * risk:
-                        new_signal = -SIZE_HALF
-                        position_reduced = True
+                risk = 2.5 * atr[i]
+                profit = entry_price - close[i]
+                if profit >= 2.0 * risk:
+                    new_signal = -SIZE_HALF
+                    position_reduced = True
         
         # Update position tracking AFTER signal calculation
         prev_signal = signals[i-1] if i > 0 else 0.0
