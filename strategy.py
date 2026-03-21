@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #145: 15m Multi-Timeframe Mean Reversion with 4h Trend Filter
-Hypothesis: 15m timeframe is too noisy for pure trend following (see exp #133, #139 failures).
-Instead, use 4h HMA for major trend direction, then enter on 15m RSI extremes (mean reversion)
-when aligned with 4h trend. Add volume confirmation to avoid false breakouts.
-Use Bollinger Band position for entry timing and ATR stoploss at 2.5*ATR.
-This combines: HTF trend filter + LTF mean reversion + volume confirmation.
-Position sizing: 0.25 entry, reduce to 0.12 at 2R profit, stoploss at 2.5*ATR.
-Timeframe: 15m for more trade opportunities while 4h filter reduces whipsaws.
+Experiment #146: 30m Multi-Timeframe Trend-Follow with RSI Pullback
+Hypothesis: 30m timeframe offers balance between noise reduction and trade frequency.
+Use 4h HMA as primary trend filter (proven in best strategies), 30m RSI for pullback
+entries in trend direction. Simpler than regime-switching approaches that failed.
+Key insight from failures: too many conflicting filters = whipsaw or 0 trades.
+This uses: 4h HMA slope + 30m RSI pullback + ATR stoploss.
+Position sizing: 0.30 entry, stoploss at 2.5*ATR, discrete levels to minimize fees.
+Timeframe: 30m for adequate trade frequency while avoiding 5m/15m noise.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_4h_hma_rsi_mr_volume_v1"
-timeframe = "15m"
+name = "mtf_30m_4h_hma_rsi_pullback_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -53,79 +53,36 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and bandwidth."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma
-    return upper, lower, bandwidth, sma
-
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs moving average."""
-    vol_s = pd.Series(volume)
-    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
-    vol_ratio = volume / vol_ma
-    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
-    return vol_ratio
-
-def calculate_kst(close, high, low, period1=10, period2=15, period3=20, period4=30, smooth1=10, smooth2=10, smooth3=10, smooth4=15):
-    """
-    Calculate Know Sure Thing (KST) momentum oscillator.
-    Combines 4 ROC periods with different smoothing for multi-timeframe momentum.
-    """
-    roc1 = (close - np.roll(close, period1)) / np.roll(close, period1) * 100
-    roc2 = (close - np.roll(close, period2)) / np.roll(close, period2) * 100
-    roc3 = (close - np.roll(close, period3)) / np.roll(close, period3) * 100
-    roc4 = (close - np.roll(close, period4)) / np.roll(close, period4) * 100
-    
-    roc1[0:period1] = 0
-    roc2[0:period2] = 0
-    roc3[0:period3] = 0
-    roc4[0:period4] = 0
-    
-    sma1 = pd.Series(roc1).rolling(window=smooth1, min_periods=smooth1).mean().values
-    sma2 = pd.Series(roc2).rolling(window=smooth2, min_periods=smooth2).mean().values
-    sma3 = pd.Series(roc3).rolling(window=smooth3, min_periods=smooth3).mean().values
-    sma4 = pd.Series(roc4).rolling(window=smooth4, min_periods=smooth4).mean().values
-    
-    kst = sma1 * 1 + sma2 * 2 + sma3 * 3 + sma4 * 4
-    kst_signal = pd.Series(kst).rolling(window=9, min_periods=9).mean().values
-    
-    return kst, kst_signal
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_4h_fast = calculate_hma(df_4h['close'].values, 21)
+    hma_4h_slow = calculate_hma(df_4h['close'].values, 55)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_4h_fast_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_fast)
+    hma_4h_slow_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_slow)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_bw, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
-    vol_ratio = calculate_volume_ratio(volume, 20)
-    kst, kst_signal = calculate_kst(close, high, low)
-    
-    # Calculate 15m HMA for local trend
-    hma_15m_fast = calculate_hma(close, 8)
-    hma_15m_slow = calculate_hma(close, 21)
+    hma_30m = calculate_hma(close, 21)
+    sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.28
-    SIZE_HALF = 0.14
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -135,63 +92,48 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):
-        # 4h trend filter (major trend direction)
-        trend_4h_bullish = close[i] > hma_4h_aligned[i]
-        trend_4h_bearish = close[i] < hma_4h_aligned[i]
+    for i in range(250, n):  # Start after 200 SMA warmup + buffer
+        # 4h HTF trend filter (major trend direction)
+        hma_4h_bullish = hma_4h_fast_aligned[i] > hma_4h_slow_aligned[i]
+        hma_4h_bearish = hma_4h_fast_aligned[i] < hma_4h_slow_aligned[i]
         
-        # 15m HMA crossover for local trend confirmation
-        hma_cross_long = hma_15m_fast[i] > hma_15m_slow[i]
-        hma_cross_short = hma_15m_fast[i] < hma_15m_slow[i]
+        # 4h HMA slope confirmation (trend momentum)
+        hma_4h_slope_up = hma_4h_fast_aligned[i] > hma_4h_fast_aligned[i-3] if i > 3 else False
+        hma_4h_slope_down = hma_4h_fast_aligned[i] < hma_4h_fast_aligned[i-3] if i > 3 else False
         
-        # RSI extremes for mean reversion entries
-        rsi_oversold = rsi[i] < 32
-        rsi_overbought = rsi[i] > 68
-        rsi_neutral = 35 <= rsi[i] <= 65
+        # 30m LTF trend filter
+        price_above_sma200 = close[i] > sma_200[i]
+        price_below_sma200 = close[i] < sma_200[i]
         
-        # Bollinger Band position
-        bb_range = bb_upper[i] - bb_lower[i]
-        if bb_range > 0:
-            bb_position = (close[i] - bb_lower[i]) / bb_range
-        else:
-            bb_position = 0.5
-        bb_low = bb_position < 0.15
-        bb_high = bb_position > 0.85
+        # 30m HMA trend
+        hma_30m_bullish = close[i] > hma_30m[i]
+        hma_30m_bearish = close[i] < hma_30m[i]
         
-        # Volume confirmation (avoid low volume false breakouts)
-        volume_confirmed = vol_ratio[i] > 0.8
-        
-        # KST momentum confirmation
-        kst_bullish = kst[i] > kst_signal[i] if not np.isnan(kst_signal[i]) else False
-        kst_bearish = kst[i] < kst_signal[i] if not np.isnan(kst_signal[i]) else False
-        
-        # KST divergence (momentum shifting)
-        kst_rising = kst[i] > kst[i-3] if i > 3 else False
-        kst_falling = kst[i] < kst[i-3] if i > 3 else False
+        # RSI pullback conditions (entry timing)
+        rsi_pullback_long = 35 <= rsi[i] <= 50  # Pullback in uptrend
+        rsi_pullback_short = 50 <= rsi[i] <= 65  # Pullback in downtrend
+        rsi_strong_long = rsi[i] > 55  # Momentum continuation
+        rsi_strong_short = rsi[i] < 45  # Momentum continuation
         
         new_signal = 0.0
         
-        # LONG ENTRY: 4h bullish + RSI oversold + BB low + volume confirmed + KST turning up
-        if trend_4h_bullish and rsi_oversold and bb_low and volume_confirmed:
-            if kst_rising or kst_bullish:
+        # LONG entries: 4h bullish + 30m confirmation + RSI timing
+        if hma_4h_bullish and hma_4h_slope_up:
+            # Pullback entry (preferred - better risk/reward)
+            if rsi_pullback_long and hma_30m_bullish and price_above_sma200:
+                new_signal = SIZE_ENTRY
+            # Momentum entry (when trend is strong)
+            elif rsi_strong_long and hma_30m_bullish and hma_4h_slope_up:
                 new_signal = SIZE_ENTRY
         
-        # SHORT ENTRY: 4h bearish + RSI overbought + BB high + volume confirmed + KST turning down
-        elif trend_4h_bearish and rsi_overbought and bb_high and volume_confirmed:
-            if kst_falling or kst_bearish:
+        # SHORT entries: 4h bearish + 30m confirmation + RSI timing
+        elif hma_4h_bearish and hma_4h_slope_down:
+            # Pullback entry (preferred - better risk/reward)
+            if rsi_pullback_short and hma_30m_bearish and price_below_sma200:
                 new_signal = -SIZE_ENTRY
-        
-        # Alternative: HMA crossover with 4h trend alignment (trend following mode)
-        if new_signal == 0.0:
-            # LONG: 4h bullish + 15m HMA cross up + RSI not overbought
-            if trend_4h_bullish and hma_cross_long and hma_15m_fast[i-1] <= hma_15m_slow[i-1] and rsi[i] < 60:
-                if volume_confirmed:
-                    new_signal = SIZE_ENTRY
-            
-            # SHORT: 4h bearish + 15m HMA cross down + RSI not oversold
-            elif trend_4h_bearish and hma_cross_short and hma_15m_fast[i-1] >= hma_15m_slow[i-1] and rsi[i] > 40:
-                if volume_confirmed:
-                    new_signal = -SIZE_ENTRY
+            # Momentum entry (when trend is strong)
+            elif rsi_strong_short and hma_30m_bearish and hma_4h_slope_down:
+                new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
