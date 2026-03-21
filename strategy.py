@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #213: 1h KAMA Adaptive Trend with 4h/1d HMA Filter and RSI Pullback
+Experiment #214: 4h KAMA Adaptive Trend with Daily/Weekly HMA Filter + RSI Pullback
 Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility - 
-fast in trends, slow in ranges. On 1h timeframe, this should reduce whipsaws compared 
-to fixed EMA/HMA. 4h HMA provides intermediate trend bias, 1d HMA provides macro filter.
-RSI pullback (40-60 range) ensures we enter on retracements, not chasing. ATR trailing 
-stop manages risk. Position sizing: 0.25 entry, 0.125 half at 2R profit. Target: Beat 
-Sharpe=0.499 from current best (12h Supertrend). Simpler than regime-switching.
+faster during trends, slower during ranges. This should reduce whipsaws compared to 
+fixed EMA/HMA. 4h timeframe captures multi-day swings. Daily HMA provides trend bias, 
+Weekly HMA confirms macro direction. RSI pullback entries (not extremes) catch dips 
+in uptrends and rallies in downtrends. ATR trailing stop limits drawdown.
+Position sizing: 0.25 entry, 0.125 half at 2R profit, stoploss at 2.5*ATR.
+Target: Beat Sharpe=0.499 from current best (mtf_12h_supertrend_daily_hma_rsi_pullback_v2)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_kama_4h_1d_hma_rsi_pullback_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_kama_daily_weekly_hma_rsi_pullback_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -29,31 +30,38 @@ def calculate_atr(high, low, close, period=14):
 def calculate_kama(close, period=10, fast_period=2, slow_period=30):
     """
     Calculate Kaufman Adaptive Moving Average (KAMA).
-    KAMA adapts to market noise - moves fast in trends, slow in ranges.
-    Efficiency Ratio (ER) = |close - close[n]| / sum(|close[i] - close[i-1]|)
+    KAMA adapts to market noise - moves faster during trends, slower during ranges.
+    Efficiency Ratio (ER) measures trend vs noise.
     """
     close_s = pd.Series(close)
     n = len(close)
-    kama = np.zeros(n)
-    kama[0] = close[0]
     
+    # Calculate Efficiency Ratio
+    change = np.abs(close - np.roll(close, period))
+    change[0:period] = np.abs(close[0:period] - close[0])
+    
+    volatility = np.zeros(n)
     for i in range(1, n):
-        if i < period:
-            kama[i] = close[i]
-            continue
-        
-        # Efficiency Ratio
-        signal = np.abs(close[i] - close[i - period])
-        noise = np.sum(np.abs(np.diff(close[max(0, i-period):i+1])))
-        er = signal / noise if noise > 0 else 0
-        
-        # Smoothing constant
-        fast_sc = 2 / (fast_period + 1)
-        slow_sc = 2 / (slow_period + 1)
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-        
-        # KAMA calculation
-        kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    volatility[0:period] = np.abs(close[0:period] - close[0])
+    volatility_diff = np.abs(volatility - np.roll(volatility, period))
+    volatility_diff[0:period] = volatility[0:period]
+    
+    er = np.zeros(n)
+    mask = volatility_diff > 0
+    er[mask] = change[mask] / volatility_diff[mask]
+    er = np.clip(er, 0, 1)
+    
+    # Calculate smoothing constant
+    fast_sc = 2 / (fast_period + 1)
+    slow_sc = 2 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[period-1] = close[period-1]
+    for i in range(period, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     return kama
 
@@ -86,24 +94,21 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
     hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
+    kama = calculate_kama(close, period=10, fast_period=2, slow_period=30)
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    kama = calculate_kama(close, 10)
-    
-    # KAMA slope (direction)
-    kama_slope = np.diff(kama, prepend=kama[0])
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -119,42 +124,47 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # HTF trend filters
-        trend_4h_bullish = close[i] > hma_4h_aligned[i]
-        trend_4h_bearish = close[i] < hma_4h_aligned[i]
-        trend_1d_bullish = close[i] > hma_1d_aligned[i]
-        trend_1d_bearish = close[i] < hma_1d_aligned[i]
+        daily_bullish = close[i] > hma_1d_aligned[i]
+        daily_bearish = close[i] < hma_1d_aligned[i]
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
         # KAMA trend direction
-        kama_bullish = kama_slope[i] > 0
-        kama_bearish = kama_slope[i] < 0
+        kama_bullish = close[i] > kama[i]
+        kama_bearish = close[i] < kama[i]
         
-        # RSI pullback zones (not extreme)
-        rsi_long_pullback = 35 < rsi[i] < 55  # Pullback in uptrend
-        rsi_short_pullback = 45 < rsi[i] < 65  # Pullback in downtrend
+        # RSI pullback conditions (not extremes - allows more trades)
+        rsi_pullback_long = 35 < rsi[i] < 55  # dip in uptrend
+        rsi_pullback_short = 45 < rsi[i] < 65  # rally in downtrend
         rsi_neutral = 40 < rsi[i] < 60
+        
+        # KAMA slope (trend momentum)
+        kama_slope = kama[i] - kama[i-5] if i >= 5 else 0
+        kama_rising = kama_slope > 0
+        kama_falling = kama_slope < 0
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # KAMA bullish + 4h bullish + RSI pullback
-        if kama_bullish and trend_4h_bullish and rsi_long_pullback:
+        # Primary: KAMA bullish + daily HMA bullish + RSI pullback
+        if kama_bullish and daily_bullish and rsi_pullback_long:
             new_signal = SIZE_ENTRY
-        # KAMA bullish + 1d bullish + RSI neutral (stronger macro trend)
-        elif kama_bullish and trend_1d_bullish and rsi_neutral:
+        # Secondary: Weekly HMA confirms + KAMA rising
+        elif kama_bullish and weekly_bullish and kama_rising and rsi_neutral:
             new_signal = SIZE_ENTRY
-        # Price above KAMA + 4h bullish + RSI recovering from oversold
-        elif close[i] > kama[i] and trend_4h_bullish and 30 < rsi[i] < 50:
+        # Tertiary: Strong weekly trend + KAMA cross above
+        elif weekly_bullish and close[i] > kama[i] and close[i-1] <= kama[i-1]:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # KAMA bearish + 4h bearish + RSI pullback
-        if kama_bearish and trend_4h_bearish and rsi_short_pullback:
+        # Primary: KAMA bearish + daily HMA bearish + RSI pullback
+        if kama_bearish and daily_bearish and rsi_pullback_short:
             new_signal = -SIZE_ENTRY
-        # KAMA bearish + 1d bearish + RSI neutral (stronger macro trend)
-        elif kama_bearish and trend_1d_bearish and rsi_neutral:
+        # Secondary: Weekly HMA confirms + KAMA falling
+        elif kama_bearish and weekly_bearish and kama_falling and rsi_neutral:
             new_signal = -SIZE_ENTRY
-        # Price below KAMA + 4h bearish + RSI recovering from overbought
-        elif close[i] < kama[i] and trend_4h_bearish and 50 < rsi[i] < 70:
+        # Tertiary: Strong weekly trend + KAMA cross below
+        elif weekly_bearish and close[i] < kama[i] and close[i-1] >= kama[i-1]:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
