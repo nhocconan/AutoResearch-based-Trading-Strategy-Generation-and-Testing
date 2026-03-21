@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #006 - HMA Crossover + RSI Momentum + 1w Trend Filter (1d primary)
+EXPERIMENT #007 - MACD Momentum + Bollinger Regime + 4h HMA Trend (15m primary)
 =====================================================================================
-Hypothesis: Daily timeframe captures major crypto trends while avoiding noise of lower TFs.
-HMA crossover (8/21) provides fast trend detection with minimal lag. RSI(14) momentum
-confirms entry direction without requiring extreme values (which cause 0 trades).
-Weekly HMA(21) filter ensures we trade with the major trend, reducing whipsaws.
+Hypothesis: MACD histogram captures momentum shifts earlier than Supertrend. 
+Bollinger Band Width detects regime (squeeze = breakout coming, wide = trend ongoing).
+4h HMA(21) filters trades to only go with higher timeframe trend direction.
+Volume confirmation ensures we're not trading low-liquidity fakeouts.
 
 Key features:
-- Primary TF: 1d (daily candles - fewer but higher quality signals)
-- HTF filter: 1w HMA(21) for major trend direction
-- Trend: HMA(8) vs HMA(21) crossover
-- Entry: RSI(14) momentum confirmation (RSI > 50 long, RSI < 50 short)
-- Stoploss: 2.5*ATR(14) trailing (wider for daily TF)
-- Position sizing: 0.25-0.30 discrete levels
-- Take profit: Reduce to half at 2R profit
+- Primary TF: 15m
+- HTF filter: 4h HMA(21) for major trend direction
+- Momentum: MACD(12,26,9) histogram crossing zero
+- Regime: Bollinger Band Width percentile (squeeze vs expansion)
+- Entry: MACD cross + BB regime + volume spike + HTF alignment
+- Stoploss: 2.0*ATR(14) trailing stop
+- Position sizing: 0.20-0.30 discrete levels (conservative to control DD)
+- Take profit: Reduce to half at 2R, trail stop at 1R
 
-Why this should work on 1d:
-- Daily candles filter out intraday noise that caused false signals on 15m/1h
-- HMA crossover generates ~20-50 signals/year on crypto (enough for 10+ trades)
-- Weekly trend filter removes counter-trend trades during major moves
-- Conservative sizing (0.25-0.30) protects against 70%+ crypto crashes
-- RSI > 50/< 50 is less strict than RSI < 45/> 55 (avoids 0 trade problem)
+Why this should beat previous attempts:
+- MACD histogram leads price more than Supertrend (earlier entries)
+- BB regime filter avoids entering during chop (low BBW = wait for breakout)
+- Volume confirmation filters low-liquidity false signals
+- Conservative 0.25 base size prevents -50%+ drawdowns seen in #001, #003
+- Discrete signal levels (0.0, ±0.25, ±0.30) minimize fee churn
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "hma_crossover_rsi_1wtrend_1d_v1"
-timeframe = "1d"
+name = "macd_bb_4hhma_15m_v1"
+timeframe = "15m"
 leverage = 1.0
 
 
@@ -46,6 +47,28 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram"""
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=fast, adjust=False, min_periods=fast).mean()
+    ema_slow = close_s.ewm(span=slow, adjust=False, min_periods=slow).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
+
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width"""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    band_width = (upper - lower) / sma
+    return upper.values, lower.values, band_width.values
+
+
 def calculate_hma(close, period):
     """Calculate Hull Moving Average"""
     close_s = pd.Series(close)
@@ -56,59 +79,62 @@ def calculate_hma(close, period):
     return hma.values
 
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI (Relative Strength Index)"""
-    n = len(close)
-    rsi = np.zeros(n)
-    rsi[:] = np.nan
+def calculate_volume_spike(volume, period=20):
+    """Detect volume spikes relative to recent average"""
+    vol_s = pd.Series(volume)
+    vol_avg = vol_s.rolling(window=period, min_periods=period).mean()
+    vol_std = vol_s.rolling(window=period, min_periods=period).std()
+    vol_zscore = (volume - vol_avg) / (vol_std + 1e-8)
+    return vol_zscore
+
+
+def calculate_bb_percentile(band_width, lookback=100):
+    """Calculate where current BBW sits relative to recent history (percentile)"""
+    n = len(band_width)
+    bb_percentile = np.zeros(n)
+    bb_percentile[:] = np.nan
     
-    delta = np.diff(close)
-    gain = np.zeros(n)
-    loss = np.zeros(n)
+    for i in range(lookback, n):
+        window = band_width[i-lookback:i+1]
+        if len(window) > 0 and not np.all(np.isnan(window)):
+            current = band_width[i]
+            percentile = np.nanpercentile(window, 100) 
+            if percentile > 0:
+                bb_percentile[i] = (current - np.nanmin(window)) / (np.nanmax(window) - np.nanmin(window) + 1e-8) * 100
+            else:
+                bb_percentile[i] = 50.0
     
-    gain[1:] = np.where(delta > 0, delta, 0)
-    loss[1:] = np.where(delta < 0, -delta, 0)
-    
-    # Use EMA for smoothing (Wilder's method)
-    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-    
-    return rsi
+    return bb_percentile
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
+    volume = prices["volume"].values.copy()
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 1w HMA for major trend filter
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    # Calculate 4h HMA for trend filter
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
-    hma_fast = calculate_hma(close, 8)
-    hma_slow = calculate_hma(close, 21)
-    rsi = calculate_rsi(close, period=14)
+    # Calculate 15m indicators
+    macd_line, macd_signal, macd_hist = calculate_macd(close, fast=12, slow=26, signal=9)
+    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     atr = calculate_atr(high, low, close, period=14)
+    vol_zscore = calculate_volume_spike(volume, period=20)
+    bb_percentile = calculate_bb_percentile(bb_width, lookback=100)
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.28  # Base position size (28% of capital)
-    MAX_SIZE = 0.35   # Max position size with strong momentum
-    MIN_SIZE = 0.20   # Min position size
+    BASE_SIZE = 0.25  # Base position size (25% of capital - conservative)
+    MAX_SIZE = 0.30   # Max position size with strong confirmation
+    MIN_SIZE = 0.15   # Min position size
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -119,56 +145,59 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_atr = 0.0
     profit_target_hit = False
     
-    min_period = 50  # Wait for indicators to stabilize (less than 15m strategies)
+    min_period = 150  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1w_aligned[i]) or np.isnan(hma_fast[i]) or
-            np.isnan(hma_slow[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]) or
-            atr[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(macd_hist[i]) or
+            np.isnan(bb_width[i]) or np.isnan(atr[i]) or np.isnan(vol_zscore[i]) or
+            np.isnan(bb_percentile[i]) or atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # 1w HMA trend filter (major trend direction)
-        price_above_1w_hma = close[i] > hma_1w_aligned[i]
-        weekly_trend = 1 if price_above_1w_hma else -1
+        # 4h HMA trend filter
+        price_above_4h_hma = close[i] > hma_4h_aligned[i]
+        hma_trend = 1 if price_above_4h_hma else -1
         
-        # HMA crossover signal
-        hma_bullish = hma_fast[i] > hma_slow[i]
-        hma_bearish = hma_fast[i] < hma_slow[i]
+        # MACD momentum signals
+        macd_bullish_cross = macd_hist[i] > 0 and macd_hist[i-1] <= 0  # Histogram crossing above zero
+        macd_bearish_cross = macd_hist[i] < 0 and macd_hist[i-1] >= 0  # Histogram crossing below zero
+        macd_momentum_long = macd_hist[i] > 0 and macd_hist[i] > macd_hist[i-1]  # Positive and increasing
+        macd_momentum_short = macd_hist[i] < 0 and macd_hist[i] < macd_hist[i-1]  # Negative and decreasing
         
-        # Check for crossover (fast crossed above/below slow)
-        hma_cross_long = False
-        hma_cross_short = False
+        # Bollinger Band regime
+        bb_squeeze = bb_percentile[i] < 30  # Low percentile = squeeze (breakout coming)
+        bb_expansion = bb_percentile[i] > 70  # High percentile = trend ongoing
+        bb_breakout_long = close[i] > bb_upper[i] and bb_expansion
+        bb_breakout_short = close[i] < bb_lower[i] and bb_expansion
         
-        if i > 0:
-            prev_hma_bullish = hma_fast[i-1] > hma_slow[i-1]
-            prev_hma_bearish = hma_fast[i-1] < hma_slow[i-1]
-            
-            # Bullish crossover: was bearish, now bullish
-            if prev_hma_bearish and hma_bullish:
-                hma_cross_long = True
-            # Bearish crossover: was bullish, now bearish
-            if prev_hma_bullish and hma_bearish:
-                hma_cross_short = True
+        # Volume confirmation
+        volume_confirmed = vol_zscore[i] > 0.5  # Above average volume
         
-        # RSI momentum confirmation (less strict than pullback strategy)
-        rsi_bullish = rsi[i] > 50  # Momentum to the upside
-        rsi_bearish = rsi[i] < 50  # Momentum to the downside
-        
-        # Calculate position size based on RSI strength
-        rsi_strength = abs(rsi[i] - 50) / 50  # 0 to 1
-        position_size = min(MAX_SIZE, max(MIN_SIZE, BASE_SIZE * (1.0 + rsi_strength * 0.25)))
+        # Calculate position size based on regime strength
+        if bb_expansion and volume_confirmed:
+            position_size = MAX_SIZE
+        elif bb_squeeze or volume_confirmed:
+            position_size = BASE_SIZE
+        else:
+            position_size = MIN_SIZE
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: HMA bullish crossover + 1w HMA bullish + RSI > 50
-        if hma_cross_long and weekly_trend == 1 and rsi_bullish:
+        # Long entry: MACD momentum + 4h HMA bullish + BB regime + volume
+        # Two entry modes: (1) MACD cross in expansion, (2) BB breakout with momentum
+        long_condition_1 = (macd_bullish_cross or macd_momentum_long) and hma_trend == 1 and volume_confirmed
+        long_condition_2 = bb_breakout_long and hma_trend == 1 and macd_momentum_long
+        
+        if long_condition_1 or long_condition_2:
             target_signal = position_size
         
-        # Short entry: HMA bearish crossover + 1w HMA bearish + RSI < 50
-        elif hma_cross_short and weekly_trend == -1 and rsi_bearish:
+        # Short entry: MACD momentum + 4h HMA bearish + BB regime + volume
+        short_condition_1 = (macd_bearish_cross or macd_momentum_short) and hma_trend == -1 and volume_confirmed
+        short_condition_2 = bb_breakout_short and hma_trend == -1 and macd_momentum_short
+        
+        if short_condition_1 or short_condition_2:
             target_signal = -position_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -179,20 +208,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.5 * atr[i]  # Wider stop for daily
+                trailing_stop = highest_since_entry - 2.0 * atr[i]
                 
                 # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry, where R = 2.5*ATR at entry)
+                # Check take profit (2R from entry, where R = 2*ATR at entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 5.0 * entry_atr:  # 2R = 5*ATR
+                    if close[i] >= entry_price + 4.0 * entry_atr:  # 2R = 4*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.5 * atr[i]
+                trailing_stop = lowest_since_entry + 2.0 * atr[i]
                 
                 # Check stoploss
                 if close[i] > trailing_stop:
@@ -200,7 +229,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 5.0 * entry_atr:  # 2R profit
+                    if close[i] <= entry_price - 4.0 * entry_atr:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -228,13 +257,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if HMA crossover reverses OR 1w HMA alignment breaks
-                hma_reversal_long = hma_bearish  # Fast below slow
-                hma_reversal_short = hma_bullish  # Fast above slow
-                weekly_alignment_broken = (position_side == 1 and weekly_trend == -1) or \
-                                          (position_side == -1 and weekly_trend == 1)
+                # Exit if MACD reverses OR 4h HMA alignment breaks
+                macd_reversal_long = macd_hist[i] < 0 and macd_hist[i-1] >= 0
+                macd_reversal_short = macd_hist[i] > 0 and macd_hist[i-1] <= 0
+                hma_alignment_broken = (position_side == 1 and hma_trend == -1) or \
+                                       (position_side == -1 and hma_trend == 1)
                 
-                if hma_reversal_long or hma_reversal_short or weekly_alignment_broken:
+                if macd_reversal_long or macd_reversal_short or hma_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
