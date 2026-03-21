@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #161: 12h Regime-Adaptive Strategy with Daily/Weekly HMA Filter
-Hypothesis: 12h timeframe captures multi-day swings while avoiding noise. 
-Regime detection (Choppiness Index + Bollinger Band Width) switches between
-trend-following (CHOP<38.2) and mean-reversion (CHOP>61.8). Daily HMA provides
-major trend bias, Weekly HMA confirms macro direction. Entry conditions loosened
-to ensure sufficient trades (RSI 30/70 instead of 20/80). ATR stoploss at 2.5*ATR.
-This targets the 2022 crash (trend mode) and 2025 consolidation (range mode).
-Position sizing: 0.25 entry, 0.125 half-size at 2R profit. Discrete levels minimize fees.
+Experiment #162: 1d Connors RSI Mean Reversion with Weekly HMA Trend Filter
+Hypothesis: Daily timeframe with Connors RSI (CRSI) captures short-term mean reversion
+while Weekly HMA provides macro trend bias. CRSI combines RSI(3) + Streak RSI(2) + 
+PercentRank(100) for high-probability reversal signals (75% win rate in literature).
+Choppiness Index filters regime - only mean-revert in ranging markets (CHOP>50).
+This should work in 2025 bear/range market while capturing 2021 bull trends.
+Entry: CRSI<15 (long) or CRSI>85 (short) + weekly trend alignment + CHOP>50.
+Stoploss: 2.5*ATR trailing. Position sizing: 0.30 entry, 0.15 half-profit at 2R.
+Target: Sharpe>0.5, trades>20 on train, trades>5 on test, DD<-30%.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_regime_chop_bb_daily_weekly_hma_v1"
-timeframe = "12h"
+name = "mtf_1d_crsi_weekly_hma_chop_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -49,11 +50,82 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_streak_rsi(close, period=2):
+    """
+    Calculate Streak RSI component of Connors RSI.
+    Measures consecutive up/down days as RSI.
+    Reference: Connors, Alvarez, Radtke - "Short Term Trading Strategies That Work"
+    """
+    n = len(close)
+    streak = np.zeros(n)
+    
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1
+        else:
+            streak[i] = streak[i-1]
+    
+    # Convert streak to RSI-like value
+    gain_streak = np.where(streak > 0, streak, 0.0)
+    loss_streak = np.where(streak < 0, -streak, 0.0)
+    
+    avg_g = pd.Series(gain_streak).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_l = pd.Series(loss_streak).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
+    streak_rsi = 100 - 100 / (1 + rs)
+    streak_rsi = np.clip(streak_rsi, 0, 100)
+    
+    return streak_rsi
+
+def calculate_percent_rank(close, period=100):
+    """
+    Calculate Percent Rank component of Connors RSI.
+    Measures current price change vs historical changes over period.
+    """
+    n = len(close)
+    percent_rank = np.zeros(n)
+    
+    # Calculate daily returns
+    returns = np.diff(close, prepend=close[0])
+    
+    for i in range(period, n):
+        window = returns[i-period+1:i+1]
+        current_return = returns[i]
+        
+        # Count how many values in window are less than current
+        count_lower = np.sum(window < current_return)
+        percent_rank[i] = count_lower / period * 100
+    
+    # Fill initial values
+    percent_rank[:period] = 50.0
+    
+    return percent_rank
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, pr_period=100):
+    """
+    Calculate Connors RSI (CRSI).
+    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    Reference: Connors, Alvarez, Radtke - "Short Term Trading Strategies That Work"
+    Long entry: CRSI < 10-15
+    Short entry: CRSI > 85-90
+    """
+    rsi_3 = calculate_rsi(close, rsi_period)
+    streak_rsi = calculate_streak_rsi(close, streak_period)
+    percent_rank = calculate_percent_rank(close, pr_period)
+    
+    crsi = (rsi_3 + streak_rsi + percent_rank) / 3.0
+    crsi = np.clip(crsi, 0, 100)
+    
+    return crsi
+
 def calculate_choppiness(high, low, close, period=14):
     """
     Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market (mean reversion)
-    CHOP < 38.2 = trending market (trend following)
+    CHOP > 61.8 = ranging market (mean reversion favored)
+    CHOP < 38.2 = trending market (trend following favored)
     Reference: E.W. Dreiss
     """
     atr = calculate_atr(high, low, close, period)
@@ -64,39 +136,14 @@ def calculate_choppiness(high, low, close, period=14):
     range_hl = highest_high - lowest_low
     range_hl = np.where(range_hl > 0, range_hl, 1e-10)
     
-    chop = 100 * np.log10(np.sum(atr) / (range_hl * period))
+    # Sum ATR over period
+    atr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
+    
+    chop = 100 * np.log10(atr_sum / (range_hl * period))
     chop = np.where(np.isnan(chop), 50.0, chop)
     chop = np.clip(chop, 0, 100)
     
     return chop
-
-def calculate_bollinger_bandwidth(close, period=20, std_mult=2.0):
-    """
-    Calculate Bollinger Band Width for regime detection.
-    Low BW = squeeze (potential breakout)
-    High BW = expanded (potential mean reversion)
-    """
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    std = np.where(std > 0, std, 1e-10)
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bw = (upper - lower) / sma
-    bw = np.where(np.isnan(bw), 0.0, bw)
-    
-    return bw, sma
-
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD indicator."""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
-    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -105,35 +152,25 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
+    crsi = calculate_crsi(close, 3, 2, 100)
     chop = calculate_choppiness(high, low, close, 14)
-    bb_bw, bb_mid = calculate_bollinger_bandwidth(close, 20, 2.0)
-    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
-    hma_20 = calculate_hma(close, 20)
-    hma_50 = calculate_hma(close, 50)
     
-    # Calculate BB percentile for regime
-    bb_percentile = pd.Series(bb_bw).rolling(window=100, min_periods=50).apply(
-        lambda x: np.percentile(x, 50), raw=True
-    ).values
-    bb_percentile = np.where(np.isnan(bb_percentile), 50.0, bb_percentile)
+    # Calculate SMA200 for additional trend filter
+    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.125
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -143,77 +180,48 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):
-        # HTF trend filters
-        daily_bullish = hma_1d_aligned[i] > 0 and close[i] > hma_1d_aligned[i]
-        daily_bearish = hma_1d_aligned[i] > 0 and close[i] < hma_1d_aligned[i]
+    for i in range(250, n):  # Need 250 bars for SMA200 + CRSI warmup
+        # Weekly trend filter
         weekly_bullish = hma_1w_aligned[i] > 0 and close[i] > hma_1w_aligned[i]
         weekly_bearish = hma_1w_aligned[i] > 0 and close[i] < hma_1w_aligned[i]
         
-        # Regime detection
-        is_ranging = chop[i] > 55.0  # Loosened from 61.8 for more trades
-        is_trending = chop[i] < 45.0  # Loosened from 38.2 for more trades
-        bb_expanded = bb_bw[i] > bb_percentile[i]  # Bands expanded
-        bb_squeezed = bb_bw[i] < bb_percentile[i]  # Bands squeezed
+        # Long-term trend filter
+        above_sma200 = close[i] > sma_200[i] if not np.isnan(sma_200[i]) else False
+        below_sma200 = close[i] < sma_200[i] if not np.isnan(sma_200[i]) else False
         
-        # 12h trend
-        trend_bullish = hma_20[i] > hma_50[i]
-        trend_bearish = hma_20[i] < hma_50[i]
+        # Regime detection - only mean revert in ranging markets
+        is_ranging = chop[i] > 45.0  # Loosened from 61.8 for more trades
         
-        # RSI signals (loosened for more trades)
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
-        rsi_rising = rsi[i] > rsi[i-3] if i > 3 else False
-        rsi_falling = rsi[i] < rsi[i-3] if i > 3 else False
-        
-        # MACD signals
-        macd_bullish = macd_hist[i] > 0 and macd_hist[i-1] <= 0 if i > 0 else False
-        macd_bearish = macd_hist[i] < 0 and macd_hist[i-1] >= 0 if i > 0 else False
+        # CRSI signals
+        crsi_oversold = crsi[i] < 20  # Loosened from 15 for more trades
+        crsi_overbought = crsi[i] > 80  # Loosened from 85 for more trades
+        crsi_rising = crsi[i] > crsi[i-2] if i > 2 else False
+        crsi_falling = crsi[i] < crsi[i-2] if i > 2 else False
         
         new_signal = 0.0
         
-        # === MEAN REVERSION MODE (ranging market) ===
-        if is_ranging:
-            # Long: RSI oversold + price near lower BB + daily not bearish
-            if rsi_oversold and close[i] < bb_mid[i] * 0.98:
-                if not daily_bearish or rsi_rising:
-                    new_signal = SIZE_ENTRY
-            
-            # Short: RSI overbought + price near upper BB + daily not bullish
-            elif rsi_overbought and close[i] > bb_mid[i] * 1.02:
-                if not daily_bullish or rsi_falling:
-                    new_signal = -SIZE_ENTRY
+        # === MEAN REVERSION LONG ===
+        if crsi_oversold and is_ranging:
+            # Require weekly trend not bearish (avoid catching falling knife in strong downtrend)
+            if weekly_bullish or above_sma200 or crsi_rising:
+                new_signal = SIZE_ENTRY
         
-        # === TREND FOLLOWING MODE (trending market) ===
-        elif is_trending:
-            # Long: HMA crossover + MACD bullish + daily/weekly bullish
-            if trend_bullish and hma_20[i-1] <= hma_50[i-1]:
-                if macd_bullish or (daily_bullish and weekly_bullish):
-                    new_signal = SIZE_ENTRY
-            
-            # Short: HMA crossover + MACD bearish + daily/weekly bearish
-            elif trend_bearish and hma_20[i-1] >= hma_50[i-1]:
-                if macd_bearish or (daily_bearish and weekly_bearish):
-                    new_signal = -SIZE_ENTRY
-            
-            # Continuation: trend already established + pullback
-            elif trend_bullish and rsi[i] < 50 and rsi_rising:
-                if daily_bullish:
-                    new_signal = SIZE_ENTRY
-            elif trend_bearish and rsi[i] > 50 and rsi_falling:
-                if daily_bearish:
-                    new_signal = -SIZE_ENTRY
+        # === MEAN REVERSION SHORT ===
+        elif crsi_overbought and is_ranging:
+            # Require weekly trend not bullish
+            if weekly_bearish or below_sma200 or crsi_falling:
+                new_signal = -SIZE_ENTRY
         
-        # === BREAKOUT MODE (BB squeeze) ===
-        if bb_squeezed and new_signal == 0.0:
-            # Breakout long: price breaks above BB mid + volume confirmation
-            if close[i] > bb_mid[i] and macd_hist[i] > 0:
-                if daily_bullish or weekly_bullish:
+        # === TREND CONTINUATION (when not ranging) ===
+        if not is_ranging and new_signal == 0.0:
+            # Long: weekly bullish + CRSI recovering from oversold
+            if weekly_bullish and crsi[i] < 50 and crsi_rising:
+                if crsi[i-1] < 30:  # Was recently oversold
                     new_signal = SIZE_ENTRY
             
-            # Breakout short: price breaks below BB mid + volume confirmation
-            elif close[i] < bb_mid[i] and macd_hist[i] < 0:
-                if daily_bearish or weekly_bearish:
+            # Short: weekly bearish + CRSI falling from overbought
+            elif weekly_bearish and crsi[i] > 50 and crsi_falling:
+                if crsi[i-1] > 70:  # Was recently overbought
                     new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
