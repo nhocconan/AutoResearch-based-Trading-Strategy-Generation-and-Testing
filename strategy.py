@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #041 - MTF KAMA+RSI+BB 1h+4h Simplified State Tracking
+EXPERIMENT #042 - MTF Donchian+ADX+RSI 1h+4h Simplified State
 ==================================================================================================
-Hypothesis: Previous crashes (#034, #040) caused by read-only numpy array assignments in loop.
-15m timeframe has excessive noise causing whipsaw. Moving to 1h + 4h MTF with simpler logic.
+Hypothesis: Previous crashes (#040, #041) caused by numpy array mutation in loop.
+Donchian breakouts + ADX trend strength filter should reduce whipsaw in choppy markets.
+1h timeframe with 4h trend filter proven stable in #041 before crash.
 
-Key changes from #040:
-- Timeframe: 1h (less noise than 15m, more trades than 4h)
-- HTF: 4h trend filter using mtf_data helper
-- Indicators: KAMA (adaptive trend), RSI (momentum), Bollinger Bands (volatility squeeze)
-- State tracking: Use Python lists (mutable) instead of numpy arrays in loop
-- Signal levels: Discrete (0, ±0.25, ±0.30) to reduce churn costs
-- Position sizing: Fixed 0.30 max (simpler than ATR-dynamic which caused issues)
-- Stoploss/TP: Signal→0 at 2.5*ATR stop, signal→half at 2R profit
+Key changes from #041:
+- Indicators: Donchian Channels (breakout), ADX (trend strength), RSI (momentum)
+- State tracking: Pure Python lists, never modify numpy arrays in loop
+- Signal levels: Discrete (0, ±0.25, ±0.30) to minimize churn costs
+- ADX filter: Only trade when ADX > 25 (strong trend, avoid chop)
+- Donchian: 20-period breakout with 4h confirmation
+- Position sizing: Base 0.28 with ATR dynamic adjustment (0.22-0.32 range)
 
 Why this should work:
-- 1h timeframe balances trade frequency vs noise (proven in #031-#039 range)
-- KAMA adapts to volatility better than HMA/EMA in choppy markets
-- BB squeeze filter avoids trading in low-volatility consolidation
-- Simple state tracking avoids numpy read-only crashes
-- Based on best performer structure (mtf_supertrend_macd_bbw_rsi_15m_1h_4h_v1)
+- Donchian breakouts capture trending moves better than KAMA/EMA crossovers
+- ADX > 25 filter avoids trading in sideways markets (major drawdown source)
+- 4h trend + 1h breakout = proven MTF structure from best performer
+- Simplified state tracking avoids numpy read-only crashes
+- Conservative sizing (0.28 base) protects against 2022-style crashes
 """
 
 import numpy as np
@@ -27,51 +27,96 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 
-name = "mtf_kama_rsi_bb_squeeze_1h_4h_v1"
+name = "mtf_donchian_adx_rsi_1h_4h_v1"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
-    """
-    Kaufman Adaptive Moving Average
-    Adapts smoothing based on market efficiency (trend vs noise)
-    """
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high / lowest low over period)"""
+    n = len(high)
+    if n < period:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    middle = (upper + lower) / 2.0
+    
+    return (
+        np.nan_to_num(upper, nan=0.0),
+        np.nan_to_num(lower, nan=0.0),
+        np.nan_to_num(middle, nan=0.0)
+    )
+
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength"""
     n = len(close)
-    if n < er_period + fast_sc:
+    if n < period * 2:
         return np.zeros(n)
     
-    # Efficiency Ratio
-    net_change = np.abs(np.diff(close, prepend=close[0]))
-    sum_change = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(
-        window=er_period, min_periods=er_period
-    ).sum().values
+    # True Range
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
     
-    er = np.zeros(n)
-    mask = sum_change > 0
-    er[mask] = net_change[mask] / sum_change[mask]
+    # Directional Movement
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
     
-    # Smoothing constants
-    fast_const = 2.0 / (fast_sc + 1)
-    slow_const = 2.0 / (slow_sc + 1)
+    for i in range(1, n):
+        diff_high = high[i] - high[i-1]
+        diff_low = low[i-1] - low[i]
+        
+        if diff_high > diff_low and diff_high > 0:
+            plus_dm[i] = diff_high
+        if diff_low > diff_high and diff_low > 0:
+            minus_dm[i] = diff_low
     
-    sc = er * (fast_const - slow_const) + slow_const
-    sc_squared = sc ** 2
+    # Smooth with Wilder's method
+    atr = np.zeros(n)
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
     
-    kama = np.zeros(n)
-    kama[er_period - 1] = close[er_period - 1]
+    # Initial values (first period)
+    atr[period-1] = np.sum(tr[1:period]) / period
+    plus_di[period-1] = 100 * np.sum(plus_dm[1:period]) / max(atr[period-1], 0.0001)
+    minus_di[period-1] = 100 * np.sum(minus_dm[1:period]) / max(atr[period-1], 0.0001)
     
-    for i in range(er_period, n):
-        kama[i] = kama[i-1] + sc_squared[i] * (close[i] - kama[i-1])
+    # Wilder's smoothing
+    for i in range(period, n):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        plus_di[i] = (plus_di[i-1] * (period-1) + 100 * plus_dm[i] / max(atr[i], 0.0001)) / period
+        minus_di[i] = (minus_di[i-1] * (period-1) + 100 * minus_dm[i] / max(atr[i], 0.0001)) / period
     
-    return np.nan_to_num(kama, nan=0.0)
+    # DX and ADX
+    dx = np.zeros(n)
+    adx = np.zeros(n)
+    
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    # Initial ADX
+    adx[period*2-1] = np.sum(dx[period:period*2]) / period
+    
+    # Smooth ADX
+    for i in range(period*2, n):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    return np.nan_to_num(adx, nan=0.0)
 
 
 def calculate_rsi(close, period=14):
     """Calculate RSI using Wilder's smoothing"""
     n = len(close)
     if n < period + 1:
-        return np.zeros(n)
+        return np.full(n, 50.0)
     
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0.0)
@@ -92,26 +137,6 @@ def calculate_rsi(close, period=14):
     
     rsi = 100 - (100 / (1 + rs))
     return np.nan_to_num(rsi, nan=50.0)
-
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma
-    
-    return (
-        np.nan_to_num(upper, nan=0.0),
-        np.nan_to_num(lower, nan=0.0),
-        np.nan_to_num(bandwidth, nan=0.0)
-    )
 
 
 def calculate_atr(high, low, close, period=14):
@@ -149,37 +174,32 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     
-    # Calculate 4h trend indicator (KAMA adaptive)
-    kama_4h = calculate_kama(close_4h, er_period=10, fast_sc=2, slow_sc=30)
+    # Calculate 4h trend indicators
+    donchian_upper_4h, donchian_lower_4h, donchian_mid_4h = calculate_donchian(high_4h, low_4h, period=20)
+    adx_4h = calculate_adx(high_4h, low_4h, close_4h, period=14)
     
     # Align 4h indicators to 1h timeframe (auto shift(1) for completed bars)
-    kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
+    donchian_mid_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid_4h)
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
     
     # 1h entry indicators
-    kama_1h = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
+    donchian_upper_1h, donchian_lower_1h, donchian_mid_1h = calculate_donchian(high, low, period=20)
+    adx_1h = calculate_adx(high, low, close, period=14)
     rsi_1h = calculate_rsi(close, period=14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     atr_1h = calculate_atr(high, low, close, period=14)
     
     # Parameters
-    BASE_SIZE = 0.30
-    MIN_SIZE = 0.20
-    MAX_SIZE = 0.35
+    BASE_SIZE = 0.28
+    MIN_SIZE = 0.22
+    MAX_SIZE = 0.32
     ATR_STOP_MULT = 2.5
     TP_MULT = 2.0
     TRAIL_MULT = 1.0
-    BB_WIDTH_PERCENTILE = 0.30  # Only trade when BB width > 30th percentile (avoid squeeze)
-    RSI_LONG_MIN = 45
-    RSI_LONG_MAX = 65
-    RSI_SHORT_MIN = 35
-    RSI_SHORT_MAX = 55
-    
-    # Calculate BB width percentile for regime filter
-    bb_width_valid = bb_width[bb_width > 0]
-    if len(bb_width_valid) > 0:
-        bb_width_threshold = np.percentile(bb_width_valid, 30)
-    else:
-        bb_width_threshold = 0.01
+    ADX_MIN = 25  # Only trade when trend is strong
+    RSI_LONG_MIN = 40
+    RSI_LONG_MAX = 60
+    RSI_SHORT_MIN = 40
+    RSI_SHORT_MAX = 60
     
     signals = np.zeros(n)
     
@@ -189,28 +209,38 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     tp_triggered = [0.0] * n
     extreme_price = [0.0] * n
     
-    first_valid = max(100, 40 * 4)  # Ensure 4h data is aligned
+    first_valid = max(100, 40 * 4)  # Ensure 4h data is aligned and indicators warmed up
     
     for i in range(first_valid, n):
         # Validate data
-        if np.isnan(atr_1h[i]) or atr_1h[i] <= 0 or np.isnan(kama_4h_aligned[i]):
+        if np.isnan(atr_1h[i]) or atr_1h[i] <= 0:
             signals[i] = 0.0
             position_side[i] = 0.0
+            entry_price[i] = 0.0
+            tp_triggered[i] = 0.0
+            extreme_price[i] = 0.0
+            continue
+        
+        if np.isnan(donchian_mid_4h_aligned[i]) or np.isnan(adx_4h_aligned[i]):
+            signals[i] = 0.0
+            position_side[i] = 0.0
+            entry_price[i] = 0.0
+            tp_triggered[i] = 0.0
+            extreme_price[i] = 0.0
             continue
         
         price = close[i]
         atr = atr_1h[i]
         
-        # 4h trend direction
+        # 4h trend direction (price vs Donchian middle)
         trend_4h = 0
-        if kama_4h_aligned[i] > 0:
-            if price > kama_4h_aligned[i]:
-                trend_4h = 1
-            elif price < kama_4h_aligned[i]:
-                trend_4h = -1
+        if price > donchian_mid_4h_aligned[i]:
+            trend_4h = 1
+        elif price < donchian_mid_4h_aligned[i]:
+            trend_4h = -1
         
-        # BB squeeze filter - avoid trading in low volatility
-        in_squeeze = bb_width[i] < bb_width_threshold
+        # 4h ADX trend strength filter
+        adx_strong = adx_4h_aligned[i] > ADX_MIN
         
         # Manage existing positions
         if position_side[i-1] != 0:
@@ -244,6 +274,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     position_side[i] = 1.0
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1.0
+                    extreme_price[i] = current_extreme
                     continue
                 
                 # Trail stop at 1R after TP
@@ -272,6 +303,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     position_side[i] = -1.0
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1.0
+                    extreme_price[i] = current_extreme
                     continue
                 
                 if prev_tp:
@@ -284,7 +316,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         extreme_price[i] = 0.0
                         continue
             
-            # Hold position
+            # Hold position - copy previous state
             signals[i] = signals[i-1]
             position_side[i] = position_side[i-1]
             entry_price[i] = entry_price[i-1]
@@ -292,26 +324,27 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             extreme_price[i] = extreme_price[i-1]
             continue
         
-        # Skip entries during BB squeeze (low volatility)
-        if in_squeeze:
+        # Skip entries when ADX is weak (choppy market)
+        if not adx_strong:
             signals[i] = 0.0
             position_side[i] = 0.0
+            entry_price[i] = 0.0
+            tp_triggered[i] = 0.0
+            extreme_price[i] = 0.0
             continue
         
-        # Entry logic: KAMA trend + RSI pullback
+        # Entry logic: Donchian breakout + ADX strength + RSI confirmation
         rsi = rsi_1h[i]
-        kama_1h_val = kama_1h[i]
         
-        # 1h KAMA confirmation
-        kama_1h_trend = 0
-        if kama_1h_val > 0:
-            if price > kama_1h_val:
-                kama_1h_trend = 1
-            elif price < kama_1h_val:
-                kama_1h_trend = -1
+        # 1h Donchian breakout signal
+        donchian_breakout = 0
+        if price > donchian_upper_1h[i]:
+            donchian_breakout = 1
+        elif price < donchian_lower_1h[i]:
+            donchian_breakout = -1
         
-        # Long entry: 4h uptrend + 1h KAMA uptrend + RSI pullback
-        if trend_4h == 1 and kama_1h_trend == 1:
+        # Long entry: 4h uptrend + ADX strong + 1h Donchian breakout + RSI not overbought
+        if trend_4h == 1 and adx_strong and donchian_breakout == 1:
             if RSI_LONG_MIN <= rsi <= RSI_LONG_MAX:
                 # Dynamic sizing based on ATR
                 atr_pct = atr / price
@@ -326,8 +359,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 extreme_price[i] = price
                 continue
         
-        # Short entry: 4h downtrend + 1h KAMA downtrend + RSI pullback
-        elif trend_4h == -1 and kama_1h_trend == -1:
+        # Short entry: 4h downtrend + ADX strong + 1h Donchian breakout + RSI not oversold
+        elif trend_4h == -1 and adx_strong and donchian_breakout == -1:
             if RSI_SHORT_MIN <= rsi <= RSI_SHORT_MAX:
                 # Dynamic sizing based on ATR
                 atr_pct = atr / price
@@ -345,5 +378,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         # No position
         signals[i] = 0.0
         position_side[i] = 0.0
+        entry_price[i] = 0.0
+        tp_triggered[i] = 0.0
+        extreme_price[i] = 0.0
     
     return signals
