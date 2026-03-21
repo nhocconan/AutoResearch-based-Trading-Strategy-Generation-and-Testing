@@ -1,174 +1,142 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #013 - Donchian Trend + RSI Pullback + ADX Strength Filter
+EXPERIMENT #014 - KAMA Adaptive Trend + MACD Histogram Momentum + BBW Regime Filter
 ====================================================================================
-Hypothesis: Donchian channels provide cleaner trend signals than EMA crossovers by 
-capturing actual breakouts. Combined with RSI pullback entries (proven in #005 best 
-performer) and ADX strength filter to avoid trading during weak/choppy trends.
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility better 
+than EMA/HMA, providing cleaner trend signals during choppy periods. Combined with 
+MACD histogram for momentum entry timing (different from RSI pullback in #005/#007) 
+and Bollinger Band Width for regime detection (proven in #007 with Sharpe=4.711).
 
 Key differences from current best (#005 EMA+RSI+Z-score):
-- Donchian(20) trend instead of EMA - captures actual breakout levels
-- RSI(14) pullback entry (same as #005 proven winner)
-- ADX(14) > 25 filter - NEW: only trade when trend has sufficient strength
-- Z-score filter (proven in #005) - avoids extreme mean-reversion traps
-- 4h Donchian trend + 1h RSI entries (proven MTF structure)
+- KAMA(10,2,30) trend filter instead of EMA - adapts to volatility automatically
+- MACD(12,26,9) histogram cross for entry (momentum-based, not mean-reversion like RSI)
+- BBW percentile filter instead of Z-score - detects volatility regime (squeeze vs expansion)
+- 4h KAMA trend + 1h MACD entries (proven MTF structure from #005)
 - Trailing stoploss at 2*ATR, take profit at 2R (reduce to half)
-- Discrete signal levels: 0.0, ±0.25, ±0.35 to minimize churn costs
+- Discrete signal levels: 0.0, ±0.20, ±0.30 to minimize churn costs
 
 Why this might beat Sharpe=5.525:
-- Donchian breakouts filter out fakeout moves better than EMA crosses
-- ADX strength filter eliminates trades during choppy/weak trends (major improvement)
-- RSI pullback proven effective in #005 and #007 (both top performers)
+- KAMA reduces whipsaws during choppy markets better than fixed EMA
+- MACD histogram captures momentum shifts earlier than RSI pullback
+- BBW filter avoids trading during low-volatility squeezes (major improvement over Z-score)
 - Multi-timeframe structure proven to 2x Sharpe vs single timeframe
-- ADX filter should reduce trade count but increase win rate
+- Different signal combination than #005/#007 - may capture different market regimes
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_donchian_rsi_adx_zscore_v1"
+name = "mtf_kama_macd_bbw_v1"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_donchian(high, low, period=20):
+def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
     """
-    Calculate Donchian Channel (highest high and lowest low over period)
-    Returns: upper_channel, lower_channel, middle_channel
+    Calculate Kaufman Adaptive Moving Average (KAMA)
+    KAMA adapts smoothing based on market efficiency ratio (ER)
+    High ER (trending) = fast smoothing, Low ER (choppy) = slow smoothing
     """
-    n = len(high)
+    n = len(close)
+    kama = np.zeros(n)
+    
+    if n < er_period + fast_sc:
+        return kama
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        change = abs(close[i] - close[i - er_period])
+        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        if noise > 0:
+            er[i] = change / noise
+        else:
+            er[i] = 0
+    
+    # Calculate Smoothing Constant (SC)
+    sc = np.zeros(n)
+    fast_constant = 2.0 / (fast_sc + 1)
+    slow_constant = 2.0 / (slow_sc + 1)
+    
+    for i in range(er_period, n):
+        sc[i] = er[i] * (fast_constant - slow_constant) + slow_constant
+        sc[i] = sc[i] ** 2  # Square for smoother adaptation
+    
+    # Calculate KAMA
+    kama[er_period] = close[er_period]
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    return kama
+
+
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """
+    Calculate MACD (Moving Average Convergence Divergence)
+    Returns: MACD line, Signal line, Histogram
+    """
+    n = len(close)
+    macd_line = np.zeros(n)
+    signal_line = np.zeros(n)
+    histogram = np.zeros(n)
+    
+    if n < slow + signal:
+        return macd_line, signal_line, histogram
+    
+    # Calculate EMAs
+    ema_fast = np.zeros(n)
+    ema_slow = np.zeros(n)
+    
+    ema_fast[fast - 1] = np.mean(close[:fast])
+    ema_slow[slow - 1] = np.mean(close[:slow])
+    
+    for i in range(fast, n):
+        ema_fast[i] = ema_fast[i - 1] + (2.0 / (fast + 1)) * (close[i] - ema_fast[i - 1])
+    
+    for i in range(slow, n):
+        ema_slow[i] = ema_slow[i - 1] + (2.0 / (slow + 1)) * (close[i] - ema_slow[i - 1])
+    
+    # MACD Line
+    for i in range(slow - 1, n):
+        macd_line[i] = ema_fast[i] - ema_slow[i]
+    
+    # Signal Line (EMA of MACD)
+    valid_macd_start = slow - 1
+    macd_values = macd_line[valid_macd_start:valid_macd_start + signal]
+    signal_line[valid_macd_start + signal - 1] = np.mean(macd_values)
+    
+    for i in range(valid_macd_start + signal, n):
+        signal_line[i] = signal_line[i - 1] + (2.0 / (signal + 1)) * (macd_line[i] - signal_line[i - 1])
+    
+    # Histogram
+    for i in range(valid_macd_start + signal - 1, n):
+        histogram[i] = macd_line[i] - signal_line[i]
+    
+    return macd_line, signal_line, histogram
+
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """
+    Calculate Bollinger Bands
+    Returns: upper, middle, lower, bandwidth
+    """
+    n = len(close)
     upper = np.zeros(n)
-    lower = np.zeros(n)
     middle = np.zeros(n)
+    lower = np.zeros(n)
+    bandwidth = np.zeros(n)
     
     for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-        middle[i] = (upper[i] + lower[i]) / 2
-    
-    return upper, lower, middle
-
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI using Wilder's smoothing"""
-    n = len(close)
-    rsi = np.zeros(n)
-    
-    if n < period + 1:
-        return rsi
-    
-    delta = np.diff(close)
-    gain = np.zeros(n - 1)
-    loss = np.zeros(n - 1)
-    
-    gain[delta > 0] = delta[delta > 0]
-    loss[delta < 0] = -delta[delta < 0]
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    
-    avg_gain[period - 1] = np.mean(gain[:period])
-    avg_loss[period - 1] = np.mean(loss[:period])
-    
-    for i in range(period, n):
-        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i - 1]) / period
-        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i - 1]) / period
-    
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-    
-    return rsi
-
-
-def calculate_adx(high, low, close, period=14):
-    """
-    Calculate ADX (Average Directional Index) for trend strength
-    ADX > 25 indicates strong trend, ADX < 20 indicates weak/choppy market
-    """
-    n = len(close)
-    adx = np.zeros(n)
-    
-    if n < period * 3:
-        return adx
-    
-    # Calculate True Range
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
-    
-    # Calculate +DM and -DM
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        if high[i] - high[i - 1] > low[i - 1] - low[i]:
-            plus_dm[i] = max(0, high[i] - high[i - 1])
-        if low[i - 1] - low[i] > high[i] - high[i - 1]:
-            minus_dm[i] = max(0, low[i - 1] - low[i])
-    
-    # Smooth TR, +DM, -DM
-    atr = np.zeros(n)
-    atr[period - 1] = np.mean(tr[1:period])
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    smoothed_tr = np.zeros(n)
-    smoothed_plus_dm = np.zeros(n)
-    smoothed_minus_dm = np.zeros(n)
-    
-    smoothed_tr[period - 1] = np.sum(tr[1:period])
-    smoothed_plus_dm[period - 1] = np.sum(plus_dm[1:period])
-    smoothed_minus_dm[period - 1] = np.sum(minus_dm[1:period])
-    
-    for i in range(period, n):
-        smoothed_tr[i] = smoothed_tr[i - 1] - smoothed_tr[i - 1] / period + tr[i]
-        smoothed_plus_dm[i] = smoothed_plus_dm[i - 1] - smoothed_plus_dm[i - 1] / period + plus_dm[i]
-        smoothed_minus_dm[i] = smoothed_minus_dm[i - 1] - smoothed_minus_dm[i - 1] / period + minus_dm[i]
-    
-    for i in range(period - 1, n):
-        if smoothed_tr[i] > 0:
-            plus_di[i] = 100 * smoothed_plus_dm[i] / smoothed_tr[i]
-            minus_di[i] = 100 * smoothed_minus_dm[i] / smoothed_tr[i]
-    
-    # Calculate DX and ADX
-    dx = np.zeros(n)
-    for i in range(period - 1, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    # ADX is smoothed DX
-    adx[period * 2 - 2] = np.mean(dx[period - 1:period * 2 - 1])
-    
-    for i in range(period * 2 - 1, n):
-        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
-    
-    return adx, plus_di, minus_di
-
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized deviation from mean)"""
-    n = len(close)
-    zscore = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        mean = np.mean(close[i - period + 1:i + 1])
+        middle[i] = np.mean(close[i - period + 1:i + 1])
         std = np.std(close[i - period + 1:i + 1])
-        if std > 0:
-            zscore[i] = (close[i] - mean) / std
+        upper[i] = middle[i] + std_mult * std
+        lower[i] = middle[i] - std_mult * std
+        if middle[i] > 0:
+            bandwidth[i] = (upper[i] - lower[i]) / middle[i]
         else:
-            zscore[i] = 0
+            bandwidth[i] = 0
     
-    return zscore
+    return upper, middle, lower, bandwidth
 
 
 def calculate_atr(high, low, close, period=14):
@@ -200,12 +168,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     n = len(close)
     
     # 1h indicators for entry timing
-    rsi_1h = calculate_rsi(close, period=14)
-    zscore_1h = calculate_zscore(close, period=20)
+    macd_1h, signal_1h, histogram_1h = calculate_macd(close, fast=12, slow=26, signal=9)
     atr_1h = calculate_atr(high, low, close, period=14)
-    adx_1h, plus_di_1h, minus_di_1h = calculate_adx(high, low, close, period=14)
+    bb_upper_1h, bb_mid_1h, bb_lower_1h, bbw_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     
-    # 4h Donchian for trend filter (resample 1h → 4h)
+    # 4h KAMA for trend filter (resample 1h → 4h)
     df_1h = pd.DataFrame({
         'open': close,
         'high': high,
@@ -225,20 +192,28 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     }).dropna()
     
     c_4h = df_4h['close'].values
-    h_4h = df_4h['high'].values
-    l_4h = df_4h['low'].values
     n_4h = len(c_4h)
     
-    # Calculate 4h Donchian for trend
-    donchian_upper_4h, donchian_lower_4h, donchian_mid_4h = calculate_donchian(h_4h, l_4h, period=20)
+    # Calculate 4h KAMA for trend
+    kama_4h = calculate_kama(c_4h, er_period=10, fast_sc=2, slow_sc=30)
     
-    # 4h trend direction based on Donchian position
+    # 4h trend direction based on KAMA slope and price position
     trend_4h = np.zeros(n_4h)
-    for i in range(40, n_4h):  # Need enough data for Donchian
-        if c_4h[i] > donchian_mid_4h[i] and donchian_upper_4h[i] > donchian_upper_4h[i - 5]:
-            trend_4h[i] = 1  # Bullish (price above mid, channel expanding up)
-        elif c_4h[i] < donchian_mid_4h[i] and donchian_lower_4h[i] < donchian_lower_4h[i - 5]:
-            trend_4h[i] = -1  # Bearish (price below mid, channel expanding down)
+    kama_period = 40  # Need enough data for KAMA
+    
+    for i in range(kama_period, n_4h):
+        # Price above KAMA and KAMA sloping up = bullish
+        price_above_kama = c_4h[i] > kama_4h[i]
+        kama_sloping_up = kama_4h[i] > kama_4h[i - 5] if i >= 5 else False
+        
+        # Price below KAMA and KAMA sloping down = bearish
+        price_below_kama = c_4h[i] < kama_4h[i]
+        kama_sloping_down = kama_4h[i] < kama_4h[i - 5] if i >= 5 else False
+        
+        if price_above_kama and kama_sloping_up:
+            trend_4h[i] = 1  # Bullish
+        elif price_below_kama and kama_sloping_down:
+            trend_4h[i] = -1  # Bearish
     
     # Map 4h trend back to 1h timeframe (4 x 1h = 4h)
     trend_1h = np.zeros(n)
@@ -249,24 +224,28 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if idx_4h < len(trend_4h):
             trend_1h[i] = trend_4h[idx_4h]
     
+    # Calculate BBW percentile for regime filter (rolling 100-period)
+    bbw_percentile = np.zeros(n)
+    bbw_lookback = 100
+    
+    for i in range(bbw_lookback - 1, n):
+        bbw_window = bbw_1h[i - bbw_lookback + 1:i + 1]
+        bbw_percentile[i] = np.sum(bbw_window <= bbw_1h[i]) / bbw_lookback * 100
+    
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels to reduce churn
-    SIZE_FULL = 0.35   # Full position
-    SIZE_HALF = 0.20   # Half position (after take profit)
+    SIZE_FULL = 0.30   # Full position (conservative)
+    SIZE_HALF = 0.15   # Half position (after take profit)
     
-    # RSI thresholds for pullback entries
-    RSI_LONG_ENTRY = 45   # RSI pulls back to 45 in uptrend
-    RSI_SHORT_ENTRY = 55  # RSI rallies to 55 in downtrend
-    RSI_EXIT = 50         # Exit when RSI crosses back through 50
+    # MACD histogram thresholds for momentum entry
+    MACD_HIST_THRESHOLD = 0.0  # Cross above/below zero
+    MACD_HIST_MIN = 0.0001     # Minimum histogram magnitude to confirm
     
-    # ADX threshold for trend strength
-    ADX_MIN = 25   # Only trade when ADX > 25 (strong trend)
-    
-    # Z-score filter thresholds
-    ZSCORE_MAX = 2.0   # Avoid extreme overbought (> 2 std)
-    ZSCORE_MIN = -2.0  # Avoid extreme oversold (< -2 std)
+    # BBW percentile thresholds for regime filter
+    BBW_MIN_PERCENTILE = 30    # Avoid trading during extreme squeeze (< 30th percentile)
+    BBW_MAX_PERCENTILE = 85    # Caution during extreme expansion (> 85th percentile)
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.0
@@ -274,7 +253,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Take profit multiplier (2R)
     TP_MULT = 2.0
     
-    first_valid = max(100, 40, 40, 42)  # Wait for all indicators
+    first_valid = max(100, 40, 40, 100)  # Wait for all indicators
     
     # Track entry prices for stoploss/takeprofit logic
     entry_price = np.zeros(n)
@@ -285,38 +264,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     initial_stop = np.zeros(n)  # Track initial stoploss level
     
     for i in range(first_valid, n):
-        if np.isnan(rsi_1h[i]) or np.isnan(zscore_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(adx_1h[i]):
+        if np.isnan(macd_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(bbw_1h[i]) or np.isnan(bbw_percentile[i]):
             signals[i] = 0.0
             continue
         
         trend = trend_1h[i]
-        rsi_val = rsi_1h[i]
-        zscore_val = zscore_1h[i]
-        adx_val = adx_1h[i]
+        hist_val = histogram_1h[i]
+        prev_hist_val = histogram_1h[i - 1] if i > 0 else 0
+        bbw_pct = bbw_percentile[i]
         atr = atr_1h[i]
         price = close[i]
         
-        # Z-score regime filter - avoid extreme moves (mean reversion likely)
-        if zscore_val > ZSCORE_MAX or zscore_val < ZSCORE_MIN:
-            if i > 0 and position_side[i - 1] != 0:
-                signals[i] = signals[i - 1]
-                position_side[i] = position_side[i - 1]
-                entry_price[i] = entry_price[i - 1]
-                tp_triggered[i] = tp_triggered[i - 1]
-                if position_side[i-1] == 1:
-                    highest_since_entry[i] = max(highest_since_entry[i-1] if i > 0 else 0, price)
-                    lowest_since_entry[i] = lowest_since_entry[i-1] if i > 0 else price
-                elif position_side[i-1] == -1:
-                    highest_since_entry[i] = highest_since_entry[i-1] if i > 0 else 0
-                    lowest_since_entry[i] = min(lowest_since_entry[i-1] if i > 0 else price, price)
-                initial_stop[i] = initial_stop[i-1]
-            else:
-                signals[i] = 0.0
-                position_side[i] = 0
-            continue
-        
-        # ADX strength filter - only trade when trend is strong
-        if adx_val < ADX_MIN:
+        # BBW regime filter - avoid extreme squeeze (low volatility = false breakouts)
+        if bbw_pct < BBW_MIN_PERCENTILE:
             if i > 0 and position_side[i - 1] != 0:
                 # Hold existing position but don't add
                 signals[i] = signals[i - 1]
@@ -373,8 +333,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     initial_stop[i] = prev_stop
                     continue
                 
-                # RSI exit for longs
-                if rsi_val > 70:  # Overbought, consider exit
+                # MACD histogram exit for longs (momentum fading)
+                if prev_hist_val > 0 and hist_val < 0:  # Histogram crossed below zero
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
@@ -414,8 +374,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     initial_stop[i] = prev_stop
                     continue
                 
-                # RSI exit for shorts
-                if rsi_val < 30:  # Oversold, consider exit
+                # MACD histogram exit for shorts (momentum fading)
+                if prev_hist_val < 0 and hist_val > 0:  # Histogram crossed above zero
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
@@ -425,33 +385,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     initial_stop[i] = 0
                     continue
         
-        # Entry logic with RSI pullback confirmation
+        # Entry logic with MACD histogram momentum confirmation
         position_size = SIZE_FULL
         
-        if trend == 1:  # 4h uptrend + ADX OK + Z-score OK
-            # RSI pulls back to entry zone in uptrend
-            if RSI_LONG_ENTRY - 5 <= rsi_val <= RSI_LONG_ENTRY + 5:
-                # Check for RSI turning up from oversold
-                if i > 0 and rsi_1h[i-1] < rsi_val:
-                    signals[i] = position_size
-                    position_side[i] = 1
-                    entry_price[i] = price
-                    tp_triggered[i] = 0
-                    highest_since_entry[i] = price
-                    lowest_since_entry[i] = price
-                    initial_stop[i] = price - ATR_STOP_MULT * atr
-                else:
-                    if i > 0 and position_side[i - 1] == 1:
-                        signals[i] = signals[i - 1]
-                        position_side[i] = 1
-                        entry_price[i] = entry_price[i - 1]
-                        tp_triggered[i] = tp_triggered[i - 1]
-                        highest_since_entry[i] = highest_since_entry[i-1]
-                        lowest_since_entry[i] = lowest_since_entry[i-1]
-                        initial_stop[i] = initial_stop[i-1]
-                    else:
-                        signals[i] = 0.0
-                        position_side[i] = 0
+        if trend == 1:  # 4h uptrend + BBW OK
+            # MACD histogram crosses above zero (momentum turning positive)
+            if prev_hist_val <= MACD_HIST_THRESHOLD and hist_val > MACD_HIST_THRESHOLD + MACD_HIST_MIN:
+                signals[i] = position_size
+                position_side[i] = 1
+                entry_price[i] = price
+                tp_triggered[i] = 0
+                highest_since_entry[i] = price
+                lowest_since_entry[i] = price
+                initial_stop[i] = price - ATR_STOP_MULT * atr
             else:
                 if i > 0 and position_side[i - 1] == 1:
                     signals[i] = signals[i - 1]
@@ -465,30 +411,16 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     signals[i] = 0.0
                     position_side[i] = 0
                     
-        elif trend == -1:  # 4h downtrend + ADX OK + Z-score OK
-            # RSI rallies to entry zone in downtrend
-            if RSI_SHORT_ENTRY - 5 <= rsi_val <= RSI_SHORT_ENTRY + 5:
-                # Check for RSI turning down from overbought
-                if i > 0 and rsi_1h[i-1] > rsi_val:
-                    signals[i] = -position_size
-                    position_side[i] = -1
-                    entry_price[i] = price
-                    tp_triggered[i] = 0
-                    highest_since_entry[i] = price
-                    lowest_since_entry[i] = price
-                    initial_stop[i] = price + ATR_STOP_MULT * atr
-                else:
-                    if i > 0 and position_side[i - 1] == -1:
-                        signals[i] = signals[i - 1]
-                        position_side[i] = -1
-                        entry_price[i] = entry_price[i - 1]
-                        tp_triggered[i] = tp_triggered[i - 1]
-                        highest_since_entry[i] = highest_since_entry[i-1]
-                        lowest_since_entry[i] = lowest_since_entry[i-1]
-                        initial_stop[i] = initial_stop[i-1]
-                    else:
-                        signals[i] = 0.0
-                        position_side[i] = 0
+        elif trend == -1:  # 4h downtrend + BBW OK
+            # MACD histogram crosses below zero (momentum turning negative)
+            if prev_hist_val >= MACD_HIST_THRESHOLD and hist_val < MACD_HIST_THRESHOLD - MACD_HIST_MIN:
+                signals[i] = -position_size
+                position_side[i] = -1
+                entry_price[i] = price
+                tp_triggered[i] = 0
+                highest_since_entry[i] = price
+                lowest_since_entry[i] = price
+                initial_stop[i] = price + ATR_STOP_MULT * atr
             else:
                 if i > 0 and position_side[i - 1] == -1:
                     signals[i] = signals[i - 1]
