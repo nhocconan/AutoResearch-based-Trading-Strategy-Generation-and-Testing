@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #344: 30m KAMA Adaptive Trend + 4h HMA Macro + RSI Pullback + ATR Stop
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility better than 
-fixed EMAs, performing well in both trending and ranging conditions. Combined with 4h HMA 
-for macro trend bias (faster than daily, more reliable than 1h), and RSI pullback entries 
-(proven in best strategy mtf_12h_supertrend_daily_hma_rsi_pullback_v2). This should generate 
-more trades than 12h strategies while maintaining quality through HTF filter.
-Timeframe: 30m (REQUIRED), HTF: 4h for trend bias via mtf_data helper.
-Target: Beat Sharpe=0.499 with 40-80 trades/year, adaptive trend following with pullback entries.
-Key insight: KAMA efficiency ratio filters noise, 4h HMA provides trend bias, RSI pullback = quality entries.
-Position sizing: 0.25 entry, 0.125 half (take profit), stoploss at 2.5*ATR.
+Experiment #345: 1h HMA Crossover + 4h Trend Filter + RSI Momentum + ATR Stop
+Hypothesis: 1h timeframe with HMA crossover entries filtered by 4h trend direction.
+Using 4h HMA(21) for macro bias (proven in baseline), 1h HMA(8/21) crossover for entries,
+RSI(14) momentum confirmation (>50 for long, <50 for short), and 2.5*ATR trailing stop.
+Timeframe: 1h (REQUIRED), HTF: 4h for trend bias via mtf_data helper.
+Target: Beat Sharpe=0.499 with 30-60 trades/year, cleaner entries than pure Donchian.
+Key insight: HMA crossover is faster than EMA, 4h filter reduces false signals in chop.
+Position sizing: 0.25 discrete, stoploss at 2.5*ATR, take profit at 2R (reduce to half).
+Why this might work: 1h provides enough trade frequency, 4h filter avoids counter-trend trades.
+Loose RSI filter (>45/<55) ensures we get trades even in weak momentum periods.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_kama_4h_hma_rsi_pullback_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_hma_crossover_4h_trend_rsi_momentum_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -28,46 +28,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA).
-    KAMA adapts to market volatility using Efficiency Ratio (ER).
-    ER = |net change| / sum of absolute changes over period
-    High ER = trending (fast SC), Low ER = ranging (slow SC)
-    """
-    close_s = pd.Series(close)
-    
-    # Calculate Efficiency Ratio
-    net_change = np.abs(close - np.roll(close, period))
-    net_change[:period] = np.nan
-    
-    volatility = np.zeros(len(close))
-    for i in range(period, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-period:i+1])))
-    
-    er = np.zeros(len(close))
-    er[period:] = np.where(volatility[period:] > 0, net_change[period:] / volatility[period:], 0)
-    er[:period] = np.nan
-    
-    # Calculate Smoothing Constant
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
-    sc = er ** 2 * (fast_sc - slow_sc) + slow_sc
-    sc[:period] = np.nan
-    
-    # Calculate KAMA
-    kama = np.zeros(len(close))
-    kama[period] = close[period]  # Initialize with price
-    
-    for i in range(period + 1, len(close)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    kama[:period] = np.nan
-    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -106,13 +66,11 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    kama = calculate_kama(close, period=10, fast_period=2, slow_period=30)
-    
-    # Additional KAMA for trend confirmation (slower)
-    kama_slow = calculate_kama(close, period=20, fast_period=2, slow_period=30)
+    hma_fast = calculate_hma(close, 8)
+    hma_slow = calculate_hma(close, 21)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -128,7 +86,7 @@ def generate_signals(prices):
     
     for i in range(250, n):  # Start after 250 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(kama[i]) or np.isnan(kama_slow[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
             signals[i] = 0.0
             continue
         
@@ -137,47 +95,43 @@ def generate_signals(prices):
         trend_bullish = hma_4h_valid and close[i] > hma_4h_aligned[i]
         trend_bearish = hma_4h_valid and close[i] < hma_4h_aligned[i]
         
-        # KAMA trend direction (fast vs slow)
-        kama_bullish = kama[i] > kama_slow[i]
-        kama_bearish = kama[i] < kama_slow[i]
+        # HMA crossover signals
+        hma_cross_long = hma_fast[i] > hma_slow[i] and hma_fast[i-1] <= hma_slow[i-1]
+        hma_cross_short = hma_fast[i] < hma_slow[i] and hma_fast[i-1] >= hma_slow[i-1]
         
-        # KAMA slope (price vs KAMA)
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # HMA trend state (already crossed)
+        hma_bullish = hma_fast[i] > hma_slow[i]
+        hma_bearish = hma_fast[i] < hma_slow[i]
         
-        # RSI pullback levels (entry on weakness in uptrend, strength in downtrend)
-        rsi_pullback_long = rsi[i] < 45  # Pullback in uptrend
-        rsi_pullback_short = rsi[i] > 55  # Pullback in downtrend
-        rsi_extreme_long = rsi[i] < 35  # Deep pullback
-        rsi_extreme_short = rsi[i] > 65  # Deep rally
-        
-        # RSI momentum confirmation
-        rsi_momentum_long = rsi[i] > 40  # Not too weak
-        rsi_momentum_short = rsi[i] < 60  # Not too strong
+        # RSI momentum filter (LOOSE - ensure we get trades)
+        rsi_ok_long = rsi[i] > 45  # Not too weak
+        rsi_ok_short = rsi[i] < 55  # Not too strong
+        rsi_strong_long = rsi[i] > 50
+        rsi_strong_short = rsi[i] < 50
         
         new_signal = 0.0
         
         # === LONG ENTRIES ===
-        # Primary: 4h bullish + KAMA bullish + RSI pullback
-        if trend_bullish and kama_bullish and rsi_pullback_long and rsi_momentum_long:
+        # Primary: HMA cross + 4h bullish + RSI ok
+        if hma_cross_long and trend_bullish and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        # Secondary: 4h bullish + Price above KAMA + RSI extreme (deep pullback entry)
-        elif trend_bullish and price_above_kama and rsi_extreme_long:
+        # Secondary: HMA bullish state + 4h bullish + RSI strong
+        elif hma_bullish and trend_bullish and rsi_strong_long:
             new_signal = SIZE_ENTRY
-        # Tertiary: KAMA crossover bullish + RSI ok (momentum entry)
-        elif kama_bullish and price_above_kama and rsi[i] > 50:
-            new_signal = SIZE_ENTRY
+        # Tertiary: HMA cross without 4h filter (momentum only, smaller size)
+        elif hma_cross_long and rsi[i] > 55:
+            new_signal = SIZE_ENTRY * 0.8
         
         # === SHORT ENTRIES ===
-        # Primary: 4h bearish + KAMA bearish + RSI pullback
-        if trend_bearish and kama_bearish and rsi_pullback_short and rsi_momentum_short:
+        # Primary: HMA cross + 4h bearish + RSI ok
+        if hma_cross_short and trend_bearish and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        # Secondary: 4h bearish + Price below KAMA + RSI extreme (deep rally entry)
-        elif trend_bearish and price_below_kama and rsi_extreme_short:
+        # Secondary: HMA bearish state + 4h bearish + RSI strong
+        elif hma_bearish and trend_bearish and rsi_strong_short:
             new_signal = -SIZE_ENTRY
-        # Tertiary: KAMA crossover bearish + RSI ok (momentum entry)
-        elif kama_bearish and price_below_kama and rsi[i] < 50:
-            new_signal = -SIZE_ENTRY
+        # Tertiary: HMA cross without 4h filter (momentum only, smaller size)
+        elif hma_cross_short and rsi[i] < 45:
+            new_signal = -SIZE_ENTRY * 0.8
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
