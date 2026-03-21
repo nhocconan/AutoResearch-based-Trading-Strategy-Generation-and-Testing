@@ -1,261 +1,166 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #005 - EMA Trend (4h) + Daily Regime + RSI Pullback + Volume Confirm
-================================================================================
-Hypothesis: 4h timeframe balances trend clarity with sufficient trade frequency.
-Daily EMA(21/55) crossover provides robust regime filter (proven in traditional markets).
-4h RSI(14) pullback entries with volume confirmation reduce false signals.
-ATR-based trailing stop with take-profit scaling manages risk/reward.
+EXPERIMENT #006 - HMA Crossover 12h with Daily Trend Filter
+============================================================
+Hypothesis: 12h primary timeframe with 1d HTF trend filter will outperform 4h strategies
+because: (1) fewer signals = less fee churn, (2) HMA is more responsive than EMA for
+trend changes, (3) daily trend filter prevents counter-trend trades in strong regimes,
+(4) ATR trailing stop protects against major drawdowns.
 
-Why this differs from failed strategies:
-- 4h primary TF (vs failed 12h) = more trades while still avoiding 15m/1h noise
-- Daily EMA(21/55) regime (vs SMA50) = more responsive to trend changes
-- Volume confirmation on entries = filters weak breakouts that caused whipsaws
-- Simplified position management = fewer bugs in stoploss/takeprofit logic
-- Conservative position size (0.30) with discrete levels to minimize fee churn
+Key differences from failed attempts:
+- NO RSI pullback (failed in #001, #002, #005)
+- 12h primary instead of 4h (higher TF = less noise, less fees)
+- HMA crossover instead of Supertrend or simple EMA
+- 1d HTF filter (not 4h or 6h which may be too noisy)
+- Proper ATR trailing stop for risk management
+- Conservative position sizing (0.30) to control DD
 
-Key risk controls:
-- Signal magnitude: 0.30 (30% position size, max 0.40)
-- Stoploss: 2.0*ATR trailing stop from entry/highest
-- Take profit: reduce to half at 2R, trail stop at 1R
-- Discrete levels: 0.0, ±0.30, ±0.15 (half position)
-- Volume filter: entry volume > 1.5*20-bar avg volume
+Why this should work:
+- 12h timeframe: ~2 bars/day vs 96 bars/day on 15m = 48x less fee impact
+- HMA(16/48): Faster response than EMA while filtering noise
+- Daily trend filter: Only trade in direction of higher timeframe trend
+- ATR stop: Dynamic risk management adapts to volatility
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "ema_4h_daily_regime_rsi_volume_v1"
-timeframe = "4h"
+name = "hma_12h_daily_trend_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 
-def calculate_ema(close, period=21):
-    """Calculate EMA with proper min_periods"""
-    n = len(close)
+def calculate_hma(series: np.ndarray, period: int) -> np.ndarray:
+    """Calculate Hull Moving Array using WMA formula."""
+    n = len(series)
     if n < period:
         return np.full(n, np.nan)
     
-    ema = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-    return ema
-
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI with proper min_periods"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+    # WMA helper
+    def wma(arr, w):
+        result = np.full(len(arr), np.nan)
+        weights = np.arange(1, w + 1)
+        for i in range(w - 1, len(arr)):
+            if np.any(np.isnan(arr[i-w+1:i+1])):
+                continue
+            result[i] = np.dot(arr[i-w+1:i+1], weights) / weights.sum()
+        return result
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    half = period // 2
+    wma_half = wma(series, half)
+    wma_full = wma(series, period)
     
-    avg_gain = pd.Series(gain).rolling(window=period, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).rolling(window=period, min_periods=period).mean().values
+    # HMA = WMA(2*WMA(n/2) - WMA(n))
+    hma_raw = 2 * wma_half - wma_full
+    hma = wma(hma_raw, int(np.sqrt(period)))
     
-    rsi = np.zeros(n)
-    for i in range(n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-    
-    rsi[:period] = np.nan
-    return rsi
-
-
-def calculate_atr(high, low, close, period=14):
-    """Calculate ATR with proper min_periods"""
-    n = len(close)
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i],
-                    abs(high[i] - close[i-1]),
-                    abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    return atr
-
-
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume SMA for volume confirmation"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+    return hma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
-    # Load daily HTF data ONCE before loop (for regime filter)
+    # Load daily HTF data ONCE before loop (Rule 1)
     df_1d = get_htf_data(prices, '1d')
-    daily_close = df_1d['close'].values
     
-    # Calculate daily EMA(21) and EMA(55) for long-term trend regime
-    daily_ema21 = calculate_ema(daily_close, period=21)
-    daily_ema55 = calculate_ema(daily_close, period=55)
+    # Calculate daily HMA for trend filter
+    hma_1d_fast = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_slow = calculate_hma(df_1d['close'].values, 55)
     
-    # Align daily indicators to 4h timeframe (auto shift(1) for completed bars)
-    daily_ema21_aligned = align_htf_to_ltf(prices, df_1d, daily_ema21)
-    daily_ema55_aligned = align_htf_to_ltf(prices, df_1d, daily_ema55)
-    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
+    # Align to 12h timeframe with proper shift (Rule 2)
+    hma_1d_fast_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_fast)
+    hma_1d_slow_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_slow)
     
-    # Calculate indicators on primary 4h timeframe
-    ema_21 = calculate_ema(close, period=21)
-    ema_55 = calculate_ema(close, period=55)
-    rsi = calculate_rsi(close, period=14)
-    atr = calculate_atr(high, low, close, period=14)
-    vol_sma = calculate_volume_sma(volume, period=20)
+    # Calculate 12h HMA for entry signals
+    hma_12h_fast = calculate_hma(close, 16)
+    hma_12h_slow = calculate_hma(close, 48)
     
-    # Generate signals with discrete position sizing and stoploss
+    # Calculate ATR for trailing stop
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i-1]),
+                    abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Initialize signals and tracking variables
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size (conservative)
-    HALF_SIZE = SIZE / 2  # 15% for take profit reduction
-    ATR_STOP_MULT = 2.0  # Stoploss at 2.0*ATR
-    RSI_LONG_ENTRY = 40  # RSI pullback level for longs (deeper pullback)
-    RSI_SHORT_ENTRY = 60  # RSI pullback level for shorts
-    VOLUME_MULT = 1.5  # Volume must be 1.5x average for entry confirmation
+    SIZE = 0.30  # 30% position size - conservative for DD control
     
-    # Track position state
+    # Track position for stoploss
     position_side = 0  # 0=flat, 1=long, -1=short
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
-    tp_hit = False
+    highest_close = 0.0
+    lowest_close = 0.0
     
-    # Find first valid index (all indicators ready)
-    first_valid = max(55, 20, 14)  # EMA(55), Vol_SMA(20), RSI(14)
+    # Minimum period for HMA calculations
+    min_period = 100  # Safe margin for all indicators
     
-    for i in range(first_valid, n):
-        # Check for NaN values in primary indicators
-        if (np.isnan(ema_21[i]) or np.isnan(ema_55[i]) or 
-            np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(vol_sma[i])):
-            signals[i] = 0.0
-            if position_side != 0:
-                position_side = 0
-                entry_price = 0.0
+    for i in range(min_period, n):
+        # Skip if any indicator is NaN
+        if np.isnan(hma_12h_fast[i]) or np.isnan(hma_12h_slow[i]):
+            continue
+        if np.isnan(hma_1d_fast_aligned[i]) or np.isnan(hma_1d_slow_aligned[i]):
+            continue
+        if np.isnan(atr[i]) or atr[i] == 0:
             continue
         
-        # Daily regime filter (allow trades if daily data not available yet)
-        daily_trend_bullish = False
-        daily_trend_bearish = False
+        # Daily trend filter (HTF)
+        daily_trend = 0
+        if hma_1d_fast_aligned[i] > hma_1d_slow_aligned[i]:
+            daily_trend = 1  # Bullish
+        elif hma_1d_fast_aligned[i] < hma_1d_slow_aligned[i]:
+            daily_trend = -1  # Bearish
         
-        if not np.isnan(daily_ema21_aligned[i]) and not np.isnan(daily_ema55_aligned[i]):
-            daily_trend_bullish = daily_ema21_aligned[i] > daily_ema55_aligned[i]
-            daily_trend_bearish = daily_ema21_aligned[i] < daily_ema55_aligned[i]
+        # 12h HMA crossover signal
+        hma_signal = 0
+        if hma_12h_fast[i] > hma_12h_slow[i]:
+            hma_signal = 1  # Bullish crossover
+        elif hma_12h_fast[i] < hma_12h_slow[i]:
+            hma_signal = -1  # Bearish crossover
         
-        # 4h EMA trend direction
-        ema_bullish = ema_21[i] > ema_55[i]
-        ema_bearish = ema_21[i] < ema_55[i]
-        
-        # Volume confirmation
-        volume_confirmed = volume[i] > (VOLUME_MULT * vol_sma[i])
-        
-        # Check stoploss/trailing stop first (before new signals)
-        if position_side == 1 and entry_price > 0:
-            # Update highest since entry for trailing
-            if close[i] > highest_since_entry:
-                highest_since_entry = close[i]
-            
-            # Trailing stop: 2.0*ATR from highest (for longs)
-            trailing_stop = highest_since_entry - ATR_STOP_MULT * atr[i]
-            
-            # Initial stoploss: 2.0*ATR below entry
-            initial_stop = entry_price - ATR_STOP_MULT * atr[i]
-            stop_level = max(initial_stop, trailing_stop)
-            
-            # Check if stoploss hit
-            if close[i] < stop_level:
-                signals[i] = 0.0
-                position_side = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
-                tp_hit = False
-                continue
-            
-            # Take profit: reduce to half at 2R (2 * 2.0*ATR = 4.0*ATR from entry)
-            tp_level = entry_price + 4.0 * atr[i]
-            if not tp_hit and close[i] > tp_level:
-                signals[i] = HALF_SIZE
-                tp_hit = True
-                # Move stop to breakeven + 1R (1*ATR)
-                highest_since_entry = max(highest_since_entry, close[i])
-                continue
-            
-            # Maintain position
-            signals[i] = HALF_SIZE if tp_hit else SIZE
-            continue
-        
-        if position_side == -1 and entry_price > 0:
-            # Update lowest since entry for trailing
-            if close[i] < lowest_since_entry or lowest_since_entry == 0:
-                lowest_since_entry = close[i]
-            
-            # Trailing stop: 2.0*ATR from lowest (for shorts)
-            trailing_stop = lowest_since_entry + ATR_STOP_MULT * atr[i]
-            
-            # Initial stoploss: 2.0*ATR above entry
-            initial_stop = entry_price + ATR_STOP_MULT * atr[i]
-            stop_level = min(initial_stop, trailing_stop)
-            
-            # Check if stoploss hit
-            if close[i] > stop_level:
-                signals[i] = 0.0
-                position_side = 0
-                entry_price = 0.0
-                lowest_since_entry = 0.0
-                tp_hit = False
-                continue
-            
-            # Take profit: reduce to half at 2R
-            tp_level = entry_price - 4.0 * atr[i]
-            if not tp_hit and close[i] < tp_level:
-                signals[i] = -HALF_SIZE
-                tp_hit = True
-                lowest_since_entry = min(lowest_since_entry, close[i])
-                continue
-            
-            # Maintain position
-            signals[i] = -HALF_SIZE if tp_hit else -SIZE
-            continue
-        
-        # Generate new entry signals (only if flat)
-        if position_side == 0:
-            # Long entry: EMA bullish + Daily bullish + RSI pullback + Volume confirm
-            if ema_bullish and (daily_trend_bullish or np.isnan(daily_ema21_aligned[i])):
-                if rsi[i] < RSI_LONG_ENTRY and volume_confirmed:
-                    signals[i] = SIZE
-                    position_side = 1
-                    entry_price = close[i]
-                    highest_since_entry = close[i]
-                    tp_hit = False
-                    continue
-            
-            # Short entry: EMA bearish + Daily bearish + RSI pullback + Volume confirm
-            if ema_bearish and (daily_trend_bearish or np.isnan(daily_ema21_aligned[i])):
-                if rsi[i] > RSI_SHORT_ENTRY and volume_confirmed:
-                    signals[i] = -SIZE
-                    position_side = -1
-                    entry_price = close[i]
-                    lowest_since_entry = close[i]
-                    tp_hit = False
-                    continue
-        
-        # No signal - maintain current position
-        if position_side == 0:
-            signals[i] = 0.0
+        # Only trade in direction of daily trend
+        if daily_trend == 1 and hma_signal == 1:
+            target_signal = SIZE
+        elif daily_trend == -1 and hma_signal == -1:
+            target_signal = -SIZE
         else:
-            signals[i] = signals[i-1] if i > 0 else 0.0
+            target_signal = 0.0
+        
+        # ATR trailing stop logic (Rule 6)
+        current_signal = signals[i-1] if i > 0 else 0.0
+        
+        if position_side == 1:  # Long position
+            highest_close = max(highest_close, close[i])
+            stop_price = highest_close - 2.5 * atr[i]
+            if close[i] < stop_price:
+                target_signal = 0.0  # Stoploss hit
+                position_side = 0
+        elif position_side == -1:  # Short position
+            lowest_close = min(lowest_close, close[i])
+            stop_price = lowest_close + 2.5 * atr[i]
+            if close[i] > stop_price:
+                target_signal = 0.0  # Stoploss hit
+                position_side = 0
+        
+        # Update position tracking
+        if target_signal > 0 and position_side != 1:
+            position_side = 1
+            entry_price = close[i]
+            highest_close = close[i]
+        elif target_signal < 0 and position_side != -1:
+            position_side = -1
+            entry_price = close[i]
+            lowest_close = close[i]
+        elif target_signal == 0 and position_side != 0:
+            position_side = 0
+        
+        signals[i] = target_signal
     
     return signals
