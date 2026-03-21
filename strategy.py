@@ -1,39 +1,43 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #014 - KAMA Adaptive Trend + 4h HMA Filter + RSI Pullback (30m primary)
+EXPERIMENT #015 - EMA Crossover + 12h Trend Filter + ATR Risk Management (1h primary)
 =====================================================================================
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility better than 
-fixed EMAs/SMAs. In trending markets, KAMA follows price closely; in chop, it flattens.
-Combined with 4h HMA(21) for higher timeframe trend direction and RSI(14) pullback entries,
-this should capture sustained moves while filtering choppy periods.
+Hypothesis: Previous strategies failed due to TOO MANY conflicting filters causing
+either 0 trades or massive drawdowns. This strategy uses SIMPLER logic:
+- 12h EMA(50) for major trend direction (smoother than 4h, fewer whipsaws)
+- 1h EMA(8)/EMA(21) crossover for entry timing (generates regular signals)
+- RSI(14) moderate filter only (avoid extreme overbought/oversold)
+- 2.5*ATR trailing stoploss (critical for drawdown control)
+- Position sizing: 0.25 base, discrete levels (0.0, ±0.25)
 
-Key features:
-- Primary TF: 30m (this experiment)
-- HTF filter: 4h HMA(21) for major trend direction
-- Trend: KAMA(21) with Efficiency Ratio for adaptive smoothing
-- Entry: RSI pullback within trend (RSI 40-50 long, RSI 50-60 short)
-- Strength: ADX(14) > 20 filter (lower threshold = more trades)
-- Regime: Bollinger Band Width percentile to avoid extreme squeeze/expansion
-- Stoploss: 2.5*ATR(14) trailing
-- Position sizing: 0.25-0.30 discrete levels
-- Take profit: Reduce to half at 2R profit
+Why this should work better than failed strategies:
+- Fewer filters = more trades (avoiding #012's 8-trade failure)
+- 12h trend is smoother than 4h (avoiding #003's -51% DD)
+- No Supertrend/BB/KAMA complexity (avoiding #007-#009's 80-99% DD)
+- Simple EMA crossover generates 100-500 trades range (sweet spot)
+- Conservative sizing (0.25) controls drawdown during 2022 crash
 
-Why this should work:
-- KAMA adapts to volatility, reducing whipsaws in chop
-- 30m captures more opportunities than 1h/4h while less noisy than 15m
-- 4h HMA filter ensures we trade with higher timeframe trend
-- RSI pullback entries improve risk/reward vs breakout entries
-- Conservative sizing (0.25-0.30) controls drawdown during crashes
-- ADX > 20 (not 25) ensures enough trades while filtering weak trends
+Key improvements:
+- Removed volume filter (too restrictive, caused missed entries)
+- Relaxed RSI to 25-75 range (allows trend continuation entries)
+- Using 12h instead of 4h/1d for balanced trend filter
+- Strict 2.5*ATR stoploss on every position
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_4hhma_rsi_bbregime_30m_v1"
-timeframe = "30m"
+name = "ema_cross_12htrend_atr_1h_v1"
+timeframe = "1h"
 leverage = 1.0
+
+
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average"""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, adjust=False, min_periods=period).mean().values
+    return ema
 
 
 def calculate_atr(high, low, close, period=14):
@@ -47,44 +51,6 @@ def calculate_atr(high, low, close, period=14):
                     abs(low[i] - close[i - 1]))
     atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
     return atr
-
-
-def calculate_kama(close, period=21, fast_period=2, slow_period=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA)
-    KAMA adapts to market noise using Efficiency Ratio (ER)
-    ER = |change| / sum(|individual changes|) over period
-    When ER is high (trending), KAMA follows price closely
-    When ER is low (choppy), KAMA flattens
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(period, n):
-        price_change = abs(close[i] - close[i - period])
-        noise = 0.0
-        for j in range(i - period + 1, i + 1):
-            noise += abs(close[j] - close[j - 1])
-        if noise > 0:
-            er[i] = price_change / noise
-        else:
-            er[i] = 0
-    
-    # Calculate smoothing constant
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    
-    # Initialize KAMA
-    kama[period] = close[period]
-    
-    for i in range(period + 1, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama, er
 
 
 def calculate_rsi(close, period=14):
@@ -113,113 +79,30 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    n = len(close)
-    
-    tr = np.zeros(n)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    tr[0] = high[0] - low[0]
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i],
-                    abs(high[i] - close[i - 1]),
-                    abs(low[i] - close[i - 1]))
-        
-        if high[i] - high[i - 1] > low[i - 1] - low[i]:
-            plus_dm[i] = max(high[i] - high[i - 1], 0)
-        else:
-            plus_dm[i] = 0
-            
-        if low[i - 1] - low[i] > high[i] - high[i - 1]:
-            minus_dm[i] = max(low[i - 1] - low[i], 0)
-        else:
-            minus_dm[i] = 0
-    
-    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        if tr_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
-    
-    dx = np.zeros(n)
-    for i in range(period - 1, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    return adx, plus_di, minus_di
-
-
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period // 2, adjust=False, min_periods=period // 2).mean()
-    wma2 = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
-    raw_hma = 2 * wma1 - wma2
-    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False, min_periods=int(np.sqrt(period))).mean()
-    return hma.values
-
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width"""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    band_width = (upper - lower) / sma
-    return upper, lower, sma, band_width
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
+    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 4h HMA for trend filter
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    # Calculate 12h EMA(50) for major trend filter
+    ema_12h = calculate_ema(df_12h['close'].values, 50)
     
-    # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 30m indicators
-    kama, er = calculate_kama(close, period=21)
-    rsi = calculate_rsi(close, period=14)
+    # Calculate 1h indicators
+    ema_8 = calculate_ema(close, 8)
+    ema_21 = calculate_ema(close, 21)
     atr = calculate_atr(high, low, close, period=14)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
-    bb_upper, bb_lower, bb_sma, bb_width = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    
-    # Calculate BB Width percentile for regime detection (last 100 bars)
-    bb_width_percentile = np.zeros(n)
-    bb_width_percentile[:] = np.nan
-    lookback = 100
-    for i in range(lookback, n):
-        if not np.isnan(bb_width[i]):
-            valid_widths = bb_width[i-lookback:i+1]
-            valid_widths = valid_widths[~np.isnan(valid_widths)]
-            if len(valid_widths) > 0:
-                bb_width_percentile[i] = np.sum(bb_width[i] >= valid_widths) / len(valid_widths)
+    rsi = calculate_rsi(close, period=14)
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.27  # Base position size (27% of capital)
-    MAX_SIZE = 0.32   # Max position size with strong signals
-    MIN_SIZE = 0.22   # Min position size
+    BASE_SIZE = 0.25  # 25% of capital per position (conservative)
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -230,64 +113,35 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_atr = 0.0
     profit_target_hit = False
     
-    min_period = 100  # Wait for all indicators to stabilize
+    min_period = 100  # Wait for indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(kama[i]) or
-            np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(adx[i]) or
-            np.isnan(bb_width_percentile[i]) or atr[i] == 0 or adx[i] == 0):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(ema_8[i]) or
+            np.isnan(ema_21[i]) or np.isnan(atr[i]) or np.isnan(rsi[i]) or
+            atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # 4h HMA trend filter
-        price_above_4h_hma = close[i] > hma_4h_aligned[i]
-        hma_trend = 1 if price_above_4h_hma else -1
+        # 12h EMA trend filter
+        price_above_12h = close[i] > ema_12h_aligned[i]
+        trend_bullish = price_above_12h
+        trend_bearish = not price_above_12h
         
-        # KAMA trend direction
-        kama_trend = 1 if close[i] > kama[i] else -1
+        # EMA crossover signals (current vs previous bar)
+        ema_bullish_cross = ema_8[i] > ema_21[i] and ema_8[i-1] <= ema_21[i-1]
+        ema_bearish_cross = ema_8[i] < ema_21[i] and ema_8[i-1] >= ema_21[i-1]
         
-        # ADX strength filter (ADX > 20 for trend confirmation)
-        adx_strong = adx[i] > 20
+        # RSI filter (moderate - avoid extreme overbought/oversold only)
+        rsi_not_extreme = 25 < rsi[i] < 75
         
-        # BB Width regime filter (avoid extreme squeeze < 20th pct or expansion > 80th pct)
-        bb_regime_ok = 0.20 <= bb_width_percentile[i] <= 0.80
-        
-        # RSI pullback conditions (more lenient than before)
-        rsi_pullback_long = 35 <= rsi[i] <= 55  # Pullback in uptrend
-        rsi_pullback_short = 45 <= rsi[i] <= 65  # Pullback in downtrend
-        
-        # DI+ vs DI- for trend confirmation
-        di_bullish = plus_di[i] > minus_di[i]
-        di_bearish = minus_di[i] > plus_di[i]
-        
-        # Efficiency Ratio filter (ER > 0.3 means trending, not choppy)
-        er_trending = er[i] > 0.25
-        
-        # Calculate position size based on ADX and ER strength
-        strength_factor = min(1.0 + (adx[i] - 20) / 60 + er[i], 1.20)
-        position_size = min(MAX_SIZE, max(MIN_SIZE, BASE_SIZE * strength_factor))
-        
-        # Determine target signal based on all filters
-        target_signal = 0.0
-        
-        # Long entry: KAMA bullish + 4h HMA bullish + ADX strong + RSI pullback + DI+ > DI- + ER trending
-        if (kama_trend == 1 and hma_trend == 1 and adx_strong and 
-            rsi_pullback_long and di_bullish and bb_regime_ok and er_trending):
-            target_signal = position_size
-        
-        # Short entry: KAMA bearish + 4h HMA bearish + ADX strong + RSI pullback + DI- > DI+ + ER trending
-        elif (kama_trend == -1 and hma_trend == -1 and adx_strong and 
-              rsi_pullback_short and di_bearish and bb_regime_ok and er_trending):
-            target_signal = -position_size
-        
-        # Stoploss and take profit logic - check BEFORE setting new signal
+        # Stoploss and take profit check - evaluate BEFORE new entries
         stoploss_triggered = False
         take_profit_triggered = False
         
         if position_side != 0:
             if position_side == 1:
-                # Long position - update highest
+                # Long position - update highest since entry
                 highest_since_entry = max(highest_since_entry, close[i])
                 trailing_stop = highest_since_entry - 2.5 * atr[i]
                 
@@ -297,10 +151,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit (2R from entry, where R = 2.5*ATR at entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 5.0 * entry_atr:  # 2R = 5*ATR
+                    if close[i] >= entry_price + 5.0 * entry_atr:  # 2R profit
                         take_profit_triggered = True
             else:
-                # Short position - update lowest
+                # Short position - update lowest since entry
                 lowest_since_entry = min(lowest_since_entry, close[i])
                 trailing_stop = lowest_since_entry + 2.5 * atr[i]
                 
@@ -313,6 +167,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     if close[i] <= entry_price - 5.0 * entry_atr:  # 2R profit
                         take_profit_triggered = True
         
+        # Execute stoploss/takeprofit first
         if stoploss_triggered:
             signals[i] = 0.0
             position_side = 0
@@ -322,11 +177,21 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             entry_atr = 0.0
             profit_target_hit = False
         elif take_profit_triggered:
-            # Reduce position to half at 2R profit
+            # Reduce position to half at 2R profit, trail stop continues
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
-            # Apply signal change
+            # Entry logic - only when flat
+            target_signal = 0.0
+            
+            # Long: bullish 12h trend + EMA cross + RSI not extreme
+            if trend_bullish and ema_bullish_cross and rsi_not_extreme:
+                target_signal = BASE_SIZE
+            
+            # Short: bearish 12h trend + EMA cross + RSI not extreme
+            elif trend_bearish and ema_bearish_cross and rsi_not_extreme:
+                target_signal = -BASE_SIZE
+            
             if target_signal != 0.0 and position_side == 0:
                 # New entry
                 signals[i] = target_signal
@@ -337,14 +202,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 entry_atr = atr[i]
                 profit_target_hit = False
             elif position_side != 0:
-                # Maintain existing position (check if trend reversed)
-                # Exit if KAMA reverses OR 4h HMA alignment breaks
-                kama_reversal_long = kama_trend == -1
-                kama_reversal_short = kama_trend == 1
-                hma_alignment_broken = (position_side == 1 and hma_trend == -1) or \
-                                       (position_side == -1 and hma_trend == 1)
+                # Maintain existing position - check for exit conditions
+                ema_reversal_long = ema_8[i] < ema_21[i]
+                ema_reversal_short = ema_8[i] > ema_21[i]
+                trend_broken = (position_side == 1 and trend_bearish) or \
+                               (position_side == -1 and trend_bullish)
                 
-                if kama_reversal_long or kama_reversal_short or hma_alignment_broken:
+                if ema_reversal_long or ema_reversal_short or trend_broken:
+                    # Exit on EMA reversal or trend break
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
@@ -354,7 +219,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     profit_target_hit = False
                 else:
                     # Maintain position
-                    signals[i] = position_size * position_side if not profit_target_hit else HALF_SIZE * position_side
+                    signals[i] = BASE_SIZE * position_side if not profit_target_hit else HALF_SIZE * position_side
             else:
                 signals[i] = 0.0
     
