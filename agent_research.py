@@ -185,7 +185,24 @@ STRATEGY KNOWLEDGE:
 - MOMENTUM: MACD(12,26,9) histogram, ROC(10)+RSI(14)
 - MULTI-TF: 4h trend + 1h entries (proven to 2x Sharpe)
 - REGIME: Bollinger BW percentile detection
-- RISK: ATR trailing stop = signal→0 when price < highest - 3*ATR"""
+- RISK: ATR trailing stop = signal→0 when price < highest - 3*ATR
+
+MULTI-TIMEFRAME RESAMPLING — CORRECT WAY:
+NEVER use pd.date_range('2021-01-01', ...) — this creates FAKE timestamps!
+NEVER set open=close for resampled bars!
+ALWAYS use the actual open_time column:
+```
+# CORRECT: use real timestamps from data
+prices_indexed = prices.set_index('open_time')
+df_4h = prices_indexed.resample('4h').agg({
+    'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+}).dropna()
+# Map 4h values back to 1h using merge_asof or reindex
+trend_4h = compute_trend(df_4h)
+# Align back: for each 1h bar, find the most recent 4h bar
+trend_aligned = trend_4h.reindex(prices_indexed.index, method='ffill')
+```
+SOLUSDT has 2 data gaps of ~3 days. Synthetic date_range misaligns after gaps."""
 
 
 def build_experiment_prompt(
@@ -297,7 +314,12 @@ INSTRUCTIONS:
 1. State your hypothesis in a comment at the top (which strategy, timeframe, why)
 2. Implement using REAL indicator formulas from quantitative trading literature
 3. Use conservative leverage (1.0-2.0x) and keep drawdown under control
-4. If doing multi-timeframe: resample data properly (e.g., 1h→4h using .resample('4h'))
+4. MULTI-TIMEFRAME RESAMPLING — MUST USE ACTUAL TIMESTAMPS:
+   prices_idx = prices.set_index('open_time')
+   df_4h = prices_idx.resample('4h').agg({'open':'first','high':'max','low':'min','close':'last','volume':'sum'}).dropna()
+   trend_4h = your_indicator(df_4h)
+   trend_aligned = trend_4h.reindex(prices_idx.index, method='ffill')
+   NEVER use pd.date_range('2021-01-01',...) — it creates FAKE timestamps and breaks on data gaps!
 5. CRITICAL: Use proper min_periods on all rolling calculations
 
 OUTPUT: Complete strategy.py code only. Start with #!/usr/bin/env python3"""
@@ -330,6 +352,13 @@ def validate_strategy(code: str) -> tuple[bool, str]:
     # Reject 1m timeframe
     if re.search(r'timeframe\s*=\s*["\']1m["\']', code):
         return False, "1m timeframe not allowed (too noisy/risky)"
+
+    # CRITICAL: Reject synthetic date_range for MTF resampling
+    # This causes alignment bugs and subtle look-ahead on gappy data (SOLUSDT)
+    if re.search(r"pd\.date_range\s*\(\s*start\s*=\s*['\"]2021", code):
+        return False, "FORBIDDEN: pd.date_range('2021-...') creates fake timestamps. Use prices['open_time'] as index for resampling."
+    if re.search(r"date_range\s*\(\s*start\s*=\s*['\"]202", code):
+        return False, "FORBIDDEN: synthetic date_range for resampling. Use actual open_time column."
 
     # Check for obvious look-ahead patterns
     bad_patterns = [

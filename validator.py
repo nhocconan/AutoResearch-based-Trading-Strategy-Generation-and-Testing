@@ -34,6 +34,10 @@ LOOK_AHEAD_PATTERNS = [
     (r"df\s*\[\s*['\"].*['\"]\s*\]\s*=.*\.shift\s*\(\s*-", "Column assigned future-shifted value (look-ahead)"),
 ]
 
+SYNTHETIC_RESAMPLE_PATTERNS = [
+    (r"date_range\s*\(\s*(?:start\s*=\s*)?['\"]202", "SYNTHETIC: pd.date_range('202x...') creates fake timestamps — use prices['open_time'] as index for resampling"),
+]
+
 
 @dataclass
 class ValidationResult:
@@ -83,6 +87,12 @@ def validate_strategy(code: str) -> ValidationResult:
 
     # --- 3. Look-ahead bias (regex) ---
     for pattern, msg in LOOK_AHEAD_PATTERNS:
+        if re.search(pattern, code):
+            result.errors.append(msg)
+            result.valid = False
+
+    # --- 3b. Synthetic resampling (causes alignment bugs) ---
+    for pattern, msg in SYNTHETIC_RESAMPLE_PATTERNS:
         if re.search(pattern, code):
             result.errors.append(msg)
             result.valid = False
