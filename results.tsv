@@ -14,9 +14,3 @@ da55d5e	mtf_kama_macd_rsi_daily_4h_1d_v1	SOLUSDT	0.7346	124.34	22.48	-32.05	41.3
 da55d5e	mtf_kama_macd_rsi_daily_4h_1d_v1	BTCUSDT	0.4106	10.28	8.8	-6.86	52.6	1.79	38	0.4918	1.2827	keep	exp#010 mtf_kama_macd_rsi_daily_4h_1d_v1	test
 da55d5e	mtf_kama_macd_rsi_daily_4h_1d_v1	ETHUSDT	1.1635	28.2	23.86	-6.53	56.2	3.14	32	1.3465	3.6564	keep	exp#010 mtf_kama_macd_rsi_daily_4h_1d_v1	test
 da55d5e	mtf_kama_macd_rsi_daily_4h_1d_v1	SOLUSDT	0.9234	25.5	21.61	-12.46	54.5	2.19	44	1.0963	1.7346	keep	exp#010 mtf_kama_macd_rsi_daily_4h_1d_v1	test
-a07440e	kama_supertrend_rsi_pullback_30m_4h_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	keep	exp#028 kama_supertrend_rsi_pullback_30m_4h_v1	train
-a07440e	kama_supertrend_rsi_pullback_30m_4h_v1	ETHUSDT	0.1046	23.97	5.52	-30.75	52.7	1.55	131	0.1277	0.1796	keep	exp#028 kama_supertrend_rsi_pullback_30m_4h_v1	train
-a07440e	kama_supertrend_rsi_pullback_30m_4h_v1	SOLUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	keep	exp#028 kama_supertrend_rsi_pullback_30m_4h_v1	train
-a07440e	kama_supertrend_rsi_pullback_30m_4h_v1	BTCUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	keep	exp#028 kama_supertrend_rsi_pullback_30m_4h_v1	test
-a07440e	kama_supertrend_rsi_pullback_30m_4h_v1	ETHUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	keep	exp#028 kama_supertrend_rsi_pullback_30m_4h_v1	test
-a07440e	kama_supertrend_rsi_pullback_30m_4h_v1	SOLUSDT	0.0	0.0	0.0	0.0	0.0	0.0	0	0.0	0.0	keep	exp#028 kama_supertrend_rsi_pullback_30m_4h_v1	test

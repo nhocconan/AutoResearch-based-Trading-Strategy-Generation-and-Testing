@@ -634,7 +634,9 @@ def main():
         return_dd_ratio = abs(avg_return / avg_dd) if avg_dd < -0.1 else avg_return
         improved_sharpe = avg_sharpe > best_sharpe
         # Keep ANY strategy with positive Sharpe and reasonable return/DD
-        is_good = avg_sharpe > 0
+        # Must have: positive Sharpe, actual trades, AND no symbol with Sharpe < -0.3
+        min_sharpe_per_sym = min(r["sharpe_ratio"] for r in bt_results)
+        is_good = avg_sharpe > 0.05 and avg_trades >= 10 and min_sharpe_per_sym > -0.5
         status = "keep" if is_good else "discard"
 
         # Save ALL strategies that pass quality gates
