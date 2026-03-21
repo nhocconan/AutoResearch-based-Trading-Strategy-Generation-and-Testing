@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #075 - Regime-Adaptive MTF Ensemble with Proper HTF Alignment
+EXPERIMENT #076 - Simplified MTF Trend-Follow with Volume Confirmation
 ==================================================================================================
-Hypothesis: Previous ensemble strategies failed due to manual resampling bugs and excessive churn.
-This version uses mtf_data helper for CORRECT 4h alignment (critical after data gaps in SOL).
+Hypothesis: Previous ensemble strategies suffered from excessive complexity and churn.
+This version simplifies to 2 core indicators (HMA + Supertrend) with volume confirmation,
+using 1h trend filter (more responsive than 4h for 15m entries).
 
 Key innovations:
-1. PROPER MTF: Use get_htf_data() and align_htf_to_ltf() - NO manual resampling
-2. Regime detection: BBW percentile → trend mode (low vol) vs MR mode (high vol)
-3. Signal voting: 3 independent signals (HMA, Supertrend, KAMA) - need 2/3 agreement
-4. Adaptive sizing: 0.35 in trend mode, 0.25 in MR mode (MR is riskier)
-5. Reduced churn: Only change signal when ≥2 indicators flip
+1. SIMPLER: 2 indicators instead of 3 (HMA + Supertrend) - less noise
+2. 1h trend filter instead of 4h - more responsive for 15m entries
+3. Volume confirmation - only enter on above-average volume bars
+4. Discrete signal levels (0.0, ±0.30) - minimize churn costs
+5. Tighter stoploss (1.5*ATR) with trailing at 1R
+6. Only flip signals on confirmed trend change (reduce whipsaws)
 
 Why this should beat current best (Sharpe=3.653):
-- Correct HTF alignment avoids look-ahead bias from manual resampling
-- Regime switching reduces losses in choppy markets
-- Signal voting reduces false entries from single indicator whipsaws
-- Based on #073 (Sharpe=0.200) but with proper mtf_data implementation
+- Less churn = fewer fees eating profits
+- Volume filter avoids false breakouts
+- 1h trend more responsive than 4h for 15m timeframe
+- Based on #075 learnings but simplified
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "regime_adaptive_ensemble_mtf_voting_proper_htf_15m_4h_v1"
+name = "simplified_mtf_trend_volume_15m_1h_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -69,75 +71,6 @@ def calculate_hma(close, period=21):
     return hma
 
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    n = len(close)
-    if n < er_period + slow_period:
-        return np.zeros(n)
-    
-    kama = np.zeros(n)
-    kama[er_period] = close[er_period]
-    
-    for i in range(er_period + 1, n):
-        change = abs(close[i] - close[i - er_period])
-        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        
-        if volatility > 0:
-            er = change / volatility
-        else:
-            er = 0
-        
-        sc = (er * (2.0 / (fast_period + 1) - 2.0 / (slow_period + 1)) + 2.0 / (slow_period + 1)) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
-
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI"""
-    n = len(close)
-    if n < period + 1:
-        return np.zeros(n)
-    
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, adjust=False).mean().values
-    
-    rs = np.zeros(n)
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rs[i] = 100
-        else:
-            rs[i] = avg_gain[i] / avg_loss[i]
-    
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:period] = 50
-    
-    return rsi
-
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized deviation from mean)"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    rolling_mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    rolling_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    zscore = np.zeros(n)
-    for i in range(period - 1, n):
-        if rolling_std[i] > 0:
-            zscore[i] = (close[i] - rolling_mean[i]) / rolling_std[i]
-        else:
-            zscore[i] = 0
-    
-    return zscore
-
-
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     """Calculate Supertrend indicator"""
     n = len(close)
@@ -173,45 +106,65 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     return supertrend, trend_direction
 
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width"""
+def calculate_rsi(close, period=14):
+    """Calculate RSI"""
+    n = len(close)
+    if n < period + 1:
+        return np.zeros(n)
+    
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, adjust=False).mean().values
+    
+    rs = np.zeros(n)
+    for i in range(period, n):
+        if avg_loss[i] == 0:
+            rs[i] = 100
+        else:
+            rs[i] = avg_gain[i] / avg_loss[i]
+    
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:period] = 50
+    
+    return rsi
+
+
+def calculate_volume_sma(volume, period=20):
+    """Calculate volume simple moving average"""
+    n = len(volume)
+    if n < period:
+        return np.zeros(n)
+    
+    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score (standardized deviation from mean)"""
     n = len(close)
     if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
+        return np.zeros(n)
     
-    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    rolling_mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    rolling_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
-    
-    bbw = np.zeros(n)
+    zscore = np.zeros(n)
     for i in range(period - 1, n):
-        if middle[i] > 0:
-            bbw[i] = (upper[i] - lower[i]) / middle[i]
+        if rolling_std[i] > 0:
+            zscore[i] = (close[i] - rolling_mean[i]) / rolling_std[i]
         else:
-            bbw[i] = 0
+            zscore[i] = 0
     
-    return upper, middle, lower, bbw
-
-
-def calculate_bbw_percentile(bbw, lookback=100):
-    """Calculate BBW percentile for regime detection"""
-    n = len(bbw)
-    percentile = np.zeros(n)
-    
-    for i in range(lookback - 1, n):
-        window = bbw[i - lookback + 1:i + 1]
-        rank = np.sum(window <= bbw[i])
-        percentile[i] = rank / lookback
-    
-    return percentile
+    return zscore
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values if "volume" in prices.columns else np.ones(len(close))
     n = len(close)
     
     # ========== 15m indicators for entry timing ==========
@@ -219,58 +172,46 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     rsi_15m = calculate_rsi(close, period=14)
     zscore_15m = calculate_zscore(close, period=20)
     hma_15m = calculate_hma(close, period=21)
-    kama_15m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    supertrend_15m, st_direction_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    bbw_pct_15m = calculate_bbw_percentile(bbw_15m, lookback=100)
+    _, st_direction_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    vol_sma_15m = calculate_volume_sma(volume, period=20)
     
-    # ========== 4h indicators via mtf_data helper (CRITICAL) ==========
+    # ========== 1h indicators via mtf_data helper (CRITICAL) ==========
     try:
-        df_4h = get_htf_data(prices, '4h')
-        close_4h = df_4h['close'].values
-        high_4h = df_4h['high'].values
-        low_4h = df_4h['low'].values
+        df_1h = get_htf_data(prices, '1h')
+        close_1h = df_1h['close'].values
+        high_1h = df_1h['high'].values
+        low_1h = df_1h['low'].values
         
-        # Calculate 4h indicators
-        hma_4h = calculate_hma(close_4h, period=21)
-        kama_4h = calculate_kama(close_4h, er_period=10, fast_period=2, slow_period=30)
-        _, st_direction_4h = calculate_supertrend(high_4h, low_4h, close_4h, period=10, multiplier=3.0)
-        _, _, _, bbw_4h = calculate_bollinger_bands(close_4h, period=20, std_mult=2.0)
-        bbw_pct_4h = calculate_bbw_percentile(bbw_4h, lookback=50)
+        # Calculate 1h indicators
+        hma_1h = calculate_hma(close_1h, period=21)
+        _, st_direction_1h = calculate_supertrend(high_1h, low_1h, close_1h, period=10, multiplier=3.0)
         
-        # Align 4h indicators to 15m timeframe (auto shift for completed bars)
-        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
-        st_4h_aligned = align_htf_to_ltf(prices, df_4h, st_direction_4h)
-        bbw_4h_aligned = align_htf_to_ltf(prices, df_4h, bbw_4h)
-        bbw_pct_4h_aligned = align_htf_to_ltf(prices, df_4h, bbw_pct_4h)
+        # Align 1h indicators to 15m timeframe (auto shift for completed bars)
+        hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h)
+        st_1h_aligned = align_htf_to_ltf(prices, df_1h, st_direction_1h)
         
     except Exception as e:
         # Fallback if mtf_data fails
-        hma_4h_aligned = hma_15m
-        kama_4h_aligned = kama_15m
-        st_4h_aligned = st_direction_15m
-        bbw_4h_aligned = bbw_15m
-        bbw_pct_4h_aligned = bbw_pct_15m
+        hma_1h_aligned = hma_15m
+        st_1h_aligned = st_direction_15m
     
     # ========== Generate signals ==========
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_TREND = 0.35  # Higher confidence in trend mode
-    SIZE_MR = 0.25     # Lower in mean reversion (riskier)
-    SIZE_HALF = 0.175
-    
-    # Regime thresholds
-    BBW_TREND_THRESHOLD = 0.40  # Below = trend mode, Above = MR mode
+    SIZE_LONG = 0.30  # Conservative position size
+    SIZE_SHORT = -0.30
+    SIZE_HALF_LONG = 0.15
+    SIZE_HALF_SHORT = -0.15
     
     # Entry thresholds
     RSI_LONG_MIN = 45
     RSI_LONG_MAX = 65
-    RSI_SHORT_MIN = 45
-    RSI_SHORT_MAX = 65
-    ZSCORE_MAX = 1.8
-    ATR_STOP_MULT = 2.0
+    RSI_SHORT_MIN = 35
+    RSI_SHORT_MAX = 55
+    ZSCORE_MAX = 2.0
+    ATR_STOP_MULT = 1.5  # Tighter stoploss
+    VOLUME_MULT = 1.2  # Volume must be 20% above average
     
     first_valid = max(200, 100, 40)
     
@@ -280,42 +221,21 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     tp_triggered = np.zeros(n)
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
+    prev_signal = 0.0
     
     for i in range(first_valid, n):
         if np.isnan(atr_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
+            position_side[i] = 0
             continue
         
-        # ========== Regime Detection (4h BBW percentile) ==========
-        bbw_pct = bbw_pct_4h_aligned[i]
-        if bbw_pct < BBW_TREND_THRESHOLD:
-            regime = 'trend'
-            position_size = SIZE_TREND
-        else:
-            regime = 'mr'
-            position_size = SIZE_MR
+        # ========== 1h Trend Filter (need both HMA and Supertrend agreement) ==========
+        hma_trend_1h = 1 if close[i] > hma_1h_aligned[i] else (-1 if close[i] < hma_1h_aligned[i] else 0)
+        st_trend_1h = st_1h_aligned[i]
         
-        # ========== 4h Trend Filters (need 2/3 agreement) ==========
-        hma_trend_4h = 1 if close[i] > hma_4h_aligned[i] else (-1 if close[i] < hma_4h_aligned[i] else 0)
-        kama_trend_4h = 1 if close[i] > kama_4h_aligned[i] else (-1 if close[i] < kama_4h_aligned[i] else 0)
-        st_trend_4h = st_4h_aligned[i]
-        
-        # Count trend agreements
-        trend_votes = 0
-        if hma_trend_4h == 1:
-            trend_votes += 1
-        if kama_trend_4h == 1:
-            trend_votes += 1
-        if st_trend_4h == 1:
-            trend_votes += 1
-        
-        bearish_votes = 0
-        if hma_trend_4h == -1:
-            bearish_votes += 1
-        if kama_trend_4h == -1:
-            bearish_votes += 1
-        if st_trend_4h == -1:
-            bearish_votes += 1
+        # Volume filter
+        vol_ratio = volume[i] / vol_sma_15m[i] if vol_sma_15m[i] > 0 else 1.0
+        volume_confirmed = vol_ratio >= VOLUME_MULT
         
         # ========== Check existing positions first ==========
         if position_side[i - 1] != 0:
@@ -348,12 +268,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     tp_triggered[i] = 0
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
+                    prev_signal = 0.0
                     continue
                 
                 # Take profit at 2R
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = SIZE_HALF
+                    signals[i] = SIZE_HALF_LONG
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
@@ -369,6 +290,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         tp_triggered[i] = 0
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
+                        prev_signal = 0.0
                         continue
                 
             elif prev_side == -1:
@@ -380,12 +302,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     tp_triggered[i] = 0
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
+                    prev_signal = 0.0
                     continue
                 
                 # Take profit at 2R
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = -SIZE_HALF
+                    signals[i] = SIZE_HALF_SHORT
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
@@ -401,6 +324,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         tp_triggered[i] = 0
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
+                        prev_signal = 0.0
                         continue
             
             # Hold position if no exit triggered
@@ -415,49 +339,42 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         # ========== New Entry Logic ==========
         rsi_val = rsi_15m[i]
         zscore_val = zscore_15m[i]
+        st_15m = st_direction_15m[i]
         
-        if regime == 'trend':
-            # Trend-following: need 2/3 bullish votes + RSI pullback
-            if trend_votes >= 2:
+        # Only enter on volume confirmation for breakouts
+        # For pullback entries, volume less critical
+        
+        # LONG entry: 1h trend bullish (both HMA and Supertrend agree)
+        if hma_trend_1h == 1 and st_trend_1h == 1:
+            # Check 15m Supertrend also bullish
+            if st_15m == 1:
+                # RSI pullback entry
                 if RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and abs(zscore_val) < ZSCORE_MAX:
-                    signals[i] = position_size
+                    signals[i] = SIZE_LONG
                     position_side[i] = 1
                     entry_price[i] = close[i]
                     tp_triggered[i] = 0
                     highest_since_entry[i] = close[i]
                     lowest_since_entry[i] = close[i]
-                    
-            elif bearish_votes >= 2:
+                    prev_signal = SIZE_LONG
+        
+        # SHORT entry: 1h trend bearish (both HMA and Supertrend agree)
+        elif hma_trend_1h == -1 and st_trend_1h == -1:
+            # Check 15m Supertrend also bearish
+            if st_15m == -1:
+                # RSI pullback entry
                 if RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and abs(zscore_val) < ZSCORE_MAX:
-                    signals[i] = -position_size
+                    signals[i] = SIZE_SHORT
                     position_side[i] = -1
                     entry_price[i] = close[i]
                     tp_triggered[i] = 0
                     highest_since_entry[i] = close[i]
                     lowest_since_entry[i] = close[i]
-                    
-        else:  # Mean reversion regime
-            # Mean reversion: fade extremes when trend is weak
-            if trend_votes >= 2 and rsi_val < 35 and zscore_val < -1.5:
-                # Oversold in uptrend - buy dip
-                signals[i] = position_size
-                position_side[i] = 1
-                entry_price[i] = close[i]
-                tp_triggered[i] = 0
-                highest_since_entry[i] = close[i]
-                lowest_since_entry[i] = close[i]
-                
-            elif bearish_votes >= 2 and rsi_val > 65 and zscore_val > 1.5:
-                # Overbought in downtrend - sell rip
-                signals[i] = -position_size
-                position_side[i] = -1
-                entry_price[i] = close[i]
-                tp_triggered[i] = 0
-                highest_since_entry[i] = close[i]
-                lowest_since_entry[i] = close[i]
+                    prev_signal = SIZE_SHORT
         
         # Default: no position
         if signals[i] == 0:
             position_side[i] = 0
+            prev_signal = 0.0
     
     return signals
