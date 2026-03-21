@@ -1,54 +1,55 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h primary with 1d KAMA trend + BB Width regime + RSI timing
-- 12h timeframe reduces noise vs 15m/1h, fewer false signals
-- KAMA adapts to market efficiency (slow in chop, fast in trend)
-- 1d KAMA provides stable HTF trend filter
-- BB Width percentile detects regime (squeeze=range, expand=trend)
-- RSI(14) for entry timing within trend direction
+Hypothesis: Daily timeframe with weekly trend filter + KAMA adaptive trend + BB regime + RSI timing
+- 1d primary provides clean signals with less noise than intraday
+- 1w HMA filters long-term trend direction (avoid counter-trend trades)
+- KAMA adapts to market efficiency (fast in trends, slow in chop)
+- Bollinger Band Width detects regime (squeeze=low vol, expand=trending)
+- RSI for entry timing within trend direction
 - ATR trailing stop for risk management
-- Asymmetric sizing: 0.30 in strong trend, 0.15 in weak/uncertain
-Timeframe: 12h (primary), 1d (HTF trend filter)
+- Asymmetric sizing: larger in strong weekly trend, smaller in neutral
+Timeframe: 1d (primary), 1w (HTF filter)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_kama_bb_regime_12h_v1"
-timeframe = "12h"
+name = "mtf_kama_bb_rsi_regime_1d_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Kaufman Adaptive Moving Average - adapts to market efficiency"""
+    """Kaufman Adaptive Moving Average - adapts to market noise"""
     n = len(close)
     kama = np.zeros(n)
+    kama[0] = close[0]
     
-    # Change = absolute price change over er_period
-    change = np.abs(close - np.roll(close, er_period))
-    change[:er_period] = np.nan
-    
-    # Volatility = sum of absolute single-period changes
-    volatility = np.zeros(n)
-    for i in range(er_period, n):
-        volatility[i] = np.sum(np.abs(close[i-er_period+1:i+1] - np.roll(close[i-er_period+1:i+1], 1))[1:])
-    
-    # Efficiency Ratio
-    er = np.zeros(n)
-    mask = volatility > 0
-    er[mask] = change[mask] / volatility[mask]
-    er[:er_period] = 0
-    
-    # Smoothing constants
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    sc = er * (fast_sc - slow_sc) + slow_sc
-    
-    # KAMA calculation
-    kama[er_period] = close[er_period]
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    for i in range(1, n):
+        # Efficiency Ratio
+        if i >= er_period:
+            change = abs(close[i] - close[i - er_period])
+            volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+            er = change / (volatility + 1e-10) if volatility > 0 else 0
+        else:
+            er = 0
+        
+        # Smoothing constant
+        fast_sc = 2.0 / (fast_period + 1)
+        slow_sc = 2.0 / (slow_period + 1)
+        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+        
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
     
     return kama
+
+def calculate_hma(close, period):
+    """Hull Moving Average - reduces lag while maintaining smoothness"""
+    close_s = pd.Series(close)
+    wma_half = close_s.ewm(span=period//2, min_periods=period//2, adjust=False).mean().values
+    wma_full = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+    hull = 2 * wma_half - wma_full
+    hma = pd.Series(hull).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean().values
+    return hma
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -77,54 +78,56 @@ def calculate_rsi(close, period=14):
     rsi = 100 - 100 / (1 + rs)
     return rsi
 
-def calculate_bb_width(close, period=20):
-    """Bollinger Band Width for regime detection"""
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Bollinger Bands with width for regime detection"""
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = sma + 2 * std
-    lower = sma - 2 * std
-    bb_width = (upper - lower) / sma
-    return bb_width, sma, std
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    width = (upper - lower) / sma
+    pct_b = (close - lower) / (upper - lower + 1e-10)
+    return upper, lower, width, pct_b
 
-def calculate_bb_width_percentile(bb_width, lookback=100):
-    """Percentile of BB Width vs recent history"""
-    n = len(bb_width)
-    percentile = np.zeros(n)
-    
-    for i in range(lookback, n):
-        window = bb_width[i-lookback:i+1]
-        percentile[i] = np.sum(window < bb_width[i]) / len(window)
-    
-    percentile[:lookback] = 0.5
-    return percentile
+def calculate_momentum(close, period=10):
+    """Rate of Change momentum"""
+    roc = np.zeros(len(close))
+    roc[period:] = (close[period:] - close[:-period]) / (close[:-period] + 1e-10) * 100
+    return roc
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d KAMA for HTF trend direction
-    kama_1d_21 = calculate_kama(df_1d['close'].values, er_period=10, fast_period=2, slow_period=30)
-    kama_1d_50 = calculate_kama(df_1d['close'].values, er_period=10, fast_period=2, slow_period=50)
-    kama_1d_21_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_21)
-    kama_1d_50_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_50)
+    # 1w HMA for long-term trend direction
+    hma_1w_10 = calculate_hma(df_1w['close'].values, 10)
+    hma_1w_20 = calculate_hma(df_1w['close'].values, 20)
+    hma_1w_10_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_10)
+    hma_1w_20_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_20)
     
-    # 12h indicators
-    kama_12h_21 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    kama_12h_50 = calculate_kama(close, er_period=10, fast_period=2, slow_period=50)
+    # 1d indicators
+    kama_1d_10 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    kama_1d_30 = calculate_kama(close, er_period=10, fast_period=5, slow_period=50)
     atr = calculate_atr(high, low, close, period=14)
-    rsi = calculate_rsi(close, period=14)
-    bb_width, bb_sma, bb_std = calculate_bb_width(close, period=20)
-    bb_width_pct = calculate_bb_width_percentile(bb_width, lookback=100)
+    rsi = calculate_rsi(close, 14)
+    bb_upper, bb_lower, bb_width, bb_pct_b = calculate_bollinger_bands(close, 20, 2.0)
+    momentum = calculate_momentum(close, 10)
+    
+    # BB Width percentile for regime detection
+    bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=50).apply(
+        lambda x: np.sum(x < x.iloc[-1]) / len(x) if len(x) > 0 else 0.5, raw=False
+    ).values
+    bb_width_percentile = np.nan_to_num(bb_width_percentile, 0.5)
     
     signals = np.zeros(n)
-    SIZE_TREND = 0.30   # Size in confirmed trend
-    SIZE_WEAK = 0.15    # Size in weak/uncertain trend
-    SIZE_MAX = 0.35
+    SIZE_BASE = 0.25  # Base position size 25%
+    SIZE_MAX = 0.35   # Max position size 35%
+    SIZE_MIN = 0.15   # Min position size 15%
     
     prev_signal = 0.0
     entry_price = 0.0
@@ -133,27 +136,39 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     for i in range(100, n):
-        # HTF trend regime (1d KAMA)
-        htf_bull = kama_1d_21_aligned[i] > kama_1d_50_aligned[i] and close[i] > kama_1d_21_aligned[i]
-        htf_bear = kama_1d_21_aligned[i] < kama_1d_50_aligned[i] and close[i] < kama_1d_21_aligned[i]
+        # Weekly trend regime
+        htf_bull = hma_1w_10_aligned[i] > hma_1w_20_aligned[i] and close[i] > hma_1w_10_aligned[i]
+        htf_bear = hma_1w_10_aligned[i] < hma_1w_20_aligned[i] and close[i] < hma_1w_10_aligned[i]
+        htf_neutral = not htf_bull and not htf_bear
         
-        # 12h trend
-        ltf_bull = kama_12h_21[i] > kama_12h_50[i]
-        ltf_bear = kama_12h_21[i] < kama_12h_50[i]
+        # Weekly trend strength (slope)
+        if i >= 7:
+            hma_slope_1w = (hma_1w_10_aligned[i] - hma_1w_10_aligned[i-7]) / (hma_1w_10_aligned[i-7] + 1e-10)
+        else:
+            hma_slope_1w = 0
+        htf_strength = min(abs(hma_slope_1w) * 50, 2.0)  # Cap at 2.0
         
-        # Regime detection via BB Width percentile
-        # Low percentile = squeeze (range), High percentile = expansion (trend)
-        regime_trend = bb_width_pct[i] > 0.6  # Expanding bands = trending
-        regime_range = bb_width_pct[i] < 0.4  # Squeezing bands = ranging
+        # Daily trend (KAMA crossover)
+        kama_bull = kama_1d_10[i] > kama_1d_30[i]
+        kama_bear = kama_1d_10[i] < kama_1d_30[i]
         
-        # KAMA slope for trend strength
-        kama_slope = (kama_12h_21[i] - kama_12h_21[i-5]) / (kama_12h_21[i-5] + 1e-10)
-        trend_strong = abs(kama_slope) > 0.005
+        # BB regime
+        bb_squeeze = bb_width_percentile[i] < 0.3  # Low volatility
+        bb_expand = bb_width_percentile[i] > 0.7   # High volatility / trending
+        
+        # RSI conditions
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
+        rsi_neutral = 40 <= rsi[i] <= 60
+        
+        # Momentum confirmation
+        mom_positive = momentum[i] > 0
+        mom_negative = momentum[i] < 0
         
         # ATR stoploss level
         atr_stop = 2.5 * atr[i]
         
-        # Check stoploss first - MUST exit on stop
+        # Check stoploss first (trailing stop)
         if position_side == 1:
             highest_since_entry = max(highest_since_entry, high[i])
             trailing_stop = highest_since_entry - atr_stop
@@ -171,72 +186,84 @@ def generate_signals(prices):
                 prev_signal = 0.0
                 continue
         
-        # Determine position size based on regime
-        if regime_trend and trend_strong:
-            size = SIZE_TREND
+        # Determine position size based on HTF strength and regime
+        if htf_bull or htf_bear:
+            if bb_expand:
+                size = min(SIZE_BASE + htf_strength * 0.05, SIZE_MAX)
+            else:
+                size = SIZE_BASE
         else:
-            size = SIZE_WEAK
+            size = SIZE_MIN  # Reduce size in neutral regime
         
-        # Entry logic - simpler to ensure trades are generated
-        if htf_bull and ltf_bull:  # Strong bull alignment
-            # RSI pullback entry
-            if rsi[i] < 55 and rsi[i] > 35:
+        # Entry logic - asymmetric based on weekly regime
+        if htf_bull:  # Bull regime - prefer longs
+            # Trend continuation entry
+            if kama_bull and rsi_oversold and mom_positive:
                 signals[i] = size
                 if prev_signal == 0:
                     position_side = 1
                     entry_price = close[i]
                     highest_since_entry = close[i]
-            # RSI overbought - exit
-            elif rsi[i] > 70:
-                signals[i] = 0.0
-                position_side = 0
+            # Pullback entry in BB squeeze
+            elif kama_bull and bb_squeeze and rsi[i] < 50:
+                signals[i] = size * 0.8
+                if prev_signal == 0:
+                    position_side = 1
+                    entry_price = close[i]
+                    highest_since_entry = close[i]
+            # Overbought - reduce or exit
+            elif rsi_overbought and position_side == 1:
+                signals[i] = size * 0.5
             else:
                 signals[i] = prev_signal
                 
-        elif htf_bear and ltf_bear:  # Strong bear alignment
-            # RSI pullback entry
-            if rsi[i] > 45 and rsi[i] < 65:
+        elif htf_bear:  # Bear regime - prefer shorts
+            # Trend continuation entry
+            if kama_bear and rsi_overbought and mom_negative:
                 signals[i] = -size
                 if prev_signal == 0:
                     position_side = -1
                     entry_price = close[i]
                     lowest_since_entry = close[i]
-            # RSI oversold - exit
-            elif rsi[i] < 30:
-                signals[i] = 0.0
-                position_side = 0
+            # Pullback entry in BB squeeze
+            elif kama_bear and bb_squeeze and rsi[i] > 50:
+                signals[i] = -size * 0.8
+                if prev_signal == 0:
+                    position_side = -1
+                    entry_price = close[i]
+                    lowest_since_entry = close[i]
+            # Oversold - reduce or exit
+            elif rsi_oversold and position_side == -1:
+                signals[i] = -size * 0.5
             else:
                 signals[i] = prev_signal
                 
-        elif regime_range:  # Range-bound - mean reversion
-            if rsi[i] < 30:
-                signals[i] = size * 0.5
-                if prev_signal == 0:
-                    position_side = 1
-                    entry_price = close[i]
-                    highest_since_entry = close[i]
-            elif rsi[i] > 70:
+        else:  # Neutral regime - mean reversion only
+            if rsi_overbought and bb_pct_b[i] > 0.9:
                 signals[i] = -size * 0.5
                 if prev_signal == 0:
                     position_side = -1
                     entry_price = close[i]
                     lowest_since_entry = close[i]
+            elif rsi_oversold and bb_pct_b[i] < 0.1:
+                signals[i] = size * 0.5
+                if prev_signal == 0:
+                    position_side = 1
+                    entry_price = close[i]
+                    highest_since_entry = close[i]
+            elif rsi_neutral:
+                signals[i] = 0.0
+                position_side = 0
             else:
                 signals[i] = prev_signal
         
-        else:  # Uncertain regime - reduce or flat
-            if prev_signal != 0:
-                signals[i] = prev_signal * 0.5  # Reduce position
-            else:
-                signals[i] = 0.0
-        
-        # Discretize signal to reduce churn (every change costs 0.10% fees)
+        # Discretize signal to reduce churn
         if abs(signals[i]) < 0.10:
             signals[i] = 0.0
         elif signals[i] > 0:
-            signals[i] = min(max(round(signals[i] / 0.05) * 0.05, 0.15), SIZE_MAX)
+            signals[i] = min(max(round(signals[i] / 0.05) * 0.05, SIZE_MIN), SIZE_MAX)
         else:
-            signals[i] = max(min(round(signals[i] / 0.05) * 0.05, -0.15), -SIZE_MAX)
+            signals[i] = max(min(round(signals[i] / 0.05) * 0.05, -SIZE_MIN), -SIZE_MAX)
         
         prev_signal = signals[i]
     
