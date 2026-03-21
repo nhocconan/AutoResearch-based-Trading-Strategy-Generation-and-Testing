@@ -1,57 +1,34 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #005 - KAMA Trend + RSI Pullback with Daily Filter (12h)
-====================================================================
-Hypothesis: 12h KAMA(10) captures adaptive trends while daily HMA(50) 
-filters major trend direction. RSI(14) pullback entries (buy dips in 
-uptrend, sell rallies in downtrend) improve entry timing vs breakouts.
-ATR trailing stop protects capital. 12h TF balances trade frequency 
-and signal quality.
+EXPERIMENT #006 - Donchian Breakout + HMA Trend Filter (1d)
+============================================================
+Hypothesis: Daily Donchian(20) breakouts capture major trend moves in crypto.
+HMA(50) on daily filters direction (only long breakouts above HMA, short below).
+ADX(14) confirms trending regime. ATR(14) trailing stop protects capital.
+1d timeframe reduces noise and fee churn vs lower TFs.
 
 Key features:
-- Primary TF: 12h (balances noise vs signal)
-- HTF filter: 1d HMA(50) for major trend direction
-- Entry: KAMA slope + RSI pullback (RSI<45 in uptrend, RSI>55 in downtrend)
+- Primary TF: 1d (REQUIRED for this experiment)
+- HTF filter: 1d HMA(50) for trend direction (same TF, different indicator)
+- Entry: Donchian(20) breakout + HMA filter + ADX > 25
 - Stoploss: 2.5*ATR(14) trailing
-- Position sizing: 0.30 discrete (30% of capital)
-- Regime filter: Only trade when ADX(14) > 20 (trending market)
+- Position sizing: 0.25 discrete (25% of capital)
+- Regime filter: ADX(14) > 25 (strong trending market only)
+
+Why this should work on 1d:
+- Daily breakouts have higher follow-through than intraday
+- HMA(50) captures multi-week trend direction
+- ADX filter avoids choppy sideways markets
+- Lower trade frequency = less fee churn
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_rsi_daily_filter_12h_v1"
-timeframe = "12h"
+name = "donchian_hma_adx_daily_v1"
+timeframe = "1d"
 leverage = 1.0
-
-
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    n = len(close)
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    
-    for i in range(1, n):
-        if i < period:
-            kama[i] = close[i]
-            continue
-        
-        # Efficiency Ratio
-        signal = abs(close[i] - close[i - period])
-        noise = sum(abs(close[j] - close[j-1]) for j in range(i - period + 1, i + 1))
-        
-        if noise == 0:
-            er = 1.0
-        else:
-            er = signal / noise
-        
-        # Smoothing constant
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        
-        kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
-    
-    return kama
 
 
 def calculate_hma(close, period):
@@ -64,21 +41,8 @@ def calculate_hma(close, period):
     return hma.values
 
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI"""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-
 def calculate_atr(high, low, close, period=14):
-    """Calculate ATR"""
+    """Calculate Average True Range"""
     n = len(close)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
@@ -91,7 +55,7 @@ def calculate_atr(high, low, close, period=14):
 
 
 def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
+    """Calculate Average Directional Index"""
     n = len(close)
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
@@ -125,81 +89,87 @@ def calculate_adx(high, low, close, period=14):
     return adx
 
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (upper and lower bands)"""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(period-1, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    # Fill initial values
+    for i in range(period-1):
+        upper[i] = np.max(high[:i+1])
+        lower[i] = np.min(low[:i+1])
+    
+    return upper, lower
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
     n = len(close)
     
-    # Load 1d HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
-    hma_1d = calculate_hma(df_1d['close'].values, 50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-    
-    # Calculate 12h indicators
-    kama = calculate_kama(close, period=10)
-    rsi = calculate_rsi(close, 14)
+    # Calculate all indicators ONCE before loop
+    hma = calculate_hma(close, 50)
     atr = calculate_atr(high, low, close, 14)
     adx = calculate_adx(high, low, close, 14)
-    
-    # Calculate KAMA slope (rate of change)
-    kama_slope = np.zeros(n)
-    for i in range(5, n):
-        kama_slope[i] = (kama[i] - kama[i-5]) / (kama[i-5] + 1e-10)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     # Generate signals
     signals = np.zeros(n)
-    SIZE = 0.30  # Base position size (30% of capital)
+    SIZE = 0.25  # Base position size (25% of capital - conservative for daily)
     
     # Track position state for stoploss
     position_side = 0  # 0=flat, 1=long, -1=short
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
+    entry_price = 0.0
     
-    min_period = 70  # Wait for daily HMA and ADX to stabilize
+    min_period = 70  # Wait for HMA(50), ATR(14), ADX(14), Donchian(20) to stabilize
     
     for i in range(min_period, n):
-        # Check for NaN in any indicator
-        if (np.isnan(hma_1d_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(atr[i]) or np.isnan(adx[i]) or np.isnan(kama[i]) or
-            atr[i] == 0):
+        # Check for NaN or zero in any indicator
+        if (np.isnan(hma[i]) or np.isnan(atr[i]) or np.isnan(adx[i]) or
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            atr[i] == 0 or hma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Daily trend filter
-        daily_trend = 1 if close[i] > hma_1d_aligned[i] else -1
+        # Trend filter: price vs HMA(50)
+        price_above_hma = close[i] > hma[i]
+        price_below_hma = close[i] < hma[i]
         
-        # ADX filter - only trade in trending markets (ADX > 20)
-        trending_market = adx[i] > 20
+        # ADX filter: only trade in trending markets (ADX > 25)
+        trending_market = adx[i] > 25
         
-        # KAMA slope confirmation
-        kama_bullish = kama_slope[i] > 0.001
-        kama_bearish = kama_slope[i] < -0.001
-        
-        # RSI pullback entry logic
-        rsi_pullback_long = rsi[i] < 45  # Buy dip in uptrend
-        rsi_pullback_short = rsi[i] > 55  # Sell rally in downtrend
+        # Donchian breakout signals
+        breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
+        breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
         
         # Determine target signal
         target_signal = 0.0
         
         if trending_market:
-            if daily_trend == 1 and kama_bullish and rsi_pullback_long:
+            if price_above_hma and breakout_long:
                 target_signal = SIZE  # Long entry
-            elif daily_trend == -1 and kama_bearish and rsi_pullback_short:
+            elif price_below_hma and breakout_short:
                 target_signal = -SIZE  # Short entry
         
         # Stoploss logic - check BEFORE setting new signal
         stoploss_triggered = False
         if position_side != 0:
             if position_side == 1:
-                # Long position - update highest
+                # Long position - update highest since entry
                 highest_since_entry = max(highest_since_entry, close[i])
                 trailing_stop = highest_since_entry - 2.5 * atr[i]
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
             else:
-                # Short position - update lowest
+                # Short position - update lowest since entry
                 lowest_since_entry = min(lowest_since_entry, close[i])
                 trailing_stop = lowest_since_entry + 2.5 * atr[i]
                 if close[i] > trailing_stop:
@@ -210,6 +180,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             position_side = 0
             highest_since_entry = 0.0
             lowest_since_entry = float('inf')
+            entry_price = 0.0
         else:
             # Apply signal change
             if target_signal != 0.0:
@@ -219,6 +190,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     position_side = 1 if target_signal > 0 else -1
                     highest_since_entry = close[i]
                     lowest_since_entry = close[i]
+                    entry_price = close[i]
             elif position_side != 0:
                 # Maintain existing position
                 signals[i] = SIZE * position_side
