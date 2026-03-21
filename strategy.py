@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #012 - KAMA RSI Pullback with Daily HMA Filter (6h Primary)
+EXPERIMENT #013 - KAMA Adaptive Trend with Triple Timeframe Filter (1h Primary)
 ==================================================================================================
-Hypothesis: 6h primary timeframe offers cleaner signals than 4h (less noise) while maintaining
-sufficient trade frequency (unlike 12h). KAMA adapts to volatility better than HMA/EMA, reducing
-whipsaws in choppy markets. Combining 6h KAMA trend + 1d HMA filter + RSI pullback entries should
-capture medium-term swings more effectively than 4h strategies.
+Hypothesis: Current best uses 4h+1d. This uses 1h+4h+1d triple timeframe for more entry opportunities
+while maintaining strict trend alignment. KAMA adapts to market regime (fast in trends, slow in chop).
 
 Key innovations:
-1. 6h PRIMARY + 1d HTF: Sweet spot between 4h (noisy) and 12h (too few trades)
-2. KAMA for adaptive trend: Adjusts smoothing based on market efficiency (ER)
-3. 1d HMA as master filter: Stronger trend confirmation than 4h
-4. RSI pullback zones: Enter at 35-55 (slightly lower than 40-60 for better entries)
-5. Z-score filter: Avoid entries when price is >2 std dev from 20-period mean
+1. Triple MTF: 1h entries + 4h trend + 1d master filter (stronger than dual MTF)
+2. KAMA adaptive trend: Automatically adjusts sensitivity based on volatility/efficiency ratio
+3. BBW regime filter: Only trade when Bollinger Bands are expanding (avoid squeeze/chop)
+4. Z-score entry timing: Enter when price is 1-2 std dev from mean in trend direction
+5. Volume confirmation: Require above-average volume on entry bars
 
-Why this should beat #005 (Sharpe=0.537):
-- 6h has less noise than 4h, fewer false signals
-- KAMA adapts to volatility, better than static HMA in ranging markets
-- 1d HMA filter is stronger than 1d Supertrend alone
-- Z-score adds mean-reversion filter missing from #005
+Why this should beat hma_rsi_pullback_daily_trend_4h_v1 (Sharpe=0.537):
+- More entry signals (1h vs 4h primary) while keeping strict HTF filters
+- KAMA adapts better than HMA in changing regimes
+- BBW filter avoids low-volatility chop that causes whipsaws
+- Z-score provides better entry timing than RSI alone
+- Triple timeframe alignment reduces false signals
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_rsi_pullback_daily_hma_6h_v1"
-timeframe = "6h"
+name = "kama_triple_mtf_bbw_zscore_1h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
@@ -53,40 +52,43 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+def calculate_kama(close, period=10, fast=2, slow=30):
     """
-    Kaufman's Adaptive Moving Average
-    Adjusts smoothing based on market efficiency ratio (ER)
-    ER = |net change| / sum of absolute changes
-    High ER = trending (fast smoothing), Low ER = ranging (slow smoothing)
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts to market noise: fast in trends, slow in chop
+    ER = |close - close[n]| / sum(|close[i] - close[i-1]|)
+    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    KAMA = KAMA_prev + SC * (close - KAMA_prev)
     """
     n = len(close)
-    if n < period + slow_period:
+    if n < period + slow:
         return np.zeros(n)
     
-    close = np.array(close)
     kama = np.zeros(n)
     
-    # Efficiency Ratio
+    # Calculate Efficiency Ratio (ER)
     er = np.zeros(n)
     for i in range(period, n):
-        net_change = abs(close[i] - close[i - period])
-        sum_changes = np.sum(np.abs(np.diff(close[i - period:i + 1])))
-        if sum_changes > 0:
-            er[i] = net_change / sum_changes
+        signal = abs(close[i] - close[i - period])
+        noise = sum(abs(close[j] - close[j - 1]) for j in range(i - period + 1, i + 1))
+        if noise > 0:
+            er[i] = signal / noise
         else:
             er[i] = 0
     
-    # Smoothing constants
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
+    # Smoothing Constant
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
+    
+    sc = np.zeros(n)
+    for i in range(period, n):
+        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
     
     # Initialize KAMA
     kama[period] = close[period]
     
     for i in range(period + 1, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
     
     return kama
 
@@ -113,50 +115,37 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_hma(close, period=21):
-    """
-    Hull Moving Average - faster than EMA, smoother than SMA
-    HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    """
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width"""
     n = len(close)
     if n < period:
-        return np.zeros(n)
+        return np.zeros(n), np.zeros(n), np.zeros(n)
     
-    half = period // 2
-    sqrt_period = int(np.sqrt(period))
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     
-    def wma(series, window):
-        result = np.zeros(len(series))
-        weights = np.arange(1, window + 1)
-        for i in range(window - 1, len(series)):
-            result[i] = np.sum(series[i - window + 1:i + 1] * weights) / np.sum(weights)
-        return result
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bbw = (upper - lower) / sma
     
-    close_series = np.array(close)
-    wma_half = wma(close_series, half)
-    wma_full = wma(close_series, period)
+    # Handle NaN/inf
+    bbw = np.nan_to_num(bbw, nan=0.0, posinf=0.0, neginf=0.0)
     
-    diff = 2 * wma_half - wma_full
-    hma = wma(diff, sqrt_period)
-    
-    return hma
+    return upper, lower, bbw
 
 
 def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized deviation from mean)"""
+    """Calculate Z-score (standardized price)"""
     n = len(close)
     if n < period:
         return np.zeros(n)
     
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
     zscore = np.zeros(n)
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        mean = np.mean(window)
-        std = np.std(window)
-        if std > 0:
-            zscore[i] = (close[i] - mean) / std
-        else:
-            zscore[i] = 0
+    mask = std > 0
+    zscore[mask] = (close[mask] - sma[mask]) / std[mask]
     
     return zscore
 
@@ -214,60 +203,105 @@ def calculate_supertrend(high, low, close, atr, multiplier=3.0):
     return supertrend, trend
 
 
+def calculate_bbw_percentile(bbw, lookback=100):
+    """Calculate BBW percentile rank over lookback period"""
+    n = len(bbw)
+    percentile = np.zeros(n)
+    
+    for i in range(lookback, n):
+        window = bbw[i - lookback:i + 1]
+        rank = np.sum(window <= bbw[i])
+        percentile[i] = rank / len(window)
+    
+    return percentile
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # ========== 6h INDICATORS (PRIMARY TIMEFRAME) ==========
-    atr_6h = calculate_atr(high, low, close, period=14)
-    rsi_6h = calculate_rsi(close, period=14)
-    kama_6h = calculate_kama(close, period=10, fast_period=2, slow_period=30)
-    kama_6h_fast = calculate_kama(close, period=5, fast_period=2, slow_period=15)
-    zscore_6h = calculate_zscore(close, period=20)
-    supertrend_6h, st_trend_6h = calculate_supertrend(high, low, close, atr_6h, multiplier=3.0)
+    # ========== 1h INDICATORS (PRIMARY TIMEFRAME) ==========
+    atr_1h = calculate_atr(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
+    kama_1h = calculate_kama(close, period=10, fast=2, slow=30)
+    kama_1h_fast = calculate_kama(close, period=5, fast=2, slow=15)
+    supertrend_1h, st_trend_1h = calculate_supertrend(high, low, close, atr_1h, multiplier=3.0)
+    bb_upper_1h, bb_lower_1h, bbw_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    zscore_1h = calculate_zscore(close, period=20)
+    bbw_pct_1h = calculate_bbw_percentile(bbw_1h, lookback=100)
     
-    # ========== 1d INDICATORS (TREND FILTER) - PROPER MTF ==========
+    # Volume MA for confirmation
+    vol_ma_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ========== 4h INDICATORS (INTERMEDIATE TREND) - PROPER MTF ==========
+    try:
+        df_4h = get_htf_data(prices, '4h')
+        close_4h = df_4h['close'].values
+        high_4h = df_4h['high'].values
+        low_4h = df_4h['low'].values
+        
+        kama_4h = calculate_kama(close_4h, period=10, fast=2, slow=30)
+        atr_4h = calculate_atr(high_4h, low_4h, close_4h, period=14)
+        _, st_trend_4h = calculate_supertrend(high_4h, low_4h, close_4h, atr_4h, multiplier=3.0)
+        
+        # Align to 1h timeframe (auto shift for completed bars)
+        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
+        st_trend_4h_aligned = align_htf_to_ltf(prices, df_4h, st_trend_4h)
+        
+    except Exception:
+        kama_4h_aligned = np.zeros(n)
+        st_trend_4h_aligned = np.zeros(n)
+    
+    # ========== 1d INDICATORS (MASTER TREND FILTER) - PROPER MTF ==========
     try:
         df_1d = get_htf_data(prices, '1d')
         close_1d = df_1d['close'].values
         high_1d = df_1d['high'].values
         low_1d = df_1d['low'].values
         
-        # Daily HMA for trend direction (stronger than Supertrend alone)
-        hma_1d = calculate_hma(close_1d, period=21)
+        kama_1d = calculate_kama(close_1d, period=10, fast=2, slow=30)
         atr_1d = calculate_atr(high_1d, low_1d, close_1d, period=14)
         _, st_trend_1d = calculate_supertrend(high_1d, low_1d, close_1d, atr_1d, multiplier=3.0)
         
-        # Align to 6h timeframe (auto shift for completed bars)
-        hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+        # Align to 1h timeframe (auto shift for completed bars)
+        kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
         st_trend_1d_aligned = align_htf_to_ltf(prices, df_1d, st_trend_1d)
         
     except Exception:
-        hma_1d_aligned = np.zeros(n)
+        kama_1d_aligned = np.zeros(n)
         st_trend_1d_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
     
-    # Position sizing - CONSERVATIVE (max 0.35)
-    SIZE_BASE = 0.20
-    SIZE_HIGH = 0.35
+    # Position sizing - CONSERVATIVE & DISCRETE
+    SIZE_BASE = 0.20   # Base position (20%)
+    SIZE_HIGH = 0.30   # High conviction (30%)
+    SIZE_MAX = 0.35    # Maximum position
     
     # ATR stoploss
-    ATR_STOP_MULT = 2.0
+    ATR_STOP_MULT = 2.5
     
-    # RSI pullback zones (slightly lower than 40-60 for better entries)
+    # RSI pullback zones
     RSI_LONG_MIN = 35
     RSI_LONG_MAX = 55
     RSI_SHORT_MIN = 45
     RSI_SHORT_MAX = 65
     
-    # Z-score filter
-    ZSCORE_MAX = 2.0
+    # Z-score entry zones
+    ZSCORE_LONG_MIN = -1.5
+    ZSCORE_LONG_MAX = 0.5
+    ZSCORE_SHORT_MIN = -0.5
+    ZSCORE_SHORT_MAX = 1.5
     
-    first_valid = max(100, 50)
+    # BBW percentile filter (avoid squeeze < 0.2, avoid extreme > 0.9)
+    BBW_PCT_MIN = 0.20
+    BBW_PCT_MAX = 0.85
+    
+    first_valid = max(150, 100)
     
     # Track position state
     position_side = np.zeros(n, dtype=int)
@@ -278,33 +312,52 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_6h[i]) or atr_6h[i] == 0 or np.isnan(rsi_6h[i]):
+        if np.isnan(atr_1h[i]) or atr_1h[i] == 0 or np.isnan(rsi_1h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_6h[i]
-        rsi_val = rsi_6h[i]
-        st_trend_val = st_trend_6h[i]
-        kama_val = kama_6h[i]
-        kama_fast_val = kama_6h_fast[i]
-        zscore_val = zscore_6h[i]
+        atr = atr_1h[i]
+        rsi_val = rsi_1h[i]
+        st_trend_val = st_trend_1h[i]
+        kama_val = kama_1h[i]
+        kama_fast_val = kama_1h_fast[i]
+        zscore_val = zscore_1h[i]
+        bbw_pct_val = bbw_pct_1h[i]
+        vol_ratio = volume[i] / vol_ma_1h[i] if vol_ma_1h[i] > 0 else 1.0
+        
+        # 4h trend filters
+        kama_4h_val = kama_4h_aligned[i]
+        st_trend_4h_val = st_trend_4h_aligned[i]
         
         # 1d trend filters (MASTER FILTER)
-        hma_1d_val = hma_1d_aligned[i]
+        kama_1d_val = kama_1d_aligned[i]
         st_trend_1d_val = st_trend_1d_aligned[i]
         
-        # Determine daily trend direction
+        # Determine trend directions
+        # 1d master trend
         daily_trend = 0
-        if hma_1d_val > 0 and price > hma_1d_val:
+        if kama_1d_val > 0 and price > kama_1d_val:
             daily_trend = 1
-        elif hma_1d_val > 0 and price < hma_1d_val:
+        elif kama_1d_val > 0 and price < kama_1d_val:
             daily_trend = -1
         
         if st_trend_1d_val == 1:
             daily_trend = max(daily_trend, 1)
         elif st_trend_1d_val == -1:
             daily_trend = min(daily_trend, -1)
+        
+        # 4h intermediate trend
+        h4_trend = 0
+        if kama_4h_val > 0 and price > kama_4h_val:
+            h4_trend = 1
+        elif kama_4h_val > 0 and price < kama_4h_val:
+            h4_trend = -1
+        
+        if st_trend_4h_val == 1:
+            h4_trend = max(h4_trend, 1)
+        elif st_trend_4h_val == -1:
+            h4_trend = min(h4_trend, -1)
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -325,7 +378,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.0*ATR)
+            # Stoploss check (2.5*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -340,7 +393,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = SIZE_BASE
+                    signals[i] = SIZE_BASE / 2  # Reduce to half
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -372,7 +425,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = -SIZE_BASE
+                    signals[i] = -SIZE_BASE / 2  # Reduce to half
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -399,31 +452,42 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ========== ENTRY LOGIC - RSI PULLBACK IN TREND DIRECTION ==========
-        # Z-score filter: avoid entries when price is extreme (>2 std dev)
-        zscore_filter = abs(zscore_val) < ZSCORE_MAX
+        # ========== REGIME FILTER (BBW PERCENTILE) ==========
+        # Only trade when BBW is in normal range (not squeeze, not extreme expansion)
+        regime_ok = bbw_pct_val >= BBW_PCT_MIN and bbw_pct_val <= BBW_PCT_MAX
         
-        # LONG: Daily trend up + 6h Supertrend up + RSI pullback + Z-score OK
+        # Volume confirmation (above 0.8x average)
+        volume_ok = vol_ratio >= 0.8
+        
+        if not regime_ok or not volume_ok:
+            signals[i] = 0.0
+            continue
+        
+        # ========== ENTRY LOGIC - TRIPLE TIMEFRAME ALIGNMENT ==========
+        # LONG: 1d trend up + 4h trend up + 1h Supertrend up + RSI pullback + Z-score entry
         long_condition = (
             daily_trend == 1 and
+            h4_trend == 1 and
             st_trend_val == 1 and
             rsi_val >= RSI_LONG_MIN and rsi_val <= RSI_LONG_MAX and
-            kama_fast_val > kama_val and
-            zscore_filter
+            zscore_val >= ZSCORE_LONG_MIN and zscore_val <= ZSCORE_LONG_MAX and
+            kama_fast_val > kama_val  # Fast KAMA above slow KAMA
         )
         
-        # SHORT: Daily trend down + 6h Supertrend down + RSI pullback + Z-score OK
+        # SHORT: 1d trend down + 4h trend down + 1h Supertrend down + RSI pullback + Z-score entry
         short_condition = (
             daily_trend == -1 and
+            h4_trend == -1 and
             st_trend_val == -1 and
             rsi_val >= RSI_SHORT_MIN and rsi_val <= RSI_SHORT_MAX and
-            kama_fast_val < kama_val and
-            zscore_filter
+            zscore_val >= ZSCORE_SHORT_MIN and zscore_val <= ZSCORE_SHORT_MAX and
+            kama_fast_val < kama_val  # Fast KAMA below slow KAMA
         )
         
         # Determine position size based on conviction
-        high_conviction_long = long_condition and st_trend_1d_val == 1 and hma_1d_val > 0
-        high_conviction_short = short_condition and st_trend_1d_val == -1 and hma_1d_val > 0
+        # High conviction: all three timeframes align + strong volume
+        high_conviction_long = long_condition and st_trend_1d_val == 1 and st_trend_4h_val == 1 and vol_ratio >= 1.2
+        high_conviction_short = short_condition and st_trend_1d_val == -1 and st_trend_4h_val == -1 and vol_ratio >= 1.2
         
         if long_condition:
             size = SIZE_HIGH if high_conviction_long else SIZE_BASE
