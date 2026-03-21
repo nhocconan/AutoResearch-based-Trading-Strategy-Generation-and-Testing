@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #157: 15m Bollinger Band Mean Reversion with 4h HMA Trend Filter
-Hypothesis: 15m timeframe is ideal for mean reversion strategies. Bollinger Bands
-capture price extremes relative to recent volatility. When price touches lower band
-(%B < 0.1) with volume spike AND 4h trend is not bearish, high probability long.
-Conversely for shorts. This differs from RSI-based MR by using volatility-normalized
-price position. 4h HMA provides trend bias without being too slow (like daily).
-Volume confirmation (1.5x average) filters false breakouts. ATR stoploss at 2.0*ATR
-protects capital. Position sizing: 0.25 entry, 0.15 at 2R profit. This targets the
-gap left by failed RSI strategies - Bollinger %B is more responsive on 15m.
+Experiment #158: 30m RSI Pullback with 4h HMA Trend Filter and ATR Stoploss
+Hypothesis: 30m timeframe captures intermediate swings better than 1h/4h for mean-reversion
+within trend. Using 4h HMA for major trend bias + 30m RSI pullback entries generates
+sufficient trades while avoiding counter-trend traps. Looser RSI thresholds (35-45 long,
+55-65 short) ensure trades trigger on all symbols. ATR stoploss at 2.0*ATR protects capital.
+This addresses the 0-trade failure mode by simplifying entry conditions while maintaining
+trend alignment via 4h HTF filter. Position sizing: 0.25 entry, 0.125 at 2R profit.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_bb_4h_hma_volume_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_rsi_pullback_4h_hma_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -42,35 +40,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """
-    Calculate Bollinger Bands and %B indicator.
-    %B = (price - lower_band) / (upper_band - lower_band)
-    %B < 0.1 = oversold, %B > 0.9 = overbought
-    """
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    
-    # Calculate %B
-    range_bb = upper - lower
-    range_bb = np.where(range_bb > 0, range_bb, 1e-10)
-    percent_b = (close - lower) / range_bb
-    percent_b = np.clip(percent_b, 0, 1)
-    
-    return sma.values, upper.values, lower.values, percent_b
-
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio relative to rolling average."""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean().values
-    vol_avg = np.where(vol_avg > 0, vol_avg, 1e-10)
-    vol_ratio = volume / vol_avg
-    return vol_ratio
-
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -88,6 +57,13 @@ def calculate_sma(close, period=50):
     close_s = pd.Series(close)
     return close_s.rolling(window=period, min_periods=period).mean().values
 
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs recent average."""
+    vol_s = pd.Series(volume)
+    vol_avg = vol_s.rolling(window=period, min_periods=period).mean().values
+    vol_ratio = np.where(vol_avg > 0, volume / vol_avg, 1.0)
+    return vol_ratio
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -104,18 +80,17 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    bb_sma, bb_upper, bb_lower, bb_pct_b = calculate_bollinger_bands(close, 20, 2.0)
-    vol_ratio = calculate_volume_ratio(volume, 20)
     sma_50 = calculate_sma(close, 50)
     hma_20 = calculate_hma(close, 20)
     hma_50 = calculate_hma(close, 50)
+    vol_ratio = calculate_volume_ratio(volume, 20)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.15
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -131,69 +106,52 @@ def generate_signals(prices):
         trend_4h_bullish = hma_4h_valid and close[i] > hma_4h_aligned[i]
         trend_4h_bearish = hma_4h_valid and close[i] < hma_4h_aligned[i]
         
-        # 15m trend filter
-        trend_15m_bullish = hma_20[i] > hma_50[i] if hma_50[i] > 0 else False
-        trend_15m_bearish = hma_20[i] < hma_50[i] if hma_50[i] > 0 else False
+        # 30m trend filter
+        trend_30m_bullish = hma_20[i] > hma_50[i] if hma_50[i] > 0 else False
+        trend_30m_bearish = hma_20[i] < hma_50[i] if hma_50[i] > 0 else False
         
         # Price position relative to SMA50
         above_sma50 = sma_50[i] > 0 and close[i] > sma_50[i]
         below_sma50 = sma_50[i] > 0 and close[i] < sma_50[i]
         
-        # Bollinger Band extremes (loosened for more trades)
-        bb_oversold = bb_pct_b[i] < 0.15
-        bb_overbought = bb_pct_b[i] > 0.85
-        bb_extreme_oversold = bb_pct_b[i] < 0.05
-        bb_extreme_overbought = bb_pct_b[i] > 0.95
-        
-        # Volume confirmation
-        volume_spike = vol_ratio[i] > 1.3
-        volume_normal = vol_ratio[i] > 0.8
-        
-        # RSI confirmation (wider thresholds for more trades)
+        # RSI pullback signals (LOOSE thresholds for more trades)
+        rsi_pullback_long = 35 <= rsi[i] <= 50
+        rsi_pullback_short = 50 <= rsi[i] <= 65
         rsi_oversold = rsi[i] < 40
         rsi_overbought = rsi[i] > 60
-        rsi_rising = rsi[i] > rsi[i-2] if i > 2 else False
-        rsi_falling = rsi[i] < rsi[i-2] if i > 2 else False
+        
+        # Volume confirmation
+        volume_ok = vol_ratio[i] >= 0.7  # At least 70% of avg volume
+        
+        # RSI momentum
+        rsi_rising = rsi[i] > rsi[i-1] if i > 1 else False
+        rsi_falling = rsi[i] < rsi[i-1] if i > 1 else False
         
         new_signal = 0.0
         
-        # LONG ENTRY: Bollinger oversold + volume + RSI confirmation
-        if bb_oversold or bb_extreme_oversold:
-            if volume_spike and rsi_oversold:
-                if not trend_4h_bearish:
-                    # Strong long: 4h not bearish + oversold + volume
-                    new_signal = SIZE_ENTRY
-                elif trend_15m_bullish:
-                    # Moderate long: 15m bullish despite 4h bearish
-                    new_signal = SIZE_ENTRY * 0.6
-            elif volume_normal and rsi_rising:
-                if above_sma50 and not trend_4h_bearish:
-                    # Above SMA50 + RSI rising + not 4h bearish
-                    new_signal = SIZE_ENTRY
+        # LONG ENTRY: 4h bullish + RSI pullback OR 4h neutral + RSI oversold
+        if rsi_pullback_long or rsi_oversold:
+            if trend_4h_bullish and volume_ok:
+                # Strong long: 4h trend + pullback
+                new_signal = SIZE_ENTRY
+            elif not trend_4h_bearish and rsi_rising and above_sma50:
+                # Moderate long: 4h not bearish + RSI turning up
+                new_signal = SIZE_ENTRY
+            elif trend_30m_bullish and rsi_oversold and volume_ok:
+                # 30m trend + oversold
+                new_signal = SIZE_ENTRY
         
-        # SHORT ENTRY: Bollinger overbought + volume + RSI confirmation
-        if bb_overbought or bb_extreme_overbought:
-            if volume_spike and rsi_overbought:
-                if not trend_4h_bullish:
-                    # Strong short: 4h not bullish + overbought + volume
-                    new_signal = -SIZE_ENTRY
-                elif trend_15m_bearish:
-                    # Moderate short: 15m bearish despite 4h bullish
-                    new_signal = -SIZE_ENTRY * 0.6
-            elif volume_normal and rsi_falling:
-                if below_sma50 and not trend_4h_bullish:
-                    # Below SMA50 + RSI falling + not 4h bullish
-                    new_signal = -SIZE_ENTRY
-        
-        # TREND FOLLOWING: HMA crossover with BB confirmation
-        if new_signal == 0.0:
-            if trend_15m_bullish and hma_20[i-1] <= hma_50[i-1]:
-                if trend_4h_bullish or (above_sma50 and bb_pct_b[i] > 0.4):
-                    new_signal = SIZE_ENTRY
-            
-            elif trend_15m_bearish and hma_20[i-1] >= hma_50[i-1]:
-                if trend_4h_bearish or (below_sma50 and bb_pct_b[i] < 0.6):
-                    new_signal = -SIZE_ENTRY
+        # SHORT ENTRY: 4h bearish + RSI pullback OR 4h neutral + RSI overbought
+        if new_signal == 0.0 and (rsi_pullback_short or rsi_overbought):
+            if trend_4h_bearish and volume_ok:
+                # Strong short: 4h trend + pullback
+                new_signal = -SIZE_ENTRY
+            elif not trend_4h_bullish and rsi_falling and below_sma50:
+                # Moderate short: 4h not bullish + RSI turning down
+                new_signal = -SIZE_ENTRY
+            elif trend_30m_bearish and rsi_overbought and volume_ok:
+                # 30m trend + overbought
+                new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
