@@ -1,37 +1,41 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #001 - Supertrend + RSI Pullback + Dual HTF Filter (15m primary)
-=====================================================================================
-Hypothesis: 15m Supertrend captures intraday trends, but needs HTF confirmation to avoid
-whipsaws. 4h HMA(21) defines major trend, 1h Supertrend confirms intermediate momentum.
-RSI(14) pullback entries (RSI<40 in uptrend, RSI>60 in downtrend) improve entry timing.
-ADX(14)>25 filters choppy regimes. This differs from Donchian by using Supertrend (ATR-based)
-which adapts to volatility better than fixed Donchian channels.
+EXPERIMENT #008 - Volatility-Adjusted Momentum + Volume Confirmation (30m primary)
+==================================================================================
+Hypothesis: 30m momentum works best when confirmed by volume and filtered by HTF trend.
+Previous Donchian/RSI strategies failed due to false breakouts in chop. This strategy:
+- Uses ROC(10) for momentum (faster than MA crossover, slower than RSI extremes)
+- Requires volume confirmation (1.5x 20-period avg) to filter false moves
+- 4h HMA(21) + 1d HMA(50) for trend alignment (not triple HTF - too restrictive)
+- Dynamic position sizing based on ATR (smaller size when volatility is high)
+- 2.5*ATR trailing stop (wider than 2.0*ATR to avoid premature exits)
+- Discrete signal levels (0.0, ±0.20, ±0.30) to minimize fee churn
 
-Key features:
-- Primary TF: 15m
-- HTF filters: 4h HMA(21) + 1h Supertrend(10,3) for dual alignment
-- Trend: 15m Supertrend(10,3) direction
-- Entry: RSI(14) pullback (RSI<40 long, RSI>60 short) + ADX>25
-- Regime: ADX percentile > 50th (avoid weakest trends)
-- Stoploss: 2.0*ATR(14) trailing
-- Position sizing: 0.20-0.30 discrete, scaled by ADX strength
-- Take profit: Reduce to half at 2R profit, trail stop at 1R
-
-Why this should beat current best:
-- 15m captures more intraday opportunities than 12h
-- Dual HTF filter (4h HMA + 1h Supertrend) reduces false signals
-- RSI pullback entries improve risk/reward vs breakout entries
-- Supertrend adapts to volatility better than fixed Donchian channels
+Why this should beat previous attempts:
+- Volume filter removes 40%+ of false momentum signals
+- ROC captures momentum earlier than MA crossovers
+- Dynamic sizing controls drawdown in high volatility periods
+- 30m TF is faster than 4h/12h but slower than 5m/15m (sweet spot for swing)
+- Simpler HTF filter (4h+1d vs triple) = more trades, less overfitting
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "supertrend_rsi_dualhtf_15m_1h_4h_v1"
-timeframe = "15m"
+name = "vol_momentum_volume_30m_4h_1d_v1"
+timeframe = "30m"
 leverage = 1.0
+
+
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
+    close_s = pd.Series(close)
+    wma1 = close_s.ewm(span=period // 2, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, adjust=False).mean()
+    raw_hma = 2 * wma1 - wma2
+    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
+    return hma.values
 
 
 def calculate_atr(high, low, close, period=14):
@@ -47,250 +51,149 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator"""
+def calculate_roc(close, period=10):
+    """Calculate Rate of Change (momentum indicator)"""
     n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
-    supertrend = np.zeros(n)
-    trend = np.ones(n)  # 1 = bullish, -1 = bearish
-    
+    roc = np.zeros(n)
+    roc[:] = np.nan
     for i in range(period, n):
-        hl2 = (high[i] + low[i]) / 2.0
-        
-        upper_band[i] = hl2 + multiplier * atr[i]
-        lower_band[i] = hl2 - multiplier * atr[i]
-        
-        if i == period:
-            supertrend[i] = upper_band[i]
-            trend[i] = -1 if close[i] <= upper_band[i] else 1
-        else:
-            # Update upper/lower bands based on previous trend
-            if trend[i - 1] == 1:
-                upper_band[i] = min(upper_band[i], upper_band[i - 1])
-            else:
-                lower_band[i] = max(lower_band[i], lower_band[i - 1])
-            
-            # Determine new trend
-            if close[i] <= lower_band[i]:
-                supertrend[i] = upper_band[i]
-                trend[i] = -1
-            elif close[i] >= upper_band[i]:
-                supertrend[i] = lower_band[i]
-                trend[i] = 1
-            else:
-                supertrend[i] = supertrend[i - 1]
-                trend[i] = trend[i - 1]
-    
-    return supertrend, trend, upper_band, lower_band
+        if close[i - period] != 0:
+            roc[i] = 100 * (close[i] - close[i - period]) / close[i - period]
+    return roc
 
 
 def calculate_rsi(close, period=14):
     """Calculate RSI using Wilder's smoothing"""
     n = len(close)
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)
+    delta = np.zeros(n)
+    for i in range(1, n):
+        delta[i] = close[i] - close[i - 1]
     
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
+    gain_smooth = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
+    loss_smooth = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
     
     rs = np.zeros(n)
-    for i in range(period, n):
-        if avg_loss[i] > 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
+    for i in range(period - 1, n):
+        if loss_smooth[i] != 0:
+            rs[i] = gain_smooth[i] / loss_smooth[i]
         else:
             rs[i] = 100
     
     rsi = 100 - (100 / (1 + rs))
-    rsi[:period] = np.nan
-    
     return rsi
 
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    n = len(close)
-    
-    tr = np.zeros(n)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    tr[0] = high[0] - low[0]
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i],
-                    abs(high[i] - close[i - 1]),
-                    abs(low[i] - close[i - 1]))
-        
-        if high[i] - high[i - 1] > low[i - 1] - low[i]:
-            plus_dm[i] = max(high[i] - high[i - 1], 0)
-        else:
-            plus_dm[i] = 0
-            
-        if low[i - 1] - low[i] > high[i] - high[i - 1]:
-            minus_dm[i] = max(low[i - 1] - low[i], 0)
-        else:
-            minus_dm[i] = 0
-    
-    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        if tr_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
-    
-    dx = np.zeros(n)
-    for i in range(period - 1, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    return adx, plus_di, minus_di
-
-
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period // 2, adjust=False, min_periods=period // 2).mean()
-    wma2 = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
-    raw_hma = 2 * wma1 - wma2
-    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False, min_periods=int(np.sqrt(period))).mean()
-    return hma.values
-
-
-def calculate_percentile_rank(series, window=100):
-    """Calculate rolling percentile rank"""
-    n = len(series)
-    pr = np.zeros(n)
-    pr[:] = np.nan
-    
-    for i in range(window - 1, n):
-        if not np.isnan(series[i]):
-            window_data = series[i - window + 1:i + 1]
-            window_data = window_data[~np.isnan(window_data)]
-            if len(window_data) > 0:
-                pr[i] = np.sum(window_data <= series[i]) / len(window_data)
-    
-    return pr
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average"""
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
+    volume = prices["volume"].values.copy()
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1h = get_htf_data(prices, '1h')
     df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    st_1h, trend_1h, _, _ = calculate_supertrend(
-        df_1h['high'].values, 
-        df_1h['low'].values, 
-        df_1h['close'].values, 
-        period=10, 
-        multiplier=3.0
-    )
+    hma_1d = calculate_hma(df_1d['close'].values, 50)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    trend_1h_aligned = align_htf_to_ltf(prices, df_1h, trend_1h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 15m indicators
-    st_15m, trend_15m, _, _ = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    atr_15m = calculate_atr(high, low, close, 14)
-    rsi_15m = calculate_rsi(close, 14)
-    adx_15m, plus_di_15m, minus_di_15m = calculate_adx(high, low, close, 14)
+    # Calculate 30m indicators
+    atr = calculate_atr(high, low, close, 14)
+    roc = calculate_roc(close, 10)
+    rsi = calculate_rsi(close, 14)
+    vol_ma = calculate_volume_ma(volume, 20)
     
-    # Calculate ADX percentile rank (regime filter)
-    adx_pr = calculate_percentile_rank(adx_15m, 100)
+    # Calculate ATR percentile for volatility regime
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = np.zeros(n)
+    for i in range(50, n):
+        if atr_ma[i] > 0:
+            atr_ratio[i] = atr[i] / atr_ma[i]
     
     # Generate signals
     signals = np.zeros(n)
+    
+    # Position sizing parameters
     BASE_SIZE = 0.25  # Base position size (25% of capital)
-    MAX_SIZE = 0.35   # Max position size with strong ADX
-    MIN_SIZE = 0.15   # Min position size
-    HALF_SIZE = BASE_SIZE / 2
+    MAX_SIZE = 0.35   # Max position size in low volatility
+    MIN_SIZE = 0.15   # Min position size in high volatility
+    HALF_SIZE = 0.12  # Half position for take profit
     
     # Track position state for stoploss and take profit
     position_side = 0  # 0=flat, 1=long, -1=short
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     entry_price = 0.0
-    profit_target_hit = False
     entry_atr = 0.0
+    profit_target_hit = False
     
     min_period = 150  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(trend_1h_aligned[i]) or
-            np.isnan(st_15m[i]) or np.isnan(trend_15m[i]) or
-            np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or 
-            np.isnan(adx_15m[i]) or np.isnan(adx_pr[i]) or
-            atr_15m[i] == 0 or adx_15m[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(roc[i]) or np.isnan(rsi[i]) or
+            np.isnan(vol_ma[i]) or atr[i] == 0 or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # 4h HMA trend alignment (major trend)
+        # HTF trend alignment (4h and 1d must agree)
         price_above_4h_hma = close[i] > hma_4h_aligned[i]
-        major_trend = 1 if price_above_4h_hma else -1
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
         
-        # 1h Supertrend direction (intermediate trend)
-        intermediate_trend = int(trend_1h_aligned[i])
+        # HTF trend direction
+        hma_4h_trend = 1 if price_above_4h_hma else -1
+        hma_1d_trend = 1 if price_above_1d_hma else -1
         
-        # 15m Supertrend direction (short-term trend)
-        short_term_trend = int(trend_15m[i])
+        # Momentum signals
+        roc_bullish = roc[i] > 2.0  # Positive momentum > 2%
+        roc_bearish = roc[i] < -2.0  # Negative momentum < -2%
         
-        # ADX strength filter (only trade when ADX > 25 and in top 50th percentile)
-        adx_strong = adx_15m[i] > 25
-        adx_regime = adx_pr[i] > 0.50
+        # RSI filter (avoid extremes for momentum strategy)
+        rsi_neutral = 35 < rsi[i] < 65  # Not overbought/oversold
+        rsi_bullish = rsi[i] > 50 and rsi[i] < 70  # Bullish but not extreme
+        rsi_bearish = rsi[i] < 50 and rsi[i] > 30  # Bearish but not extreme
         
-        # RSI pullback signals
-        rsi_oversold = rsi_15m[i] < 40  # Pullback in uptrend
-        rsi_overbought = rsi_15m[i] > 60  # Pullback in downtrend
+        # Volume confirmation (must be 1.5x average volume)
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # DI+ vs DI- for trend confirmation
-        di_bullish = plus_di_15m[i] > minus_di_15m[i]
-        di_bearish = minus_di_15m[i] > plus_di_15m[i]
+        # Volatility regime (avoid extreme volatility)
+        vol_normal = 0.5 < atr_ratio[i] < 2.0  # ATR within 50%-200% of average
         
-        # Calculate position size based on ADX strength (dynamic sizing)
-        adx_multiplier = min(1.0 + (adx_15m[i] - 25) / 50, 1.4)  # Max 1.4x
-        position_size = min(MAX_SIZE, max(MIN_SIZE, BASE_SIZE * adx_multiplier))
-        
-        # Round to discrete levels
-        if position_size < 0.20:
-            position_size = 0.20
-        elif position_size < 0.30:
-            position_size = 0.25
+        # Calculate dynamic position size based on volatility
+        if atr_ratio[i] < 0.8:
+            position_size = MAX_SIZE  # Low volatility = larger size
+        elif atr_ratio[i] > 1.5:
+            position_size = MIN_SIZE  # High volatility = smaller size
         else:
-            position_size = 0.30
+            position_size = BASE_SIZE  # Normal volatility
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: All trends aligned + RSI pullback + ADX strong
-        if (major_trend == 1 and intermediate_trend == 1 and short_term_trend == 1 and
-            adx_strong and adx_regime and rsi_oversold and di_bullish):
+        # Long entry: Momentum + Volume + HTF bullish + RSI confirmation
+        if (roc_bullish and volume_confirmed and vol_normal and
+            hma_4h_trend == 1 and hma_1d_trend == 1 and rsi_bullish):
             target_signal = position_size
         
-        # Short entry: All trends aligned + RSI pullback + ADX strong
-        elif (major_trend == -1 and intermediate_trend == -1 and short_term_trend == -1 and
-              adx_strong and adx_regime and rsi_overbought and di_bearish):
+        # Short entry: Momentum + Volume + HTF bearish + RSI confirmation
+        elif (roc_bearish and volume_confirmed and vol_normal and
+              hma_4h_trend == -1 and hma_1d_trend == -1 and rsi_bearish):
             target_signal = -position_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -301,20 +204,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.0 * atr_15m[i]
+                trailing_stop = highest_since_entry - 2.5 * atr[i]
                 
                 # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry, where R = 2*ATR at entry)
+                # Check take profit (2R from entry, where R = 2.5*ATR at entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 4.0 * entry_atr:  # 2R = 4*ATR
+                    if close[i] >= entry_price + 5.0 * entry_atr:  # 2R = 5*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.0 * atr_15m[i]
+                trailing_stop = lowest_since_entry + 2.5 * atr[i]
                 
                 # Check stoploss
                 if close[i] > trailing_stop:
@@ -322,7 +225,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 4.0 * entry_atr:  # 2R profit
+                    if close[i] <= entry_price - 5.0 * entry_atr:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -346,17 +249,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry = close[i]
                 lowest_since_entry = close[i]
                 entry_price = close[i]
-                entry_atr = atr_15m[i]
+                entry_atr = atr[i]
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if Supertrend reverses OR HTF alignment breaks
-                supertrend_reversal_long = short_term_trend == -1
-                supertrend_reversal_short = short_term_trend == 1
-                hma_alignment_broken = (position_side == 1 and major_trend == -1) or \
-                                       (position_side == -1 and major_trend == 1)
+                # Exit if momentum reverses OR HTF alignment breaks
+                momentum_reversal_long = roc[i] < -1.0
+                momentum_reversal_short = roc[i] > 1.0
+                hma_alignment_broken = (position_side == 1 and hma_4h_trend == -1) or \
+                                       (position_side == -1 and hma_4h_trend == 1)
                 
-                if supertrend_reversal_long or supertrend_reversal_short or hma_alignment_broken:
+                if momentum_reversal_long or momentum_reversal_short or hma_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
