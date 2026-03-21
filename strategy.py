@@ -1,212 +1,162 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #018 - Supertrend + RSI Pullback + ADX Strength + Volume Filter
-===============================================================================
-Hypothesis: Supertrend provides cleaner trend signals than Donchian channels.
-Combined with RSI pullback entries in the direction of the 4h trend, ADX strength
-filter (>20) to avoid choppy markets, and volume confirmation for conviction.
-This should reduce whipsaws while capturing major trending moves.
+EXPERIMENT #014 - DEMA Trend + CCI Entry + ADX Filter + ATR Stop
+================================================================
+Hypothesis: DEMA (Double EMA) responds faster to trend changes than regular EMA,
+combined with CCI for entry timing within the trend direction. ADX filters out
+weak trends to avoid whipsaws. ATR-based trailing stop manages risk dynamically.
+
+Key differences from previous attempts:
+- DEMA(21/55) instead of HMA/KAMA for faster trend detection
+- CCI(20) for entry timing instead of RSI (different oscillator behavior)
+- ADX(14) strength filter to avoid trading in choppy markets
+- Cleaner multi-timeframe mapping without artificial date indices
+- Discrete signal levels (0, ±0.25, ±0.35) to minimize churn costs
 
 Why this might beat Sharpe=2.139:
-- Supertrend (tested in #002, #011) showed strong returns (+433%, +497%)
-- RSI pullback entries avoid chasing extended moves
-- ADX filter removes low-quality choppy periods
-- Volume confirmation adds conviction to breakouts
-- Simpler calculations than Donchian+HMA combo (avoids #007 timeout)
-- Discrete position sizing (0.0, ±0.25, ±0.35) reduces churn costs
+- DEMA reduces lag compared to EMA while being smoother than HMA
+- CCI captures momentum extremes better than RSI in trending markets
+- ADX filter prevents entries during low-trend-strength periods
+- Proven multi-timeframe structure from winning strategies
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_supertrend_rsi_adx_volume_v1"
+name = "mtf_dema_cci_adx_atr_v1"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_atr(high, low, close, period=14):
-    """Calculate ATR using Wilder's smoothing"""
+def calculate_dema(close, period=21):
+    """Calculate Double Exponential Moving Average - faster response than EMA"""
     n = len(close)
     if n < period:
         return np.zeros(n)
     
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
+    ema1 = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, adjust=False, min_periods=period).mean().values
     
-    atr = np.zeros(n)
-    atr[period - 1] = np.mean(tr[1:period])
+    dema = 2 * ema1 - ema2
+    dema[:period] = np.nan
     
-    for i in range(period, n):
-        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
-    
-    return atr
+    return dema
 
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator"""
+def calculate_cci(high, low, close, period=20):
+    """Calculate Commodity Channel Index for entry timing"""
     n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n)
+    tp = (high + low + close) / 3
     
-    atr = calculate_atr(high, low, close, period)
+    tp_mean = pd.Series(tp).rolling(window=period, min_periods=period).mean().values
+    tp_std = pd.Series(tp).rolling(window=period, min_periods=period).std().values
     
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)  # 1 for bullish, -1 for bearish
+    cci = np.zeros(n)
+    mask = tp_std > 0
+    cci[mask] = (tp[mask] - tp_mean[mask]) / (0.015 * tp_std[mask])
     
-    for i in range(period, n):
-        hl2 = (high[i] + low[i]) / 2
-        upper_band[i] = hl2 + multiplier * atr[i]
-        lower_band[i] = hl2 - multiplier * atr[i]
-        
-        if i == period:
-            supertrend[i] = upper_band[i]
-            direction[i] = 1
-        else:
-            if close[i - 1] <= supertrend[i - 1]:
-                supertrend[i] = min(upper_band[i], supertrend[i - 1])
-                if close[i] > supertrend[i]:
-                    supertrend[i] = lower_band[i]
-                    direction[i] = 1
-                else:
-                    direction[i] = -1
-            else:
-                supertrend[i] = max(lower_band[i], supertrend[i - 1])
-                if close[i] < supertrend[i]:
-                    supertrend[i] = upper_band[i]
-                    direction[i] = -1
-                else:
-                    direction[i] = 1
-    
-    return supertrend, direction
-
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI with proper min_periods"""
-    n = len(close)
-    if n < period + 1:
-        return np.zeros(n)
-    
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)
-    
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=period, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).rolling(window=period, min_periods=period).mean().values
-    
-    rsi = np.zeros(n)
-    mask = (avg_loss > 0) & (avg_gain >= 0)
-    rs = np.zeros(n)
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rsi[mask] = 100 - (100 / (1 + rs[mask]))
-    
-    return rsi
+    return cci
 
 
 def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
+    """Calculate ADX for trend strength filter"""
     n = len(close)
-    if n < period * 2:
-        return np.zeros(n)
     
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        plus_dm[i] = max(0, high[i] - high[i - 1]) if (high[i] - high[i - 1]) > (low[i - 1] - low[i]) else 0
-        minus_dm[i] = max(0, low[i - 1] - low[i]) if (low[i - 1] - low[i]) > (high[i] - high[i - 1]) else 0
-    
     tr = np.zeros(n)
+    
     for i in range(1, n):
         tr[i] = max(
             high[i] - low[i],
             abs(high[i] - close[i - 1]),
             abs(low[i] - close[i - 1])
         )
+        
+        if high[i] - high[i - 1] > low[i - 1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i - 1], 0)
+        else:
+            plus_dm[i] = 0
+            
+        if low[i - 1] - low[i] > high[i] - high[i - 1]:
+            minus_dm[i] = max(low[i - 1] - low[i], 0)
+        else:
+            minus_dm[i] = 0
     
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
     
     plus_di = np.zeros(n)
     minus_di = np.zeros(n)
-    
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=period, min_periods=period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=period, min_periods=period).mean().values
-    
-    mask = atr > 0
-    plus_di[mask] = 100 * plus_dm_smooth[mask] / atr[mask]
-    minus_di[mask] = 100 * minus_dm_smooth[mask] / atr[mask]
+    mask = tr_smooth > 0
+    plus_di[mask] = 100 * plus_dm_smooth[mask] / tr_smooth[mask]
+    minus_di[mask] = 100 * minus_dm_smooth[mask] / tr_smooth[mask]
     
     dx = np.zeros(n)
     di_sum = plus_di + minus_di
     mask2 = di_sum > 0
     dx[mask2] = 100 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
     
-    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
+    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
     
     return adx
 
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume SMA for confirmation"""
-    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+def calculate_atr(high, low, close, period=14):
+    """Calculate ATR for trailing stop and position sizing"""
+    n = len(close)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+    
+    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return atr
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices.get("volume", np.ones(len(close))).values
     n = len(close)
     
     # 1h indicators for entry timing
-    rsi_1h = calculate_rsi(close, period=14)
+    cci_1h = calculate_cci(high, low, close, period=20)
     atr_1h = calculate_atr(high, low, close, period=14)
     adx_1h = calculate_adx(high, low, close, period=14)
-    vol_sma_1h = calculate_volume_sma(volume, period=20)
+    dema_fast_1h = calculate_dema(close, period=21)
+    dema_slow_1h = calculate_dema(close, period=55)
     
-    # Resample to 4h for trend filter
-    df_1h = pd.DataFrame({
-        'open': close,
-        'high': high,
-        'low': low,
-        'close': close,
-        'volume': volume
-    })
-    df_1h.index = pd.date_range(start='2021-01-01', periods=n, freq='1h')
+    # 4h trend via downsampling (integer-based, no date manipulation)
+    n_4h = n // 4
+    close_4h = close[:n_4h * 4].reshape(n_4h, 4).mean(axis=1)
+    high_4h = high[:n_4h * 4].reshape(n_4h, 4).max(axis=1)
+    low_4h = low[:n_4h * 4].reshape(n_4h, 4).min(axis=1)
     
-    df_4h = df_1h.resample('4h').agg({
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
-        'volume': 'sum'
-    }).dropna()
-    
-    h_4h = df_4h['high'].values
-    l_4h = df_4h['low'].values
-    c_4h = df_4h['close'].values
-    
-    # 4h Supertrend for trend direction
-    supertrend_4h, direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
+    dema_fast_4h = calculate_dema(close_4h, period=21)
+    dema_slow_4h = calculate_dema(close_4h, period=55)
     
     # Map 4h trend back to 1h
+    trend_4h = np.zeros(n_4h)
+    for i in range(55, n_4h):
+        if dema_fast_4h[i] > dema_slow_4h[i]:
+            trend_4h[i] = 1
+        elif dema_fast_4h[i] < dema_slow_4h[i]:
+            trend_4h[i] = -1
+    
     trend_1h = np.zeros(n)
-    idx_1h_to_4h = np.arange(n) // 4
-    
     for i in range(n):
-        idx_4h = idx_1h_to_4h[i]
-        if idx_4h < len(direction_4h) and idx_4h >= 10:
-            trend_1h[i] = direction_4h[idx_4h]
+        idx_4h = i // 4
+        if idx_4h < n_4h:
+            trend_1h[i] = trend_4h[idx_4h]
     
-    # Generate signals
+    # Signal generation
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels
@@ -214,109 +164,120 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     SIZE_HALF = 0.25
     
     # Thresholds
-    RSI_LONG_ENTRY = 40
-    RSI_SHORT_ENTRY = 60
-    ADX_MIN = 20
-    ATR_STOP_MULT = 2.5
+    CCI_LONG_ENTRY = -100   # Enter long when CCI oversold in uptrend
+    CCI_SHORT_ENTRY = 100   # Enter short when CCI overbought in downtrend
+    ADX_MIN = 20            # Minimum ADX for trend strength
+    ATR_STOP_MULT = 2.5     # ATR multiplier for trailing stop
     
-    first_valid = max(80, 28, 20)
+    # Wait for all indicators to be valid
+    first_valid = max(55, 21, 20, 14)
     
-    entry_price = np.zeros(n)
-    position_side = np.zeros(n)
+    # Track position for stoploss
+    position_side = 0
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(first_valid, n):
-        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(adx_1h[i]):
+        if np.isnan(cci_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(adx_1h[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(dema_fast_1h[i]) or np.isnan(dema_slow_1h[i]):
             signals[i] = 0.0
             continue
         
         trend = trend_1h[i]
-        rsi_val = rsi_1h[i]
+        cci_val = cci_1h[i]
         adx_val = adx_1h[i]
         atr = atr_1h[i]
         price = close[i]
-        vol = volume[i]
-        vol_avg = vol_sma_1h[i]
         
-        # ATR filter - avoid extreme volatility
-        if atr > 0 and atr / price > 0.05:
-            signals[i] = 0.0
-            position_side[i] = 0
+        # ADX filter - only trade when trend strength is sufficient
+        if adx_val < ADX_MIN:
+            if position_side != 0:
+                # Check stoploss even in low ADX
+                if position_side == 1:
+                    stoploss = entry_price - ATR_STOP_MULT * atr
+                    if price < stoploss:
+                        signals[i] = 0.0
+                        position_side = 0
+                        entry_price = 0.0
+                        continue
+                elif position_side == -1:
+                    stoploss = entry_price + ATR_STOP_MULT * atr
+                    if price > stoploss:
+                        signals[i] = 0.0
+                        position_side = 0
+                        entry_price = 0.0
+                        continue
+                # Hold position
+                signals[i] = signals[i - 1] if i > 0 else 0.0
+            else:
+                signals[i] = 0.0
             continue
         
         # Check trailing stop for existing positions
-        if i > 0 and position_side[i - 1] != 0:
-            prev_side = position_side[i - 1]
-            prev_entry = entry_price[i - 1] if entry_price[i - 1] > 0 else price
-            
-            if prev_side == 1:
-                stoploss_price = prev_entry - ATR_STOP_MULT * atr
-                if price < stoploss_price:
+        if position_side != 0:
+            if position_side == 1:  # Long
+                if i == 0 or entry_price == 0:
+                    entry_price = price
+                highest_since_entry = max(highest_since_entry, price)
+                stoploss = max(entry_price, highest_since_entry - ATR_STOP_MULT * atr)
+                if price < stoploss:
                     signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
+                    position_side = 0
+                    entry_price = 0.0
+                    highest_since_entry = 0.0
                     continue
-            elif prev_side == -1:
-                stoploss_price = prev_entry + ATR_STOP_MULT * atr
-                if price > stoploss_price:
+            elif position_side == -1:  # Short
+                if i == 0 or entry_price == 0:
+                    entry_price = price
+                lowest_since_entry = min(lowest_since_entry, price)
+                stoploss = min(entry_price, lowest_since_entry + ATR_STOP_MULT * atr)
+                if price > stoploss:
                     signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
+                    position_side = 0
+                    entry_price = 0.0
+                    lowest_since_entry = 0.0
                     continue
         
-        # ADX filter - only trade when trend is strong enough
-        if adx_val < ADX_MIN:
-            if i > 0 and position_side[i - 1] != 0:
-                signals[i] = signals[i - 1]
-                position_side[i] = position_side[i - 1]
-                entry_price[i] = entry_price[i - 1]
+        # 1h DEMA confirmation
+        dema_confirmed_long = dema_fast_1h[i] > dema_slow_1h[i]
+        dema_confirmed_short = dema_fast_1h[i] < dema_slow_1h[i]
+        
+        if trend == 1 and dema_confirmed_long:  # Uptrend
+            if cci_val < CCI_LONG_ENTRY:
+                signals[i] = SIZE_FULL
+                position_side = 1
+                entry_price = price
+                highest_since_entry = price
+            elif cci_val < 0 and position_side == 1:
+                signals[i] = SIZE_HALF
+            elif position_side == 1:
+                signals[i] = SIZE_HALF  # Hold reduced position
             else:
                 signals[i] = 0.0
-                position_side[i] = 0
-            continue
-        
-        # Volume confirmation
-        volume_confirmed = vol > vol_avg * 0.8
-        
-        if trend == 1:  # 4h uptrend
-            if rsi_val < RSI_LONG_ENTRY and volume_confirmed:
-                signals[i] = SIZE_FULL
-                position_side[i] = 1
-                entry_price[i] = price
-            elif rsi_val < 50 and volume_confirmed:
-                signals[i] = SIZE_HALF
-                position_side[i] = 1
-                entry_price[i] = price
-            else:
-                if i > 0 and position_side[i - 1] == 1:
-                    signals[i] = signals[i - 1]
-                    position_side[i] = 1
-                    entry_price[i] = entry_price[i - 1]
-                else:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    
-        elif trend == -1:  # 4h downtrend
-            if rsi_val > RSI_SHORT_ENTRY and volume_confirmed:
+                
+        elif trend == -1 and dema_confirmed_short:  # Downtrend
+            if cci_val > CCI_SHORT_ENTRY:
                 signals[i] = -SIZE_FULL
-                position_side[i] = -1
-                entry_price[i] = price
-            elif rsi_val > 50 and volume_confirmed:
+                position_side = -1
+                entry_price = price
+                lowest_since_entry = price
+            elif cci_val > 0 and position_side == -1:
                 signals[i] = -SIZE_HALF
-                position_side[i] = -1
-                entry_price[i] = price
+            elif position_side == -1:
+                signals[i] = -SIZE_HALF  # Hold reduced position
             else:
-                if i > 0 and position_side[i - 1] == -1:
-                    signals[i] = signals[i - 1]
-                    position_side[i] = -1
-                    entry_price[i] = entry_price[i - 1]
-                else:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
+                signals[i] = 0.0
         else:
+            # No clear trend or DEMA disagreement
             signals[i] = 0.0
-            position_side[i] = 0
-            entry_price[i] = 0
+            if position_side != 0:
+                position_side = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
     
     return signals
