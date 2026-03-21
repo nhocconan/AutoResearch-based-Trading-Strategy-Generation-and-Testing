@@ -1,66 +1,127 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #002 - MTF HMA Trend + RSI Pullback Strategy (30m)
-=============================================================
-Hypothesis: Using 4h HMA for trend direction + 30m RSI pullback entries will
-capture trends with better entry timing than pure trend-following. The 4h HMA
-filters out counter-trend trades, while RSI oversold/overbought on 30m provides
-optimal entry points within the trend.
+EXPERIMENT #003 - KAMA Adaptive Trend + MACD Momentum Strategy (1h)
+====================================================================
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility
+better than HMA/EMA, reducing whipsaws in choppy markets. Combined with MACD
+histogram for momentum confirmation and ADX for trend strength filtering, this
+should capture trending moves while avoiding range-bound losses.
 
-Key improvements over failed #001:
-- 4h HMA trend filter (smoother than Supertrend, fewer whipsaws)
-- RSI pullback entries (buy dips in uptrend, sell rallies in downtrend)
-- Proper stoploss: signal→0 at 2*ATR against position
-- Take profit: reduce to half at 2R, trail stop at 1R
-- Smaller position size (0.30 max) for better drawdown control
-- Volume confirmation filter to avoid low-liquidity entries
+Key differences from failed #001/#002:
+- KAMA instead of HMA (adaptive to volatility, fewer false signals)
+- MACD histogram for momentum confirmation (not just RSI pullback)
+- ADX filter: only trade when ADX > 25 (strong trend)
+- 1h primary timeframe (this experiment's rotation)
+- 4h KAMA for trend direction filter
+- Smaller position size (0.25 max) for better drawdown control
+- Proper stoploss at 2*ATR with signal→0 exit
 
-Primary TF: 30m | HTF: 4h HMA trend filter
+Primary TF: 1h | HTF: 4h KAMA trend filter
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_hma_rsi_pullback_30m_v1"
-timeframe = "30m"
+name = "kama_macd_adx_1h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_hma(close: np.ndarray, period: int) -> np.ndarray:
-    """Calculate Hull Moving Average"""
+def calculate_kama(close: np.ndarray, er_period: int = 10, fast_sc: int = 2, slow_sc: int = 30) -> np.ndarray:
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA)
+    KAMA adapts smoothing based on market efficiency ratio (ER)
+    High ER (trending) = fast smoothing, Low ER (choppy) = slow smoothing
+    """
     n = len(close)
-    if n < period:
+    if n < er_period + slow_sc:
         return np.full(n, np.nan)
     
     close_s = pd.Series(close)
-    wma_half = close_s.ewm(span=period // 2, min_periods=period // 2, adjust=False).mean().values
-    wma_full = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
-    raw_hma = 2 * wma_half - wma_full
     
-    hma = pd.Series(raw_hma).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean().values
-    return hma
+    # Calculate Efficiency Ratio (ER)
+    change = close_s.diff(er_period).abs()
+    volatility = close_s.diff().abs().rolling(window=er_period, min_periods=er_period).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    
+    # Calculate Smoothing Constant (SC)
+    fast_sc_val = 2 / (fast_sc + 1)
+    slow_sc_val = 2 / (slow_sc + 1)
+    sc = (er * (fast_sc_val - slow_sc_val) + slow_sc_val) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[er_period] = close[er_period]  # Initialize with price
+    
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    
+    kama[:er_period] = np.nan
+    return kama
 
 
-def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
-    """Calculate RSI with proper min_periods"""
+def calculate_macd(close: np.ndarray, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple:
+    """
+    Calculate MACD line, signal line, and histogram
+    Returns: (macd_line, signal_line, histogram)
+    """
     n = len(close)
-    if n < period + 1:
+    if n < slow + signal:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    close_s = pd.Series(close)
+    
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    
+    macd_line = (ema_fast - ema_slow).values
+    signal_line = pd.Series(macd_line).ewm(span=signal, min_periods=signal, adjust=False).mean().values
+    histogram = macd_line - signal_line
+    
+    histogram[:slow + signal] = np.nan
+    return macd_line, signal_line, histogram
+
+
+def calculate_adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    """
+    Calculate Average Directional Index (ADX)
+    ADX > 25 indicates strong trend, ADX < 20 indicates range
+    """
+    n = len(close)
+    if n < period * 2:
         return np.full(n, np.nan)
     
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
     
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # True Range
+    tr1 = high_s - low_s
+    tr2 = (high_s - close_s.shift(1)).abs()
+    tr3 = (low_s - close_s.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    avg_gain = pd.Series(gain).rolling(window=period, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).rolling(window=period, min_periods=period).mean().values
+    # Directional Movement
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:period] = np.nan
-    return rsi
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    
+    # Smoothed values
+    atr = tr.rolling(window=period, min_periods=period).mean()
+    plus_di = 100 * (plus_dm.rolling(window=period, min_periods=period).mean() / atr)
+    minus_di = 100 * (minus_dm.rolling(window=period, min_periods=period).mean() / atr)
+    
+    # DX and ADX
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.rolling(window=period, min_periods=period).mean()
+    
+    adx_values = adx.values
+    adx_values[:period * 2] = np.nan
+    return adx_values
 
 
 def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
@@ -68,21 +129,18 @@ def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: 
     n = len(close)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
+    
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i-1]),
                     abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
     return atr
 
 
-def calculate_volume_sma(volume: np.ndarray, period: int = 20) -> np.ndarray:
-    """Calculate volume SMA for confirmation"""
-    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
+    # Extract price data
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
@@ -91,20 +149,21 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # === LOAD HTF DATA ONCE BEFORE LOOP (CRITICAL RULE #1) ===
     df_4h = get_htf_data(prices, '4h')
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)  # auto shift(1)
+    kama_4h = calculate_kama(df_4h['close'].values, er_period=10, fast_sc=2, slow_sc=30)
+    kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)  # auto shift(1)
     
-    # === CALCULATE 30m INDICATORS (vectorized before loop) ===
-    hma_30m = calculate_hma(close, 21)
-    rsi = calculate_rsi(close, 14)
-    atr = calculate_atr(high, low, close, 14)
-    vol_sma = calculate_volume_sma(volume, 20)
+    # === CALCULATE 1h INDICATORS (vectorized before loop) ===
+    kama_1h = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, fast=12, slow=26, signal=9)
+    adx = calculate_adx(high, low, close, period=14)
+    atr = calculate_atr(high, low, close, period=14)
     
     # === SIGNAL PARAMETERS ===
-    SIZE_ENTRY = 0.30      # 30% position on entry
-    SIZE_HALF = 0.15       # 15% after take profit
+    SIZE_ENTRY = 0.25      # 25% position on entry (conservative)
+    SIZE_HALF = 0.125      # 12.5% after take profit
     STOPLOSS_MULT = 2.0    # 2*ATR stoploss
     TAKEPROFIT_MULT = 2.0  # 2R take profit
+    ADX_THRESHOLD = 25     # Only trade when ADX > 25 (strong trend)
     
     signals = np.zeros(n)
     
@@ -113,81 +172,113 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     position_side = 0  # 0=flat, 1=long, -1=short
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
+    trailing_stop = 0.0
     
-    min_lookback = max(50, 21)  # Ensure all indicators are valid
+    min_lookback = max(100, 30)  # Ensure all indicators are valid
     
     for i in range(min_lookback, n):
         # Skip if any indicator is NaN
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]):
+        if (np.isnan(kama_4h_aligned[i]) or np.isnan(kama_1h[i]) or 
+            np.isnan(macd_hist[i]) or np.isnan(adx[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
-            position_side = 0
+            if position_side != 0:
+                position_side = 0
+                entry_price = 0.0
             continue
         
         current_atr = atr[i]
         current_price = close[i]
-        current_rsi = rsi[i]
-        current_hma_4h = hma_4h_aligned[i]
-        current_hma_30m = hma_30m[i]
-        current_vol = volume[i]
-        avg_vol = vol_sma[i]
+        current_adx = adx[i]
+        current_kama_4h = kama_4h_aligned[i]
+        current_kama_1h = kama_1h[i]
+        current_macd_hist = macd_hist[i]
         
-        # Volume filter: require at least 80% of average volume
-        volume_ok = current_vol >= 0.8 * avg_vol if avg_vol > 0 else True
+        # === TREND FILTER (4h KAMA) ===
+        # Price above 4h KAMA = uptrend, below = downtrend
+        trend_up = current_price > current_kama_4h
+        trend_down = current_price < current_kama_4h
         
-        # === TREND FILTER (4h HMA) ===
-        # Price above 4h HMA = uptrend, below = downtrend
-        trend_up = current_price > current_hma_4h
-        trend_down = current_price < current_hma_4h
+        # === TREND STRENGTH FILTER (ADX) ===
+        strong_trend = current_adx > ADX_THRESHOLD
+        
+        # === MOMENTUM FILTER (MACD Histogram) ===
+        # MACD hist > 0 and rising = bullish momentum
+        # MACD hist < 0 and falling = bearish momentum
+        macd_bullish = current_macd_hist > 0
+        macd_bearish = current_macd_hist < 0
+        
+        # Check MACD histogram direction (compare to previous)
+        if i > min_lookback:
+            prev_macd_hist = macd_hist[i-1]
+            macd_rising = current_macd_hist > prev_macd_hist
+            macd_falling = current_macd_hist < prev_macd_hist
+        else:
+            macd_rising = False
+            macd_falling = False
         
         # === ENTRY SIGNALS ===
         new_signal = 0.0
         
         if position_side == 0:
-            # === LONG ENTRY: uptrend + RSI pullback (30-45) ===
-            if trend_up and volume_ok and 30 <= current_rsi <= 45:
-                # Confirm 30m HMA also supportive
-                if current_price > current_hma_30m:
+            # === LONG ENTRY: uptrend + strong ADX + MACD bullish ===
+            if trend_up and strong_trend and macd_bullish and macd_rising:
+                # Confirm 1h KAMA also supportive (price above KAMA)
+                if current_price > current_kama_1h:
                     new_signal = SIZE_ENTRY
                     entry_price = current_price
                     position_side = 1
                     highest_since_entry = current_price
                     lowest_since_entry = current_price
+                    trailing_stop = entry_price - STOPLOSS_MULT * current_atr
             
-            # === SHORT ENTRY: downtrend + RSI rally (55-70) ===
-            elif trend_down and volume_ok and 55 <= current_rsi <= 70:
-                # Confirm 30m HMA also supportive
-                if current_price < current_hma_30m:
+            # === SHORT ENTRY: downtrend + strong ADX + MACD bearish ===
+            elif trend_down and strong_trend and macd_bearish and macd_falling:
+                # Confirm 1h KAMA also supportive (price below KAMA)
+                if current_price < current_kama_1h:
                     new_signal = -SIZE_ENTRY
                     entry_price = current_price
                     position_side = -1
                     highest_since_entry = current_price
                     lowest_since_entry = current_price
+                    trailing_stop = entry_price + STOPLOSS_MULT * current_atr
         
         elif position_side == 1:
             # Track highest price since entry for trailing
             highest_since_entry = max(highest_since_entry, current_price)
             
-            # === STOPLOSS: price drops 2*ATR below entry ===
-            stoploss_price = entry_price - STOPLOSS_MULT * current_atr
-            if current_price < stoploss_price:
+            # === TRAILING STOP: move stop up as price rises ===
+            new_trailing_stop = highest_since_entry - STOPLOSS_MULT * current_atr
+            if new_trailing_stop > trailing_stop:
+                trailing_stop = new_trailing_stop
+            
+            # === STOPLOSS: price drops below trailing stop ===
+            if current_price < trailing_stop:
                 new_signal = 0.0
                 position_side = 0
                 entry_price = 0.0
+                trailing_stop = 0.0
             
             # === TAKE PROFIT: at 2R, reduce to half ===
             elif entry_price > 0:
                 profit_r = (current_price - entry_price) / current_atr
-                if profit_r >= TAKEPROFIT_MULT and new_signal == 0:
+                if profit_r >= TAKEPROFIT_MULT:
                     new_signal = SIZE_HALF
-                    # Trail stop: move stoploss to entry + 1*ATR
-                    # (handled by checking stoploss each bar)
-                    entry_price = current_price - STOPLOSS_MULT * current_atr / 2  # Move stop up
+                    # Update trailing stop to lock in profit
+                    trailing_stop = entry_price + 0.5 * current_atr
             
-            # === EXIT: RSI overbought in long position ===
-            elif current_rsi > 75:
+            # === EXIT: MACD momentum reversal ===
+            elif macd_bearish and macd_falling:
                 new_signal = 0.0
                 position_side = 0
                 entry_price = 0.0
+                trailing_stop = 0.0
+            
+            # === EXIT: Trend reversal (4h KAMA) ===
+            elif trend_down:
+                new_signal = 0.0
+                position_side = 0
+                entry_price = 0.0
+                trailing_stop = 0.0
             
             else:
                 new_signal = SIZE_ENTRY if new_signal == 0 else new_signal
@@ -196,38 +287,42 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             # Track lowest price since entry for trailing
             lowest_since_entry = min(lowest_since_entry, current_price)
             
-            # === STOPLOSS: price rises 2*ATR above entry ===
-            stoploss_price = entry_price + STOPLOSS_MULT * current_atr
-            if current_price > stoploss_price:
+            # === TRAILING STOP: move stop down as price falls ===
+            new_trailing_stop = lowest_since_entry + STOPLOSS_MULT * current_atr
+            if new_trailing_stop < trailing_stop or trailing_stop == 0:
+                trailing_stop = new_trailing_stop
+            
+            # === STOPLOSS: price rises above trailing stop ===
+            if current_price > trailing_stop:
                 new_signal = 0.0
                 position_side = 0
                 entry_price = 0.0
+                trailing_stop = 0.0
             
             # === TAKE PROFIT: at 2R, reduce to half ===
             elif entry_price > 0:
                 profit_r = (entry_price - current_price) / current_atr
-                if profit_r >= TAKEPROFIT_MULT and new_signal == 0:
+                if profit_r >= TAKEPROFIT_MULT:
                     new_signal = -SIZE_HALF
-                    entry_price = current_price + STOPLOSS_MULT * current_atr / 2
+                    # Update trailing stop to lock in profit
+                    trailing_stop = entry_price - 0.5 * current_atr
             
-            # === EXIT: RSI oversold in short position ===
-            elif current_rsi < 25:
+            # === EXIT: MACD momentum reversal ===
+            elif macd_bullish and macd_rising:
                 new_signal = 0.0
                 position_side = 0
                 entry_price = 0.0
+                trailing_stop = 0.0
+            
+            # === EXIT: Trend reversal (4h KAMA) ===
+            elif trend_up:
+                new_signal = 0.0
+                position_side = 0
+                entry_price = 0.0
+                trailing_stop = 0.0
             
             else:
                 new_signal = -SIZE_ENTRY if new_signal == 0 else new_signal
-        
-        # === TREND REVERSAL EXIT ===
-        if position_side == 1 and trend_down:
-            new_signal = 0.0
-            position_side = 0
-            entry_price = 0.0
-        elif position_side == -1 and trend_up:
-            new_signal = 0.0
-            position_side = 0
-            entry_price = 0.0
         
         signals[i] = new_signal
     
