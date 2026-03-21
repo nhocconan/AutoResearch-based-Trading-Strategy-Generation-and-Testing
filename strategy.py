@@ -1,64 +1,33 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #033 - HMA Trend + RSI Pullback (30m Primary, 4h Trend Filter)
+EXPERIMENT #034 - HMA RSI Pullback with 1h Primary + 4h Trend Filter (v3)
 ==================================================================================================
-Hypothesis: Current best (hma_rsi_pullback_daily_trend_4h_v1, Sharpe=0.537) uses 4h primary with daily filter.
-This uses 30m primary with 4h trend filter for MORE trade opportunities while maintaining signal quality.
-30m captures intraday swings that 4h misses, while 4h HMA filter prevents counter-trend trades.
+Hypothesis: Current best (Sharpe=0.537) uses 4h+1d. This tests 1h+4h for MORE trades while
+keeping the proven HMA+RSI pullback combination. 1h should capture more intraday moves
+while 4h filter prevents counter-trend trades that cause drawdown.
 
-Key changes vs #032 (keltner_squeeze_breakout_4h_trend_1h_v1, Sharpe=0.168):
-1. 30m PRIMARY instead of 1h: More trades, captures intraday momentum swings
-2. HMA trend + RSI pullback instead of Keltner squeeze: Proven combination (best strategy uses this)
-3. Simpler entry logic: RSI pullback to 40-60 range in trend direction (no complex squeeze detection)
-4. Tighter stoploss: 1.5*ATR instead of 2.0*ATR (reduces drawdown per trade)
-5. Position sizing: 0.30 base, 0.35 high conviction (discrete levels to reduce fee churn)
+Key changes from current best:
+1. 1h PRIMARY (not 4h): More trade opportunities, faster signal response
+2. 4h HTF trend filter (not 1d): Less laggy than daily, still filters noise
+3. Same proven indicators: HMA for trend, RSI pullback entries
+4. Position sizing: 0.25 base, 0.35 high conviction (slightly more aggressive)
+5. Stoploss: 2.0*ATR (same as current best)
+6. Added volume confirmation: Entry volume > 20-bar avg (filters weak breakouts)
 
 Why this should beat Sharpe=0.537:
-- 30m timeframe captures 3-5x more trades than 4h while avoiding 15m noise
-- HMA is faster than SMA for trend detection (less lag in crypto)
-- RSI pullback entries have better risk/reward than breakout entries
-- 4h trend filter is strong enough to avoid counter-trend traps
-- Tighter stops reduce per-trade loss, improving Sharpe ratio
+- 1h timeframe captures more intraday momentum than 4h
+- 4h trend filter is responsive enough for crypto volatility
+- Volume filter reduces false entries (tested in #027 with success)
+- More trades = better statistical significance
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "hma_rsi_pullback_30m_4h_v1"
-timeframe = "30m"
+name = "hma_rsi_pullback_mtf_1h_4h_v3"
+timeframe = "1h"
 leverage = 1.0
-
-
-def calculate_hma(close, period=21):
-    """
-    Hull Moving Average - reduces lag while maintaining smoothness
-    HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    """
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    half = int(period / 2)
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA helper
-    def wma(series, span):
-        result = np.zeros(len(series))
-        weights = np.arange(1, span + 1)
-        for i in range(span - 1, len(series)):
-            window = series[i - span + 1:i + 1]
-            result[i] = np.sum(window * weights) / np.sum(weights)
-        return result
-    
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
-    
-    diff = 2 * wma_half - wma_full
-    
-    hma = wma(diff, sqrt_period)
-    
-    return hma
 
 
 def calculate_atr(high, low, close, period=14):
@@ -84,6 +53,35 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
+def calculate_hma(close, period=21):
+    """
+    Hull Moving Average - faster than EMA, smoother than SMA
+    HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    """
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    half = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    def wma(series, window):
+        result = np.zeros(len(series))
+        weights = np.arange(1, window + 1)
+        for i in range(window - 1, len(series)):
+            result[i] = np.sum(series[i - window + 1:i + 1] * weights) / np.sum(weights)
+        return result
+    
+    close_series = np.array(close)
+    wma_half = wma(close_series, half)
+    wma_full = wma(close_series, period)
+    
+    diff = 2 * wma_half - wma_full
+    hma = wma(diff, sqrt_period)
+    
+    return hma
+
+
 def calculate_rsi(close, period=14):
     """Calculate RSI"""
     n = len(close)
@@ -106,39 +104,86 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_hma_trend_direction(hma_values, lookback=3):
+def calculate_supertrend(high, low, close, atr, multiplier=3.0):
     """
-    Determine trend direction from HMA slope
-    Returns: 1 = uptrend, -1 = downtrend, 0 = neutral
+    Supertrend indicator - trend following with ATR-based stops
+    Returns: supertrend_values, trend_direction (1=up, -1=down)
     """
-    n = len(hma_values)
+    n = len(close)
+    if n < len(atr) or len(atr) == 0:
+        return np.zeros(n), np.zeros(n)
+    
+    supertrend = np.zeros(n)
     trend = np.zeros(n)
     
-    for i in range(lookback, n):
-        if hma_values[i] > hma_values[i - lookback]:
-            trend[i] = 1
-        elif hma_values[i] < hma_values[i - lookback]:
-            trend[i] = -1
-        else:
-            trend[i] = 0
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
     
-    return trend
+    for i in range(n):
+        if atr[i] == 0:
+            continue
+        upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
+        lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
+    
+    first_valid = np.where(atr > 0)[0]
+    if len(first_valid) == 0:
+        return supertrend, trend
+    
+    start_idx = first_valid[0]
+    supertrend[start_idx] = upper_band[start_idx]
+    trend[start_idx] = 1
+    
+    for i in range(start_idx + 1, n):
+        if atr[i] == 0:
+            supertrend[i] = supertrend[i - 1]
+            trend[i] = trend[i - 1]
+            continue
+        
+        if trend[i - 1] == 1:
+            if close[i] > lower_band[i]:
+                supertrend[i] = max(supertrend[i - 1], lower_band[i])
+                trend[i] = 1
+            else:
+                supertrend[i] = upper_band[i]
+                trend[i] = -1
+        else:
+            if close[i] < upper_band[i]:
+                supertrend[i] = min(supertrend[i - 1], upper_band[i])
+                trend[i] = -1
+            else:
+                supertrend[i] = lower_band[i]
+                trend[i] = 1
+    
+    return supertrend, trend
+
+
+def calculate_volume_sma(volume, period=20):
+    """Calculate simple moving average of volume"""
+    n = len(volume)
+    if n < period:
+        return np.zeros(n)
+    
+    volume_sma = np.zeros(n)
+    for i in range(period - 1, n):
+        volume_sma[i] = np.mean(volume[i - period + 1:i + 1])
+    
+    return volume_sma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # ========== 30m INDICATORS (PRIMARY TIMEFRAME) ==========
-    atr_30m = calculate_atr(high, low, close, period=14)
-    rsi_30m = calculate_rsi(close, period=14)
-    
-    # HMA for trend on 30m
-    hma_30m_short = calculate_hma(close, period=16)
-    hma_30m_long = calculate_hma(close, period=48)
-    hma_trend_30m = calculate_hma_trend_direction(hma_30m_long, lookback=3)
+    # ========== 1h INDICATORS (PRIMARY TIMEFRAME) ==========
+    atr_1h = calculate_atr(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
+    hma_1h = calculate_hma(close, period=21)
+    hma_1h_fast = calculate_hma(close, period=8)
+    supertrend_1h, st_trend_1h = calculate_supertrend(high, low, close, atr_1h, multiplier=3.0)
+    volume_sma_1h = calculate_volume_sma(volume, period=20)
     
     # ========== 4h INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
@@ -147,71 +192,77 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         high_4h = df_4h['high'].values
         low_4h = df_4h['low'].values
         
-        # 4h HMA for master trend direction
+        # 4h HMA for trend direction
         hma_4h = calculate_hma(close_4h, period=21)
-        hma_trend_4h = calculate_hma_trend_direction(hma_4h, lookback=3)
-        
-        # 4h RSI for momentum confirmation
-        rsi_4h = calculate_rsi(close_4h, period=14)
-        
-        # 4h ATR for volatility adjustment
         atr_4h = calculate_atr(high_4h, low_4h, close_4h, period=14)
+        _, st_trend_4h = calculate_supertrend(high_4h, low_4h, close_4h, atr_4h, multiplier=3.0)
         
-        # Align to 30m timeframe (auto shift for completed bars)
-        hma_trend_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_trend_4h)
-        rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-        atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+        # Align to 1h timeframe (auto shift for completed bars)
         hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+        st_trend_4h_aligned = align_htf_to_ltf(prices, df_4h, st_trend_4h)
         
     except Exception:
-        hma_trend_4h_aligned = np.zeros(n)
-        rsi_4h_aligned = np.zeros(n)
-        atr_4h_aligned = np.zeros(n)
         hma_4h_aligned = np.zeros(n)
+        st_trend_4h_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
     
-    # Position sizing - DISCRETE levels to minimize fee churn
-    SIZE_BASE = 0.30    # Base position (30% of capital)
-    SIZE_HIGH = 0.35    # High conviction (35% of capital)
-    SIZE_MAX = 0.40     # Absolute maximum
+    # Position sizing - CONSERVATIVE but slightly more aggressive than 4h strategy
+    SIZE_BASE = 0.25   # Base position (25% of capital)
+    SIZE_HIGH = 0.35   # High conviction (35% of capital)
     
-    # ATR stoploss - TIGHTER than previous (1.5 instead of 2.0)
-    ATR_STOP_MULT = 1.5
+    # ATR stoploss
+    ATR_STOP_MULT = 2.0
     
-    # RSI pullback thresholds
-    RSI_LONG_ENTRY = 45   # Enter long on pullback to 45 in uptrend
-    RSI_SHORT_ENTRY = 55  # Enter short on pullback to 55 in downtrend
-    RSI_EXIT = 65         # Exit long when RSI reaches 65 (overbought)
-    RSI_EXIT_SHORT = 35   # Exit short when RSI reaches 35 (oversold)
+    # RSI pullback zones
+    RSI_LONG_MIN = 40
+    RSI_LONG_MAX = 60
+    RSI_SHORT_MIN = 40
+    RSI_SHORT_MAX = 60
     
     first_valid = max(100, 50)
     
     # Track position state
     position_side = np.zeros(n, dtype=int)
     entry_price = np.zeros(n)
-    entry_rsi = np.zeros(n)
     tp_triggered = np.zeros(n, dtype=bool)
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_30m[i]) or atr_30m[i] == 0 or np.isnan(rsi_30m[i]):
+        if np.isnan(atr_1h[i]) or atr_1h[i] == 0 or np.isnan(rsi_1h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_30m[i]
-        rsi_val = rsi_30m[i]
-        hma_trend_val = hma_trend_30m[i]
+        atr = atr_1h[i]
+        rsi_val = rsi_1h[i]
+        st_trend_val = st_trend_1h[i]
+        hma_val = hma_1h[i]
+        hma_fast_val = hma_1h_fast[i]
+        vol = volume[i]
+        vol_avg = volume_sma_1h[i]
         
-        # 4h trend filters (MASTER FILTER - must align with 4h trend)
-        hma_trend_4h_val = hma_trend_4h_aligned[i]
-        rsi_4h_val = rsi_4h_aligned[i]
-        atr_4h_val = atr_4h_aligned[i]
+        # 4h trend filters (MASTER FILTER)
         hma_4h_val = hma_4h_aligned[i]
+        st_trend_4h_val = st_trend_4h_aligned[i]
+        
+        # Determine 4h trend direction
+        trend_4h = 0
+        if hma_4h_val > 0 and price > hma_4h_val:
+            trend_4h = 1
+        elif hma_4h_val > 0 and price < hma_4h_val:
+            trend_4h = -1
+        
+        if st_trend_4h_val == 1:
+            trend_4h = max(trend_4h, 1)
+        elif st_trend_4h_val == -1:
+            trend_4h = min(trend_4h, -1)
+        
+        # Volume confirmation (avoid low-volume false breakouts)
+        volume_confirmed = vol > vol_avg * 1.0 if vol_avg > 0 else False
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -232,20 +283,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (1.5*ATR - tighter)
+            # Stoploss check (2.0*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = False
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    continue
-                
-                # RSI exit (overbought)
-                if rsi_val >= RSI_EXIT:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
@@ -274,30 +315,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         continue
-                
-                # 4h trend reversal exit
-                if hma_trend_4h_val == -1:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = False
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    continue
                     
             elif prev_side == -1:
                 stoploss_price = prev_entry + ATR_STOP_MULT * atr
                 if price > stoploss_price:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = False
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    continue
-                
-                # RSI exit (oversold)
-                if rsi_val <= RSI_EXIT_SHORT:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
@@ -326,16 +347,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         continue
-                
-                # 4h trend reversal exit
-                if hma_trend_4h_val == 1:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = False
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    continue
             
             # Hold position if no exit triggered
             signals[i] = signals[i - 1]
@@ -347,72 +358,52 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             continue
         
         # ========== ENTRY LOGIC - RSI PULLBACK IN TREND DIRECTION ==========
-        # LONG: 4h uptrend + 30m pullback (RSI < 50) + RSI crossing back up
-        long_trend_filter = hma_trend_4h_val == 1
-        long_pullback = rsi_val < 50 and rsi_val >= RSI_LONG_ENTRY
-        long_momentum = rsi_val > entry_rsi[i - 1] if i > 0 else True  # RSI rising
-        long_30m_trend = hma_trend_val >= 0  # 30m not in downtrend
-        
+        # LONG: 4h trend up + 1h Supertrend up + RSI pullback (40-60) + volume confirmed
         long_condition = (
-            long_trend_filter and
-            long_pullback and
-            long_30m_trend
+            trend_4h == 1 and
+            st_trend_val == 1 and
+            rsi_val >= RSI_LONG_MIN and rsi_val <= RSI_LONG_MAX and
+            hma_fast_val > hma_val and
+            volume_confirmed
         )
         
-        # SHORT: 4h downtrend + 30m pullback (RSI > 50) + RSI crossing back down
-        short_trend_filter = hma_trend_4h_val == -1
-        short_pullback = rsi_val > 50 and rsi_val <= RSI_SHORT_ENTRY
-        short_momentum = rsi_val < entry_rsi[i - 1] if i > 0 else True  # RSI falling
-        short_30m_trend = hma_trend_val <= 0  # 30m not in uptrend
-        
+        # SHORT: 4h trend down + 1h Supertrend down + RSI pullback (40-60) + volume confirmed
         short_condition = (
-            short_trend_filter and
-            short_pullback and
-            short_30m_trend
+            trend_4h == -1 and
+            st_trend_val == -1 and
+            rsi_val >= RSI_SHORT_MIN and rsi_val <= RSI_SHORT_MAX and
+            hma_fast_val < hma_val and
+            volume_confirmed
         )
         
         # Determine position size based on conviction
-        # High conviction: strong 4h trend + RSI deep in pullback zone
-        high_conviction_long = long_condition and rsi_4h_val > 55 and rsi_val <= 40
-        high_conviction_short = short_condition and rsi_4h_val < 45 and rsi_val >= 60
-        
-        # Dynamic sizing: reduce size in high volatility (high 4h ATR)
-        vol_adjustment = 1.0
-        if atr_4h_val > 0 and price > 0:
-            atr_pct = (atr_4h_val / price) * 100
-            if atr_pct > 4.0:
-                vol_adjustment = 0.85
-            elif atr_pct > 6.0:
-                vol_adjustment = 0.70
+        # High conviction: all signals align + strong 4h supertrend
+        high_conviction_long = long_condition and st_trend_4h_val == 1
+        high_conviction_short = short_condition and st_trend_4h_val == -1
         
         if long_condition:
-            base_size = SIZE_HIGH if high_conviction_long else SIZE_BASE
-            size = min(base_size * vol_adjustment, SIZE_MAX)
-            # Discretize to 0.05 increments
-            size = round(size * 20) / 20
+            size = SIZE_HIGH if high_conviction_long else SIZE_BASE
             signals[i] = size
             position_side[i] = 1
             entry_price[i] = price
-            entry_rsi[i] = rsi_val
             tp_triggered[i] = False
             highest_since_entry[i] = price
             lowest_since_entry[i] = price
         
         elif short_condition:
-            base_size = SIZE_HIGH if high_conviction_short else SIZE_BASE
-            size = min(base_size * vol_adjustment, SIZE_MAX)
-            # Discretize to 0.05 increments
-            size = round(size * 20) / 20
+            size = SIZE_HIGH if high_conviction_short else SIZE_BASE
             signals[i] = -size
             position_side[i] = -1
             entry_price[i] = price
-            entry_rsi[i] = rsi_val
             tp_triggered[i] = False
             highest_since_entry[i] = price
             lowest_since_entry[i] = price
         
-        # Track entry RSI for momentum check
-        if position_side[i] == 0:
-            entry_rsi[i] = entry_rsi[i - 1] if i > 0 else 50
+        # Track state for existing positions
+        if position_side[i] != 0 and entry_price[i] == 0:
+            entry_price[i] = entry_price[i - 1]
+            tp_triggered[i] = tp_triggered[i - 1]
+            highest_since_entry[i] = highest_since_entry[i - 1]
+            lowest_since_entry[i] = lowest_since_entry[i - 1]
     
     return signals
