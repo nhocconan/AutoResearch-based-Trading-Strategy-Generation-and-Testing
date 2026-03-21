@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #266: 30m RSI Mean Reversion with 4h/1d HMA Trend Filter
-Hypothesis: 30m timeframe captures intraday swings better than 12h/1d. RSI mean reversion
-works well in range/bear markets (2025 test period). 4h HMA provides trend bias without
-being too restrictive. 1d HMA confirms macro direction. Entry on RSI extremes (30/70) with
-trend alignment generates sufficient trades. Simple 2*ATR stoploss. Position sizing: 0.25
-entry, 0.125 half at 2R profit. This differs from failed experiments by using simpler
-entry conditions that actually trigger (RSI 30/70 vs strict ADX/CHOP filters).
-Target: Beat Sharpe=0.499 with more consistent trades across all symbols.
+Experiment #267: 1h Trend Pullback with 4h HMA Filter + ROC Momentum
+Hypothesis: 1h timeframe with 4h HMA trend filter captures intermediate trends better than 
+daily filters. ROC(10) momentum confirms direction, RSI(14) pullback entries reduce whipsaw.
+Simple logic: enter on pullback in direction of 4h trend, exit on momentum reversal or ATR stop.
+This differs from failed experiments by using fewer filters (no ADX, no CHOP, no complex regime).
+Position sizing: 0.25 entry, 0.12 half at 2R profit. Stoploss: 2.5*ATR trailing.
+Target: Beat Sharpe=0.499 with simpler, more robust logic that generates 20+ trades/year.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_rsi_mr_4h_1d_hma_trend_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_trend_pullback_4h_hma_roc_rsi_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -37,6 +36,13 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_roc(close, period=10):
+    """Calculate Rate of Change momentum indicator."""
+    close_s = pd.Series(close)
+    roc = close_s.pct_change(periods=period) * 100
+    roc = roc.fillna(0).values
+    return roc
+
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -49,59 +55,43 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_sma(close, period=50):
-    """Calculate Simple Moving Average."""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean()
-    std = pd.Series(close).rolling(window=period, min_periods=period).std()
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper.values, lower.values, sma.values
-
-def calculate_volume_ratio(taker_buy_volume, volume):
-    """Calculate taker buy volume ratio (0-1, >0.5 = bullish)."""
-    ratio = np.where(volume > 0, taker_buy_volume / volume, 0.5)
-    return ratio
+def calculate_ema(close, period=21):
+    """Calculate Exponential Moving Average."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    return ema.values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    sma_50 = calculate_sma(close, 50)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
-    vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
+    roc = calculate_roc(close, 10)
+    ema_21 = calculate_ema(close, 21)
+    ema_50 = calculate_ema(close, 50)
     
-    # Track previous values
+    # Track previous values for momentum detection
+    prev_roc = np.roll(roc, 1)
+    prev_roc[0] = roc[0]
     prev_rsi = np.roll(rsi, 1)
     prev_rsi[0] = rsi[0]
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.125
+    SIZE_HALF = 0.12
     
     # Track positions for stoploss
     position_side = 0
@@ -112,71 +102,56 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filters (simple and loose to ensure trades)
-        trend_4h_bullish = close[i] > hma_4h_aligned[i]
-        trend_4h_bearish = close[i] < hma_4h_aligned[i]
-        trend_1d_bullish = close[i] > hma_1d_aligned[i]
-        trend_1d_bearish = close[i] < hma_1d_aligned[i]
+        # 4h trend filter (primary bias)
+        trend_bullish = close[i] > hma_4h_aligned[i]
+        trend_bearish = close[i] < hma_4h_aligned[i]
         
-        # RSI mean reversion signals (loose thresholds for trade generation)
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
+        # ROC momentum (simplified - just sign and magnitude)
+        roc_positive = roc[i] > 0.5
+        roc_negative = roc[i] < -0.5
+        roc_strong_long = roc[i] > 2.0
+        roc_strong_short = roc[i] < -2.0
+        
+        # RSI pullback zones (wider ranges to ensure trades)
+        rsi_oversold = rsi[i] < 45
+        rsi_overbought = rsi[i] > 55
+        rsi_neutral = 35 < rsi[i] < 65
+        
+        # EMA trend confirmation
+        ema_bullish = ema_21[i] > ema_50[i]
+        ema_bearish = ema_21[i] < ema_50[i]
+        
+        # RSI momentum shift
         rsi_rising = rsi[i] > prev_rsi[i]
         rsi_falling = rsi[i] < prev_rsi[i]
         
-        # Bollinger Band position
-        near_lower = close[i] < bb_lower[i] * 1.01
-        near_upper = close[i] > bb_upper[i] * 0.99
-        below_mid = close[i] < bb_mid[i]
-        above_mid = close[i] > bb_mid[i]
-        
-        # SMA 50 position
-        above_sma50 = close[i] > sma_50[i]
-        below_sma50 = close[i] < sma_50[i]
-        
-        # Volume confirmation
-        vol_bullish = vol_ratio[i] > 0.50
-        vol_bearish = vol_ratio[i] < 0.50
-        
-        # Price momentum
-        price_rising = close[i] > prev_close[i]
-        price_falling = close[i] < prev_close[i]
-        
         new_signal = 0.0
         
-        # === LONG ENTRY (Mean Reversion in Uptrend) ===
-        # Primary: RSI oversold + 4h bullish trend
-        if rsi_oversold and trend_4h_bullish:
-            if rsi_rising or price_rising:
+        # === LONG ENTRY ===
+        # Pullback entry in uptrend (primary signal)
+        if trend_bullish and ema_bullish:
+            # RSI pullback with ROC confirmation
+            if rsi_oversold and roc_positive:
+                new_signal = SIZE_ENTRY
+            # ROC momentum surge in uptrend
+            elif roc_strong_long and rsi_neutral:
+                new_signal = SIZE_ENTRY
+            # RSI turning up from oversold
+            elif rsi[i] < 40 and rsi_rising and trend_bullish:
                 new_signal = SIZE_ENTRY
         
-        # Secondary: RSI oversold + near BB lower + volume support
-        elif rsi_oversold and near_lower:
-            if vol_bullish or above_sma50:
-                new_signal = SIZE_ENTRY
-        
-        # Tertiary: Pullback to SMA50 in uptrend
-        elif trend_4h_bullish and trend_1d_bullish:
-            if below_sma50 and prev_close[i] < sma_50[i] and close[i] > sma_50[i]:
-                if rsi[i] < 50:
-                    new_signal = SIZE_ENTRY
-        
-        # === SHORT ENTRY (Mean Reversion in Downtrend) ===
-        # Primary: RSI overbought + 4h bearish trend
-        if rsi_overbought and trend_4h_bearish:
-            if rsi_falling or price_falling:
+        # === SHORT ENTRY ===
+        # Pullback entry in downtrend (primary signal)
+        if trend_bearish and ema_bearish:
+            # RSI pullback with ROC confirmation
+            if rsi_overbought and roc_negative:
                 new_signal = -SIZE_ENTRY
-        
-        # Secondary: RSI overbought + near BB upper + volume support
-        elif rsi_overbought and near_upper:
-            if vol_bearish or below_sma50:
+            # ROC momentum surge in downtrend
+            elif roc_strong_short and rsi_neutral:
                 new_signal = -SIZE_ENTRY
-        
-        # Tertiary: Rally to SMA50 in downtrend
-        elif trend_4h_bearish and trend_1d_bearish:
-            if above_sma50 and prev_close[i] > sma_50[i] and close[i] < sma_50[i]:
-                if rsi[i] > 50:
-                    new_signal = -SIZE_ENTRY
+            # RSI turning down from overbought
+            elif rsi[i] > 60 and rsi_falling and trend_bearish:
+                new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
@@ -184,8 +159,8 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2*ATR from highest)
-            current_stop = highest_close - 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR from highest)
+            current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -194,7 +169,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
@@ -205,8 +180,8 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2*ATR from lowest)
-            current_stop = lowest_close + 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR from lowest)
+            current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -215,7 +190,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
@@ -228,7 +203,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
@@ -237,7 +212,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
