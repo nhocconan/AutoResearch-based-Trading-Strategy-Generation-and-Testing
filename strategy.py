@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #027 - MTF HMA+RSI Simplified (1h+4h v1)
+EXPERIMENT #028 - MTF Supertrend+RSI 30m/4h v1
 ==================================================================================================
-Hypothesis: The current best (#022) uses 30m/4h with Sharpe=1.153. Testing same logic on 1h base
-timeframe should produce cleaner signals with less noise while maintaining sufficient trade count.
-Key differences from current strategy (#004):
-- Simpler 2-TF setup (1h+4h) vs complex 3-TF (15m+1h+4h)
-- HMA trend filter (proven in #022) vs Supertrend
-- Fewer entry conditions (less filter rejection)
-- Position size 0.30 (vs 0.35) for better drawdown control
-- Stoploss 1.5*ATR (tighter) vs 2.0*ATR
+Hypothesis: The best performer #022 used 30m/4h with HMA+RSI (Sharpe=1.153). Testing Supertrend
+as the trend filter instead of HMA crossover should provide cleaner trend signals with less
+whipsaw. Supertrend is proven to work well in crypto perpetual futures.
 
-Why this should work:
-- 30m/4h proved successful in #022, 1h should be similar but cleaner
-- Fewer timeframe alignments = less complexity = fewer bugs
-- HMA is faster than EMA, catches trends earlier
-- RSI pullback entries work well in trending markets
+Key changes from #022:
+- Supertrend(ATR=10, mult=3) for trend direction vs HMA crossover
+- Same 30m/4h timeframe combo (proven winner)
+- Position size 0.35 (slightly higher than 0.30 in #027)
+- Stoploss 2.0*ATR (more room for 30m noise vs 1.5*ATR in #027)
+- Simpler entry logic: trend agreement + RSI pullback only
+
+Why Supertrend:
+- Built-in ATR normalization adapts to volatility
+- Clear binary signal (above/below) vs crossover lag
+- Proven in crypto futures (many quant funds use it)
+- Less parameter sensitivity than HMA periods
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_hma_rsi_1h_4h_simplified_v4"
-timeframe = "1h"
+name = "mtf_supertrend_rsi_30m_4h_v1"
+timeframe = "30m"
 leverage = 1.0
 
 
@@ -50,21 +52,44 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average"""
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
     n = len(close)
     if n < period:
-        return np.zeros(n)
+        return np.zeros(n), np.zeros(n)
     
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
+    atr = calculate_atr(high, low, close, period)
     
-    wma1 = pd.Series(close).ewm(span=half_period, adjust=False).mean().values
-    wma2 = pd.Series(close).ewm(span=period, adjust=False).mean().values
+    supertrend = np.zeros(n)
+    trend_direction = np.zeros(n)  # 1 = bullish, -1 = bearish
     
-    hma = pd.Series(2 * wma1 - wma2).ewm(span=sqrt_period, adjust=False).mean().values
+    for i in range(period, n):
+        upper_band = (high[i] + low[i]) / 2 + multiplier * atr[i]
+        lower_band = (high[i] + low[i]) / 2 - multiplier * atr[i]
+        
+        if i == period:
+            supertrend[i] = upper_band
+            trend_direction[i] = -1
+        else:
+            # Determine trend
+            if close[i - 1] > supertrend[i - 1]:
+                # Previous trend was bullish
+                supertrend[i] = max(lower_band, supertrend[i - 1])
+                if close[i] < supertrend[i]:
+                    trend_direction[i] = -1
+                    supertrend[i] = upper_band
+                else:
+                    trend_direction[i] = 1
+            else:
+                # Previous trend was bearish
+                supertrend[i] = min(upper_band, supertrend[i - 1])
+                if close[i] > supertrend[i]:
+                    trend_direction[i] = 1
+                    supertrend[i] = lower_band
+                else:
+                    trend_direction[i] = -1
     
-    return hma
+    return supertrend, trend_direction
 
 
 def calculate_rsi(close, period=14):
@@ -98,11 +123,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # 1h indicators for entry timing
-    atr_1h = calculate_atr(high, low, close, period=14)
-    rsi_1h = calculate_rsi(close, period=14)
-    hma_1h_fast = calculate_hma(close, period=16)
-    hma_1h_slow = calculate_hma(close, period=48)
+    # 30m indicators for entry timing
+    atr_30m = calculate_atr(high, low, close, period=14)
+    rsi_30m = calculate_rsi(close, period=14)
+    st_30m, trend_30m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
     
     # Get 4h data using mtf_data helper (MUST use this for proper alignment)
     try:
@@ -111,38 +135,32 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         h_4h = df_4h['high'].values
         l_4h = df_4h['low'].values
         
-        # 4h indicators
-        hma_4h_fast = calculate_hma(c_4h, period=16)
-        hma_4h_slow = calculate_hma(c_4h, period=48)
-        rsi_4h = calculate_rsi(c_4h, period=14)
+        # 4h Supertrend for trend filter
+        st_4h, trend_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
         
-        # Align 4h indicators to 1h timeframe (auto shift for completed bars)
-        hma_4h_fast_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_fast)
-        hma_4h_slow_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_slow)
-        rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+        # Align 4h indicators to 30m timeframe (auto shift for completed bars)
+        trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
     except Exception:
         # Fallback if mtf_data fails
-        hma_4h_fast_aligned = np.zeros(n)
-        hma_4h_slow_aligned = np.zeros(n)
-        rsi_4h_aligned = np.zeros(n) + 50
+        trend_4h_aligned = np.zeros(n)
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.30
-    SIZE_HALF = 0.15
+    SIZE_FULL = 0.35
+    SIZE_HALF = 0.175
     
     # RSI thresholds for pullback entries
-    RSI_LONG_MIN = 40
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 60
+    RSI_LONG_MIN = 35
+    RSI_LONG_MAX = 55
+    RSI_SHORT_MIN = 45
+    RSI_SHORT_MAX = 65
     
-    # ATR stoploss multiplier (tighter for 1h timeframe)
-    ATR_STOP_MULT = 1.5
+    # ATR stoploss multiplier (2.0*ATR for 30m noise)
+    ATR_STOP_MULT = 2.0
     
-    first_valid = max(100, 48, 14 * 2)
+    first_valid = max(100, 14 * 2)
     
     # Track position state
     position_side = np.zeros(n)
@@ -152,29 +170,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_1h[i]) or np.isnan(rsi_1h[i]) or atr_1h[i] == 0:
+        if np.isnan(atr_30m[i]) or np.isnan(rsi_30m[i]) or atr_30m[i] == 0:
             signals[i] = 0.0
             position_side[i] = 0
             continue
         
         # Get aligned MTF values
-        hma_4h_f = hma_4h_fast_aligned[i] if i < len(hma_4h_fast_aligned) else 0
-        hma_4h_s = hma_4h_slow_aligned[i] if i < len(hma_4h_slow_aligned) else 0
-        rsi_4h_val = rsi_4h_aligned[i] if i < len(rsi_4h_aligned) else 50
-        
-        # 4h trend filter (HMA fast > slow = bullish, fast < slow = bearish)
-        trend_4h = 0
-        if hma_4h_f > hma_4h_s and hma_4h_f > 0:
-            trend_4h = 1
-        elif hma_4h_f < hma_4h_s and hma_4h_f > 0:
-            trend_4h = -1
-        
-        # 1h trend filter (same HMA crossover)
-        trend_1h = 0
-        if hma_1h_fast[i] > hma_1h_slow[i] and hma_1h_fast[i] > 0:
-            trend_1h = 1
-        elif hma_1h_fast[i] < hma_1h_slow[i] and hma_1h_fast[i] > 0:
-            trend_1h = -1
+        trend_4h_val = trend_4h_aligned[i] if i < len(trend_4h_aligned) else 0
         
         # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
@@ -197,9 +199,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (1.5*ATR)
+            # Stoploss check (2.0*ATR)
             if prev_side == 1:
-                stoploss_price = prev_entry - ATR_STOP_MULT * atr_1h[i]
+                stoploss_price = prev_entry - ATR_STOP_MULT * atr_30m[i]
                 if price < stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
@@ -210,7 +212,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     continue
                 
                 # Take profit check (2R) - reduce to half
-                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr_1h[i]
+                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr_30m[i]
                 if not prev_tp and price >= tp_price:
                     signals[i] = SIZE_HALF
                     position_side[i] = 1
@@ -220,7 +222,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Trail stop at 1R profit
                 if prev_tp:
-                    trail_stop = current_high - ATR_STOP_MULT * atr_1h[i]
+                    trail_stop = current_high - ATR_STOP_MULT * atr_30m[i]
                     if price < trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
@@ -231,7 +233,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         continue
                     
             elif prev_side == -1:
-                stoploss_price = prev_entry + ATR_STOP_MULT * atr_1h[i]
+                stoploss_price = prev_entry + ATR_STOP_MULT * atr_30m[i]
                 if price > stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
@@ -242,7 +244,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     continue
                 
                 # Take profit check (2R) - reduce to half
-                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr_1h[i]
+                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr_30m[i]
                 if not prev_tp and price <= tp_price:
                     signals[i] = -SIZE_HALF
                     position_side[i] = -1
@@ -252,7 +254,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Trail stop at 1R profit
                 if prev_tp:
-                    trail_stop = current_low + ATR_STOP_MULT * atr_1h[i]
+                    trail_stop = current_low + ATR_STOP_MULT * atr_30m[i]
                     if price > trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
@@ -271,13 +273,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h trend + 1h trend agreement + 1h RSI pullback
+        # Entry logic: 4h trend + 30m trend agreement + 30m RSI pullback
         price = close[i]
         
-        # Both 4h and 1h must agree on trend direction
-        if trend_4h == 1 and trend_1h == 1:  # Bullish trend on both
-            # RSI pullback on 1h (not overbought, in healthy range)
-            if RSI_LONG_MIN <= rsi_1h[i] <= RSI_LONG_MAX:
+        # Both 4h and 30m must agree on trend direction (Supertrend)
+        if trend_4h_val == 1 and trend_30m[i] == 1:  # Bullish trend on both
+            # RSI pullback on 30m (not overbought, in healthy range)
+            if RSI_LONG_MIN <= rsi_30m[i] <= RSI_LONG_MAX:
                 signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = price
@@ -285,9 +287,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
                 
-        elif trend_4h == -1 and trend_1h == -1:  # Bearish trend on both
-            # RSI pullback on 1h (not oversold, in healthy range)
-            if RSI_SHORT_MIN <= rsi_1h[i] <= RSI_SHORT_MAX:
+        elif trend_4h_val == -1 and trend_30m[i] == -1:  # Bearish trend on both
+            # RSI pullback on 30m (not oversold, in healthy range)
+            if RSI_SHORT_MIN <= rsi_30m[i] <= RSI_SHORT_MAX:
                 signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = price
