@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #365: 12h KAMA Adaptive Trend + Daily HMA + RSI Momentum + Volatility Filter
-Hypothesis: KAMA adapts to market efficiency better than HMA/EMA, reducing whipsaws in range markets.
-12h timeframe captures medium-term trends with fewer false signals than 4h. Daily HMA provides soft trend bias.
-RSI(14) with moderate thresholds (35-65) ensures sufficient trade frequency without overtrading.
-ATR-based volatility filter avoids entries during extreme moves. Stoploss at 2.5*ATR protects capital.
-Building on #359 (Sharpe=0.061) by replacing Donchian with KAMA for smoother trend following.
-Target: Beat Sharpe=0.499 with 40-80 trades total, DD < -30%.
-Key insight: KAMA's efficiency ratio adapts position sizing implicitly - faster in trends, slower in ranges.
-Timeframe: 12h (REQUIRED), HTF: 1d for trend bias via mtf_data helper.
+Experiment #366: 1d KAMA Adaptive Trend + Weekly HMA Macro + RSI Momentum + ATR Stop
+Hypothesis: Daily timeframe captures major trends with minimal noise. KAMA adapts to volatility
+(regime changes), Weekly HMA provides macro bias filter, RSI(14) with moderate thresholds (30-70)
+ensures sufficient trade frequency on daily bars. ATR(14) stoploss at 2.5x protects capital.
+Timeframe: 1d (REQUIRED), HTF: 1w for macro trend via mtf_data helper.
+Target: Beat Sharpe=0.499 with 15-40 trades total across train+test.
+Key insight: 1d has fewer whipsaws than lower TFs, KAMA adapts better than EMA in crypto volatility.
+Position sizing: 0.30 entry, 0.15 half-exit at 2R profit, discrete levels to minimize fee churn.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_daily_hma_rsi_vol_filter_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_weekly_hma_rsi_momentum_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -28,30 +27,40 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(close, period=14, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average."""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman's Adaptive Moving Average (KAMA).
+    KAMA adapts to market volatility - fast in trends, slow in chop.
+    ER (Efficiency Ratio) = |Net Change| / Sum of Absolute Changes
+    SC (Smoothing Constant) = [ER * (fast_sc - slow_sc) + slow_sc]^2
+    """
     n = len(close)
     kama = np.zeros(n)
     
-    # Calculate Efficiency Ratio (ER)
-    for i in range(period, n):
-        price_change = np.abs(close[i] - close[i - period])
-        volatility = np.sum(np.abs(np.diff(close[i - period:i + 1])))
-        if volatility > 0:
-            er = price_change / volatility
-        else:
-            er = 0
-        
-        # Calculate smoothing constant
-        sc = (er * (2.0 / (fast + 1) - 2.0 / (slow + 1)) + 2.0 / (slow + 1)) ** 2
-        
-        if i == period:
-            kama[i] = close[i]
-        else:
-            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    # Calculate Efficiency Ratio
+    net_change = np.abs(close - np.roll(close, er_period))
+    net_change[:er_period] = np.abs(close[:er_period] - close[0])
     
-    # Fill initial values
-    kama[:period] = close[:period]
+    abs_changes = np.abs(close - np.roll(close, 1))
+    abs_changes[0] = abs_changes[1] if len(abs_changes) > 1 else 0.0
+    
+    sum_abs_changes = pd.Series(abs_changes).rolling(window=er_period, min_periods=er_period).sum().values
+    sum_abs_changes[:er_period] = np.sum(abs_changes[:er_period])
+    
+    er = np.where(sum_abs_changes > 0, net_change / sum_abs_changes, 0.0)
+    er = np.clip(er, 0, 1)
+    
+    # Smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    sc = np.square(er * (fast_sc - slow_sc) + slow_sc)
+    
+    # Calculate KAMA
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
     return kama
 
 def calculate_hma(close, period=21):
@@ -83,31 +92,27 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     rsi = calculate_rsi(close, 14)
-    kama = calculate_kama(close, 14, fast=2, slow=30)
     
-    # KAMA slope (momentum)
+    # KAMA slope (trend direction)
     kama_slope = np.zeros(n)
     for i in range(5, n):
-        kama_slope[i] = kama[i] - kama[i - 5]
-    
-    # Volatility filter (ATR ratio)
-    atr_ratio = atr / close
-    atr_median = np.nanmedian(atr_ratio[100:])
+        kama_slope[i] = kama[i] - kama[i-5]
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.28
-    SIZE_HALF = 0.14
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -117,57 +122,58 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):  # Start after 100 bars for indicators
+    for i in range(50, n):  # Start after 50 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(kama[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(kama[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        # Daily trend bias (SOFT filter - boosts confidence, not required)
-        daily_bullish = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
-        daily_bearish = not np.isnan(hma_1d_aligned[i]) and close[i] < hma_1d_aligned[i]
+        # Weekly macro trend bias
+        weekly_bullish = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
+        weekly_bearish = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
         
-        # KAMA trend signals
-        kama_bullish = kama_slope[i] > 0 and close[i] > kama[i]
-        kama_bearish = kama_slope[i] < 0 and close[i] < kama[i]
+        # KAMA trend direction
+        kama_bullish = kama_slope[i] > 0
+        kama_bearish = kama_slope[i] < 0
         
-        # RSI momentum filter (MODERATE thresholds for trade frequency)
-        rsi_ok_long = rsi[i] > 35 and rsi[i] < 75
-        rsi_ok_short = rsi[i] > 25 and rsi[i] < 65
-        rsi_strong_long = rsi[i] > 45 and rsi[i] < 70
-        rsi_strong_short = rsi[i] > 30 and rsi[i] < 55
+        # Price relative to KAMA
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
-        # Volatility filter (avoid extreme volatility)
-        vol_ok = atr_ratio[i] < atr_median * 2.5  # Not in extreme volatility
+        # RSI momentum (moderate thresholds for trade frequency on 1d)
+        rsi_neutral_long = rsi[i] > 35 and rsi[i] < 70
+        rsi_neutral_short = rsi[i] > 30 and rsi[i] < 65
+        rsi_strong_long = rsi[i] > 45 and rsi[i] < 75
+        rsi_strong_short = rsi[i] > 25 and rsi[i] < 55
         
         new_signal = 0.0
         
         # === LONG ENTRIES ===
-        # Primary: KAMA bullish + RSI ok + Daily bullish + Vol ok
-        if kama_bullish and rsi_ok_long and daily_bullish and vol_ok:
+        # Primary: Weekly bullish + KAMA bullish + Price above KAMA + RSI neutral
+        if weekly_bullish and kama_bullish and price_above_kama and rsi_neutral_long:
             new_signal = SIZE_ENTRY
-        # Secondary: KAMA bullish + RSI strong + Vol ok (daily neutral ok)
-        elif kama_bullish and rsi_strong_long and vol_ok:
+        # Secondary: Weekly bullish + KAMA bullish + RSI strong (price filter relaxed)
+        elif weekly_bullish and kama_bullish and rsi_strong_long:
             new_signal = SIZE_ENTRY
-        # Tertiary: KAMA crossover (close crosses above KAMA) + RSI ok
-        elif close[i] > kama[i] and close[i-1] <= kama[i-1] and rsi_ok_long:
+        # Tertiary: KAMA bullish + Price above KAMA + RSI ok (weekly neutral ok)
+        elif kama_bullish and price_above_kama and rsi[i] > 40 and rsi[i] < 75:
             new_signal = SIZE_ENTRY
-        # Quaternary: KAMA bullish alone (ensures minimum trade frequency)
-        elif kama_bullish and rsi[i] > 40 and rsi[i] < 70:
+        # Quaternary: KAMA slope strongly positive + RSI ok (ensures minimum trades)
+        elif kama_slope[i] > atr[i] * 0.5 and rsi[i] > 35 and rsi[i] < 80:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES ===
-        # Primary: KAMA bearish + RSI ok + Daily bearish + Vol ok
-        if kama_bearish and rsi_ok_short and daily_bearish and vol_ok:
+        # Primary: Weekly bearish + KAMA bearish + Price below KAMA + RSI neutral
+        if weekly_bearish and kama_bearish and price_below_kama and rsi_neutral_short:
             new_signal = -SIZE_ENTRY
-        # Secondary: KAMA bearish + RSI strong + Vol ok (daily neutral ok)
-        elif kama_bearish and rsi_strong_short and vol_ok:
+        # Secondary: Weekly bearish + KAMA bearish + RSI strong (price filter relaxed)
+        elif weekly_bearish and kama_bearish and rsi_strong_short:
             new_signal = -SIZE_ENTRY
-        # Tertiary: KAMA crossover (close crosses below KAMA) + RSI ok
-        elif close[i] < kama[i] and close[i-1] >= kama[i-1] and rsi_ok_short:
+        # Tertiary: KAMA bearish + Price below KAMA + RSI ok (weekly neutral ok)
+        elif kama_bearish and price_below_kama and rsi[i] > 25 and rsi[i] < 60:
             new_signal = -SIZE_ENTRY
-        # Quaternary: KAMA bearish alone (ensures minimum trade frequency)
-        elif kama_bearish and rsi[i] > 30 and rsi[i] < 60:
+        # Quaternary: KAMA slope strongly negative + RSI ok (ensures minimum trades)
+        elif kama_slope[i] < -atr[i] * 0.5 and rsi[i] > 20 and rsi[i] < 65:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
