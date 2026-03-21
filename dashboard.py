@@ -717,11 +717,9 @@ function openCandleChart(data) {{
         ${{data.symbol}} · ${{data.timeframe}} · ${{data.period === 'train' ? 'Train 2021–2024' : 'Test 2025+'}}
         <span style="color:#8b949e;font-weight:normal"> | Sharpe=${{data.metrics.sharpe.toFixed(3)}} | Return=${{data.metrics.return_pct > 0 ? '+' : ''}}${{data.metrics.return_pct.toFixed(1)}}% | DD=${{data.metrics.max_dd_pct.toFixed(1)}}% | Trades=${{data.metrics.num_trades}}</span>
       </div>
-      <div>
-        <span style="color:#f0883e;font-size:0.75em;margin-right:15px">━ EMA 21</span>
-        <span style="color:#a371f7;font-size:0.75em;margin-right:15px">━ EMA 55</span>
-        <span style="color:#2ecc71;font-size:0.75em;margin-right:10px">▲ Long</span>
-        <span style="color:#e74c3c;font-size:0.75em;margin-right:15px">▼ Short</span>
+      <div id="chartLegend">
+        <span style="color:#2ecc71;font-size:0.75em;margin-right:10px">▲ Long Entry</span>
+        <span style="color:#e74c3c;font-size:0.75em;margin-right:15px">▼ Short Entry</span>
         <button onclick="document.getElementById('chartOverlay').style.display='none'" style="background:#e74c3c;border:none;color:#fff;padding:4px 12px;border-radius:4px;cursor:pointer;font-family:monospace">Close (Esc)</button>
       </div>
     </div>
@@ -749,38 +747,58 @@ function openCandleChart(data) {{
   }});
   candleSeries.setData(data.ohlc);
 
-  // EMA 21
-  if (data.ema21 && data.ema21.length > 0) {{
-    const ema21Series = chart.addLineSeries({{ color: '#f0883e', lineWidth: 1, lineStyle: 2 }});
-    ema21Series.setData(data.ema21);
+  // Dynamic indicator lines
+  if (data.indicators) {{
+    for (const [indName, indInfo] of Object.entries(data.indicators)) {{
+      if (indInfo.data && indInfo.data.length > 0) {{
+        const series = chart.addLineSeries({{
+          color: indInfo.color || '#f0883e',
+          lineWidth: 1.5,
+          lineStyle: 0,
+          title: indName,
+        }});
+        series.setData(indInfo.data);
+      }}
+    }}
   }}
 
-  // EMA 55
-  if (data.ema55 && data.ema55.length > 0) {{
-    const ema55Series = chart.addLineSeries({{ color: '#a371f7', lineWidth: 1, lineStyle: 2 }});
-    ema55Series.setData(data.ema55);
+  // Add indicator names to legend
+  if (data.indicators) {{
+    const legend = document.getElementById('chartLegend');
+    for (const [indName, indInfo] of Object.entries(data.indicators)) {{
+      const span = document.createElement('span');
+      span.style.cssText = `color:${{indInfo.color}};font-size:0.75em;margin-right:15px`;
+      span.textContent = `━ ${{indName}}`;
+      legend.insertBefore(span, legend.firstChild);
+    }}
   }}
 
-  // Trade markers on candles
+  // Trade markers on candles — limit density to avoid clutter
   const markers = [];
-  (data.trade_markers || []).forEach(tm => {{
-    markers.push({{
-      time: tm.entry_time,
-      position: tm.direction === 'LONG' ? 'belowBar' : 'aboveBar',
-      color: tm.direction === 'LONG' ? '#2ecc71' : '#e74c3c',
-      shape: tm.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
-      text: tm.direction[0] + ' $' + tm.entry_price,
-    }});
-    markers.push({{
-      time: tm.exit_time,
-      position: tm.pnl_pct >= 0 ? 'aboveBar' : 'belowBar',
-      color: tm.pnl_pct >= 0 ? 'rgba(46,204,113,0.7)' : 'rgba(231,76,60,0.7)',
-      shape: 'circle',
-      text: (tm.pnl_pct >= 0 ? '+' : '') + tm.pnl_pct.toFixed(1) + '%',
-    }});
+  const allTrades = data.trade_markers || [];
+  let lastMarkerTime = 0;
+  const minGap = 3600 * 4; // at least 4h between markers on chart
+  allTrades.forEach(tm => {{
+    if (tm.entry_time - lastMarkerTime >= minGap) {{
+      markers.push({{
+        time: tm.entry_time,
+        position: tm.direction === 'LONG' ? 'belowBar' : 'aboveBar',
+        color: tm.direction === 'LONG' ? '#2ecc71' : '#e74c3c',
+        shape: tm.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
+        text: tm.direction[0] + ' $' + tm.entry_price.toLocaleString(),
+      }});
+      markers.push({{
+        time: tm.exit_time,
+        position: tm.pnl_pct >= 0 ? 'aboveBar' : 'belowBar',
+        color: tm.pnl_pct >= 0 ? 'rgba(46,204,113,0.8)' : 'rgba(231,76,60,0.8)',
+        shape: 'circle',
+        text: (tm.pnl_pct >= 0 ? '+' : '') + tm.pnl_pct.toFixed(2) + '%',
+      }});
+      lastMarkerTime = tm.exit_time;
+    }}
   }});
   markers.sort((a, b) => a.time - b.time);
-  candleSeries.setMarkers(markers);
+  if (markers.length > 0) candleSeries.setMarkers(markers);
 
   // Signal pane
   const sigContainer = document.getElementById('signalChartContainer');
@@ -936,20 +954,66 @@ def run_detail_backtest(strategy_name: str, symbol: str, period: str) -> dict:
                 "close": round(float(prices["close"].values[end - 1]), 2),
             })
 
-        # Indicators (EMA 21 & 55) — sampled at same step
-        close_s = pd.Series(prices["close"].values)
+        # Compute indicators based on what the strategy code uses
+        close_arr = prices["close"].values
+        high_arr = prices["high"].values
+        low_arr = prices["low"].values
+        close_s = pd.Series(close_arr)
+        strategy_code = get_strategy_code(strategy_name) or ""
+
+        indicators = {}  # name → list of {time, value}
+
+        # Always compute EMA 21/55 (universal)
         ema21 = close_s.ewm(span=21, min_periods=21, adjust=False).mean().values
         ema55 = close_s.ewm(span=55, min_periods=55, adjust=False).mean().values
-        ema21_data = []
-        ema55_data = []
-        for i in range(0, price_n, price_step):
-            t = int(unix_times[i])
-            v21 = float(ema21[i])
-            v55 = float(ema55[i])
-            if not np.isnan(v21):
-                ema21_data.append({"time": t, "value": round(v21, 2)})
-            if not np.isnan(v55):
-                ema55_data.append({"time": t, "value": round(v55, 2)})
+
+        # Detect which indicators the strategy uses and compute them
+        if "hma" in strategy_code.lower() or "hull" in strategy_code.lower():
+            # HMA(16) and HMA(48)
+            def _wma(arr, w):
+                weights = np.arange(1, w + 1, dtype=np.float64)
+                weights /= weights.sum()
+                out = np.full(len(arr), np.nan)
+                for j in range(w - 1, len(arr)):
+                    out[j] = np.dot(arr[j - w + 1:j + 1], weights)
+                return out
+            def _hma(arr, period):
+                half = period // 2
+                sqrt_n = max(1, int(np.sqrt(period)))
+                w_half = _wma(arr, half)
+                w_full = _wma(arr, period)
+                diff = 2 * w_half - w_full
+                return _wma(diff, sqrt_n)
+            hma16 = _hma(close_arr, 16)
+            hma48 = _hma(close_arr, 48)
+            indicators["HMA 16"] = {"data": hma16, "color": "#00bfff"}
+            indicators["HMA 48"] = {"data": hma48, "color": "#ff6b9d"}
+        elif "supertrend" in strategy_code.lower():
+            indicators["EMA 21"] = {"data": ema21, "color": "#f0883e"}
+            indicators["EMA 55"] = {"data": ema55, "color": "#a371f7"}
+        elif "donchian" in strategy_code.lower():
+            # Donchian channels
+            period = 20
+            don_high = pd.Series(high_arr).rolling(period, min_periods=period).max().values
+            don_low = pd.Series(low_arr).rolling(period, min_periods=period).min().values
+            indicators["Donchian High"] = {"data": don_high, "color": "#2ecc71"}
+            indicators["Donchian Low"] = {"data": don_low, "color": "#e74c3c"}
+        if "ema" in strategy_code.lower() or not indicators:
+            indicators["EMA 21"] = {"data": ema21, "color": "#f0883e"}
+            indicators["EMA 55"] = {"data": ema55, "color": "#a371f7"}
+        if "sma" in strategy_code.lower() and "200" in strategy_code:
+            sma200 = close_s.rolling(200, min_periods=200).mean().values
+            indicators["SMA 200"] = {"data": sma200, "color": "#8b949e"}
+
+        # Build indicator data for chart
+        indicator_series = {}
+        for ind_name, ind_info in indicators.items():
+            series = []
+            for i in range(0, price_n, price_step):
+                v = float(ind_info["data"][i])
+                if not np.isnan(v):
+                    series.append({"time": int(unix_times[i]), "value": round(v, 2)})
+            indicator_series[ind_name] = {"data": series, "color": ind_info["color"]}
 
         # Signal data for signal pane
         signal_data = []
@@ -1011,8 +1075,7 @@ def run_detail_backtest(strategy_name: str, symbol: str, period: str) -> dict:
             "num_bars": n,
             # Candlestick chart data (Lightweight Charts format)
             "ohlc": ohlc,
-            "ema21": ema21_data,
-            "ema55": ema55_data,
+            "indicators": indicator_series,
             "signals": signal_data,
             "trade_markers": trade_markers,
         }
