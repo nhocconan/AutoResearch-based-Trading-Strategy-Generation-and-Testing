@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #338: 30m Keltner Breakout + 4h HMA Trend + RSI Momentum + ATR Stop
-Hypothesis: 30m timeframe with Keltner Channel breakouts provides cleaner signals than Donchian.
-Keltner (EMA20 + 2*ATR) adapts to volatility better than fixed Donchian periods.
-4h HMA(21) provides macro trend bias to avoid counter-trend breakouts.
-RSI(14) momentum filter (50-60 range for longs, 40-50 for shorts) ensures entry quality.
-This combines volatility breakout (proven in exp#329) with adaptive channels and HTF filter.
-Timeframe: 30m (REQUIRED), HTF: 4h for trend bias via mtf_data helper.
-Target: Beat Sharpe=0.499 with 30-60 trades/year, symmetric long/short logic.
-Key insight: Keltner breakouts + 4h HMA filter = fewer false breakouts, better win rate in both bull/bear.
-Position sizing: 0.25 entry, 0.125 half-profit, 2.5*ATR trailing stop.
+Experiment #339: 1h KAMA Adaptive Trend + 4h HMA Filter + RSI Momentum + ATR Stop
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market efficiency - 
+smooths in choppy markets, follows closely in trends. Combined with 4h HMA trend 
+filter via mtf_data helper, this should capture trends while avoiding whipsaws.
+RSI(14) filter ensures momentum confirmation without being too restrictive.
+Timeframe: 1h (REQUIRED for this experiment), HTF: 4h for trend bias.
+Target: Beat Sharpe=0.499 with 30-60 trades/year, adaptive to market regime.
+Key insight: KAMA's adaptive nature should outperform fixed EMAs in mixed markets.
+Position sizing: 0.25 entry, 0.125 half (take profit), discrete levels to minimize fees.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_keltner_4h_hma_rsi_momentum_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_kama_4h_hma_rsi_momentum_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -28,6 +27,39 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts smoothing based on market efficiency ratio.
+    ER = |net change| / sum of absolute changes (0 to 1)
+    SC = [ER * (fast_sc - slow_sc) + slow_sc]^2
+    """
+    close_s = pd.Series(close)
+    
+    # Calculate Efficiency Ratio (ER)
+    net_change = np.abs(close - np.roll(close, period))
+    net_change[:period] = np.nan
+    
+    sum_changes = pd.Series(np.abs(close - np.roll(close, 1))).rolling(window=period, min_periods=period).sum().values
+    sum_changes[:period] = np.nan
+    
+    er = np.where(sum_changes > 0, net_change / sum_changes, 0.0)
+    er = np.nan_to_num(er, nan=0.0)
+    
+    # Calculate Smoothing Constant (SC)
+    fast_sc = 2.0 / (fast + 1.0)
+    slow_sc = 2.0 / (slow + 1.0)
+    sc = np.square(er * (fast_sc - slow_sc) + slow_sc)
+    
+    # Calculate KAMA
+    kama = np.zeros(len(close))
+    kama[period-1] = close[period-1]
+    
+    for i in range(period, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -51,13 +83,22 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_keltner(high, low, close, ema_period=20, atr_period=14, atr_mult=2.0):
-    """Calculate Keltner Channel bands."""
-    ema = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
-    atr = calculate_atr(high, low, close, atr_period)
-    upper = ema + atr_mult * atr
-    lower = ema - atr_mult * atr
-    return upper, lower, ema
+def calculate_chop(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = ranging market, CHOP < 38.2 = trending market.
+    """
+    highest = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    atr_sum = calculate_atr(high, low, close, period)
+    atr_sum = pd.Series(atr_sum).rolling(window=period, min_periods=period).sum().values
+    
+    chop = np.zeros(len(close))
+    mask = (highest - lowest) > 0
+    chop[mask] = 100 * np.log10(atr_sum[mask] / (highest[mask] - lowest[mask])) / np.log10(period)
+    chop = np.clip(chop, 0, 100)
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -74,10 +115,12 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    keltner_upper, keltner_lower, keltner_ema = calculate_keltner(high, low, close, 20, 14, 2.0)
+    kama = calculate_kama(close, period=10, fast=2, slow=30)
+    kama_fast = calculate_kama(close, period=5, fast=2, slow=15)
+    chop = calculate_chop(high, low, close, 14)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -93,57 +136,61 @@ def generate_signals(prices):
     
     for i in range(250, n):  # Start after 250 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(keltner_upper[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(kama[i]):
             signals[i] = 0.0
             continue
         
         # 4h macro trend bias
         hma_valid = not np.isnan(hma_4h_aligned[i])
-        four_h_bullish = hma_valid and close[i] > hma_4h_aligned[i]
-        four_h_bearish = hma_valid and close[i] < hma_4h_aligned[i]
+        trend_bullish = hma_valid and close[i] > hma_4h_aligned[i]
+        trend_bearish = hma_valid and close[i] < hma_4h_aligned[i]
         
-        # Keltner breakout signals (price closes outside channel)
-        breakout_long = close[i] > keltner_upper[i-1] and close[i-1] <= keltner_upper[i-1]
-        breakout_short = close[i] < keltner_lower[i-1] and close[i-1] >= keltner_lower[i-1]
+        # KAMA crossover signals (adaptive trend)
+        kama_cross_long = kama_fast[i] > kama[i] and kama_fast[i-1] <= kama[i-1]
+        kama_cross_short = kama_fast[i] < kama[i] and kama_fast[i-1] >= kama[i-1]
         
-        # Keltner trend state (price outside channel)
-        above_upper = close[i] > keltner_upper[i-1]
-        below_lower = close[i] < keltner_lower[i-1]
+        # KAMA trend state
+        kama_bullish = kama_fast[i] > kama[i]
+        kama_bearish = kama_fast[i] < kama[i]
         
-        # RSI momentum filter (moderate values, not extremes)
-        rsi_ok_long = rsi[i] > 45 and rsi[i] < 75  # Not overbought
-        rsi_ok_short = rsi[i] < 55 and rsi[i] > 25  # Not oversold
+        # Choppiness regime filter
+        is_trending = chop[i] < 50  # Looser than 38.2 to get more trades
+        is_ranging = chop[i] > 50
         
-        # Strong momentum confirmation
-        rsi_strong_long = rsi[i] > 50 and rsi[i] < 70
-        rsi_strong_short = rsi[i] < 50 and rsi[i] > 30
-        
-        # EMA position relative to Keltner (trend confirmation)
-        ema_above_mid = keltner_ema[i] > (keltner_upper[i] + keltner_lower[i]) / 2
-        ema_below_mid = keltner_ema[i] < (keltner_upper[i] + keltner_lower[i]) / 2
+        # RSI momentum filter (LOOSE to ensure trades)
+        rsi_ok_long = rsi[i] > 40  # Not oversold
+        rsi_ok_short = rsi[i] < 60  # Not overbought
+        rsi_strong_long = rsi[i] > 50
+        rsi_strong_short = rsi[i] < 50
         
         new_signal = 0.0
         
         # === LONG ENTRIES ===
-        # Primary: Keltner breakout + 4h bullish + RSI ok
-        if breakout_long and four_h_bullish and rsi_ok_long:
+        # Primary: KAMA cross + 4h bullish + RSI ok
+        if kama_cross_long and trend_bullish and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        # Secondary: Price above upper + 4h bullish + RSI strong
-        elif above_upper and four_h_bullish and rsi_strong_long:
+        # Secondary: KAMA bullish + 4h bullish + RSI strong (no cross needed)
+        elif kama_bullish and trend_bullish and rsi_strong_long:
             new_signal = SIZE_ENTRY
-        # Tertiary: Breakout with EMA confirmation (no 4h filter for momentum)
-        elif breakout_long and ema_above_mid and rsi[i] > 55:
+        # Tertiary: KAMA cross in trending market (momentum only)
+        elif kama_cross_long and is_trending and rsi[i] > 45:
+            new_signal = SIZE_ENTRY
+        # Quaternary: Simple KAMA cross with RSI filter (ensure trades)
+        elif kama_cross_long and rsi[i] > 45 and rsi[i] < 70:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES ===
-        # Primary: Keltner breakout + 4h bearish + RSI ok
-        if breakout_short and four_h_bearish and rsi_ok_short:
+        # Primary: KAMA cross + 4h bearish + RSI ok
+        if kama_cross_short and trend_bearish and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        # Secondary: Price below lower + 4h bearish + RSI strong
-        elif below_lower and four_h_bearish and rsi_strong_short:
+        # Secondary: KAMA bearish + 4h bearish + RSI strong (no cross needed)
+        elif kama_bearish and trend_bearish and rsi_strong_short:
             new_signal = -SIZE_ENTRY
-        # Tertiary: Breakout with EMA confirmation (no 4h filter for momentum)
-        elif breakout_short and ema_below_mid and rsi[i] < 45:
+        # Tertiary: KAMA cross in trending market (momentum only)
+        elif kama_cross_short and is_trending and rsi[i] < 55:
+            new_signal = -SIZE_ENTRY
+        # Quaternary: Simple KAMA cross with RSI filter (ensure trades)
+        elif kama_cross_short and rsi[i] < 55 and rsi[i] > 30:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
