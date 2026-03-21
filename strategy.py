@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #041 - MTF Donchian+KAMA+RSI+MACD+ATR (15m+1h+4h v1)
+EXPERIMENT #010 - MTF EMA+Bollinger+RSI+ATR (15m+1h+4h v1)
 ==================================================================================================
-Hypothesis: Donchian breakouts on 4h provide strong trend direction (proven in #006 with +65.9%).
-KAMA on 1h filters false breakouts adaptively. RSI on 15m provides optimal pullback entries.
-MACD histogram confirms momentum before entry. ATR stoploss at 2.0*ATR for tight risk control.
+Hypothesis: 4h EMA(21/55) crossover provides clean trend direction. 1h Bollinger %B identifies
+pullback entries within the trend (buy when %B < 0.3 in uptrend, sell when %B > 0.7 in downtrend).
+15m RSI confirms entry timing. ATR stoploss at 2.0*ATR for tight risk control.
 
-Key changes from #040:
-- Trend: 4h Donchian(20) breakout instead of HMA/Supertrend (more objective trend signal)
-- Filter: 1h KAMA adaptive trend (worked in #006)
-- Entry: 15m RSI(14) pullback to 40-60 range
-- Momentum: 15m MACD histogram cross confirmation
-- Stoploss: 2.0*ATR trailing (same as #040, proven effective)
-- Position size: 0.35 (proven safe in winning strategies)
+Key changes from #009:
+- Trend: 4h EMA(21/55) crossover instead of Donchian (smoother, less whipsaw)
+- Entry filter: 1h Bollinger %B for pullback detection (mean reversion within trend)
+- Entry timing: 15m RSI(14) for precise entry
+- Stoploss: 2.0*ATR trailing (proven effective)
+- Position size: 0.35 max (discrete levels: 0.0, ±0.25, ±0.35)
 - Timeframe: 15m primary with 1h and 4h MTF filters
+- FIX: Use integer index mapping instead of datetime comparison to avoid timezone issues
 
-Why this should beat #040:
-- Donchian breakouts are more objective than HMA crossovers
-- 3-timeframe structure (4h trend, 1h filter, 15m entry) provides better confirmation
-- MACD histogram adds momentum confirmation missing from #040
-- Based on #006's success with Donchian+KAMA combination
+Why this should beat #005 (Sharpe=0.213):
+- EMA crossovers are smoother than Donchian breakouts (fewer false signals)
+- Bollinger %B adds mean-reversion entry logic (buy dips in uptrend)
+- 3-timeframe structure provides layered confirmation
+- Based on classic trend-following with pullback entry (proven edge)
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_donchian_kama_rsi_macd_atr_15m_v1"
+name = "mtf_ema_bollinger_rsi_atr_15m_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -53,28 +53,45 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average"""
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average"""
     n = len(close)
-    if n < er_period + slow_period:
+    if n < period:
         return np.zeros(n)
     
-    kama = np.zeros(n)
-    kama[er_period] = close[er_period]
+    ema = np.zeros(n)
+    ema[period - 1] = np.mean(close[:period])
     
-    for i in range(er_period + 1, n):
-        change = abs(close[i] - close[i - er_period])
-        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+    multiplier = 2.0 / (period + 1)
+    for i in range(period, n):
+        ema[i] = ema[i - 1] + multiplier * (close[i] - ema[i - 1])
+    
+    return ema
+
+
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and %B"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    sma = np.zeros(n)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    pct_b = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        sma[i] = np.mean(close[i - period + 1:i + 1])
+        std = np.std(close[i - period + 1:i + 1])
+        upper[i] = sma[i] + std_mult * std
+        lower[i] = sma[i] - std_mult * std
         
-        if volatility > 0:
-            er = change / volatility
+        if upper[i] != lower[i]:
+            pct_b[i] = (close[i] - lower[i]) / (upper[i] - lower[i])
         else:
-            er = 0
-        
-        sc = (er * (2.0 / (fast_period + 1) - 2.0 / (slow_period + 1)) + 2.0 / (slow_period + 1)) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+            pct_b[i] = 0.5
     
-    return kama
+    return upper, lower, pct_b
 
 
 def calculate_rsi(close, period=14):
@@ -109,68 +126,10 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram"""
-    n = len(close)
-    if n < slow + signal:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    ema_fast = np.zeros(n)
-    ema_slow = np.zeros(n)
-    macd_line = np.zeros(n)
-    signal_line = np.zeros(n)
-    histogram = np.zeros(n)
-    
-    ema_fast[fast - 1] = np.mean(close[:fast])
-    ema_slow[slow - 1] = np.mean(close[:slow])
-    
-    for i in range(fast, n):
-        ema_fast[i] = ema_fast[i - 1] + (2.0 / (fast + 1)) * (close[i] - ema_fast[i - 1])
-    
-    for i in range(slow, n):
-        ema_slow[i] = ema_slow[i - 1] + (2.0 / (slow + 1)) * (close[i] - ema_slow[i - 1])
-    
-    for i in range(slow - 1, n):
-        macd_line[i] = ema_fast[i] - ema_slow[i]
-    
-    valid_macd = slow - 1
-    signal_line[valid_macd + signal - 1] = np.mean(macd_line[valid_macd:valid_macd + signal])
-    
-    for i in range(valid_macd + signal, n):
-        signal_line[i] = signal_line[i - 1] + (2.0 / (signal + 1)) * (macd_line[i] - signal_line[i - 1])
-    
-    for i in range(valid_macd + signal - 1, n):
-        histogram[i] = macd_line[i] - signal_line[i]
-    
-    return macd_line, signal_line, histogram
-
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (upper/lower bands and breakout signal)"""
-    n = len(high)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    breakout = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-        
-        if i > period - 1:
-            if high[i] > upper[i - 1]:
-                breakout[i] = 1
-            elif low[i] < lower[i - 1]:
-                breakout[i] = -1
-    
-    return upper, lower, breakout
-
-
 def resample_to_timeframe(prices, timeframe):
     """Resample prices to higher timeframe using proper aggregation"""
     prices_indexed = prices.set_index('open_time')
+    prices_indexed.index = pd.to_datetime(prices_indexed.index, utc=True)
     
     if timeframe == '1h':
         df_resampled = prices_indexed.resample('1h').agg({
@@ -194,76 +153,69 @@ def resample_to_timeframe(prices, timeframe):
     return df_resampled
 
 
-def align_mtf_indicator(base_index, mtf_values, mtf_index):
-    """Align higher timeframe indicator back to base timeframe using ffill"""
-    mtf_series = pd.Series(mtf_values, index=mtf_index)
-    aligned = mtf_series.reindex(base_index, method='ffill').values
-    return aligned
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
+    
+    # Initialize output arrays
+    signals = np.zeros(n)
     
     # 15m indicators for entry timing
     atr_15m = calculate_atr(high, low, close, period=14)
     rsi_15m = calculate_rsi(close, period=14)
-    macd_15m, signal_15m, hist_15m = calculate_macd(close, fast=12, slow=26, signal=9)
     
-    # Resample to 1h for adaptive trend filter
+    # Resample to 1h for Bollinger filter
     prices_df = prices.copy()
-    prices_df['open_time'] = pd.to_datetime(prices_df['open_time'])
+    prices_df['open_time'] = pd.to_datetime(prices_df['open_time'], utc=True)
     prices_1h = resample_to_timeframe(prices_df, '1h')
     
     c_1h = prices_1h['close'].values
-    h_1h = prices_1h['high'].values
-    l_1h = prices_1h['low'].values
-    idx_1h = prices_1h.index
+    upper_1h, lower_1h, pct_b_1h = calculate_bollinger(c_1h, period=20, std_mult=2.0)
     
-    kama_1h = calculate_kama(c_1h, er_period=10, fast_period=2, slow_period=30)
-    
-    # Resample to 4h for Donchian trend
+    # Resample to 4h for EMA trend
     prices_4h = resample_to_timeframe(prices_df, '4h')
     
     c_4h = prices_4h['close'].values
-    h_4h = prices_4h['high'].values
-    l_4h = prices_4h['low'].values
-    idx_4h = prices_4h.index
+    ema21_4h = calculate_ema(c_4h, period=21)
+    ema55_4h = calculate_ema(c_4h, period=55)
     
-    upper_4h, lower_4h, breakout_4h = calculate_donchian(h_4h, l_4h, period=20)
+    # Create mapping from 15m index to 1h and 4h indices
+    # Use integer-based alignment to avoid datetime timezone issues
+    base_times = pd.to_datetime(prices['open_time'], utc=True)
     
-    # Align 1h and 4h indicators back to 15m timeframe
-    base_index = pd.to_datetime(open_time)
+    # Map 1h times to 15m indices
+    times_1h = prices_1h.index
+    times_4h = prices_4h.index
     
-    kama_1h_aligned = align_mtf_indicator(base_index, kama_1h, idx_1h)
-    upper_4h_aligned = align_mtf_indicator(base_index, upper_4h, idx_4h)
-    lower_4h_aligned = align_mtf_indicator(base_index, lower_4h, idx_4h)
-    breakout_4h_aligned = align_mtf_indicator(base_index, breakout_4h, idx_4h)
+    # Create forward-fill mapping arrays
+    idx_1h_aligned = np.zeros(n, dtype=int)
+    idx_4h_aligned = np.zeros(n, dtype=int)
     
-    # Generate signals with multi-timeframe logic
-    signals = np.zeros(n)
+    # For each 15m bar, find the most recent 1h and 4h bar
+    j_1h = 0
+    j_4h = 0
+    for i in range(n):
+        # Find latest 1h bar <= current 15m time
+        while j_1h < len(times_1h) - 1 and times_1h[j_1h + 1] <= base_times[i]:
+            j_1h += 1
+        idx_1h_aligned[i] = j_1h
+        
+        # Find latest 4h bar <= current 15m time
+        while j_4h < len(times_4h) - 1 and times_4h[j_4h + 1] <= base_times[i]:
+            j_4h += 1
+        idx_4h_aligned[i] = j_4h
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
     SIZE_FULL = 0.35
     SIZE_HALF = 0.175
     
-    # RSI thresholds for pullback entries
-    RSI_LONG_MIN = 40
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 60
-    
-    # MACD histogram threshold for momentum confirmation
-    MACD_HIST_MIN = 0.0
-    
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.0
     
     # Minimum warmup period
-    first_valid = max(200, 40, 26 + 9, 20)
+    first_valid = max(200, 55, 40, 20)
     
     # Track position state
     position_side = np.zeros(n)
@@ -273,30 +225,33 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(hist_15m[i]) or atr_15m[i] == 0:
+        # Check for valid data
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
             continue
         
-        # 4h Donchian trend direction
-        donchian_trend = 0
-        if upper_4h_aligned[i] > 0 and lower_4h_aligned[i] > 0:
-            mid_4h = (upper_4h_aligned[i] + lower_4h_aligned[i]) / 2
-            if close[i] > mid_4h:
-                donchian_trend = 1
-            elif close[i] < mid_4h:
-                donchian_trend = -1
+        # Get aligned indices
+        idx_1h = idx_1h_aligned[i]
+        idx_4h = idx_4h_aligned[i]
         
-        # 1h KAMA adaptive trend
-        kama_trend = 0
-        if kama_1h_aligned[i] > 0:
-            if close[i] > kama_1h_aligned[i]:
-                kama_trend = 1
-            elif close[i] < kama_1h_aligned[i]:
-                kama_trend = -1
+        # Check bounds for MTF data
+        if idx_1h >= len(pct_b_1h) or idx_4h >= len(ema21_4h):
+            signals[i] = 0.0
+            continue
         
-        # 15m RSI and MACD for entry timing
+        # 4h EMA trend direction
+        ema_trend = 0
+        if ema21_4h[idx_4h] > 0 and ema55_4h[idx_4h] > 0:
+            if ema21_4h[idx_4h] > ema55_4h[idx_4h]:
+                ema_trend = 1  # Bullish
+            elif ema21_4h[idx_4h] < ema55_4h[idx_4h]:
+                ema_trend = -1  # Bearish
+        
+        # 1h Bollinger %B for pullback detection
+        pct_b = pct_b_1h[idx_1h]
+        
+        # 15m RSI for entry timing
         rsi_val = rsi_15m[i]
-        macd_hist = hist_15m[i]
         atr = atr_15m[i]
         price = close[i]
         
@@ -393,26 +348,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h Donchian + 1h KAMA + 15m RSI + MACD
-        if donchian_trend == 1 and kama_trend == 1:  # Bullish trend confirmed
-            if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
-                macd_hist > MACD_HIST_MIN):  # Pullback + momentum confirmation
-                signals[i] = SIZE_FULL
-                position_side[i] = 1
-                entry_price[i] = price
-                tp_triggered[i] = 0
-                highest_since_entry[i] = price
-                lowest_since_entry[i] = price
-                
-        elif donchian_trend == -1 and kama_trend == -1:  # Bearish trend confirmed
-            if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
-                macd_hist < -MACD_HIST_MIN):  # Pullback + momentum confirmation
-                signals[i] = -SIZE_FULL
-                position_side[i] = -1
-                entry_price[i] = price
-                tp_triggered[i] = 0
-                highest_since_entry[i] = price
-                lowest_since_entry[i] = price
+        # Entry logic: 4h EMA trend + 1h Bollinger pullback + 15m RSI timing
+        # Long: EMA bullish + %B < 0.4 (pullback) + RSI 35-55 (not overbought)
+        if ema_trend == 1 and pct_b < 0.4 and 35 <= rsi_val <= 55:
+            signals[i] = SIZE_FULL
+            position_side[i] = 1
+            entry_price[i] = price
+            tp_triggered[i] = 0
+            highest_since_entry[i] = price
+            lowest_since_entry[i] = price
+        
+        # Short: EMA bearish + %B > 0.6 (rally) + RSI 45-65 (not oversold)
+        elif ema_trend == -1 and pct_b > 0.6 and 45 <= rsi_val <= 65:
+            signals[i] = -SIZE_FULL
+            position_side[i] = -1
+            entry_price[i] = price
+            tp_triggered[i] = 0
+            highest_since_entry[i] = price
+            lowest_since_entry[i] = price
         
         else:
             signals[i] = 0.0
