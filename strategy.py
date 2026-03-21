@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #197: 12h Supertrend + Daily HMA + RSI Pullback with Volume Confirmation
-Hypothesis: Supertrend provides clear trend direction on 12h timeframe. Daily HMA 
-filters macro bias (only long when price > 1d HMA). RSI pullback entries (not extremes) 
-catch trend continuations. Volume spike (>1.5x avg) confirms breakout validity. This 
-should generate MORE trades than Donchian (exp#191) while maintaining quality. 
-Stoploss: 2.0*ATR trailing. Position sizing: 0.30 entry, 0.15 at 2R profit.
-Target: Beat Sharpe=0.499 from current best, generate 50+ trades per symbol.
+Experiment #198: 1d Connors RSI Mean Reversion with 4h HMA Trend Filter
+Hypothesis: Daily timeframe is ideal for Connors RSI mean reversion strategy.
+CRSI combines RSI(3) + RSI_Streak(2) + PercentRank(100) for precise entry timing.
+4h HMA provides trend bias (long only when price > 4h HMA, short when <).
+Bollinger Band Width detects regime: narrow bands = mean reversion opportunity.
+This should generate 20-40 trades/year on 1d, enough for statistical significance.
+Position sizing: 0.25 entry, stoploss at 2.5*ATR. Target: Beat Sharpe=0.499.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_supertrend_daily_hma_rsi_volume_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_crsi_4h_hma_bb_regime_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -48,85 +48,80 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator (trend direction and levels)."""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Initialize arrays
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Calculate Connors RSI (CRSI).
+    CRSI = (RSI(close, 3) + RSI(streak, 2) + PercentRank(100)) / 3
+    """
     n = len(close)
-    final_upper = np.zeros(n)
-    final_lower = np.zeros(n)
-    supertrend = np.zeros(n)
-    trend = np.ones(n)  # 1 = bullish, -1 = bearish
     
-    final_upper[0] = upper_band[0]
-    final_lower[0] = lower_band[0]
-    supertrend[0] = lower_band[0]
+    # RSI(3) component
+    rsi_short = calculate_rsi(close, rsi_period)
     
+    # Streak RSI component
+    streak = np.zeros(n)
     for i in range(1, n):
-        # Update upper/lower bands
-        if upper_band[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]:
-            final_upper[i] = upper_band[i]
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
         else:
-            final_upper[i] = final_upper[i-1]
-        
-        if lower_band[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]:
-            final_lower[i] = lower_band[i]
-        else:
-            final_lower[i] = final_lower[i-1]
-        
-        # Determine trend
-        if trend[i-1] == 1:
-            if close[i] < final_lower[i]:
-                trend[i] = -1
-                supertrend[i] = final_upper[i]
-            else:
-                trend[i] = 1
-                supertrend[i] = final_lower[i]
-        else:
-            if close[i] > final_upper[i]:
-                trend[i] = 1
-                supertrend[i] = final_lower[i]
-            else:
-                trend[i] = -1
-                supertrend[i] = final_upper[i]
+            streak[i] = streak[i-1]
     
-    return supertrend, trend
+    streak_rsi = calculate_rsi(streak, streak_period)
+    
+    # Percent Rank component
+    percent_rank = np.zeros(n)
+    for i in range(rank_period, n):
+        lookback = close[i-rank_period:i]
+        count_below = np.sum(lookback < close[i])
+        percent_rank[i] = 100.0 * count_below / rank_period
+    
+    # Combine components
+    crsi = (rsi_short + streak_rsi + percent_rank) / 3.0
+    crsi = np.clip(crsi, 0, 100)
+    
+    return crsi
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume moving average."""
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    band_width = (upper - lower) / sma * 100.0
+    return upper, lower, sma, band_width
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
-    vol_sma = calculate_volume_sma(volume, 20)
+    crsi = calculate_crsi(close, 3, 2, 100)
+    bb_upper, bb_lower, bb_mid, bb_width = calculate_bollinger_bands(close, 20, 2.0)
+    
+    # Calculate BB Width percentile for regime detection
+    bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=100).apply(
+        lambda x: np.sum(x < x[-1]) / len(x) * 100, raw=True
+    ).values
+    bb_width_percentile = np.nan_to_num(bb_width_percentile, 50.0)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -136,60 +131,54 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):
-        # HTF trend filter
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+    for i in range(150, n):
+        # HTF trend filter (4h HMA)
+        trend_bullish = close[i] > hma_4h_aligned[i]
+        trend_bearish = close[i] < hma_4h_aligned[i]
         
-        # Supertrend direction
-        st_bullish = st_trend[i] == 1
-        st_bearish = st_trend[i] == -1
+        # Regime detection (BB Width percentile)
+        regime_mean_revert = bb_width_percentile[i] < 40  # Narrow bands
+        regime_trend = bb_width_percentile[i] > 60  # Wide bands
         
-        # RSI pullback zones (more lenient than extremes)
-        rsi_long_pullback = 40 <= rsi[i] <= 55
-        rsi_short_pullback = 45 <= rsi[i] <= 60
+        # CRSI extreme levels for mean reversion
+        crsi_oversold = crsi[i] < 15
+        crsi_overbought = crsi[i] > 85
+        crsi_neutral = 25 < crsi[i] < 75
         
-        # Volume confirmation (spike > 1.5x average)
-        volume_spike = volume[i] > 1.5 * vol_sma[i]
-        
-        # Supertrend flip detection
-        st_flip_long = st_trend[i] == 1 and st_trend[i-1] == -1
-        st_flip_short = st_trend[i] == -1 and st_trend[i-1] == 1
-        
-        # Price above/below supertrend level
-        above_st = close[i] > supertrend[i]
-        below_st = close[i] < supertrend[i]
+        # Price position relative to BB
+        price_near_lower = close[i] < bb_lower[i] * 1.01
+        price_near_upper = close[i] > bb_upper[i] * 0.99
+        price_above_mid = close[i] > bb_mid[i]
+        price_below_mid = close[i] < bb_mid[i]
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Supertrend flip long with daily trend confirmation
-        if st_flip_long:
-            if daily_bullish and rsi_long_pullback:
+        # Mean reversion: CRSI oversold + price near lower BB + bullish trend
+        if crsi_oversold and price_near_lower:
+            if trend_bullish:
                 new_signal = SIZE_ENTRY
-            elif daily_bullish and volume_spike:
-                new_signal = SIZE_ENTRY
+            elif regime_mean_revert:
+                new_signal = SIZE_ENTRY * 0.8
         
-        # Continuation long (price above supertrend + pullback)
-        elif st_bullish and above_st and daily_bullish:
-            if rsi_long_pullback:
-                new_signal = SIZE_ENTRY
-            elif close[i-1] < supertrend[i-1] and close[i] > supertrend[i]:
+        # Trend continuation: CRSI neutral + price above mid + bullish trend
+        elif crsi_neutral and price_above_mid and trend_bullish:
+            # Enter on pullback to mid
+            if i > 1 and close[i-1] < bb_mid[i-1] and close[i] > bb_mid[i]:
                 new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Supertrend flip short with daily trend confirmation
-        if st_flip_short:
-            if daily_bearish and rsi_short_pullback:
+        # Mean reversion: CRSI overbought + price near upper BB + bearish trend
+        if crsi_overbought and price_near_upper:
+            if trend_bearish:
                 new_signal = -SIZE_ENTRY
-            elif daily_bearish and volume_spike:
-                new_signal = -SIZE_ENTRY
+            elif regime_mean_revert:
+                new_signal = -SIZE_ENTRY * 0.8
         
-        # Continuation short (price below supertrend + pullback)
-        elif st_bearish and below_st and daily_bearish:
-            if rsi_short_pullback:
-                new_signal = -SIZE_ENTRY
-            elif close[i-1] > supertrend[i-1] and close[i] < supertrend[i]:
+        # Trend continuation: CRSI neutral + price below mid + bearish trend
+        elif crsi_neutral and price_below_mid and trend_bearish:
+            # Enter on pullback to mid
+            if i > 1 and close[i-1] > bb_mid[i-1] and close[i] < bb_mid[i]:
                 new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -198,8 +187,8 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.0*ATR from highest)
-            current_stop = highest_close - 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR from highest)
+            current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -208,7 +197,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
@@ -219,8 +208,8 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.0*ATR from lowest)
-            current_stop = lowest_close + 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR from lowest)
+            current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -229,7 +218,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
@@ -242,7 +231,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
@@ -251,7 +240,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
