@@ -41,7 +41,7 @@ def detect_symbol(prices: pd.DataFrame) -> str:
         if not symbol_dir.is_dir():
             continue
         # Check 1h data (most common primary TF)
-        for tf in ["1h", "15m", "5m", "4h"]:
+        for tf in ["1h", "15m", "30m", "5m", "4h", "6h", "12h", "1d"]:
             tf_path = symbol_dir / f"{tf}.parquet"
             if tf_path.exists():
                 df = pd.read_parquet(tf_path)
