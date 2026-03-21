@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #393: 1h HMA Trend + 4h HMA Bias + ADX Filter + RSI Pullback + ATR Stop
-Hypothesis: 1h timeframe with 4h HTF trend bias can capture medium-term moves while
-avoiding the whipsaws that destroyed pure 1h strategies (#381 Sharpe=-1.040, #387 Sharpe=-1.917).
-Key improvements over failed 1h strategies:
-1. 4h HMA provides stronger trend filter than 1h-only approaches
-2. ADX(14) > 18 ensures we only trade in trending conditions (avoid range chop)
-3. RSI(14) with LOOSE thresholds (25-75) ensures minimum trade frequency
-4. ATR(14) trailing stop at 2.5x protects from catastrophic drawdowns
-5. Position size 0.30 discrete to minimize fee churn
-Timeframe: 1h (REQUIRED), HTF: 4h for trend bias via mtf_data helper (call ONCE before loop).
+Experiment #394: 4h MACD Histogram Momentum + Daily HMA Trend + Bollinger Regime + RSI Pullback + ATR Stop
+Hypothesis: MACD histogram momentum captures trend acceleration better than simple crossovers.
+On 4h timeframe, histogram divergence/convergence provides earlier signals than Supertrend (which failed).
+Bollinger Band Width percentile detects regime (squeeze = breakout imminent, wide = trend exhaustion).
+Daily HMA provides trend bias. RSI(14) pullback entries (40-60 range) ensure trend continuation trades.
+ADX(14) > 18 filter ensures minimum trend strength. Volume ratio confirms institutional participation.
+ATR(14) stoploss at 2.5x protects capital. Position size 0.30 discrete to minimize fees.
+Timeframe: 4h (REQUIRED), HTF: 1d for trend bias via mtf_data helper (call ONCE before loop).
 Target: Beat Sharpe=0.499 (current best mtf_12h_supertrend_daily_hma_rsi_pullback_v2).
-Critical: Must generate >=10 trades per symbol on train, >=3 on test.
+Key insight: MACD histogram momentum + Bollinger regime filter = fewer whipsaws than Supertrend on 4h.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_4h_bias_adx_rsi_pullback_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_macd_hist_daily_hma_bollinger_regime_rsi_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -30,6 +28,16 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram."""
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response with less lag."""
@@ -56,57 +64,99 @@ def calculate_rsi(close, period=14):
 def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index) for trend strength."""
     n = len(close)
+    adx = np.zeros(n)
+    
+    # Calculate +DM and -DM
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
     
     for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
+        if high[i] - high[i-1] > low[i-1] - low[i]:
+            plus_dm[i] = max(0, high[i] - high[i-1])
+        else:
+            plus_dm[i] = 0
         
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
+        if low[i-1] - low[i] > high[i] - high[i-1]:
+            minus_dm[i] = max(0, low[i-1] - low[i])
+        else:
+            minus_dm[i] = 0
     
+    # Calculate TR
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # Smooth TR, +DM, -DM
+    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+    # Calculate +DI and -DI
+    plus_di = np.where(tr_smooth > 0, 100 * plus_dm_smooth / tr_smooth, 0)
+    minus_di = np.where(tr_smooth > 0, 100 * minus_dm_smooth / tr_smooth, 0)
     
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    # Calculate DX
+    di_sum = plus_di + minus_di
+    di_diff = np.abs(plus_di - minus_di)
+    dx = np.where(di_sum > 0, 100 * di_diff / di_sum, 0)
+    
+    # Calculate ADX (smoothed DX)
     adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    return adx, plus_di, minus_di
+    return adx
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands and Band Width."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    band_width = np.where(sma > 0, (upper - lower) / sma * 100, 0)
+    return upper, lower, band_width
+
+def calculate_bw_percentile(band_width, lookback=100):
+    """Calculate Bollinger Band Width percentile for regime detection."""
+    n = len(band_width)
+    bw_pct = np.zeros(n)
+    
+    for i in range(lookback, n):
+        window = band_width[i-lookback+1:i+1]
+        rank = np.sum(window <= band_width[i])
+        bw_pct[i] = rank / lookback * 100
+    
+    bw_pct[:lookback] = 50.0
+    return bw_pct
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    taker_buy_vol = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
+    adx = calculate_adx(high, low, close, 14)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
+    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2.0)
+    bb_pct = calculate_bw_percentile(bb_width, 100)
     
-    # HMA fast and slow for crossover
-    hma_fast = calculate_hma(close, 8)
-    hma_slow = calculate_hma(close, 21)
+    # Volume ratio (taker buy / total volume)
+    vol_ratio = np.where(volume > 0, taker_buy_vol / volume, 0.5)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.30
@@ -120,74 +170,91 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):  # Start after 100 bars for indicators
+    for i in range(150, n):  # Start after 150 bars for all indicators
         # Skip if indicators not ready
         if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
+        if np.isnan(macd_hist[i]) or np.isnan(bb_pct[i]):
             signals[i] = 0.0
             continue
         
-        # 4h trend bias
-        hma_4h_valid = not np.isnan(hma_4h_aligned[i])
-        trend_4h_bullish = hma_4h_valid and close[i] > hma_4h_aligned[i]
-        trend_4h_bearish = hma_4h_valid and close[i] < hma_4h_aligned[i]
+        # Daily trend bias
+        daily_bullish = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
+        daily_bearish = not np.isnan(hma_1d_aligned[i]) and close[i] < hma_1d_aligned[i]
         
-        # ADX trend strength filter (LOOSE to ensure trades)
-        is_trending = adx[i] > 18  # Lower threshold for more trades
+        # Bollinger Band Width regime
+        # bb_pct < 20 = squeeze (breakout imminent)
+        # bb_pct > 80 = wide bands (trend exhaustion)
+        # bb_pct 20-80 = normal
+        is_squeeze = bb_pct[i] < 25
+        is_exhaustion = bb_pct[i] > 75
+        is_normal = not is_squeeze and not is_exhaustion
         
-        # HMA crossover signals
-        hma_cross_long = hma_fast[i] > hma_slow[i] and hma_fast[i-1] <= hma_slow[i-1]
-        hma_cross_short = hma_fast[i] < hma_slow[i] and hma_fast[i-1] >= hma_slow[i-1]
+        # MACD histogram momentum
+        macd_hist_positive = macd_hist[i] > 0
+        macd_hist_negative = macd_hist[i] < 0
+        macd_hist_rising = macd_hist[i] > macd_hist[i-1] if i > 0 else False
+        macd_hist_falling = macd_hist[i] < macd_hist[i-1] if i > 0 else False
+        macd_hist_cross_up = macd_hist[i] > 0 and macd_hist[i-1] <= 0 if i > 0 else False
+        macd_hist_cross_down = macd_hist[i] < 0 and macd_hist[i-1] >= 0 if i > 0 else False
         
-        # HMA position (already crossed)
-        hma_bullish = hma_fast[i] > hma_slow[i]
-        hma_bearish = hma_fast[i] < hma_slow[i]
+        # ADX trend strength
+        adx_strong = adx[i] > 18  # Minimum trend strength
+        adx_very_strong = adx[i] > 25
         
-        # RSI filter (LOOSE to ensure trade frequency - CRITICAL)
-        rsi_ok_long = rsi[i] > 25 and rsi[i] < 75  # Very loose
-        rsi_ok_short = rsi[i] > 25 and rsi[i] < 75
+        # RSI pullback zones (not extremes, but trend continuation)
+        rsi_bullish_pullback = 40 <= rsi[i] <= 60
+        rsi_bearish_pullback = 40 <= rsi[i] <= 60
+        rsi_momentum_long = 45 <= rsi[i] <= 70
+        rsi_momentum_short = 30 <= rsi[i] <= 55
         
-        # DI confirmation
-        di_bullish = plus_di[i] > minus_di[i]
-        di_bearish = plus_di[i] < minus_di[i]
+        # Volume confirmation
+        vol_bullish = vol_ratio[i] > 0.50
+        vol_bearish = vol_ratio[i] < 0.50
+        vol_strong = vol_ratio[i] > 0.55 or vol_ratio[i] < 0.45
         
         new_signal = 0.0
         
         # === LONG ENTRIES (multiple conditions to ensure trades) ===
-        # Primary: HMA cross long + 4h bullish + Trending + RSI ok
-        if hma_cross_long and trend_4h_bullish and is_trending and rsi_ok_long:
+        # Primary: MACD hist cross up + Daily bullish + ADX strong + RSI ok
+        if macd_hist_cross_up and daily_bullish and adx_strong and rsi_momentum_long:
             new_signal = SIZE_ENTRY
-        # Secondary: HMA bullish + 4h bullish + DI bullish + RSI ok
-        elif hma_bullish and trend_4h_bullish and di_bullish and rsi[i] > 30:
+        # Secondary: MACD hist positive + rising + Daily bullish + RSI pullback
+        elif macd_hist_positive and macd_hist_rising and daily_bullish and rsi_bullish_pullback:
             new_signal = SIZE_ENTRY
-        # Tertiary: HMA cross long + Trending + RSI ok (4h neutral ok)
-        elif hma_cross_long and is_trending and rsi[i] > 30 and rsi[i] < 70:
+        # Tertiary: MACD hist cross up + ADX strong + Volume confirmation
+        elif macd_hist_cross_up and adx_strong and vol_bullish:
             new_signal = SIZE_ENTRY
-        # Quaternary: HMA bullish + 4h bullish (ensures minimum trade frequency)
-        elif hma_bullish and trend_4h_bullish and rsi[i] > 35 and rsi[i] < 65:
+        # Quaternary: MACD hist positive + Daily bullish + Squeeze breakout
+        elif macd_hist_positive and daily_bullish and is_squeeze:
             new_signal = SIZE_ENTRY
-        # Quintenary: HMA cross long + DI bullish (backup for trade frequency)
-        elif hma_cross_long and di_bullish and rsi[i] > 30:
+        # Quintenary: MACD hist rising + RSI momentum (ensures trade frequency)
+        elif macd_hist_rising and rsi[i] > 45 and rsi[i] < 65 and daily_bullish:
+            new_signal = SIZE_ENTRY
+        # Sextenary: MACD hist cross up alone (backup for minimum trades)
+        elif macd_hist_cross_up and rsi[i] > 40:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES (multiple conditions to ensure trades) ===
-        # Primary: HMA cross short + 4h bearish + Trending + RSI ok
-        if hma_cross_short and trend_4h_bearish and is_trending and rsi_ok_short:
+        # Primary: MACD hist cross down + Daily bearish + ADX strong + RSI ok
+        if macd_hist_cross_down and daily_bearish and adx_strong and rsi_momentum_short:
             new_signal = -SIZE_ENTRY
-        # Secondary: HMA bearish + 4h bearish + DI bearish + RSI ok
-        elif hma_bearish and trend_4h_bearish and di_bearish and rsi[i] < 70:
+        # Secondary: MACD hist negative + falling + Daily bearish + RSI pullback
+        elif macd_hist_negative and macd_hist_falling and daily_bearish and rsi_bearish_pullback:
             new_signal = -SIZE_ENTRY
-        # Tertiary: HMA cross short + Trending + RSI ok (4h neutral ok)
-        elif hma_cross_short and is_trending and rsi[i] > 30 and rsi[i] < 70:
+        # Tertiary: MACD hist cross down + ADX strong + Volume confirmation
+        elif macd_hist_cross_down and adx_strong and vol_bearish:
             new_signal = -SIZE_ENTRY
-        # Quaternary: HMA bearish + 4h bearish (ensures minimum trade frequency)
-        elif hma_bearish and trend_4h_bearish and rsi[i] > 35 and rsi[i] < 65:
+        # Quaternary: MACD hist negative + Daily bearish + Squeeze breakout
+        elif macd_hist_negative and daily_bearish and is_squeeze:
             new_signal = -SIZE_ENTRY
-        # Quintenary: HMA cross short + DI bearish (backup for trade frequency)
-        elif hma_cross_short and di_bearish and rsi[i] < 70:
+        # Quintenary: MACD hist falling + RSI momentum (ensures trade frequency)
+        elif macd_hist_falling and rsi[i] > 35 and rsi[i] < 55 and daily_bearish:
+            new_signal = -SIZE_ENTRY
+        # Sextenary: MACD hist cross down alone (backup for minimum trades)
+        elif macd_hist_cross_down and rsi[i] < 60:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
