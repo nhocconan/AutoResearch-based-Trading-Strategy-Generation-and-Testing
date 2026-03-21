@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #171: 1h Regime-Adaptive Strategy with 4h/12h HMA Trend Filter
-Hypothesis: 1h timeframe captures intraday swings while 4h/12h HMA provides 
-major trend bias. Regime detection (Choppiness Index + ADX) switches between
-trend-following (CHOP<45, ADX>25) and mean-reversion (CHOP>55, ADX<20).
-RSI pullback entries in trends (RSI 40-60), RSI extreme entries in ranges (RSI<30/>70).
-ATR stoploss at 2.5*ATR protects capital. Position sizing: 0.25 entry, 0.125 at 2R.
-This targets all market regimes: 2021 bull (trend), 2022 crash (trend short), 2025 range (mean revert).
+Experiment #172: 4h Donchian Breakout with Daily HMA Bias and RSI Pullback
+Hypothesis: 4h timeframe captures multi-day trends while avoiding noise. 
+Donchian breakout (20-period) provides clear trend entry signals. Daily HMA 
+gives major trend bias without being overly restrictive. RSI pullback (40-60 
+range) allows entries on retracements within trends. This combination should 
+work in both 2021-2024 bull/bear cycles and 2025 consolidation. Entry conditions 
+are deliberately loosened (RSI 35/65 instead of 30/70) to ensure sufficient 
+trades. ATR stoploss at 2.5*ATR with trailing. Position sizing: 0.25 entry, 
+0.125 half-size at 2R profit. Discrete levels minimize fee churn.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_regime_4h_12h_hma_rsi_chop_adx_v1"
-timeframe = "1h"
+name = "mtf_4h_donchian_daily_hma_rsi_pullback_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -48,8 +50,15 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high / lowest low over period)."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2
+    return upper, lower, mid
+
 def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
+    """Calculate ADX for trend strength."""
     high_s = pd.Series(high)
     low_s = pd.Series(low)
     close_s = pd.Series(close)
@@ -57,92 +66,54 @@ def calculate_adx(high, low, close, period=14):
     plus_dm = high_s.diff()
     minus_dm = -low_s.diff()
     
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0.0)
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr1 = high_s - low_s
+    tr2 = np.abs(high_s - close_s.shift(1))
+    tr3 = np.abs(low_s - close_s.shift(1))
+    tr = np.maximum(tr1.values, np.maximum(tr2.values, tr3.values))
     
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.where(atr > 0, atr, 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.where(atr > 0, atr, 1e-10)
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean() / atr
     
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) > 0, (plus_di + minus_di), 1e-10)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    return adx, plus_di, minus_di
+    return adx.values, plus_di.values, minus_di.values
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market (mean reversion)
-    CHOP < 38.2 = trending market (trend following)
-    """
-    atr = calculate_atr(high, low, close, period)
-    
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    range_hl = highest_high - lowest_low
-    range_hl = np.where(range_hl > 0, range_hl, 1e-10)
-    
-    atr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
-    chop = 100 * np.log10(atr_sum / (range_hl * period))
-    chop = np.where(np.isnan(chop), 50.0, chop)
-    chop = np.clip(chop, 0, 100)
-    
-    return chop
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator."""
-    atr = calculate_atr(high, low, close, period)
-    
-    hl2 = (high + low) / 2.0
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.zeros(len(close))
-    trend = np.ones(len(close))  # 1 = bullish, -1 = bearish
-    
-    supertrend[0] = lower_band[0]
-    
-    for i in range(1, len(close)):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-            trend[i] = 1
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-            trend[i] = -1
-    
-    return supertrend, trend
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs moving average."""
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)
+    return vol_ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_12h = calculate_hma(df_12h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    chop = calculate_choppiness(high, low, close, 14)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, 20)
     adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
-    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
+    vol_ratio = calculate_volume_ratio(volume, 20)
+    
+    # Calculate HMA for trend
     hma_20 = calculate_hma(close, 20)
     hma_50 = calculate_hma(close, 50)
     
@@ -159,74 +130,69 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filters
-        hma_4h_valid = hma_4h_aligned[i] > 0
-        hma_12h_valid = hma_12h_aligned[i] > 0
+        # HTF trend bias (soft filter, not hard requirement)
+        daily_bullish = hma_1d_aligned[i] > 0 and close[i] > hma_1d_aligned[i]
+        daily_bearish = hma_1d_aligned[i] > 0 and close[i] < hma_1d_aligned[i]
         
-        four_hour_bullish = hma_4h_valid and close[i] > hma_4h_aligned[i]
-        four_hour_bearish = hma_4h_valid and close[i] < hma_4h_aligned[i]
-        twelve_hour_bullish = hma_12h_valid and close[i] > hma_12h_aligned[i]
-        twelve_hour_bearish = hma_12h_valid and close[i] < hma_12h_aligned[i]
+        # 4h trend
+        trend_bullish = hma_20[i] > hma_50[i]
+        trend_bearish = hma_20[i] < hma_50[i]
         
-        # Regime detection
-        is_ranging = chop[i] > 55.0 and adx[i] < 25.0
-        is_trending = chop[i] < 45.0 and adx[i] > 20.0
+        # Donchian breakout signals
+        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
+        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
         
-        # 1h trend
-        trend_bullish = hma_20[i] > hma_50[i] and st_trend[i] == 1
-        trend_bearish = hma_20[i] < hma_50[i] and st_trend[i] == -1
+        # Donchian pullback (price near mid after breakout)
+        pullback_long = (close[i] < donchian_mid[i] and 
+                        close[i] > donchian_lower[i] and
+                        trend_bullish)
+        pullback_short = (close[i] > donchian_mid[i] and 
+                         close[i] < donchian_upper[i] and
+                         trend_bearish)
         
-        # RSI signals
-        rsi_oversold = rsi[i] < 35.0
-        rsi_overbought = rsi[i] > 65.0
-        rsi_neutral_low = 35.0 <= rsi[i] <= 45.0
-        rsi_neutral_high = 55.0 <= rsi[i] <= 65.0
+        # RSI signals (loosened for more trades)
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
+        rsi_neutral_long = 35 < rsi[i] < 55
+        rsi_neutral_short = 45 < rsi[i] < 65
         rsi_rising = rsi[i] > rsi[i-2] if i > 2 else False
         rsi_falling = rsi[i] < rsi[i-2] if i > 2 else False
         
+        # ADX trend strength
+        trend_strong = adx[i] > 20
+        trend_weak = adx[i] < 25
+        
+        # Volume confirmation
+        volume_confirmed = vol_ratio[i] > 1.0
+        
         new_signal = 0.0
         
-        # === MEAN REVERSION MODE (ranging market) ===
-        if is_ranging:
-            # Long: RSI oversold + price below 4h HMA support
-            if rsi_oversold and rsi_rising:
-                if not twelve_hour_bearish:
+        # === DONCHIAN BREAKOUT MODE ===
+        if breakout_long:
+            if daily_bullish or (trend_bullish and rsi_neutral_long):
+                if volume_confirmed or trend_strong:
                     new_signal = SIZE_ENTRY
-            
-            # Short: RSI overbought + price above 4h HMA resistance
-            elif rsi_overbought and rsi_falling:
-                if not twelve_hour_bullish:
+        
+        elif breakout_short:
+            if daily_bearish or (trend_bearish and rsi_neutral_short):
+                if volume_confirmed or trend_strong:
                     new_signal = -SIZE_ENTRY
         
-        # === TREND FOLLOWING MODE (trending market) ===
-        elif is_trending:
-            # Long: Trend bullish + RSI pullback + 4h/12h bullish
-            if trend_bullish and rsi_neutral_low and rsi_rising:
-                if four_hour_bullish or twelve_hour_bullish:
-                    new_signal = SIZE_ENTRY
-            
-            # Short: Trend bearish + RSI pullback + 4h/12h bearish
-            elif trend_bearish and rsi_neutral_high and rsi_falling:
-                if four_hour_bearish or twelve_hour_bearish:
-                    new_signal = -SIZE_ENTRY
-            
-            # Supertrend continuation
-            elif st_trend[i] == 1 and st_trend[i-1] == -1:
-                if four_hour_bullish:
-                    new_signal = SIZE_ENTRY
-            elif st_trend[i] == -1 and st_trend[i-1] == 1:
-                if four_hour_bearish:
-                    new_signal = -SIZE_ENTRY
+        # === PULLBACK ENTRY MODE (more frequent trades) ===
+        elif pullback_long:
+            if rsi_rising and (daily_bullish or not daily_bearish):
+                new_signal = SIZE_ENTRY
         
-        # === TRANSITION MODE (unclear regime) ===
-        else:
-            # Only enter on strong HTF confirmation
-            if trend_bullish and four_hour_bullish and twelve_hour_bullish:
-                if rsi[i] < 50 and rsi_rising:
-                    new_signal = SIZE_ENTRY
-            elif trend_bearish and four_hour_bearish and twelve_hour_bearish:
-                if rsi[i] > 50 and rsi_falling:
-                    new_signal = -SIZE_ENTRY
+        elif pullback_short:
+            if rsi_falling and (daily_bearish or not daily_bullish):
+                new_signal = -SIZE_ENTRY
+        
+        # === RSI MEAN REVERSION (when no trend) ===
+        elif trend_weak:
+            if rsi_oversold and close[i] > donchian_lower[i]:
+                new_signal = SIZE_ENTRY
+            elif rsi_overbought and close[i] < donchian_upper[i]:
+                new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
