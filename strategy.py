@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #007 - MACD Momentum with 4h Supertrend Filter (1h Primary)
+EXPERIMENT #008 - Donchian Breakout with RSI Pullback (30m Primary, 4h+1d HTF)
 ==================================================================================================
-Hypothesis: Current best (Sharpe=0.537) uses 4h+1d with HMA+RSI. This uses 1h+4h with MACD+Supertrend.
-MACD histogram momentum captures trend acceleration better than RSI pullback alone.
-4h Supertrend provides cleaner trend filter than Daily HMA (less lag than 1d).
-1h primary gives more trade opportunities than 4h while maintaining signal quality.
+Hypothesis: Current best uses 4h+1d with HMA+RSI (Sharpe=0.537). This uses 30m+4h+1d with
+Donchian channels + RSI pullback + volume confirmation. Donchian breakouts capture momentum
+better than HMA crossovers, and 30m primary gives 2x more trade opportunities than 1h.
 
 Key innovations:
-1. 1h PRIMARY + 4h HTF: More trades than 4h strategies, cleaner than 15m/30m
-2. MACD histogram: Captures momentum acceleration (not just crossover)
-3. 4h Supertrend: Proven trend filter with ATR-based stops built-in
-4. Z-score filter: Avoids mean-reversion traps when price is >2σ from mean
-5. RSI confirmation: Ensures we're not entering at extremes
+1. 30m PRIMARY (not 1h): More entry opportunities, captures intraday momentum
+2. 4h Donchian(20): Clean breakout-based trend filter (not MA lag)
+3. 1d SMA(50): Regime filter - only long in bull market, short in bear
+4. Volume confirmation: Avoid fake breakouts (volume > 20-period average)
+5. RSI pullback entry: Enter on pullback within trend, not at breakout extreme
 
 Why this should beat #005 (Sharpe=0.537):
-- 1h timeframe captures more momentum moves than 4h
-- MACD histogram leads price better than HMA crossover
-- 4h Supertrend is more responsive than Daily HMA for trend changes
-- Z-score filter avoids buying tops/selling bottoms
+- 30m timeframe = 2x more signals than 1h strategies
+- Donchian channels = cleaner trend detection than HMA (no whipsaw in ranges)
+- Daily regime filter = avoids counter-trend trades in strong markets
+- Volume filter = reduces false breakouts significantly
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "macd_supertrend_zscore_mtf_1h_4h_v1"
-timeframe = "1h"
+name = "donchian_rsi_volume_mtf_30m_4h_1d_v1"
+timeframe = "30m"
 leverage = 1.0
 
 
@@ -53,25 +52,25 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
+def calculate_donchian(high, low, period=20):
     """
-    MACD indicator
-    Returns: macd_line, signal_line, histogram
+    Donchian Channel - returns upper band, lower band, and mid line
+    Trend direction: price above mid = uptrend, below mid = downtrend
     """
-    n = len(close)
-    if n < slow + signal:
+    n = len(high)
+    if n < period:
         return np.zeros(n), np.zeros(n), np.zeros(n)
     
-    close_series = pd.Series(close)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
     
-    ema_fast = close_series.ewm(span=fast, adjust=False, min_periods=fast).mean()
-    ema_slow = close_series.ewm(span=slow, adjust=False, min_periods=slow).mean()
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    macd_line = (ema_fast - ema_slow).values
-    signal_line = pd.Series(macd_line).ewm(span=signal, adjust=False, min_periods=signal).mean().values
-    histogram = macd_line - signal_line
+    mid = (upper + lower) / 2
     
-    return macd_line, signal_line, histogram
+    return upper, lower, mid
 
 
 def calculate_rsi(close, period=14):
@@ -96,87 +95,37 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_supertrend(high, low, close, atr, multiplier=3.0):
-    """
-    Supertrend indicator - trend following with ATR-based stops
-    Returns: supertrend_values, trend_direction (1=up, -1=down)
-    """
-    n = len(close)
-    if n < len(atr) or len(atr) == 0:
-        return np.zeros(n), np.zeros(n)
-    
-    supertrend = np.zeros(n)
-    trend = np.zeros(n)
-    
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
-    
-    for i in range(n):
-        if atr[i] == 0:
-            continue
-        upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
-        lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
-    
-    first_valid = np.where(atr > 0)[0]
-    if len(first_valid) == 0:
-        return supertrend, trend
-    
-    start_idx = first_valid[0]
-    supertrend[start_idx] = upper_band[start_idx]
-    trend[start_idx] = 1
-    
-    for i in range(start_idx + 1, n):
-        if atr[i] == 0:
-            supertrend[i] = supertrend[i - 1]
-            trend[i] = trend[i - 1]
-            continue
-        
-        if trend[i - 1] == 1:
-            if close[i] > lower_band[i]:
-                supertrend[i] = max(supertrend[i - 1], lower_band[i])
-                trend[i] = 1
-            else:
-                supertrend[i] = upper_band[i]
-                trend[i] = -1
-        else:
-            if close[i] < upper_band[i]:
-                supertrend[i] = min(supertrend[i - 1], upper_band[i])
-                trend[i] = -1
-            else:
-                supertrend[i] = lower_band[i]
-                trend[i] = 1
-    
-    return supertrend, trend
-
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized price deviation from mean)"""
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average"""
     n = len(close)
     if n < period:
         return np.zeros(n)
     
-    close_series = pd.Series(close)
-    rolling_mean = close_series.rolling(window=period, min_periods=period).mean().values
-    rolling_std = close_series.rolling(window=period, min_periods=period).std().values
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
+
+
+def calculate_volume_sma(volume, period=20):
+    """Calculate volume moving average"""
+    n = len(volume)
+    if n < period:
+        return np.zeros(n)
     
-    zscore = np.zeros(n)
-    mask = rolling_std > 0
-    zscore[mask] = (close[mask] - rolling_mean[mask]) / rolling_std[mask]
-    
-    return zscore
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # ========== 1h INDICATORS (PRIMARY TIMEFRAME) ==========
-    atr_1h = calculate_atr(high, low, close, period=14)
-    rsi_1h = calculate_rsi(close, period=14)
-    macd_1h, macd_signal_1h, macd_hist_1h = calculate_macd(close, fast=12, slow=26, signal=9)
-    zscore_1h = calculate_zscore(close, period=20)
+    # ========== 30m INDICATORS (PRIMARY TIMEFRAME) ==========
+    atr_30m = calculate_atr(high, low, close, period=14)
+    rsi_30m = calculate_rsi(close, period=14)
+    vol_sma_30m = calculate_volume_sma(volume, period=20)
     
     # ========== 4h INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
@@ -185,42 +134,55 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         high_4h = df_4h['high'].values
         low_4h = df_4h['low'].values
         
-        # 4h ATR and Supertrend for trend direction
-        atr_4h = calculate_atr(high_4h, low_4h, close_4h, period=14)
-        _, st_trend_4h = calculate_supertrend(high_4h, low_4h, close_4h, atr_4h, multiplier=3.0)
+        # 4h Donchian channel for trend direction
+        _, lower_4h, mid_4h = calculate_donchian(high_4h, low_4h, period=20)
         
-        # 4h MACD for momentum confirmation
-        macd_4h, _, macd_hist_4h = calculate_macd(close_4h, fast=12, slow=26, signal=9)
+        # 4h RSI for momentum confirmation
+        rsi_4h = calculate_rsi(close_4h, period=14)
         
-        # Align to 1h timeframe (auto shift for completed bars)
-        st_trend_4h_aligned = align_htf_to_ltf(prices, df_4h, st_trend_4h)
-        macd_hist_4h_aligned = align_htf_to_ltf(prices, df_4h, macd_hist_4h)
+        # Align to 30m timeframe (auto shift for completed bars)
+        mid_4h_aligned = align_htf_to_ltf(prices, df_4h, mid_4h)
+        rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
         
     except Exception:
-        st_trend_4h_aligned = np.zeros(n)
-        macd_hist_4h_aligned = np.zeros(n)
+        mid_4h_aligned = np.zeros(n)
+        rsi_4h_aligned = np.zeros(n)
+    
+    # ========== 1d INDICATORS (REGIME FILTER) - PROPER MTF ==========
+    try:
+        df_1d = get_htf_data(prices, '1d')
+        close_1d = df_1d['close'].values
+        
+        # Daily SMA(50) for bull/bear regime
+        sma_1d = calculate_sma(close_1d, period=50)
+        
+        # Align to 30m timeframe
+        sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+        
+    except Exception:
+        sma_1d_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
     
     # Position sizing - CONSERVATIVE
-    SIZE_BASE = 0.20   # Base position
-    SIZE_HIGH = 0.30   # High conviction
+    SIZE_BASE = 0.20   # Base position (20% of capital)
+    SIZE_HIGH = 0.30   # High conviction (30% of capital)
     
     # ATR stoploss
-    ATR_STOP_MULT = 2.0
+    ATR_STOP_MULT = 2.5  # Wider stop for 30m noise
     
-    # RSI zones
+    # RSI zones for pullback entries
     RSI_LONG_MIN = 35
-    RSI_LONG_MAX = 65
-    RSI_SHORT_MIN = 35
+    RSI_LONG_MAX = 60
+    RSI_SHORT_MIN = 40
     RSI_SHORT_MAX = 65
     
-    # Z-score filter (avoid extremes)
-    ZSCORE_MAX = 2.0
+    # Volume filter (avoid low volume breakouts)
+    VOLUME_MULT = 1.2  # Volume must be > 1.2x average
     
-    # MACD histogram threshold for momentum
-    MACD_HIST_THRESHOLD = 0.0
+    # Donchian trend threshold
+    DONCHIAN_TREND_THRESHOLD = 0.005  # 0.5% above/below mid
     
     first_valid = max(100, 50)
     
@@ -233,26 +195,35 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_1h[i]) or atr_1h[i] == 0 or np.isnan(rsi_1h[i]):
+        if np.isnan(atr_30m[i]) or atr_30m[i] == 0 or np.isnan(rsi_30m[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_1h[i]
-        rsi_val = rsi_1h[i]
-        macd_hist = macd_hist_1h[i]
-        zscore_val = zscore_1h[i]
+        atr = atr_30m[i]
+        rsi_val = rsi_30m[i]
+        vol_ratio = volume[i] / vol_sma_30m[i] if vol_sma_30m[i] > 0 else 0
         
         # 4h trend filters (MASTER FILTER)
-        st_trend_4h_val = st_trend_4h_aligned[i]
-        macd_hist_4h = macd_hist_4h_aligned[i]
+        mid_4h = mid_4h_aligned[i]
+        rsi_4h = rsi_4h_aligned[i]
         
-        # Determine 4h trend direction
+        # 1d regime filter
+        sma_1d = sma_1d_aligned[i]
+        
+        # Determine 4h trend direction from Donchian mid
         trend_4h = 0
-        if st_trend_4h_val == 1:
+        if mid_4h > 0 and price > mid_4h * (1 + DONCHIAN_TREND_THRESHOLD):
             trend_4h = 1
-        elif st_trend_4h_val == -1:
+        elif mid_4h > 0 and price < mid_4h * (1 - DONCHIAN_TREND_THRESHOLD):
             trend_4h = -1
+        
+        # Determine daily regime
+        regime_1d = 0
+        if sma_1d > 0 and price > sma_1d:
+            regime_1d = 1  # Bull market
+        elif sma_1d > 0 and price < sma_1d:
+            regime_1d = -1  # Bear market
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -273,7 +244,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.0*ATR)
+            # Stoploss check (2.5*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -347,29 +318,42 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ========== ENTRY LOGIC - MACD MOMENTUM IN TREND DIRECTION ==========
-        # LONG: 4h trend up + 1h MACD hist positive + RSI not overbought + Z-score normal
+        # ========== ENTRY LOGIC - DONCHIAN TREND + RSI PULLBACK + VOLUME ==========
+        # LONG: 4h trend up + daily bull + 30m RSI pullback + volume confirmation
         long_condition = (
             trend_4h == 1 and
-            macd_hist > MACD_HIST_THRESHOLD and
+            regime_1d >= 0 and  # Bull or neutral daily
             rsi_val >= RSI_LONG_MIN and rsi_val <= RSI_LONG_MAX and
-            abs(zscore_val) <= ZSCORE_MAX and
-            macd_hist_4h > 0  # 4h momentum confirms
+            vol_ratio >= VOLUME_MULT and
+            rsi_4h > 45 and  # 4h momentum not oversold
+            price > mid_4h  # Price above 4h Donchian mid
         )
         
-        # SHORT: 4h trend down + 1h MACD hist negative + RSI not oversold + Z-score normal
+        # SHORT: 4h trend down + daily bear + 30m RSI pullback + volume confirmation
         short_condition = (
             trend_4h == -1 and
-            macd_hist < -MACD_HIST_THRESHOLD and
+            regime_1d <= 0 and  # Bear or neutral daily
             rsi_val >= RSI_SHORT_MIN and rsi_val <= RSI_SHORT_MAX and
-            abs(zscore_val) <= ZSCORE_MAX and
-            macd_hist_4h < 0  # 4h momentum confirms
+            vol_ratio >= VOLUME_MULT and
+            rsi_4h < 55 and  # 4h momentum not overbought
+            price < mid_4h  # Price below 4h Donchian mid
         )
         
         # Determine position size based on conviction
-        # High conviction: MACD histogram strong + 4h trend strong
-        high_conviction_long = long_condition and macd_hist > macd_hist_4h * 0.5
-        high_conviction_short = short_condition and macd_hist < macd_hist_4h * 0.5
+        # High conviction: All filters aligned strongly
+        high_conviction_long = (
+            long_condition and
+            regime_1d == 1 and  # Strong bull daily
+            rsi_4h > 50 and  # 4h momentum bullish
+            vol_ratio > 1.5  # Strong volume
+        )
+        
+        high_conviction_short = (
+            short_condition and
+            regime_1d == -1 and  # Strong bear daily
+            rsi_4h < 50 and  # 4h momentum bearish
+            vol_ratio > 1.5  # Strong volume
+        )
         
         if long_condition:
             size = SIZE_HIGH if high_conviction_long else SIZE_BASE
