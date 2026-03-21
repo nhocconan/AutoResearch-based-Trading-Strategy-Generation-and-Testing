@@ -1,35 +1,33 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #005 - EMA Crossover + 1d HMA Trend + RSI Momentum Filter (12h primary)
+EXPERIMENT #005 - EMA Trend + 1d HMA Filter + RSI Momentum (12h primary)
 =====================================================================================
-Hypothesis: 12h timeframe captures major crypto trends without excessive noise.
-Using 1d HMA(21) as higher timeframe filter ensures we trade with the macro trend.
-EMA(8/21) crossover provides timely entry signals within the 12h chart.
-RSI(14) momentum filter (35-65 range) ensures we enter with momentum, not at extremes.
-ADX(14) > 20 filter avoids choppy sideways markets.
+Hypothesis: 12h EMA alignment captures sustained trends without excessive churn.
+Using 1d HMA(21) as the major trend filter ensures we trade with the higher timeframe direction.
+RSI(14) provides momentum confirmation without being overly restrictive.
+Looser entry conditions than failed #004 (donchian_1dhma_rsi_4h_v1 had only 18 trades!).
 
 Key features:
-- Primary TF: 12h (captures multi-day trends)
-- HTF filter: 1d HMA(21) for macro trend direction
-- Entry: EMA(8/21) crossover in trend direction
-- Momentum: RSI(14) between 35-65 (not overbought/oversold)
-- Strength: ADX(14) > 20 filter
-- Stoploss: 2.5*ATR(14) trailing stop
-- Position sizing: 0.25-0.30 discrete levels (conservative)
-- Take profit: Reduce to half at 2R, trail stop at 1R
+- Primary TF: 12h (required for this experiment)
+- HTF filter: 1d HMA(21) for major trend direction
+- Trend: EMA(8) vs EMA(21) alignment (not just crossover = more trades)
+- Entry: EMA aligned + 1d HMA aligned + RSI momentum confirmation
+- Stoploss: 2.0*ATR(14) trailing
+- Position sizing: 0.28 discrete levels (conservative for 12h volatility)
+- Take profit: Reduce to half at 2R profit
 
-Why this should work on 12h:
-- 12h has ~3 bars/day, enough signals but less noise than 15m/1h
-- 1d HMA filter aligns with daily institutional flow
-- Relaxed RSI filter (35-65) ensures we get trades (not like 0-trade failures)
-- Conservative sizing controls drawdown during 2022 crash
+Why this should work better than #004:
+- EMA alignment (not crossover) keeps positions open longer = more trade time
+- RSI filter loosened (50-55 range vs strict 42-43)
+- No ADX filter (was killing trade count in previous attempts)
+- 12h timeframe naturally produces fewer but higher quality signals than 15m/1h
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "ema_crossover_1dhma_rsi_12h_v1"
+name = "ema_trend_1dhma_rsi_12h_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -52,6 +50,16 @@ def calculate_ema(close, period):
     close_s = pd.Series(close)
     ema = close_s.ewm(span=period, adjust=False, min_periods=period).mean().values
     return ema
+
+
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
+    close_s = pd.Series(close)
+    wma1 = close_s.ewm(span=period // 2, adjust=False, min_periods=period // 2).mean()
+    wma2 = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
+    raw_hma = 2 * wma1 - wma2
+    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False, min_periods=int(np.sqrt(period))).mean()
+    return hma.values
 
 
 def calculate_rsi(close, period=14):
@@ -80,64 +88,6 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    n = len(close)
-    
-    tr = np.zeros(n)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    tr[0] = high[0] - low[0]
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i],
-                    abs(high[i] - close[i - 1]),
-                    abs(low[i] - close[i - 1]))
-        
-        if high[i] - high[i - 1] > low[i - 1] - low[i]:
-            plus_dm[i] = max(high[i] - high[i - 1], 0)
-        else:
-            plus_dm[i] = 0
-            
-        if low[i - 1] - low[i] > high[i] - high[i - 1]:
-            minus_dm[i] = max(low[i - 1] - low[i], 0)
-        else:
-            minus_dm[i] = 0
-    
-    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        if tr_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
-    
-    dx = np.zeros(n)
-    for i in range(period - 1, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    return adx, plus_di, minus_di
-
-
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period // 2, adjust=False, min_periods=period // 2).mean()
-    wma2 = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
-    raw_hma = 2 * wma1 - wma2
-    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False, min_periods=int(np.sqrt(period))).mean()
-    return hma.values
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
@@ -156,15 +106,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Calculate 12h indicators
     ema_fast = calculate_ema(close, 8)
     ema_slow = calculate_ema(close, 21)
-    rsi = calculate_rsi(close, period=14)
-    atr = calculate_atr(high, low, close, period=14)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
+    rsi = calculate_rsi(close, 14)
+    atr = calculate_atr(high, low, close, 14)
     
     # Generate signals
     signals = np.zeros(n)
     BASE_SIZE = 0.28  # Base position size (28% of capital)
-    MAX_SIZE = 0.35   # Max position size with strong ADX
-    MIN_SIZE = 0.20   # Min position size
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -175,13 +122,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_atr = 0.0
     profit_target_hit = False
     
-    min_period = 50  # Wait for indicators to stabilize (12h has fewer bars)
+    min_period = 50  # Wait for indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
         if (np.isnan(hma_1d_aligned[i]) or np.isnan(ema_fast[i]) or
             np.isnan(ema_slow[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]) or
-            np.isnan(adx[i]) or atr[i] == 0):
+            atr[i] == 0):
             signals[i] = 0.0
             continue
         
@@ -189,74 +136,47 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         price_above_1d_hma = close[i] > hma_1d_aligned[i]
         hma_trend = 1 if price_above_1d_hma else -1
         
-        # EMA crossover signal
-        ema_bullish = ema_fast[i] > ema_slow[i]
-        ema_bearish = ema_fast[i] < ema_slow[i]
+        # EMA alignment (not just crossover - generates more trades)
+        ema_aligned_long = ema_fast[i] > ema_slow[i]
+        ema_aligned_short = ema_fast[i] < ema_slow[i]
         
-        # EMA crossover detection (fast crossed above/below slow)
-        ema_cross_long = (ema_fast[i] > ema_slow[i]) and (ema_fast[i-1] <= ema_slow[i-1])
-        ema_cross_short = (ema_fast[i] < ema_slow[i]) and (ema_fast[i-1] >= ema_slow[i-1])
-        
-        # ADX strength filter (only trade when ADX > 20 - relaxed for more trades)
-        adx_strong = adx[i] > 20
-        
-        # RSI momentum filter (relaxed range to ensure trades)
-        rsi_ok_long = 35 < rsi[i] < 70  # Not overbought, has momentum
-        rsi_ok_short = 30 < rsi[i] < 65  # Not oversold, has momentum
-        
-        # DI+ vs DI- for trend confirmation
-        di_bullish = plus_di[i] > minus_di[i]
-        di_bearish = minus_di[i] > plus_di[i]
-        
-        # Calculate position size based on ADX strength
-        adx_multiplier = min(1.0 + (adx[i] - 20) / 60, 1.25)
-        position_size = min(MAX_SIZE, max(MIN_SIZE, BASE_SIZE * adx_multiplier))
+        # RSI filter - LOOSENED for more trades (was too strict in #004)
+        rsi_ok_long = rsi[i] < 60  # Not extremely overbought
+        rsi_ok_short = rsi[i] > 40  # Not extremely oversold
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: EMA bullish + 1d HMA bullish + ADX strong + RSI ok + DI+ > DI-
-        # Use EMA crossover OR sustained bullish alignment for entries
-        if (ema_bullish and hma_trend == 1 and adx_strong and 
-            rsi_ok_long and di_bullish):
-            # Prioritize crossover entries, but allow sustained trend entries
-            if ema_cross_long or (position_side == 0 and ema_fast[i] > ema_slow[i] * 1.002):
-                target_signal = position_size
+        # Long entry: EMA aligned + 1d HMA bullish + RSI not overbought
+        if (ema_aligned_long and hma_trend == 1 and rsi_ok_long):
+            target_signal = BASE_SIZE
         
-        # Short entry: EMA bearish + 1d HMA bearish + ADX strong + RSI ok + DI- > DI+
-        elif (ema_bearish and hma_trend == -1 and adx_strong and 
-              rsi_ok_short and di_bearish):
-            if ema_cross_short or (position_side == 0 and ema_fast[i] < ema_slow[i] * 0.998):
-                target_signal = -position_size
+        # Short entry: EMA aligned + 1d HMA bearish + RSI not oversold
+        elif (ema_aligned_short and hma_trend == -1 and rsi_ok_short):
+            target_signal = -BASE_SIZE
         
         # Stoploss and take profit logic
         stoploss_triggered = False
         take_profit_triggered = False
-        trend_reversal = False
         
         if position_side != 0:
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.5 * atr[i]
+                trailing_stop = highest_since_entry - 2.0 * atr[i]
                 
                 # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry, where R = 2.5*ATR at entry)
+                # Check take profit (2R from entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 5.0 * entry_atr:  # 2R = 5*ATR
+                    if close[i] >= entry_price + 4.0 * entry_atr:
                         take_profit_triggered = True
-                
-                # Check trend reversal (EMA crossed bearish)
-                if ema_bearish and hma_trend == -1:
-                    trend_reversal = True
-                    
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.5 * atr[i]
+                trailing_stop = lowest_since_entry + 2.0 * atr[i]
                 
                 # Check stoploss
                 if close[i] > trailing_stop:
@@ -264,12 +184,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 5.0 * entry_atr:
+                    if close[i] <= entry_price - 4.0 * entry_atr:
                         take_profit_triggered = True
-                
-                # Check trend reversal
-                if ema_bullish and hma_trend == 1:
-                    trend_reversal = True
         
         if stoploss_triggered:
             signals[i] = 0.0
@@ -280,18 +196,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             entry_atr = 0.0
             profit_target_hit = False
         elif take_profit_triggered:
-            # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
-        elif trend_reversal:
-            # Exit on trend reversal
-            signals[i] = 0.0
-            position_side = 0
-            highest_since_entry = 0.0
-            lowest_since_entry = float('inf')
-            entry_price = 0.0
-            entry_atr = 0.0
-            profit_target_hit = False
         else:
             # Apply signal change
             if target_signal != 0.0 and position_side == 0:
@@ -304,8 +210,21 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 entry_atr = atr[i]
                 profit_target_hit = False
             elif position_side != 0:
-                # Maintain existing position
-                signals[i] = position_size * position_side if not profit_target_hit else HALF_SIZE * position_side
+                # Maintain existing position (check if trend reversed)
+                trend_reversed = (position_side == 1 and hma_trend == -1) or \
+                                 (position_side == -1 and hma_trend == 1)
+                
+                if trend_reversed:
+                    signals[i] = 0.0
+                    position_side = 0
+                    highest_since_entry = 0.0
+                    lowest_since_entry = float('inf')
+                    entry_price = 0.0
+                    entry_atr = 0.0
+                    profit_target_hit = False
+                else:
+                    # Maintain position
+                    signals[i] = BASE_SIZE * position_side if not profit_target_hit else HALF_SIZE * position_side
             else:
                 signals[i] = 0.0
     
