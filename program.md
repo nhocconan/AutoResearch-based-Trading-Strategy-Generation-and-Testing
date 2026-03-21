@@ -32,24 +32,22 @@ test, and improve trading strategies for BTC/ETH/SOL USDT-M perpetual futures.
 ```
 1. Generate strategy.py
 2. Validate code (no lookahead, no manual MTF, no get_htf_data in loop)
-3. Train: BTC first → Sharpe<0 or trades<5? → STOP, discard, skip ETH/SOL/test
-         BTC pass → ETH → Sharpe<0? → STOP
-         BTC pass → ETH pass → SOL → all pass? → continue
-4. Prefix look-ahead test on partial data
-5. ALL train symbols: Sharpe > 0 AND trades ≥ 5? → continue to test
-6. Test: BTC first → Sharpe<0 or trades<3? → STOP, demote to discard
-        BTC pass → ETH → SOL → ALL pass? → KEEP
-7. ONLY strategies passing ALL above get status="keep"
+3. PER-SYMBOL evaluation (BTC, ETH, SOL independently):
+   For EACH symbol:
+     a. Train backtest → Sharpe > 0, trades ≥ 5, DD > -50%?
+     b. Train FAIL → skip test for THIS symbol, move to next
+     c. Train PASS → Test backtest → Sharpe > 0, trades ≥ 3?
+     d. Test PASS → this symbol KEPT
+4. Prefix look-ahead test (if any symbol kept)
+5. Strategy KEPT if ≥1 symbol passes both train AND test
 ```
 
-### Auto-Rejection (immediate discard, no further compute)
-- ANY symbol Sharpe ≤ 0 on train → discard (early stop)
-- ANY symbol trades < 5 on train → discard
-- ANY symbol Sharpe ≤ 0 on test → discard (early stop)
-- ANY symbol trades < 3 on test → discard
-- **0 trades = ALWAYS discard** (Sharpe=0.000 with 0 trades is NOT a pass)
-- Max drawdown worse than -50% on any symbol → discard
-- DD worse than -50% → discard
+### Per-Symbol Rules
+- BTC, ETH, SOL are INDEPENDENT — different market characteristics
+- A strategy can work on ETH but not BTC — that's OK, keep it for ETH
+- Each symbol's train must pass before running its test (save compute)
+- 0 trades = ALWAYS discard (Sharpe=0.000 is NOT a pass)
+- DD worse than -50% on any symbol → discard that symbol
 
 ### Position Sizing
 - Signal value = position size. MAX 0.40. Normal: 0.20-0.30.

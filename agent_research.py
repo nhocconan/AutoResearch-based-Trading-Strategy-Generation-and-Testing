@@ -546,186 +546,125 @@ def main():
         except Exception:
             pass  # git commit failure is non-fatal
 
-        # --- Step 3: Backtest ---
-        print("  [2/4] Running backtest on train data...")
-        try:
-            bt_results = run_backtest_all(symbols, str(STRATEGY_FILE), period="train", early_discard=True)
-        except EarlyDiscardError as e:
-            print(f"  [EARLY DISCARD] {e}")
-            git_revert_strategy()
-            STRATEGY_FILE.write_text(best_strategy_code)
-            description = f"exp#{experiment_num:03d} {strategy_name} early:{str(e)[:40]}"
-            # Log partial results to results.tsv so dashboard shows activity
-            append_results(e.partial_results, "discard", description, period="train")
-            history.append({
-                "num": experiment_num, "name": strategy_name, "status": "discard",
-                "avg_sharpe": -999, "avg_return": 0, "description": f"early: {str(e)[:50]}",
-            })
-            continue
-        except Exception as e:
-            print(f"  [CRASH] Backtest error: {e}")
-            git_revert_strategy()
-            history.append({
-                "num": experiment_num, "name": strategy_name, "status": "crash",
-                "avg_sharpe": -999, "avg_return": 0, "description": str(e)[:60],
-            })
-            append_results([], "crash", str(e)[:60])
-            continue
+        # --- Step 3: Per-symbol independent evaluation ---
+        # Each symbol is evaluated independently: train → test
+        # A strategy can be kept for ETH even if BTC fails
+        print("  [2/4] Running per-symbol train+test...")
+        description = f"exp#{experiment_num:03d} {strategy_name}"
+        any_kept = False
+        all_train_results = []
+        all_test_results = []
 
-        # --- Step 3b: PREFIX LOOK-AHEAD TEST ---
-        # Run signals on partial data and verify they match full data signals
-        print("  [2b/4] Running look-ahead prefix test...")
-        try:
-            import importlib.util as _ilu
-            _spec = _ilu.spec_from_file_location("_strat_test", str(STRATEGY_FILE))
-            _mod = _ilu.module_from_spec(_spec)
-            _spec.loader.exec_module(_mod)
-
-            from prepare import load_klines, load_config as _lc
-            _cfg = _lc()
-            _test_sym = symbols[0]  # test on first symbol
-            _prices = load_klines(_test_sym, _mod.timeframe)
-            import pandas as _pd
-            _train_end = _pd.Timestamp(_cfg["data"]["train_end"], tz="UTC")
-            _prices = _prices[_prices["open_time"] <= _train_end].reset_index(drop=True)
-
-            _signals_full = _mod.generate_signals(_prices)
-            # Test at 3 checkpoints
-            _la_ok = True
-            import numpy as _np
-            for _cp in [1000, 2000, len(_prices) // 2]:
-                if _cp >= len(_prices):
-                    continue
-                _signals_partial = _mod.generate_signals(_prices.iloc[:_cp].reset_index(drop=True))
-                _diff = abs(float(_signals_partial[-1]) - float(_signals_full[_cp - 1]))
-                if _diff > 0.01:
-                    _la_ok = False
-                    print(f"  [LOOKAHEAD FAIL] Signal diff={_diff:.4f} at checkpoint {_cp}")
-                    break
-
-            if not _la_ok:
-                print(f"  [SKIP] Strategy FAILED prefix look-ahead test")
-                git_revert_strategy()
-                STRATEGY_FILE.write_text(best_strategy_code)
-                description = f"exp#{experiment_num:03d} {strategy_name} [LOOKAHEAD_PREFIX_FAIL]"
-                append_results(bt_results, "discard", description, period="train")
-                history.append({
-                    "num": experiment_num, "name": strategy_name, "status": "discard",
-                    "avg_sharpe": -999, "avg_return": 0,
-                    "description": "LOOKAHEAD prefix test failed",
-                })
-                continue
-            else:
-                print("  [OK] Prefix look-ahead test passed")
-        except Exception as _e:
-            print(f"  [WARN] Prefix test error (non-fatal): {_e}")
-
-        # --- Step 4: Evaluate ---
-        avg_sharpe = sum(r["sharpe_ratio"] for r in bt_results) / len(bt_results)
-        avg_return = sum(r["total_return_pct"] for r in bt_results) / len(bt_results)
-        avg_dd = sum(r["max_drawdown_pct"] for r in bt_results) / len(bt_results)
-        avg_trades = sum(r["num_trades"] for r in bt_results) / len(bt_results)
-
-        print(f"  [3/4] Results: Sharpe={avg_sharpe:.3f} | Return={avg_return:+.1f}% | DD={avg_dd:.1f}% | Trades={avg_trades:.0f}")
-
-        # --- Step 5: Keep or discard ---
-        # Quality gates
-        MIN_TRADES = 10
-        MAX_DD_THRESHOLD = -50.0  # reject strategies with > 50% drawdown
-
-        reject_reason = None
-        if avg_trades < MIN_TRADES:
-            reject_reason = f"too few trades ({avg_trades:.0f}, min={MIN_TRADES})"
-        elif avg_dd < MAX_DD_THRESHOLD:
-            reject_reason = f"drawdown too deep ({avg_dd:.1f}%, max={MAX_DD_THRESHOLD}%)"
-
-        if reject_reason:
-            print(f"  [4/4] ✗ REJECT ({reject_reason})")
-            git_revert_strategy()
-            STRATEGY_FILE.write_text(best_strategy_code)
-            description = f"exp#{experiment_num:03d} {strategy_name}"
-            append_results(bt_results, "discard", description, period="train")
-            history.append({
-                "num": experiment_num, "name": strategy_name, "status": "discard",
-                "avg_sharpe": avg_sharpe, "avg_return": avg_return,
-                "description": reject_reason,
-            })
-            continue
-
-        # Compute return/DD ratio (Calmar-like)
-        return_dd_ratio = abs(avg_return / avg_dd) if avg_dd < -0.1 else avg_return
-        improved_sharpe = avg_sharpe > best_sharpe
-        # Keep ANY strategy with positive Sharpe and reasonable return/DD
-        # EVERY symbol must be profitable WITH actual trades
-        all_symbols_good = all(
-            r["sharpe_ratio"] > 0 and r["num_trades"] >= 5
-            for r in bt_results
-        )
-        is_good = avg_sharpe > 0.1 and avg_trades >= 10 and all_symbols_good
-        status = "keep" if is_good else "discard"
-
-        # Save ALL strategies that pass quality gates
-        if is_good:
-            save_strategy(strategy_name)
-
-        if is_good:
-            if improved_sharpe:
-                print(f"  [4/4] ✓ KEEP+BEST (Sharpe +{avg_sharpe - best_sharpe:.3f} vs best {best_sharpe:.3f})")
-                best_sharpe = avg_sharpe
-                best_strategy_code = new_code
-            else:
-                print(f"  [4/4] ✓ KEEP (Sharpe={avg_sharpe:.3f}, Return/DD={return_dd_ratio:.1f})")
-
-            # Run test — early discard if first symbol Sharpe < 0
-            test_results = []
+        for symbol in symbols:
+            # --- Train ---
             try:
-                test_results = run_backtest_all(symbols, str(STRATEGY_FILE), period="test", early_discard=True)
-                test_sharpe = sum(r["sharpe_ratio"] for r in test_results) / len(test_results)
-                test_return = sum(r["total_return_pct"] for r in test_results) / len(test_results)
-                print(f"       Test: Sharpe={test_sharpe:.3f} | Return={test_return:+.1f}%")
+                train_result = run_backtest_all([symbol], str(STRATEGY_FILE), period="train", early_discard=False)
+                m = train_result[0]
+                sharpe = m["sharpe_ratio"]
+                trades = m["num_trades"]
+                dd = m["max_drawdown_pct"]
+                print(f"    {symbol} train: Sharpe={sharpe:+.3f} Ret={m['total_return_pct']:+.1f}% DD={dd:.1f}% T={trades}")
 
-                test_trades = sum(r["num_trades"] for r in test_results)
-                test_all_good = all(r["sharpe_ratio"] > 0 and r["num_trades"] >= 3 for r in test_results)
-                if test_sharpe < 0 or not test_all_good or test_trades < 10:
-                    reason = "Sharpe<0" if test_sharpe < 0 else "0-trade symbols" if not test_all_good else "too few trades"
-                    print(f"       DEMOTED: Test {reason}")
-                    status = "discard"
-                    git_revert_strategy()
-                    STRATEGY_FILE.write_text(best_strategy_code)
-            except EarlyDiscardError as e:
-                print(f"       Test EARLY DISCARD: {e}")
-                test_results = e.partial_results
-                status = "discard"
-                git_revert_strategy()
-                STRATEGY_FILE.write_text(best_strategy_code)
+                train_pass = sharpe > 0 and trades >= 5 and dd > -50
+                sym_status = "keep" if train_pass else "discard"
+                append_results(train_result, sym_status, description, period="train")
+                all_train_results.extend(train_result)
+
+                if not train_pass:
+                    print(f"    {symbol} → train FAIL, skip test")
+                    continue
+
+                # --- Test (only if train passed) ---
+                try:
+                    test_result = run_backtest_all([symbol], str(STRATEGY_FILE), period="test", early_discard=False)
+                    mt = test_result[0]
+                    t_sharpe = mt["sharpe_ratio"]
+                    t_trades = mt["num_trades"]
+                    print(f"    {symbol} test:  Sharpe={t_sharpe:+.3f} Ret={mt['total_return_pct']:+.1f}% T={t_trades}")
+
+                    test_pass = t_sharpe > 0 and t_trades >= 3
+                    t_status = "keep" if test_pass else "discard"
+                    append_results(test_result, t_status, description, period="test")
+                    all_test_results.extend(test_result)
+
+                    if test_pass:
+                        print(f"    {symbol} ✓ KEPT (train+test pass)")
+                        any_kept = True
+                    else:
+                        print(f"    {symbol} → test FAIL")
+
+                except Exception as e:
+                    print(f"    {symbol} test ERROR: {e}")
+
             except Exception as e:
-                print(f"       Test failed: {e}")
-                status = "discard"
-                git_revert_strategy()
-                STRATEGY_FILE.write_text(best_strategy_code)
+                print(f"    {symbol} train ERROR: {e}")
 
-            # Save doc
+        # --- Prefix look-ahead test (once, on first symbol) ---
+        if any_kept:
+            print("  [2b/4] Running look-ahead prefix test...")
+            try:
+                import importlib.util as _ilu
+                _spec = _ilu.spec_from_file_location("_strat_test", str(STRATEGY_FILE))
+                _mod = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                from prepare import load_klines, load_config as _lc
+                import pandas as _pd, numpy as _np
+                _cfg = _lc()
+                _prices = load_klines(symbols[0], _mod.timeframe)
+                _signals_full = _mod.generate_signals(_prices)
+                _la_ok = True
+                for _cp in [1000, 2000, len(_prices) // 2]:
+                    if _cp >= len(_prices): continue
+                    _sig_p = _mod.generate_signals(_prices.iloc[:_cp].reset_index(drop=True))
+                    if abs(float(_sig_p[-1]) - float(_signals_full[_cp - 1])) > 0.01:
+                        _la_ok = False
+                        print(f"  [LOOKAHEAD FAIL] at checkpoint {_cp}")
+                        break
+                if not _la_ok:
+                    print(f"  [SKIP] Look-ahead FAIL — discarding all")
+                    any_kept = False
+                else:
+                    print("  [OK] Prefix look-ahead test passed")
+            except Exception as _e:
+                print(f"  [WARN] Prefix test error: {_e}")
+
+        # Save strategy if any symbol kept
+        if any_kept:
+            save_strategy(strategy_name)
+            kept_count = sum(1 for r in all_test_results if r.get("sharpe_ratio", 0) > 0)
+            print(f"  [4/4] ✓ STRATEGY SAVED ({kept_count}/{len(symbols)} symbols pass train+test)")
+            best_strategy_code = new_code
+        else:
+            print(f"  [4/4] ✗ No symbol passed both train+test")
+            git_revert_strategy()
+            STRATEGY_FILE.write_text(best_strategy_code)
+
+        bt_results = all_train_results  # for history tracking
+        test_results = all_test_results
+        avg_sharpe = sum(r["sharpe_ratio"] for r in bt_results) / max(1, len(bt_results))
+        avg_return = sum(r["total_return_pct"] for r in bt_results) / max(1, len(bt_results))
+        status = "keep" if any_kept else "discard"
+
+        # Save doc for kept strategies
+        if any_kept:
             doc_path = DOCS_DIR / f"{strategy_name}.md"
             doc_path.parent.mkdir(parents=True, exist_ok=True)
-            test_table = ""
-            if test_results:
-                test_table = "\n## Test Results (2025+)\n| Symbol | Sharpe | Return | Max DD | Trades |\n|--------|--------|--------|--------|--------|\n"
-                test_table += "".join(
-                    f"| {r['symbol']} | {r['sharpe_ratio']:.3f} | {r['total_return_pct']:+.1f}% | {r['max_drawdown_pct']:.1f}% | {r['num_trades']} |\n"
-                    for r in test_results
-                )
             doc_path.write_text(f"""# Strategy: {strategy_name}
 
-## Status
-ACTIVE - Sharpe={avg_sharpe:.3f} | Return={avg_return:+.1f}% | DD={avg_dd:.1f}%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
 """ + "".join(
-    f"| {r['symbol']} | {r['sharpe_ratio']:.3f} | {r['total_return_pct']:+.1f}% | {r['max_drawdown_pct']:.1f}% | {r['num_trades']} |\n"
-    for r in bt_results
-) + test_table + f"""
+    f"| {r['symbol']} | {r['sharpe_ratio']:.3f} | {r['total_return_pct']:+.1f}% | {r['max_drawdown_pct']:.1f}% | {r['num_trades']} | {'PASS' if r['sharpe_ratio']>0 else 'FAIL'} |\n"
+    for r in all_train_results
+) + """
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+""" + "".join(
+    f"| {r['symbol']} | {r['sharpe_ratio']:.3f} | {r['total_return_pct']:+.1f}% | {r['max_drawdown_pct']:.1f}% | {r['num_trades']} | {'PASS' if r['sharpe_ratio']>0 else 'FAIL'} |\n"
+    for r in all_test_results
+) + f"""
 ## Code
 ```python
 {new_code}
