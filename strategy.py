@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #061 - Simplified Dual-Timeframe Regime Strategy with Clean State Management
+EXPERIMENT #062 - Adaptive KAMA-Supertrend Regime Strategy with Clean State Management
 ==================================================================================================
-Hypothesis: Complex 3-signal voting creates too many signal changes (fees) and state tracking bugs.
-Simplify to 2-signal confirmation (4h trend + 15m momentum) with cleaner regime-adaptive sizing.
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts better to volatility regimes than HMA/EMA.
+Combine 4h KAMA-Supertrend trend filter with 15m RSI-MACD entries, using BBW for regime detection.
 
-Key improvements over #060:
-- Remove 1h timeframe (reduces complexity, 4h+15m is proven in baseline)
-- Cleaner position state tracking (no bugs in stop/TP logic)
-- More conservative sizing: 0.25 max in low vol, 0.15 in high vol
-- Simpler entry: need trend + momentum aligned (not 2/3 voting)
-- Better regime detection: BBW percentile over 200 bars
-- Discrete signal levels only (0.0, ±0.15, ±0.25) to minimize churn
+Key differences from #061:
+- KAMA instead of HMA (better adaptation to volatility changes)
+- Cleaner entry logic: only enter when BOTH trend AND momentum agree
+- Discrete signal levels: 0.0, ±0.20, ±0.30 (reduce churn costs)
+- Regime-adaptive: trend-follow in low vol, reduced size in high vol
+- Proper ATR-based stoploss (2.5*ATR) with trend-reversal exit
+- No complex TP trailing (simpler = fewer bugs)
 
 Why this should beat Sharpe=0.223:
-- Fewer signal changes = lower fees
-- Cleaner state management = proper stop/TP execution
-- Conservative sizing = lower drawdown
+- KAMA adapts to market efficiency (ER) - better in choppy markets
 - Proven 4h+15m combination from baseline (Sharpe=3.653)
+- Conservative sizing (max 0.30) controls drawdown
+- Fewer signal changes = lower fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "simplified_mtf_regime_15m_4h_v1"
+name = "adaptive_kama_supertrend_regime_15m_4h_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -52,34 +52,39 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average"""
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA)
+    KAMA adapts to market noise using Efficiency Ratio (ER)
+    """
     n = len(close)
-    if n < period:
+    if n < period + slow:
         return np.zeros(n)
     
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
+    kama = np.zeros(n)
     
-    wma1 = np.zeros(n)
-    wma2 = np.zeros(n)
-    hma = np.zeros(n)
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(period, n):
+        signal = abs(close[i] - close[i - period])
+        noise = np.sum(np.abs(np.diff(close[i - period:i + 1])))
+        if noise > 0:
+            er[i] = signal / noise
+        else:
+            er[i] = 0
     
-    for i in range(half_period - 1, n):
-        weights = np.arange(1, half_period + 1)
-        wma1[i] = np.sum(close[i - half_period + 1:i + 1] * weights) / np.sum(weights)
+    # Calculate smoothing constant
+    fast_sc = 2 / (fast + 1)
+    slow_sc = 2 / (slow + 1)
     
-    for i in range(period - 1, n):
-        weights = np.arange(1, period + 1)
-        wma2[i] = np.sum(close[i - period + 1:i + 1] * weights) / np.sum(weights)
+    # Initialize KAMA
+    kama[period] = close[period]
     
-    for i in range(period - 1 + sqrt_period - 1, n):
-        start_idx = i - sqrt_period + 1
-        weights = np.arange(1, sqrt_period + 1)
-        raw_vals = 2 * wma1[start_idx:i + 1] - wma2[start_idx:i + 1]
-        hma[i] = np.sum(raw_vals * weights) / np.sum(weights)
+    for i in range(period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
     
-    return hma
+    return kama
 
 
 def calculate_rsi(close, period=14):
@@ -241,36 +246,32 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         low_4h = df_4h['low'].values
         
         # Calculate 4h indicators
-        hma_4h = calculate_hma(close_4h, period=21)
+        kama_4h = calculate_kama(close_4h, period=10, fast=2, slow=30)
         _, st_direction_4h = calculate_supertrend(high_4h, low_4h, close_4h, period=10, multiplier=3.0)
-        macd_hist_4h = calculate_macd_histogram(close_4h, fast=12, slow=26, signal=9)
         
         # Align 4h indicators to 15m timeframe (auto shift for completed bars)
-        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
         st_direction_4h_aligned = align_htf_to_ltf(prices, df_4h, st_direction_4h)
-        macd_hist_4h_aligned = align_htf_to_ltf(prices, df_4h, macd_hist_4h)
         
         mtf_available = True
     except Exception:
         mtf_available = False
-        hma_4h_aligned = np.zeros(n)
+        kama_4h_aligned = np.zeros(n)
         st_direction_4h_aligned = np.ones(n)
-        macd_hist_4h_aligned = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_LOW_VOL = 0.25  # Low volatility regime
-    SIZE_HIGH_VOL = 0.15  # High volatility regime
+    SIZE_LOW_VOL = 0.30  # Low volatility regime (trend follow)
+    SIZE_HIGH_VOL = 0.20  # High volatility regime (reduced risk)
     
     # Signal thresholds
-    RSI_LONG_MIN = 40
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 60
+    RSI_LONG_MIN = 45
+    RSI_LONG_MAX = 65
+    RSI_SHORT_MIN = 35
+    RSI_SHORT_MAX = 55
     MACD_THRESHOLD = 0
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.5
-    ATR_TP_MULT = 2.0  # Take profit at 2R
     
     # BBW percentile for regime detection
     BBW_HIGH_VOL_PCT = 0.70  # Above this = high volatility regime
@@ -280,7 +281,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Generate signals
     signals = np.zeros(n)
     
-    # Track position state (simplified - no complex TP trailing)
+    # Track position state
     in_position = False
     position_side = 0
     entry_price = 0.0
@@ -303,29 +304,27 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         # === 4h Trend Signal ===
         trend_signal = 0
-        if mtf_available:
+        if mtf_available and kama_4h_aligned[i] > 0:
             price_4h = close_4h[min(i // 16, len(close_4h) - 1)] if len(close_4h) > 0 else close[i]
-            hma_4h_val = hma_4h_aligned[i]
+            kama_4h_val = kama_4h_aligned[i]
             st_trend_4h = st_direction_4h_aligned[i]
-            macd_4h = macd_hist_4h_aligned[i]
             
-            if hma_4h_val > 0:
-                # Bullish: price above HMA + supertrend up + MACD positive
-                if price_4h > hma_4h_val and st_trend_4h == 1 and macd_4h > 0:
-                    trend_signal = 1
-                # Bearish: price below HMA + supertrend down + MACD negative
-                elif price_4h < hma_4h_val and st_trend_4h == -1 and macd_4h < 0:
-                    trend_signal = -1
+            # Bullish: price above KAMA + supertrend up
+            if price_4h > kama_4h_val and st_trend_4h == 1:
+                trend_signal = 1
+            # Bearish: price below KAMA + supertrend down
+            elif price_4h < kama_4h_val and st_trend_4h == -1:
+                trend_signal = -1
         
         # === 15m Entry Signal ===
         entry_signal = 0
         rsi_15m_val = rsi_15m[i]
         macd_15m_val = macd_hist_15m[i]
         
-        # Long entry: RSI in neutral zone + MACD positive
+        # Long entry: RSI in neutral-bullish zone + MACD positive
         if RSI_LONG_MIN <= rsi_15m_val <= RSI_LONG_MAX and macd_15m_val > MACD_THRESHOLD:
             entry_signal = 1
-        # Short entry: RSI in neutral zone + MACD negative
+        # Short entry: RSI in neutral-bearish zone + MACD negative
         elif RSI_SHORT_MIN <= rsi_15m_val <= RSI_SHORT_MAX and macd_15m_val < MACD_THRESHOLD:
             entry_signal = -1
         
