@@ -1,36 +1,30 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #039 - HMA Trend + RSI Pullback + Volume + HTF Filter (1h primary, 4h/12h HTF)
-=========================================================================================
-Hypothesis: 1h HMA crossover provides responsive trend signals, but needs HTF confirmation
-to avoid whipsaws. 4h HMA(50) filters major trend direction. RSI(14) pullback to 45-55 zone
-provides better entry timing than breakouts. Volume confirmation ensures genuine moves.
-Bollinger Band Width regime filter avoids low-volatility chop where trends fail.
+EXPERIMENT #040 - HMA Trend + ADX Strength + RSI Entry (4h primary, 1d HTF)
+================================================================================
+Hypothesis: 4h HMA crossover identifies trend direction faster than EMA, ADX(14)
+filters out choppy markets (ADX > 25), and RSI pullback entries (40-60 zone) 
+provide better timing than breakouts. 1d HMA(50) ensures we trade with the 
+major trend. This differs from failed supertrend/KAMA strategies by using 
+HMA's faster response + ADX regime filter to avoid whipsaws in sideways markets.
 
 Key features:
-- Primary TF: 1h (required for this experiment)
-- HTF filter: 4h HMA(50) + 12h HMA(50) for dual trend alignment
-- Trend: 1h HMA(21) vs HMA(48) crossover
-- Entry: RSI(14) pullback to 45-55 zone in trend direction
-- Volume: Current volume > 1.2 * 20-period average
-- Regime: BB Width > 40th percentile (trending market)
+- Primary TF: 4h (as required for experiment #040)
+- HTF filter: 1d HMA(50) for major trend direction
+- Trend: HMA(21) vs HMA(48) crossover on 4h
+- Strength: ADX(14) > 25 (trending market only)
+- Entry: RSI(14) pullback to 40-60 zone in trend direction
 - Stoploss: 2.5*ATR(14) trailing
 - Position sizing: 0.25-0.30 discrete levels
-- Take profit: Reduce to half at 2R profit, trail stop at 1R
-
-Why this differs from failures:
-- Dual HTF filter (4h + 12h) reduces false signals vs single HTF
-- RSI pullback (not extremes) avoids chasing overbought/oversold
-- Volume confirmation filters low-conviction moves
-- Conservative sizing (0.28 max) controls drawdown
+- Take profit: Reduce to half at 2R profit
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "hma_rsi_vol_dualhtf_1h_4h_12h_v1"
-timeframe = "1h"
+name = "hma_adx_rsi_4h_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 
@@ -70,70 +64,69 @@ def calculate_rsi(close, period=14):
     return rsi.values
 
 
-def calculate_bollinger_bands(close, period=20, std_dev=2):
-    """Calculate Bollinger Bands and Band Width"""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    band_width = (upper - lower) / sma
-    return upper.values, lower.values, band_width.values
-
-
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs moving average"""
-    vol_s = pd.Series(volume)
-    vol_ma = vol_s.rolling(window=period, min_periods=period).mean()
-    vol_ratio = vol_s / (vol_ma + 1e-10)
-    return vol_ratio.values
-
-
-def calculate_percentile_rank(series, window=100):
-    """Calculate rolling percentile rank"""
-    n = len(series)
-    pr = np.zeros(n)
-    pr[:] = np.nan
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
     
-    for i in range(window - 1, n):
-        if not np.isnan(series[i]):
-            window_data = series[i - window + 1:i + 1]
-            window_data = window_data[~np.isnan(window_data)]
-            if len(window_data) > 0:
-                pr[i] = np.sum(window_data <= series[i]) / len(window_data)
+    # Calculate +DM and -DM
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
     
-    return pr
+    for i in range(1, n):
+        plus_move = high[i] - high[i - 1]
+        minus_move = low[i - 1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    # Calculate TR
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i - 1]),
+                    abs(low[i] - close[i - 1]))
+    
+    # Smooth using Wilder's method (EMA with alpha = 1/period)
+    tr_s = pd.Series(tr)
+    plus_dm_s = pd.Series(plus_dm)
+    minus_dm_s = pd.Series(minus_dm)
+    
+    atr = tr_s.ewm(span=period, adjust=False, min_periods=period).mean().values
+    plus_di = (plus_dm_s.ewm(span=period, adjust=False, min_periods=period).mean().values / (atr + 1e-10)) * 100
+    minus_di = (minus_dm_s.ewm(span=period, adjust=False, min_periods=period).mean().values / (atr + 1e-10)) * 100
+    
+    # Calculate DX and ADX
+    dx = np.zeros(n)
+    for i in range(n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = abs(plus_di[i] - minus_di[i]) / di_sum * 100
+    
+    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return adx, plus_di, minus_di
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
-    volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d HTF data ONCE before loop (Rule 1)
+    df_1d = get_htf_data(prices, '1d')
+    hma_1d = calculate_hma(df_1d['close'].values, 50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h HMA(50) for trend filter
-    hma_4h = calculate_hma(df_4h['close'].values, 50)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    
-    # Calculate 12h HMA(50) for major trend filter
-    hma_12h = calculate_hma(df_12h['close'].values, 50)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
-    
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     hma_21 = calculate_hma(close, 21)
     hma_48 = calculate_hma(close, 48)
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2)
-    vol_ratio = calculate_volume_ratio(volume, 20)
-    
-    # Calculate Bollinger Band Width percentile rank (regime filter)
-    bb_width_pr = calculate_percentile_rank(bb_width, 100)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
     
     # Generate signals
     signals = np.zeros(n)
@@ -146,49 +139,46 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = float('inf')
     entry_price = 0.0
     profit_target_hit = False
-    atr_at_entry = 0.0
+    entry_atr = 0.0
     
-    min_period = 150  # Wait for all indicators to stabilize
+    min_period = 100  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]) or
-            np.isnan(hma_21[i]) or np.isnan(hma_48[i]) or
-            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_width_pr[i]) or
-            np.isnan(vol_ratio[i]) or atr[i] == 0):
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(hma_21[i]) or 
+            np.isnan(hma_48[i]) or np.isnan(atr[i]) or np.isnan(rsi[i]) or 
+            np.isnan(adx[i]) or atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # HTF trend filters (dual confirmation)
-        # Price above both 4h and 12h HMA = bullish major trend
-        htf_bullish = (close[i] > hma_4h_aligned[i]) and (close[i] > hma_12h_aligned[i])
-        htf_bearish = (close[i] < hma_4h_aligned[i]) and (close[i] < hma_12h_aligned[i])
+        # Daily trend filter (HTF) - price above/below 1d HMA(50)
+        daily_trend = 1 if close[i] > hma_1d_aligned[i] else -1
         
-        # 1h HMA crossover trend
-        hma_crossover_bullish = hma_21[i] > hma_48[i]
-        hma_crossover_bearish = hma_21[i] < hma_48[i]
+        # 4h HMA crossover trend
+        hma_trend = 1 if hma_21[i] > hma_48[i] else -1
         
-        # Regime filter: only trade when BB Width is in top 60% (trending market)
-        regime_valid = bb_width_pr[i] > 0.40
+        # ADX strength filter - only trade when ADX > 25 (trending market)
+        trend_strong = adx[i] > 25
         
-        # Volume confirmation: volume > 1.2 * 20-period average
-        volume_confirmed = vol_ratio[i] > 1.2
+        # RSI pullback zone (40-60 for entry timing, avoiding extremes)
+        rsi_valid_long = 40 <= rsi[i] <= 65
+        rsi_valid_short = 35 <= rsi[i] <= 60
         
-        # RSI pullback zone (45-55 for entry timing - not extremes)
-        rsi_pullback_long = 45 <= rsi[i] <= 55
-        rsi_pullback_short = 45 <= rsi[i] <= 55
+        # DI confirmation
+        di_bullish = plus_di[i] > minus_di[i]
+        di_bearish = minus_di[i] > plus_di[i]
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: All filters aligned bullish + RSI pullback
-        if (htf_bullish and hma_crossover_bullish and 
-            rsi_pullback_long and regime_valid and volume_confirmed):
+        # Long entry: HMA bullish + Daily trend bullish + ADX strong + RSI valid + DI bullish
+        if (hma_trend == 1 and daily_trend == 1 and trend_strong and 
+            rsi_valid_long and di_bullish):
             target_signal = SIZE
         
-        # Short entry: All filters aligned bearish + RSI pullback
-        elif (htf_bearish and hma_crossover_bearish and 
-              rsi_pullback_short and regime_valid and volume_confirmed):
+        # Short entry: HMA bearish + Daily trend bearish + ADX strong + RSI valid + DI bearish
+        elif (hma_trend == -1 and daily_trend == -1 and trend_strong and 
+              rsi_valid_short and di_bearish):
             target_signal = -SIZE
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -205,9 +195,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry, where R = 2.5*ATR)
-                if not profit_target_hit:
-                    if close[i] >= entry_price + 5.0 * atr_at_entry:  # 2R = 5*ATR
+                # Check take profit (2R from entry, where R = 2.5*ATR at entry)
+                if not profit_target_hit and entry_atr > 0:
+                    if close[i] >= entry_price + 5.0 * entry_atr:  # 2R = 5*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
@@ -219,8 +209,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     stoploss_triggered = True
                 
                 # Check take profit
-                if not profit_target_hit:
-                    if close[i] <= entry_price - 5.0 * atr_at_entry:  # 2R profit
+                if not profit_target_hit and entry_atr > 0:
+                    if close[i] <= entry_price - 5.0 * entry_atr:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -230,7 +220,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry = float('inf')
             entry_price = 0.0
             profit_target_hit = False
-            atr_at_entry = 0.0
+            entry_atr = 0.0
         elif take_profit_triggered:
             # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
@@ -244,28 +234,28 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry = close[i]
                 lowest_since_entry = close[i]
                 entry_price = close[i]
-                atr_at_entry = atr[i]
                 profit_target_hit = False
+                entry_atr = atr[i]
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                if position_side == 1 and hma_crossover_bearish:
-                    # HMA crossover reversed, exit long
+                if position_side == 1 and hma_trend == -1:
+                    # Trend reversed, exit long
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
                     profit_target_hit = False
-                    atr_at_entry = 0.0
-                elif position_side == -1 and hma_crossover_bullish:
-                    # HMA crossover reversed, exit short
+                    entry_atr = 0.0
+                elif position_side == -1 and hma_trend == 1:
+                    # Trend reversed, exit short
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
                     profit_target_hit = False
-                    atr_at_entry = 0.0
+                    entry_atr = 0.0
                 else:
                     # Maintain position
                     signals[i] = SIZE * position_side if not profit_target_hit else HALF_SIZE * position_side
