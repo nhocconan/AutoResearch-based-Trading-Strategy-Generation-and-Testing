@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #093 - ENSEMBLE_VOTING_REGIME_MTF_PROPER_HTF_15M_1H_4H_V1
+EXPERIMENT #094 - KAMA_ADX_MTF_TREND_PULLBACK_15M_1H_4H_V1
 ==================================================================================================
-Hypothesis: Recent ensemble failures (#085, #086, #089, #090, #092) had massive drawdowns due to:
-1. Manual resampling instead of mtf_data helper (causes misalignment on SOL gaps)
-2. Too many signals voting (increases churn and fees)
-3. No adaptive sizing based on regime confidence
+Hypothesis: Recent ensemble failures (#086, #090, #092) had massive drawdowns due to:
+1. Complex voting logic creating whipsaws and excessive churn (fees kill returns)
+2. Position tracking bugs in stoploss/TP logic
+3. Not filtering for trend strength (trading in choppy markets)
 
-Key changes from #040:
-- USE mtf_data helper for ALL HTF data (get_htf_data + align_htf_to_ltf)
-- Simpler 3-signal ensemble: HMA + Supertrend + RSI (not 7+ indicators)
-- Regime-based sizing: 4h BBW percentile → scale position 0.20-0.35
-- 15m entries + 1h trend + 4h regime (proven multi-TF structure)
-- Discrete signal levels: 0.0, ±0.20, ±0.35 (reduce churn)
-- Proper stoploss: 2*ATR, TP: 2R→half, trail at 1R
+Key changes from #093:
+- SIMPLER signal logic: KAMA trend + ADX strength filter + RSI pullback (not 3-way voting)
+- KAMA adapts to volatility better than HMA (less whipsaw in chop)
+- ADX > 25 filter: only trade when trend is strong (skip choppy regimes)
+- Wider stoploss: 2.5*ATR (avoid premature exits from noise)
+- Higher TP: 3R (let winners run, improve win rate)
+- More conservative sizing: 0.25 max (not 0.35)
+- Cleaner position tracking (no state bugs)
 
-Why this should beat #040:
-- Proper HTF alignment (no manual resampling bugs)
-- Fewer signals = less churn = lower fees
-- Regime-adaptive sizing = better risk control in high vol
-- Based on winning pattern from #031, #034, #035 (15m + MTF filters)
+Why this should beat #093 (Sharpe=0.189):
+- ADX filter avoids trading in choppy markets (major source of losses)
+- KAMA smoother than HMA = fewer false signals
+- Simpler logic = less churn = lower fees
+- Based on winning pattern from #084 (Sharpe=0.423) which used KAMA+Supertrend
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "ensemble_voting_regime_mtf_proper_htf_15m_1h_4h_v1"
+name = "kama_adx_mtf_trend_pullback_15m_1h_4h_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -54,34 +55,105 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average"""
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average (KAMA)"""
     n = len(close)
-    if n < period:
+    if n < period + slow:
         return np.zeros(n)
     
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
+    kama = np.zeros(n)
     
-    wma1 = np.zeros(n)
-    wma2 = np.zeros(n)
-    hma = np.zeros(n)
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(period, n):
+        signal = abs(close[i] - close[i - period])
+        noise = np.sum(np.abs(np.diff(close[i - period:i + 1])))
+        if noise > 0:
+            er[i] = signal / noise
+        else:
+            er[i] = 0
     
-    for i in range(half_period - 1, n):
-        weights = np.arange(1, half_period + 1)
-        wma1[i] = np.sum(close[i - half_period + 1:i + 1] * weights) / np.sum(weights)
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
     
-    for i in range(period - 1, n):
-        weights = np.arange(1, period + 1)
-        wma2[i] = np.sum(close[i - period + 1:i + 1] * weights) / np.sum(weights)
+    # Initialize KAMA
+    kama[period] = close[period]
     
-    for i in range(period - 1 + sqrt_period - 1, n):
-        start_idx = i - sqrt_period + 1
-        weights = np.arange(1, sqrt_period + 1)
-        raw_vals = 2 * wma1[start_idx:i + 1] - wma2[start_idx:i + 1]
-        hma[i] = np.sum(raw_vals * weights) / np.sum(weights)
+    for i in range(period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
     
-    return hma
+    return kama
+
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    if n < period * 2:
+        return np.zeros(n)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+        
+        if high[i] - high[i - 1] > low[i - 1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i - 1], 0)
+        else:
+            plus_dm[i] = 0
+        
+        if low[i - 1] - low[i] > high[i] - high[i - 1]:
+            minus_dm[i] = max(low[i - 1] - low[i], 0)
+        else:
+            minus_dm[i] = 0
+    
+    # Smooth using Wilder's method
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    adx = np.zeros(n)
+    
+    # Initialize first period
+    sum_tr = np.sum(tr[1:period + 1])
+    sum_plus_dm = np.sum(plus_dm[1:period + 1])
+    sum_minus_dm = np.sum(minus_dm[1:period + 1])
+    
+    for i in range(period, n):
+        if i == period:
+            tr_smooth = sum_tr
+            plus_dm_smooth = sum_plus_dm
+            minus_dm_smooth = sum_minus_dm
+        else:
+            tr_smooth = (tr_smooth * (period - 1) + tr[i]) / period
+            plus_dm_smooth = (plus_dm_smooth * (period - 1) + plus_dm[i]) / period
+            minus_dm_smooth = (minus_dm_smooth * (period - 1) + minus_dm[i]) / period
+        
+        if tr_smooth > 0:
+            plus_di[i] = 100 * plus_dm_smooth / tr_smooth
+            minus_di[i] = 100 * minus_dm_smooth / tr_smooth
+        else:
+            plus_di[i] = 0
+            minus_di[i] = 0
+        
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+        else:
+            dx[i] = 0
+    
+    # Smooth DX to get ADX
+    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
+    for i in range(period * 2, n):
+        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+    
+    return adx
 
 
 def calculate_rsi(close, period=14):
@@ -156,46 +228,6 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     return supertrend, trend_direction
 
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    middle = np.zeros(n)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    bbw = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        middle[i] = np.mean(window)
-        std = np.std(window)
-        upper[i] = middle[i] + std_mult * std
-        lower[i] = middle[i] - std_mult * std
-        
-        if middle[i] > 0:
-            bbw[i] = (upper[i] - lower[i]) / middle[i]
-        else:
-            bbw[i] = 0
-    
-    return upper, middle, lower, bbw
-
-
-def calculate_bbw_percentile(bbw, lookback=100):
-    """Calculate BBW percentile for regime detection"""
-    n = len(bbw)
-    percentile = np.zeros(n)
-    
-    for i in range(lookback - 1, n):
-        window = bbw[i - lookback + 1:i + 1]
-        current = bbw[i]
-        rank = np.sum(window <= current)
-        percentile[i] = rank / lookback
-    
-    return percentile
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
@@ -205,9 +237,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # 15m indicators for entry timing
     atr_15m = calculate_atr(high, low, close, period=14)
     rsi_15m = calculate_rsi(close, period=14)
-    hma_15m = calculate_hma(close, period=21)
     supertrend_15m, st_direction_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     
     # Get 1h HTF data using mtf_data helper (PROPER alignment)
     try:
@@ -216,43 +246,40 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         high_1h = df_1h['high'].values
         low_1h = df_1h['low'].values
         
-        # 1h indicators
-        hma_1h_raw = calculate_hma(close_1h, period=21)
-        _, st_direction_1h_raw = calculate_supertrend(high_1h, low_1h, close_1h, period=10, multiplier=3.0)
-        rsi_1h_raw = calculate_rsi(close_1h, period=14)
+        # 1h KAMA for trend (smoother than HMA, adapts to volatility)
+        kama_1h_raw = calculate_kama(close_1h, period=10, fast=2, slow=30)
+        
+        # 1h ADX for trend strength filter
+        adx_1h_raw = calculate_adx(high_1h, low_1h, close_1h, period=14)
         
         # Align HTF indicators to LTF (auto shift(1) for completed bars)
-        hma_1h = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
-        st_direction_1h = align_htf_to_ltf(prices, df_1h, st_direction_1h_raw)
-        rsi_1h = align_htf_to_ltf(prices, df_1h, rsi_1h_raw)
+        kama_1h = align_htf_to_ltf(prices, df_1h, kama_1h_raw)
+        adx_1h = align_htf_to_ltf(prices, df_1h, adx_1h_raw)
     except Exception:
-        # Fallback if mtf_data fails
-        hma_1h = np.zeros(n)
-        st_direction_1h = np.zeros(n)
-        rsi_1h = np.zeros(n)
+        kama_1h = np.zeros(n)
+        adx_1h = np.zeros(n)
     
-    # Get 4h HTF data for regime detection (PROPER alignment)
+    # Get 4h HTF data for additional trend confirmation
     try:
         df_4h = get_htf_data(prices, '4h')
         close_4h = df_4h['close'].values
+        high_4h = df_4h['high'].values
+        low_4h = df_4h['low'].values
         
-        # 4h BBW for regime
-        _, _, _, bbw_4h_raw = calculate_bollinger_bands(close_4h, period=20, std_mult=2.0)
-        bbw_pct_4h_raw = calculate_bbw_percentile(bbw_4h_raw, lookback=100)
+        # 4h KAMA for major trend
+        kama_4h_raw = calculate_kama(close_4h, period=10, fast=2, slow=30)
         
         # Align to 15m
-        bbw_pct_4h = align_htf_to_ltf(prices, df_4h, bbw_pct_4h_raw)
+        kama_4h = align_htf_to_ltf(prices, df_4h, kama_4h_raw)
     except Exception:
-        bbw_pct_4h = np.zeros(n)
+        kama_4h = np.zeros(n)
     
-    # Generate signals with ensemble voting + regime sizing
+    # Generate signals
     signals = np.zeros(n)
     
-    # Position sizing - DISCRETE levels based on regime
-    SIZE_LOW_VOL = 0.35  # BBW percentile < 0.5 (trend regime)
-    SIZE_HIGH_VOL = 0.20  # BBW percentile >= 0.5 (choppy regime)
-    SIZE_HALF_LOW = 0.175
-    SIZE_HALF_HIGH = 0.10
+    # Position sizing - CONSERVATIVE
+    SIZE_FULL = 0.25  # Max position (25% of capital)
+    SIZE_HALF = 0.125  # Half position after TP
     
     # RSI thresholds for pullback entries
     RSI_LONG_MIN = 35
@@ -260,187 +287,190 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     RSI_SHORT_MIN = 45
     RSI_SHORT_MAX = 65
     
-    # ATR stoploss multiplier
-    ATR_STOP_MULT = 2.0
+    # ATR stoploss/take profit multipliers
+    ATR_STOP_MULT = 2.5  # Wider stop to avoid noise
+    ATR_TP_MULT = 3.0  # Let winners run (3R)
     
-    first_valid = max(200, 14 * 2, 20, 100)
+    # ADX threshold for trend strength
+    ADX_MIN = 25  # Only trade when trend is strong
+    
+    first_valid = max(200, 14 * 3, 30)
     
     # Track position state
+    in_position = np.zeros(n, dtype=bool)
     position_side = np.zeros(n)
     entry_price = np.zeros(n)
-    tp_triggered = np.zeros(n)
+    tp_triggered = np.zeros(n, dtype=bool)
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
+        # Validate data
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] <= 0:
             signals[i] = 0.0
+            in_position[i] = False
+            position_side[i] = 0
             continue
         
-        # Get regime-based position size
-        regime_pct = bbw_pct_4h[i] if bbw_pct_4h[i] > 0 else 0.5
-        if regime_pct < 0.5:
-            size_full = SIZE_LOW_VOL
-            size_half = SIZE_HALF_LOW
-        else:
-            size_full = SIZE_HIGH_VOL
-            size_half = SIZE_HALF_HIGH
+        # Get 1h trend from KAMA
+        kama_trend_1h = 0
+        if kama_1h[i] > 0 and not np.isnan(kama_1h[i]):
+            if close[i] > kama_1h[i]:
+                kama_trend_1h = 1
+            elif close[i] < kama_1h[i]:
+                kama_trend_1h = -1
         
-        # 1h trend filters (using aligned HTF data)
-        hma_trend_1h = 0
-        if hma_1h[i] > 0:
-            if close[i] > hma_1h[i]:
-                hma_trend_1h = 1
-            elif close[i] < hma_1h[i]:
-                hma_trend_1h = -1
+        # Get 4h trend from KAMA
+        kama_trend_4h = 0
+        if kama_4h[i] > 0 and not np.isnan(kama_4h[i]):
+            if close[i] > kama_4h[i]:
+                kama_trend_4h = 1
+            elif close[i] < kama_4h[i]:
+                kama_trend_4h = -1
         
-        st_trend_1h = st_direction_1h[i] if st_direction_1h[i] != 0 else 0
-        rsi_1h_val = rsi_1h[i] if rsi_1h[i] > 0 else 50
+        # Get ADX for trend strength
+        adx_val = adx_1h[i] if adx_1h[i] > 0 and not np.isnan(adx_1h[i]) else 0
         
-        # 15m entry signals
+        # Get 15m Supertrend for entry timing
         st_trend_15m = st_direction_15m[i]
         rsi_15m_val = rsi_15m[i]
         
-        # Check stoploss and take profit for existing positions
-        if position_side[i - 1] != 0:
+        # Check existing position for exits
+        if in_position[i - 1]:
             prev_side = position_side[i - 1]
-            prev_entry = entry_price[i - 1] if entry_price[i - 1] > 0 else close[i - 1]
+            prev_entry = entry_price[i - 1]
             prev_tp = tp_triggered[i - 1]
-            prev_high = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else prev_entry
-            prev_low = lowest_since_entry[i - 1] if lowest_since_entry[i - 1] > 0 else prev_entry
             
             # Update highest/lowest since entry
             if prev_side == 1:
-                current_high = max(prev_high, close[i])
-                current_low = min(prev_low, close[i]) if prev_low > 0 else close[i]
+                prev_high = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else prev_entry
+                highest_since_entry[i] = max(prev_high, high[i])
+                lowest_since_entry[i] = lowest_since_entry[i - 1] if lowest_since_entry[i - 1] > 0 else low[i]
             else:
-                current_high = max(prev_high, close[i]) if prev_high > 0 else close[i]
-                current_low = min(prev_low, close[i])
+                prev_low = lowest_since_entry[i - 1] if lowest_since_entry[i - 1] > 0 else prev_entry
+                highest_since_entry[i] = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else high[i]
+                lowest_since_entry[i] = min(prev_low, low[i])
             
-            highest_since_entry[i] = current_high
-            lowest_since_entry[i] = current_low
+            current_high = highest_since_entry[i]
+            current_low = lowest_since_entry[i]
             
-            # Stoploss check (2.0*ATR)
+            # Stoploss check (2.5*ATR)
+            exit_signal = False
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr_15m[i]
-                if close[i] < stoploss_price:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    continue
+                if low[i] < stoploss_price:
+                    exit_signal = True
                 
-                # Take profit check (2R) - reduce to half
-                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr_15m[i]
-                if not prev_tp and close[i] >= tp_price:
-                    signals[i] = size_half
-                    position_side[i] = 1
-                    entry_price[i] = prev_entry
-                    tp_triggered[i] = 1
-                    continue
-                
-                # Trail stop at 1R profit
-                if prev_tp:
-                    trail_stop = current_high - ATR_STOP_MULT * atr_15m[i]
-                    if close[i] < trail_stop:
-                        signals[i] = 0.0
-                        position_side[i] = 0
-                        entry_price[i] = 0
-                        tp_triggered[i] = 0
-                        highest_since_entry[i] = 0
-                        lowest_since_entry[i] = 0
+                # Take profit check (3R) - reduce to half
+                if not prev_tp:
+                    tp_price = prev_entry + ATR_TP_MULT * atr_15m[i]
+                    if high[i] >= tp_price:
+                        signals[i] = SIZE_HALF
+                        in_position[i] = True
+                        position_side[i] = 1
+                        entry_price[i] = prev_entry
+                        tp_triggered[i] = True
+                        highest_since_entry[i] = current_high
+                        lowest_since_entry[i] = current_low
                         continue
-                    
-            elif prev_side == -1:
+                
+                # Trail stop at 1.5R profit after TP triggered
+                if prev_tp:
+                    trail_stop = current_high - 1.5 * atr_15m[i]
+                    if low[i] < trail_stop:
+                        exit_signal = True
+            else:
                 stoploss_price = prev_entry + ATR_STOP_MULT * atr_15m[i]
-                if close[i] > stoploss_price:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    continue
+                if high[i] > stoploss_price:
+                    exit_signal = True
                 
-                # Take profit check (2R) - reduce to half
-                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr_15m[i]
-                if not prev_tp and close[i] <= tp_price:
-                    signals[i] = -size_half
-                    position_side[i] = -1
-                    entry_price[i] = prev_entry
-                    tp_triggered[i] = 1
-                    continue
-                
-                # Trail stop at 1R profit
-                if prev_tp:
-                    trail_stop = current_low + ATR_STOP_MULT * atr_15m[i]
-                    if close[i] > trail_stop:
-                        signals[i] = 0.0
-                        position_side[i] = 0
-                        entry_price[i] = 0
-                        tp_triggered[i] = 0
-                        highest_since_entry[i] = 0
-                        lowest_since_entry[i] = 0
+                # Take profit check (3R) - reduce to half
+                if not prev_tp:
+                    tp_price = prev_entry - ATR_TP_MULT * atr_15m[i]
+                    if low[i] <= tp_price:
+                        signals[i] = -SIZE_HALF
+                        in_position[i] = True
+                        position_side[i] = -1
+                        entry_price[i] = prev_entry
+                        tp_triggered[i] = True
+                        highest_since_entry[i] = current_high
+                        lowest_since_entry[i] = current_low
                         continue
+                
+                # Trail stop at 1.5R profit after TP triggered
+                if prev_tp:
+                    trail_stop = current_low + 1.5 * atr_15m[i]
+                    if high[i] > trail_stop:
+                        exit_signal = True
             
-            # Hold position if no exit triggered
-            signals[i] = signals[i - 1]
-            position_side[i] = position_side[i - 1]
-            entry_price[i] = entry_price[i - 1]
-            tp_triggered[i] = tp_triggered[i - 1]
-            highest_since_entry[i] = highest_since_entry[i - 1]
-            lowest_since_entry[i] = lowest_since_entry[i - 1]
+            if exit_signal:
+                signals[i] = 0.0
+                in_position[i] = False
+                position_side[i] = 0
+                entry_price[i] = 0
+                tp_triggered[i] = False
+                highest_since_entry[i] = 0
+                lowest_since_entry[i] = 0
+            else:
+                # Hold position
+                signals[i] = signals[i - 1]
+                in_position[i] = in_position[i - 1]
+                position_side[i] = position_side[i - 1]
+                entry_price[i] = entry_price[i - 1]
+                tp_triggered[i] = tp_triggered[i - 1]
+                highest_since_entry[i] = current_high
+                lowest_since_entry[i] = current_low
             continue
         
-        # ENSEMBLE VOTING: Need 2/3 signals to agree
-        # Signal 1: 1h HMA trend
-        # Signal 2: 1h Supertrend
-        # Signal 3: 15m RSI pullback in direction of trend
+        # ENTRY LOGIC: Need ALL conditions to agree
+        # 1. 1h KAMA trend direction
+        # 2. 4h KAMA confirms (same direction)
+        # 3. ADX > 25 (strong trend, not choppy)
+        # 4. 15m RSI pullback in trend direction
+        # 5. 15m Supertrend confirms
         
-        vote_long = 0
-        vote_short = 0
+        # Check ADX filter first (skip if trend is weak)
+        if adx_val < ADX_MIN:
+            signals[i] = 0.0
+            in_position[i] = False
+            position_side[i] = 0
+            continue
         
-        # 1h HMA trend vote
-        if hma_trend_1h == 1:
-            vote_long += 1
-        elif hma_trend_1h == -1:
-            vote_short += 1
+        # LONG entry conditions
+        long_condition = (
+            kama_trend_1h == 1 and  # 1h trend up
+            kama_trend_4h >= 0 and  # 4h trend up or neutral
+            RSI_LONG_MIN <= rsi_15m_val <= RSI_LONG_MAX and  # RSI pullback
+            st_trend_15m == 1  # Supertrend confirms
+        )
         
-        # 1h Supertrend vote
-        if st_trend_1h == 1:
-            vote_long += 1
-        elif st_trend_1h == -1:
-            vote_short += 1
+        # SHORT entry conditions
+        short_condition = (
+            kama_trend_1h == -1 and  # 1h trend down
+            kama_trend_4h <= 0 and  # 4h trend down or neutral
+            RSI_SHORT_MIN <= rsi_15m_val <= RSI_SHORT_MAX and  # RSI pullback
+            st_trend_15m == -1  # Supertrend confirms
+        )
         
-        # 15m RSI pullback vote (only if 1h trend is clear)
-        if hma_trend_1h == 1 or st_trend_1h == 1:
-            if RSI_LONG_MIN <= rsi_15m_val <= RSI_LONG_MAX:
-                vote_long += 1
-        elif hma_trend_1h == -1 or st_trend_1h == -1:
-            if RSI_SHORT_MIN <= rsi_15m_val <= RSI_SHORT_MAX:
-                vote_short += 1
-        
-        # Entry logic: Need 2/3 votes
-        if vote_long >= 2:
-            signals[i] = size_full
+        if long_condition:
+            signals[i] = SIZE_FULL
+            in_position[i] = True
             position_side[i] = 1
             entry_price[i] = close[i]
-            tp_triggered[i] = 0
-            highest_since_entry[i] = close[i]
-            lowest_since_entry[i] = close[i]
-                
-        elif vote_short >= 2:
-            signals[i] = -size_full
+            tp_triggered[i] = False
+            highest_since_entry[i] = high[i]
+            lowest_since_entry[i] = low[i]
+        elif short_condition:
+            signals[i] = -SIZE_FULL
+            in_position[i] = True
             position_side[i] = -1
             entry_price[i] = close[i]
-            tp_triggered[i] = 0
-            highest_since_entry[i] = close[i]
-            lowest_since_entry[i] = close[i]
-        
+            tp_triggered[i] = False
+            highest_since_entry[i] = high[i]
+            lowest_since_entry[i] = low[i]
         else:
             signals[i] = 0.0
+            in_position[i] = False
             position_side[i] = 0
     
     return signals
