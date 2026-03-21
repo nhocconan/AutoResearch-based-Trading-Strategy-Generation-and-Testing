@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #115: 15m Multi-Timeframe Regime-Adaptive Strategy with 4h HMA + 1h RSI + CRSI
-Hypothesis: 15m is noisy, so use 4h HMA for trend direction and 1h RSI for entry timing.
-Add Connors RSI (CRSI) for mean-reversion confirmation and Choppiness Index to detect
-regime (trend vs range). In trending regimes, use trend-following entries. In ranging
-regimes, use mean-reversion entries. This adaptive approach should work better across
-different market conditions (2021 bull, 2022 bear, 2023-24 range, 2025 bear).
-Position sizing: 0.25 entry, 0.15 half at profit, stoploss at 2.5*ATR trailing.
+Experiment #116: 30m RSI Pullback with 4h HMA Trend Filter
+Hypothesis: Mirror the successful 12h Supertrend strategy but on 30m timeframe.
+Use 4h HMA(21) for trend direction, 30m RSI(14) for pullback entries.
+Long when price > 4h HMA and RSI pulls back to 35-45 zone.
+Short when price < 4h HMA and RSI rallies to 55-65 zone.
+Simple logic = more trades, less overfitting. Position size 0.25, stop at 2.5*ATR.
+Timeframe: 30m primary, 4h for trend filter (per experiment rules).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_regime_adaptive_4h_hma_1h_rsi_crsi_v1"
-timeframe = "15m"
+name = "mtf_30m_rsi_pullback_4h_hma_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -54,101 +54,11 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
-    """
-    Calculate Connors RSI (CRSI).
-    CRSI = (RSI(close, 3) + RSI(Streak, 2) + PercentRank(100)) / 3
-    """
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average."""
     close_s = pd.Series(close)
-    n = len(close)
-    
-    # RSI(3)
-    rsi_short = calculate_rsi(close, rsi_period)
-    
-    # Streak RSI - calculate consecutive up/down days
-    streak = np.zeros(n)
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif close[i] < close[i-1]:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = 0
-    
-    # RSI of streak
-    streak_s = pd.Series(streak)
-    streak_gain = streak_s.diff().where(streak_s.diff() > 0, 0.0)
-    streak_loss = (-streak_s.diff()).where(streak_s.diff() < 0, 0.0)
-    avg_sg = streak_gain.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
-    avg_sl = streak_loss.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
-    streak_rsi = 100 - 100 / (1 + avg_sg / avg_sl.replace(0, np.nan))
-    streak_rsi = streak_rsi.fillna(50).values
-    streak_rsi = np.clip(streak_rsi, 0, 100)
-    
-    # Percent Rank - percentage of past rank_period closes lower than current
-    percent_rank = np.zeros(n)
-    for i in range(rank_period, n):
-        window = close[i-rank_period:i]
-        count_lower = np.sum(window < close[i])
-        percent_rank[i] = 100 * count_lower / rank_period
-    
-    # CRSI
-    crsi = (rsi_short + streak_rsi + percent_rank) / 3
-    crsi = np.clip(crsi, 0, 100)
-    return crsi
-
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP = 100 * (ATR(1, n) / (Highest High - Lowest Low)) * (100 / n^0.5)
-    CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    """
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    
-    # True Range (1-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Sum of TR over period
-    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    
-    # Highest High - Lowest Low over period
-    hh = high_s.rolling(window=period, min_periods=period).max().values
-    ll = low_s.rolling(window=period, min_periods=period).min().values
-    hh_ll = hh - ll
-    
-    # CHOP formula
-    chop = np.zeros(len(close))
-    mask = hh_ll > 0
-    chop[mask] = 100 * (tr_sum[mask] / hh_ll[mask]) * (100 / np.sqrt(period))
-    chop = np.clip(chop, 0, 100)
-    return chop
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator."""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.zeros(len(close))
-    trend = np.ones(len(close))  # 1 = bullish, -1 = bearish
-    
-    supertrend[0] = lower_band[0]
-    for i in range(1, len(close)):
-        if close[i] > supertrend[i-1]:
-            trend[i] = 1
-            supertrend[i] = max(lower_band[i], supertrend[i-1] if trend[i-1] == 1 else lower_band[i])
-        else:
-            trend[i] = -1
-            supertrend[i] = min(upper_band[i], supertrend[i-1] if trend[i-1] == -1 else upper_band[i])
-    
-    return supertrend, trend
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    return ema.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -158,26 +68,22 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
-    df_1h = get_htf_data(prices, '1h')
     
-    # Calculate 4h HMA for trend direction
+    # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
+    
+    # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1h RSI for entry timing
-    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
-    
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi_15m = calculate_rsi(close, 14)
-    crsi = calculate_crsi(close, 3, 2, 100)
-    chop = calculate_choppiness(high, low, close, 14)
-    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
+    rsi = calculate_rsi(close, 14)
+    ema_21 = calculate_ema(close, 21)
+    ema_50 = calculate_ema(close, 50)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.15
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -186,58 +92,52 @@ def generate_signals(prices):
     position_reduced = False
     highest_close = 0.0
     lowest_close = 0.0
+    entry_atr = 0.0
     
     for i in range(100, n):
-        # 4h trend filter
-        trend_4h_bullish = close[i] > hma_4h_aligned[i]
-        trend_4h_bearish = close[i] < hma_4h_aligned[i]
+        # 4h trend filter (HTF) - price relative to 4h HMA
+        daily_bullish = close[i] > hma_4h_aligned[i]
+        daily_bearish = close[i] < hma_4h_aligned[i]
         
-        # 1h RSI filter
-        rsi_1h_ok_long = rsi_1h_aligned[i] < 70
-        rsi_1h_ok_short = rsi_1h_aligned[i] > 30
-        rsi_1h_pullback_long = rsi_1h_aligned[i] < 50  # pullback in uptrend
-        rsi_1h_pullback_short = rsi_1h_aligned[i] > 50  # pullback in downtrend
+        # 30m EMA trend
+        ema_trend_long = ema_21[i] > ema_50[i]
+        ema_trend_short = ema_21[i] < ema_50[i]
         
-        # Regime detection via Choppiness Index
-        is_trending = chop[i] < 50  # below 50 = more trending
-        is_ranging = chop[i] > 50   # above 50 = more ranging
+        # RSI pullback zones (simpler thresholds for more trades)
+        rsi_oversold = rsi[i] < 45  # Pullback in uptrend
+        rsi_overbought = rsi[i] > 55  # Rally in downtrend
+        rsi_extreme_long = rsi[i] < 35  # Deep pullback
+        rsi_extreme_short = rsi[i] > 65  # Strong rally
         
-        # Supertrend signal
-        st_bullish = st_trend[i] == 1
-        st_bearish = st_trend[i] == -1
-        
-        # CRSI extremes for mean reversion
-        crsi_oversold = crsi[i] < 20
-        crsi_overbought = crsi[i] > 80
-        crsi_neutral = 20 <= crsi[i] <= 80
-        
-        # 15m RSI
-        rsi_15m_ok_long = rsi_15m[i] < 70
-        rsi_15m_ok_short = rsi_15m[i] > 30
+        # RSI momentum (rising/falling)
+        rsi_rising = rsi[i] > rsi[i-1] if i > 0 else False
+        rsi_falling = rsi[i] < rsi[i-1] if i > 0 else False
         
         new_signal = 0.0
         
-        # ===== TRENDING REGIME ENTRIES =====
-        if is_trending:
-            # Long: 4h bullish + Supertrend bullish + 1h RSI pullback + 15m RSI ok
-            if trend_4h_bullish and st_bullish and rsi_1h_pullback_long and rsi_15m_ok_long:
-                new_signal = SIZE_ENTRY
-            
-            # Short: 4h bearish + Supertrend bearish + 1h RSI pullback + 15m RSI ok
-            elif trend_4h_bearish and st_bearish and rsi_1h_pullback_short and rsi_15m_ok_short:
-                new_signal = -SIZE_ENTRY
+        # LONG ENTRY conditions (simpler for more trades)
+        # Condition 1: 4h bullish + RSI pullback + EMA trend
+        if daily_bullish and rsi_oversold and ema_trend_long:
+            new_signal = SIZE_ENTRY
+        # Condition 2: 4h bullish + RSI extreme + any EMA
+        elif daily_bullish and rsi_extreme_long:
+            new_signal = SIZE_ENTRY
+        # Condition 3: 4h bullish + RSI rising from oversold
+        elif daily_bullish and rsi[i] < 50 and rsi_rising and ema_trend_long:
+            new_signal = SIZE_ENTRY
         
-        # ===== RANGING REGIME ENTRIES (Mean Reversion) =====
-        else:
-            # Long: CRSI oversold + 4h bullish (bias long in bull market)
-            if crsi_oversold and trend_4h_bullish:
-                new_signal = SIZE_ENTRY
-            
-            # Short: CRSI overbought + 4h bearish (bias short in bear market)
-            elif crsi_overbought and trend_4h_bearish:
-                new_signal = -SIZE_ENTRY
+        # SHORT ENTRY conditions
+        # Condition 1: 4h bearish + RSI rally + EMA trend
+        if daily_bearish and rsi_overbought and ema_trend_short:
+            new_signal = -SIZE_ENTRY
+        # Condition 2: 4h bearish + RSI extreme + any EMA
+        elif daily_bearish and rsi_extreme_short:
+            new_signal = -SIZE_ENTRY
+        # Condition 3: 4h bearish + RSI falling from overbought
+        elif daily_bearish and rsi[i] > 50 and rsi_falling and ema_trend_short:
+            new_signal = -SIZE_ENTRY
         
-        # ===== STOPLOSS AND TAKE PROFIT LOGIC =====
+        # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
             # Update highest close for trailing
             if close[i] > highest_close:
@@ -253,7 +153,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 1.5R
-                risk = 2.5 * atr[i]
+                risk = entry_atr * 2.5
                 profit = close[i] - entry_price
                 if profit >= 1.5 * risk:
                     new_signal = SIZE_HALF
@@ -261,7 +161,7 @@ def generate_signals(prices):
         
         if position_side < 0 and entry_price > 0:
             # Update lowest close for trailing
-            if lowest_close == 0.0 or close[i] < lowest_close:
+            if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
             # Calculate trailing stop (2.5*ATR from lowest)
@@ -274,7 +174,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 1.5R
-                risk = 2.5 * atr[i]
+                risk = entry_atr * 2.5
                 profit = entry_price - close[i]
                 if profit >= 1.5 * risk:
                     new_signal = -SIZE_HALF
@@ -287,6 +187,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
+            entry_atr = atr[i]
             trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
@@ -296,6 +197,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
+            entry_atr = atr[i]
             trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
@@ -309,6 +211,7 @@ def generate_signals(prices):
         elif new_signal == 0.0 and prev_signal != 0.0:
             position_side = 0
             entry_price = 0.0
+            entry_atr = 0.0
             trailing_stop = 0.0
             highest_close = 0.0
             lowest_close = 0.0
