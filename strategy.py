@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #449: 12h HMA Trend + Daily Bias + RSI Pullback + ATR Stop
-Hypothesis: 12h timeframe reduces noise vs lower TFs while maintaining trade frequency.
-Simple HMA trend following with daily HTF bias filter. RSI pullback entries ensure
-we enter on dips in uptrends (not chasing). 2.5*ATR stoploss protects capital.
-Fewer filters = more trades (critical for >=10 trades requirement).
-Timeframe: 12h (REQUIRED), HTF: 1d via mtf_data helper.
+Experiment #450: 1d KAMA Trend + Weekly Bias + RSI Pullback + ATR Stop
+Hypothesis: Daily timeframe with weekly HTF bias provides cleaner signals than lower TFs.
+KAMA (Kaufman Adaptive MA) adapts to volatility - fast in trends, slow in ranges.
+This should reduce whipsaw compared to fixed EMAs while maintaining trend capture.
+RSI 40-60 pullback zone (not extremes) ensures we enter on dips in trends.
+3.5*ATR stoploss appropriate for daily volatility. Multiple entry paths ensure >=10 trades.
+Timeframe: 1d (REQUIRED), HTF: 1w via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_hma_daily_bias_rsi_pullback_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_weekly_bias_rsi_pullback_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -25,15 +26,46 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend with less lag."""
-    close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """
+    Calculate Kaufman Adaptive Moving Average.
+    KAMA adapts to market noise - moves fast in trends, slow in ranges.
+    Efficiency Ratio (ER) measures trend direction vs noise.
+    """
+    n = len(close)
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    # Change = absolute price change over period
+    change = np.abs(close - np.roll(close, period))
+    change[:period] = np.nan
+    
+    # Sum of absolute differences (volatility/noise)
+    volatility = np.zeros(n)
+    for i in range(period, n):
+        volatility[i] = np.sum(np.abs(np.diff(close[i-period:i+1])))
+    
+    # Efficiency Ratio (ER) = trend / noise
+    er = np.zeros(n)
+    er[:] = np.nan
+    mask = volatility > 0
+    er[mask] = change[mask] / volatility[mask]
+    er = np.clip(er, 0, 1)
+    
+    # Smoothing constant
+    fast_sc = (2 / (fast + 1))
+    slow_sc = (2 / (slow + 1))
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama[period] = close[period]
+    for i in range(period + 1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    return kama
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -64,24 +96,24 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    kama_1w = calculate_kama(df_1w['close'].values, 10)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    hma_12h = calculate_hma(close, 21)
-    hma_12h_fast = calculate_hma(close, 9)
+    kama_1d = calculate_kama(close, 10)
+    kama_1d_fast = calculate_kama(close, 5)
     rsi = calculate_rsi(close, 14)
-    hma_slope = calculate_slope(hma_12h, lookback=5)
+    kama_slope = calculate_slope(kama_1d, lookback=5)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -97,68 +129,74 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_12h[i]):
+        if np.isnan(kama_1w_aligned[i]) or np.isnan(kama_1d[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(hma_slope[i]):
+        if np.isnan(rsi[i]) or np.isnan(kama_slope[i]):
             signals[i] = 0.0
             continue
         
-        # Daily trend bias (HTF)
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        # Weekly trend bias (HTF)
+        weekly_bullish = close[i] > kama_1w_aligned[i]
+        weekly_bearish = close[i] < kama_1w_aligned[i]
         
-        # 12h HMA trend
-        hma_12h_bullish = close[i] > hma_12h[i]
-        hma_12h_bearish = close[i] < hma_12h[i]
-        hma_rising = hma_slope[i] > 0
-        hma_falling = hma_slope[i] < 0
+        # 1d KAMA trend
+        kama_1d_bullish = close[i] > kama_1d[i]
+        kama_1d_bearish = close[i] < kama_1d[i]
+        kama_rising = kama_slope[i] > 0
+        kama_falling = kama_slope[i] < 0
         
-        # Fast HMA crossover
-        fast_above_slow = hma_12h_fast[i] > hma_12h[i]
-        fast_below_slow = hma_12h_fast[i] < hma_12h[i]
+        # Fast KAMA crossover
+        fast_above_slow = kama_1d_fast[i] > kama_1d[i]
+        fast_below_slow = kama_1d_fast[i] < kama_1d[i]
         
-        # RSI pullback zones (entry on dips in trend)
+        # RSI pullback zones (entry on dips in trend, not extremes)
         rsi_pullback_long = rsi[i] > 35 and rsi[i] < 55
         rsi_pullback_short = rsi[i] > 45 and rsi[i] < 65
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
+        rsi_neutral_long = rsi[i] > 40 and rsi[i] < 60
+        rsi_neutral_short = rsi[i] > 40 and rsi[i] < 60
         
         new_signal = 0.0
         
         # === LONG ENTRIES (multiple paths for >=10 trades) ===
-        # Path 1: Daily bullish + 12h bullish + RSI pullback + HMA rising
-        if daily_bullish and hma_12h_bullish and rsi_pullback_long and hma_rising:
+        # Path 1: Weekly bullish + 1d bullish + RSI pullback + KAMA rising
+        if weekly_bullish and kama_1d_bullish and rsi_pullback_long and kama_rising:
             new_signal = SIZE_ENTRY
-        # Path 2: Daily bullish + Fast HMA above slow + RSI > 40
-        elif daily_bullish and fast_above_slow and rsi[i] > 40 and rsi[i] < 60:
+        # Path 2: Weekly bullish + Fast KAMA above slow + RSI neutral
+        elif weekly_bullish and fast_above_slow and rsi_neutral_long:
             new_signal = SIZE_ENTRY
-        # Path 3: 12h bullish + HMA rising + RSI oversold (deep pullback)
-        elif hma_12h_bullish and hma_rising and rsi_oversold:
+        # Path 3: 1d bullish + KAMA rising + RSI 40-50 (deeper pullback)
+        elif kama_1d_bullish and kama_rising and rsi[i] > 40 and rsi[i] < 50:
             new_signal = SIZE_ENTRY
-        # Path 4: Daily bullish + 12h bullish + Fast HMA crossover up
-        elif daily_bullish and hma_12h_bullish and fast_above_slow and hma_12h_fast[i] > hma_12h_fast[i-1]:
+        # Path 4: Weekly bullish + 1d bullish + Fast KAMA crossover up
+        elif weekly_bullish and kama_1d_bullish and fast_above_slow and kama_1d_fast[i] > kama_1d_fast[i-1]:
             new_signal = SIZE_ENTRY
-        # Path 5: Price above both HMA + RSI 45-55 (consolidation breakout)
-        elif close[i] > hma_12h[i] and close[i] > hma_1d_aligned[i] and rsi[i] > 45 and rsi[i] < 55:
+        # Path 5: Price above both KAMA + RSI 45-55 (consolidation breakout)
+        elif close[i] > kama_1d[i] and close[i] > kama_1w_aligned[i] and rsi[i] > 45 and rsi[i] < 55:
+            new_signal = SIZE_ENTRY
+        # Path 6: Weekly bullish + KAMA rising (simple trend follow)
+        elif weekly_bullish and kama_rising and rsi[i] > 45 and rsi[i] < 65:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES (multiple paths for >=10 trades) ===
-        # Path 1: Daily bearish + 12h bearish + RSI pullback + HMA falling
-        if daily_bearish and hma_12h_bearish and rsi_pullback_short and hma_falling:
+        # Path 1: Weekly bearish + 1d bearish + RSI pullback + KAMA falling
+        if weekly_bearish and kama_1d_bearish and rsi_pullback_short and kama_falling:
             new_signal = -SIZE_ENTRY
-        # Path 2: Daily bearish + Fast HMA below slow + RSI < 60
-        elif daily_bearish and fast_below_slow and rsi[i] > 40 and rsi[i] < 60:
+        # Path 2: Weekly bearish + Fast KAMA below slow + RSI neutral
+        elif weekly_bearish and fast_below_slow and rsi_neutral_short:
             new_signal = -SIZE_ENTRY
-        # Path 3: 12h bearish + HMA falling + RSI overbought (rally short)
-        elif hma_12h_bearish and hma_falling and rsi_overbought:
+        # Path 3: 1d bearish + KAMA falling + RSI 50-60 (rally short)
+        elif kama_1d_bearish and kama_falling and rsi[i] > 50 and rsi[i] < 60:
             new_signal = -SIZE_ENTRY
-        # Path 4: Daily bearish + 12h bearish + Fast HMA crossover down
-        elif daily_bearish and hma_12h_bearish and fast_below_slow and hma_12h_fast[i] < hma_12h_fast[i-1]:
+        # Path 4: Weekly bearish + 1d bearish + Fast KAMA crossover down
+        elif weekly_bearish and kama_1d_bearish and fast_below_slow and kama_1d_fast[i] < kama_1d_fast[i-1]:
             new_signal = -SIZE_ENTRY
-        # Path 5: Price below both HMA + RSI 45-55 (consolidation breakdown)
-        elif close[i] < hma_12h[i] and close[i] < hma_1d_aligned[i] and rsi[i] > 45 and rsi[i] < 55:
+        # Path 5: Price below both KAMA + RSI 45-55 (consolidation breakdown)
+        elif close[i] < kama_1d[i] and close[i] < kama_1w_aligned[i] and rsi[i] > 45 and rsi[i] < 55:
+            new_signal = -SIZE_ENTRY
+        # Path 6: Weekly bearish + KAMA falling (simple trend follow)
+        elif weekly_bearish and kama_falling and rsi[i] > 35 and rsi[i] < 55:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -167,8 +205,8 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for 12h timeframe)
-            current_stop = highest_close - 2.5 * atr[i]
+            # Calculate trailing stop (3.5*ATR for 1d timeframe)
+            current_stop = highest_close - 3.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -177,7 +215,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.5 * atr[i]
+                risk = 3.5 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
@@ -188,8 +226,8 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for 12h timeframe)
-            current_stop = lowest_close + 2.5 * atr[i]
+            # Calculate trailing stop (3.5*ATR for 1d timeframe)
+            current_stop = lowest_close + 3.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -198,7 +236,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.5 * atr[i]
+                risk = 3.5 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
@@ -211,7 +249,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 3.5 * atr[i] if position_side > 0 else close[i] + 3.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
@@ -220,7 +258,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 3.5 * atr[i] if position_side > 0 else close[i] + 3.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
