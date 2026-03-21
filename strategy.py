@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #060: 1d Donchian Breakout with Weekly HMA Trend Bias + Volume Filter
-Hypothesis: Daily timeframe captures major trends while avoiding noise. Donchian 20-period
-breakouts are classic trend-following signals that work well on daily data. Weekly HMA(21)
-provides trend bias without being overly restrictive. Volume confirmation ensures breakouts
-have participation. Simple 2.5*ATR trailing stop. Position sizing 0.30 entry, 0.15 at 2R.
-This should generate 15-30 trades/year on daily data while capturing major moves.
-Key insight from failures: fewer filters = more trades = better chance of positive Sharpe.
+Experiment #061: 15m Fisher Transform with 4h HMA Trend Filter
+Hypothesis: Fisher Transform excels at catching reversals in bear/range markets (2025 test period).
+Combine with 4h HMA for trend direction filter to avoid counter-trend trades.
+15m timeframe provides enough signals while 4h filter reduces whipsaws.
+Fisher entry: long when crosses above -1.5 (oversold), short when crosses below +1.5 (overbought).
+Position sizing: 0.25 entry, 0.15 at 2R profit, 2*ATR trailing stop.
+This differs from failed RSI strategies by using Fisher's Gaussian normalization for better reversal detection.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_weekly_hma_volume_v1"
-timeframe = "1d"
+name = "mtf_15m_fisher_4h_hma_trend_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -40,12 +40,46 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel breakout levels."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    mid = (upper + lower) / 2
-    return upper, lower, mid
+def calculate_fisher_transform(high, low, close, period=9):
+    """
+    Calculate Ehlers Fisher Transform.
+    Transforms price into Gaussian normal distribution for better reversal detection.
+    Entry when Fisher crosses -1.5 (long) or +1.5 (short).
+    """
+    hl2 = (high + low) / 2
+    
+    # Normalize price to -1 to +1 range
+    highest = pd.Series(hl2).rolling(window=period, min_periods=period).max().values
+    lowest = pd.Series(hl2).rolling(window=period, min_periods=period).min().values
+    
+    # Avoid division by zero
+    range_val = highest - lowest
+    range_val = np.where(range_val < 0.0001, 0.0001, range_val)
+    
+    normalized = (hl2 - lowest) / range_val
+    normalized = np.clip(normalized, 0.001, 0.999)  # Avoid log(0) or log(1)
+    
+    # Fisher transform
+    fisher_input = 0.5 * np.log((1 + normalized) / (1 - normalized + 0.0001))
+    fisher_input = np.nan_to_num(fisher_input, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    # Smooth with EMA
+    fisher = pd.Series(fisher_input).ewm(span=period, min_periods=period, adjust=False).mean().values
+    fisher = np.nan_to_num(fisher, nan=0.0)
+    
+    return fisher
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI indicator."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
+    rsi = 100 - 100 / (1 + rs)
+    rsi = np.clip(rsi, 0, 100)
+    return rsi
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -55,26 +89,28 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, 20)
+    fisher = calculate_fisher_transform(high, low, close, 9)
+    rsi = calculate_rsi(close, 14)
     
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # 15m HMA for local trend confirmation
+    hma_15m_21 = calculate_hma(close, 21)
+    hma_15m_50 = calculate_hma(close, 50)
     
-    # Simple trend filter - 50 day HMA
-    hma_50 = calculate_hma(close, 50)
+    # Volume SMA for confirmation
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
+    SIZE_ENTRY = 0.25
     SIZE_HALF = 0.15
     
     # Track positions for stoploss
@@ -84,42 +120,48 @@ def generate_signals(prices):
     position_reduced = False
     
     for i in range(100, n):
-        # Weekly trend bias (HTF) - only used as soft filter
-        weekly_bullish = hma_1w_aligned[i] > 0 and close[i] > hma_1w_aligned[i]
-        weekly_bearish = hma_1w_aligned[i] > 0 and close[i] < hma_1w_aligned[i]
+        # 4h trend filter (HTF)
+        hma_4h_valid = hma_4h_aligned[i] > 0 and not np.isnan(hma_4h_aligned[i])
+        trend_bullish = hma_4h_valid and close[i] > hma_4h_aligned[i]
+        trend_bearish = hma_4h_valid and close[i] < hma_4h_aligned[i]
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        # Fisher Transform signals
+        fisher_oversold = fisher[i] < -1.5
+        fisher_overbought = fisher[i] > 1.5
         
-        # Volume confirmation (must be above average)
-        volume_confirmed = volume[i] > vol_ma[i]
+        # Fisher cross signals (look at previous bar for cross detection)
+        fisher_cross_long = (i > 1) and (fisher[i] > -1.5) and (fisher[i-1] <= -1.5)
+        fisher_cross_short = (i > 1) and (fisher[i] < 1.5) and (fisher[i-1] >= 1.5)
         
-        # 50-day trend filter
-        trend_long = close[i] > hma_50[i]
-        trend_short = close[i] < hma_50[i]
+        # 15m local trend
+        local_bullish = hma_15m_21[i] > hma_15m_50[i]
+        local_bearish = hma_15m_21[i] < hma_15m_50[i]
+        
+        # Volume confirmation (above average)
+        vol_confirmed = volume[i] > vol_sma[i] if vol_sma[i] > 0 else True
+        
+        # RSI filter (avoid extreme overbought/oversold for entries)
+        rsi_ok_long = rsi[i] < 70
+        rsi_ok_short = rsi[i] > 30
         
         new_signal = 0.0
         
-        # LONG ENTRY: Donchian breakout + volume + trend alignment
-        # Weekly bias is soft - we can enter against it if breakout is strong
-        if breakout_long and volume_confirmed:
-            if weekly_bullish or trend_long:
-                new_signal = SIZE_ENTRY
-            elif not weekly_bearish:  # neutral weekly, but breakout + volume
-                new_signal = SIZE_ENTRY * 0.67  # reduced size
+        # LONG ENTRY: Fisher cross + 4h bullish trend + volume confirmation
+        if fisher_cross_long and trend_bullish and vol_confirmed and rsi_ok_long:
+            new_signal = SIZE_ENTRY
+        elif fisher_oversold and trend_bullish and local_bullish and vol_confirmed:
+            new_signal = SIZE_ENTRY
         
-        # SHORT ENTRY: Donchian breakout + volume + trend alignment
-        if breakout_short and volume_confirmed:
-            if weekly_bearish or trend_short:
-                new_signal = -SIZE_ENTRY
-            elif not weekly_bullish:  # neutral weekly, but breakout + volume
-                new_signal = -SIZE_ENTRY * 0.67  # reduced size
+        # SHORT ENTRY: Fisher cross + 4h bearish trend + volume confirmation
+        if fisher_cross_short and trend_bearish and vol_confirmed and rsi_ok_short:
+            new_signal = -SIZE_ENTRY
+        elif fisher_overbought and trend_bearish and local_bearish and vol_confirmed:
+            new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
             # Calculate trailing stop
-            current_stop = close[i] - 2.5 * atr[i]
+            current_stop = close[i] - 2.0 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -130,14 +172,14 @@ def generate_signals(prices):
                 # Check take profit (reduce position at 2R)
                 if not position_reduced:
                     profit = close[i] - entry_price
-                    risk = 2.5 * atr[i]  # initial risk
+                    risk = 2.0 * atr[int(i)] if i > 0 else atr[i]
                     if risk > 0 and profit >= 2.0 * risk:
                         new_signal = SIZE_HALF
                         position_reduced = True
         
         if position_side < 0 and entry_price > 0:
             # Calculate trailing stop
-            current_stop = close[i] + 2.5 * atr[i]
+            current_stop = close[i] + 2.0 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -148,7 +190,7 @@ def generate_signals(prices):
                 # Check take profit (reduce position at 2R)
                 if not position_reduced:
                     profit = entry_price - close[i]
-                    risk = 2.5 * atr[i]  # initial risk
+                    risk = 2.0 * atr[int(i)] if i > 0 else atr[i]
                     if risk > 0 and profit >= 2.0 * risk:
                         new_signal = -SIZE_HALF
                         position_reduced = True
@@ -160,14 +202,14 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             position_reduced = False
         
         # Position reversed
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             position_reduced = False
         
         # Position reduced (take profit)
