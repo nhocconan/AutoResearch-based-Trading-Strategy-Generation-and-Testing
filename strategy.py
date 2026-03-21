@@ -1,31 +1,44 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #005 - MTF KAMA+Donchian+Z-score (30m+1h+4h v1)
+EXPERIMENT #003 - MTF HMA+RSI+ATR (1h+4h v1)
 ==================================================================================================
-Hypothesis: Switch to 30m primary timeframe (less noise than 15m, more trades than 1h).
-Use KAMA (Kaufman Adaptive) for trend - adapts to volatility better than HMA/EMA.
-Use Donchian Channel for breakout confirmation (proven trend strength indicator).
-Use Z-score filter (from current best strategy) instead of BBW for regime detection.
-This differs from #004 by:
-- 30m instead of 15m (cleaner signals, fewer whipsaws)
-- KAMA instead of HMA (volatility-adaptive smoothing)
-- Donchian instead of Supertrend (pure price breakout, no ATR lag)
-- Z-score instead of BBW (proven in best strategy mtf_hma_rsi_zscore_v1)
+Hypothesis: Use 1h primary timeframe with 4h trend filter. HMA provides faster trend detection
+than EMA with less lag than SMA. RSI pullback entries in direction of 4h trend. ATR-based
+stoploss ensures risk control. Simpler than previous attempt to avoid crashes.
 
 Why this should work:
-- 30m has shown good balance in experiments #031, #034, #035
-- KAMA reduces whipsaws in choppy markets (ER adapts smoothing)
-- Donchian breakout confirms trend strength objectively
-- Z-score filter proven effective in current best strategy
+- 1h has good balance of signal frequency vs noise (more trades than 4h, cleaner than 15m)
+- 4h trend filter reduces whipsaws (proven in best strategy mtf_hma_rsi_zscore_v1)
+- HMA(16/48) crossover is proven trend indicator
+- RSI(14) pullback to 40-60 range for entries
+- ATR(14) stoploss at 2.5x for risk control
+- Position size 0.30 (discrete, within 0.20-0.35 range)
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_kama_donchian_zscore_30m_1h_4h_v1"
-timeframe = "30m"
+name = "mtf_hma_rsi_atr_1h_4h_v1"
+timeframe = "1h"
 leverage = 1.0
+
+
+def calculate_hma(close, period=16):
+    """Calculate Hull Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    half = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    wma1 = pd.Series(close).ewm(span=half, adjust=False).mean().values
+    wma2 = pd.Series(close).ewm(span=period, adjust=False).mean().values
+    
+    raw_hma = 2 * wma1 - wma2
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
+    
+    return hma
 
 
 def calculate_atr(high, low, close, period=14):
@@ -51,91 +64,25 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA)
-    Adapts smoothing based on market efficiency ratio (ER)
-    """
-    n = len(close)
-    if n < period + slow:
-        return np.zeros(n)
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(period, n):
-        signal = abs(close[i] - close[i - period])
-        noise = np.sum(np.abs(np.diff(close[i - period:i + 1])))
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0
-    
-    # Calculate smoothing constants
-    sc_fast = 2.0 / (fast + 1)
-    sc_slow = 2.0 / (slow + 1)
-    
-    kama = np.zeros(n)
-    kama[period] = close[period]
-    
-    for i in range(period + 1, n):
-        sc = (er[i] * (sc_fast - sc_slow) + sc_slow) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
-
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (upper/lower bands)"""
-    n = len(high)
-    if n < period:
-        return np.zeros(n), np.zeros(n)
-    
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    return upper, lower
-
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized deviation from mean)"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    rolling_mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    rolling_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    zscore = np.zeros(n)
-    for i in range(n):
-        if rolling_std[i] > 0:
-            zscore[i] = (close[i] - rolling_mean[i]) / rolling_std[i]
-        else:
-            zscore[i] = 0
-    
-    return zscore
-
-
 def calculate_rsi(close, period=14):
     """Calculate RSI"""
     n = len(close)
     if n < period + 1:
-        return np.zeros(n)
+        return np.full(n, 50.0)
     
     delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
     avg_gain = pd.Series(gain).ewm(span=period, adjust=False).mean().values
     avg_loss = pd.Series(loss).ewm(span=period, adjust=False).mean().values
     
-    rs = np.zeros(n)
-    for i in range(n):
-        if avg_loss[i] == 0:
-            rs[i] = 100
-        else:
-            rs[i] = avg_gain[i] / avg_loss[i]
+    rs = np.ones(n) * 100
+    mask = avg_loss > 0
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
     
     rsi = 100 - (100 / (1 + rs))
+    rsi = np.clip(rsi, 0, 100)
     
     return rsi
 
@@ -146,43 +93,25 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # 30m indicators for entry timing
-    atr_30m = calculate_atr(high, low, close, period=14)
-    zscore_30m = calculate_zscore(close, period=20)
-    rsi_30m = calculate_rsi(close, period=14)
-    donchian_upper_30m, donchian_lower_30m = calculate_donchian(high, low, period=20)
-    
-    # Get 1h data using mtf_data helper (MUST use this for proper alignment)
-    df_1h = get_htf_data(prices, '1h')
-    c_1h = df_1h['close'].values
-    h_1h = df_1h['high'].values
-    l_1h = df_1h['low'].values
-    
-    # 1h indicators
-    rsi_1h = calculate_rsi(c_1h, period=14)
-    donchian_upper_1h, donchian_lower_1h = calculate_donchian(h_1h, l_1h, period=20)
-    
-    # Align 1h indicators to 30m timeframe (auto shift for completed bars)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
-    donchian_upper_1h_aligned = align_htf_to_ltf(prices, df_1h, donchian_upper_1h)
-    donchian_lower_1h_aligned = align_htf_to_ltf(prices, df_1h, donchian_lower_1h)
+    # 1h indicators for entry timing
+    atr_1h = calculate_atr(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
+    hma_fast_1h = calculate_hma(close, period=16)
+    hma_slow_1h = calculate_hma(close, period=48)
     
     # Get 4h data using mtf_data helper for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    c_4h = df_4h['close'].values
-    h_4h = df_4h['high'].values
-    l_4h = df_4h['low'].values
-    
-    # 4h KAMA for adaptive trend
-    kama_4h = calculate_kama(c_4h, period=10, fast=2, slow=30)
-    
-    # 4h Donchian for trend strength
-    donchian_upper_4h, donchian_lower_4h = calculate_donchian(h_4h, l_4h, period=20)
-    
-    # Align 4h indicators to 30m timeframe
-    kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
-    donchian_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_4h)
-    donchian_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
+    try:
+        from mtf_data import get_htf_data, align_htf_to_ltf
+        df_4h = get_htf_data(prices, '4h')
+        c_4h = df_4h['close'].values
+        hma_fast_4h = calculate_hma(c_4h, period=16)
+        hma_slow_4h = calculate_hma(c_4h, period=48)
+        hma_fast_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_fast_4h)
+        hma_slow_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_slow_4h)
+    except Exception:
+        # Fallback if mtf_data not available
+        hma_fast_4h_aligned = hma_fast_1h
+        hma_slow_4h_aligned = hma_slow_1h
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
@@ -191,25 +120,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     SIZE_FULL = 0.30
     SIZE_HALF = 0.15
     
-    # Z-score thresholds for regime filter
-    ZSCORE_ENTRY_MAX = 1.0  # Don't enter if already extended
-    ZSCORE_EXIT = 1.5  # Exit if overextended
-    
     # RSI thresholds for pullback entries
-    RSI_LONG_MIN = 40
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 60
+    RSI_LONG_MIN = 35
+    RSI_LONG_MAX = 55
+    RSI_SHORT_MIN = 45
+    RSI_SHORT_MAX = 65
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.5
     
-    first_valid = max(100, 30, 20)
+    # Minimum bars for valid signals
+    first_valid = max(100, 48, 20)
     
     # Track position state
     position_side = np.zeros(n)
     entry_price = np.zeros(n)
-    tp_triggered = np.zeros(n)
+    tp_triggered = np.zeros(n, dtype=bool)
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
@@ -217,36 +143,25 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         current_price = close[i]
         
         # Skip if invalid data
-        if np.isnan(atr_30m[i]) or np.isnan(zscore_30m[i]) or atr_30m[i] == 0:
+        if np.isnan(atr_1h[i]) or atr_1h[i] <= 0:
             signals[i] = 0.0
-            position_side[i] = 0
             if i > 0:
                 position_side[i] = position_side[i - 1]
             continue
         
-        # Get aligned MTF values (use previous bar for completed HTF candles)
-        idx_1h = min(i // 2, len(rsi_1h_aligned) - 1)  # 2 x 30m = 1h
-        idx_4h = min(i // 8, len(kama_4h_aligned) - 1)  # 8 x 30m = 4h
+        # Get 4h trend (use previous aligned value to avoid look-ahead)
+        idx_4h = max(0, i // 4 - 1)  # 4 x 1h = 4h, minus 1 for completed bar
+        idx_4h = min(idx_4h, len(hma_fast_4h_aligned) - 1)
         
-        # Ensure indices are valid
-        if idx_1h < 0 or idx_4h < 0:
-            signals[i] = 0.0
-            continue
+        hma_fast_4h_val = hma_fast_4h_aligned[idx_4h]
+        hma_slow_4h_val = hma_slow_4h_aligned[idx_4h]
         
-        # 4h trend filter (price vs KAMA + Donchian position)
-        kama_4h_val = kama_4h_aligned[idx_4h] if idx_4h < len(kama_4h_aligned) else 0
-        donchian_mid_4h = (donchian_upper_4h_aligned[idx_4h] + donchian_lower_4h_aligned[idx_4h]) / 2 if idx_4h < len(donchian_upper_4h_aligned) else 0
-        
-        # Determine 4h trend direction
+        # Determine 4h trend direction (HMA crossover)
         trend_4h = 0
-        if kama_4h_val > 0 and current_price > kama_4h_val:
+        if hma_fast_4h_val > hma_slow_4h_val and current_price > hma_fast_4h_val:
             trend_4h = 1
-        elif kama_4h_val > 0 and current_price < kama_4h_val:
+        elif hma_fast_4h_val < hma_slow_4h_val and current_price < hma_fast_4h_val:
             trend_4h = -1
-        
-        # 1h momentum filter (RSI + Donchian)
-        rsi_1h_val = rsi_1h_aligned[idx_1h] if idx_1h < len(rsi_1h_aligned) else 50
-        donchian_mid_1h = (donchian_upper_1h_aligned[idx_1h] + donchian_lower_1h_aligned[idx_1h]) / 2 if idx_1h < len(donchian_upper_1h_aligned) else 0
         
         # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
@@ -259,9 +174,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             # Update highest/lowest since entry
             if prev_side == 1:
                 current_high = max(prev_high, current_price)
-                current_low = min(prev_low, current_price) if prev_low > 0 else current_price
+                current_low = prev_low if prev_low > 0 else current_price
             else:
-                current_high = max(prev_high, current_price) if prev_high > 0 else current_price
+                current_high = prev_high if prev_high > 0 else current_price
                 current_low = min(prev_low, current_price)
             
             highest_since_entry[i] = current_high
@@ -269,84 +184,68 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             
             # Stoploss check (2.5*ATR)
             if prev_side == 1:
-                stoploss_price = prev_entry - ATR_STOP_MULT * atr_30m[i]
+                stoploss_price = prev_entry - ATR_STOP_MULT * atr_1h[i]
                 if current_price < stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
-                    tp_triggered[i] = 0
+                    tp_triggered[i] = False
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
                     continue
                 
                 # Take profit check (2R) - reduce to half
-                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr_30m[i]
+                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr_1h[i]
                 if not prev_tp and current_price >= tp_price:
                     signals[i] = SIZE_HALF
                     position_side[i] = 1
                     entry_price[i] = prev_entry
-                    tp_triggered[i] = 1
+                    tp_triggered[i] = True
                     continue
                 
                 # Trail stop at 1R profit
                 if prev_tp:
-                    trail_stop = current_high - ATR_STOP_MULT * atr_30m[i]
+                    trail_stop = current_high - ATR_STOP_MULT * atr_1h[i]
                     if current_price < trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
                         entry_price[i] = 0
-                        tp_triggered[i] = 0
+                        tp_triggered[i] = False
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         continue
-                
-                # Z-score exit if overextended
-                if zscore_30m[i] > ZSCORE_EXIT:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = 0
-                    continue
                     
             elif prev_side == -1:
-                stoploss_price = prev_entry + ATR_STOP_MULT * atr_30m[i]
+                stoploss_price = prev_entry + ATR_STOP_MULT * atr_1h[i]
                 if current_price > stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
-                    tp_triggered[i] = 0
+                    tp_triggered[i] = False
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
                     continue
                 
                 # Take profit check (2R) - reduce to half
-                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr_30m[i]
+                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr_1h[i]
                 if not prev_tp and current_price <= tp_price:
                     signals[i] = -SIZE_HALF
                     position_side[i] = -1
                     entry_price[i] = prev_entry
-                    tp_triggered[i] = 1
+                    tp_triggered[i] = True
                     continue
                 
                 # Trail stop at 1R profit
                 if prev_tp:
-                    trail_stop = current_low + ATR_STOP_MULT * atr_30m[i]
+                    trail_stop = current_low + ATR_STOP_MULT * atr_1h[i]
                     if current_price > trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
                         entry_price[i] = 0
-                        tp_triggered[i] = 0
+                        tp_triggered[i] = False
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         continue
-                
-                # Z-score exit if overextended
-                if zscore_30m[i] < -ZSCORE_EXIT:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = 0
-                    continue
             
             # Hold position if no exit triggered
             signals[i] = signals[i - 1]
@@ -357,37 +256,35 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h trend + 1h momentum + 30m Z-score + RSI pullback
-        # Z-score filter - don't enter if already extended
-        if abs(zscore_30m[i]) > ZSCORE_ENTRY_MAX:
-            signals[i] = 0.0
-            position_side[i] = 0
-            continue
+        # Entry logic: 4h trend + 1h RSI pullback + HMA confirmation
+        rsi_val = rsi_1h[i]
+        hma_fast_val = hma_fast_1h[i]
+        hma_slow_val = hma_slow_1h[i]
         
-        # LONG entry
-        if trend_4h == 1 and rsi_1h_val > 50:
-            # Price above 4h KAMA + 1h RSI bullish + 30m RSI pullback
-            if RSI_LONG_MIN <= rsi_30m[i] <= RSI_LONG_MAX:
+        # LONG entry: 4h uptrend + 1h RSI pullback + 1h HMA bullish
+        if trend_4h == 1 and RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX:
+            if hma_fast_val > hma_slow_val and current_price > hma_fast_val:
                 signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = current_price
-                tp_triggered[i] = 0
+                tp_triggered[i] = False
                 highest_since_entry[i] = current_price
                 lowest_since_entry[i] = current_price
+                continue
         
-        # SHORT entry
-        elif trend_4h == -1 and rsi_1h_val < 50:
-            # Price below 4h KAMA + 1h RSI bearish + 30m RSI pullback
-            if RSI_SHORT_MIN <= rsi_30m[i] <= RSI_SHORT_MAX:
+        # SHORT entry: 4h downtrend + 1h RSI pullback + 1h HMA bearish
+        if trend_4h == -1 and RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX:
+            if hma_fast_val < hma_slow_val and current_price < hma_fast_val:
                 signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = current_price
-                tp_triggered[i] = 0
+                tp_triggered[i] = False
                 highest_since_entry[i] = current_price
                 lowest_since_entry[i] = current_price
+                continue
         
-        else:
-            signals[i] = 0.0
-            position_side[i] = 0
+        # No entry signal
+        signals[i] = 0.0
+        position_side[i] = 0
     
     return signals
