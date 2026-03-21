@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #459: 1h Fisher Transform Reversals + 4h HMA Trend + ATR Stop
-Hypothesis: Fisher Transform catches reversal turning points better than RSI in bear/range markets.
-Combined with 4h HMA trend filter for direction bias, this should work on 1h timeframe.
-Fisher crosses -1.5 (long) or +1.5 (short) with trend confirmation = high probability entries.
-Multiple entry paths ensure >=10 trades requirement is met. Loose Fisher thresholds (-1.2/+1.2).
-Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper.
+Experiment #460: 4h Regime-Adaptive Strategy with Daily Bias
+Hypothesis: 4h timeframe captures medium-term moves while avoiding noise of lower TFs.
+Key innovation: Regime-adaptive entries using Choppiness Index - mean reversion in ranges,
+trend following in trends. Daily HMA provides HTF bias filter. Multiple entry paths ensure
+>=10 trades requirement is met. Conservative sizing (0.25-0.30) controls drawdown.
+Timeframe: 4h (REQUIRED), HTF: 1d via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_fisher_4h_hma_trend_reversal_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_regime_adaptive_daily_hma_chop_rsi_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -35,57 +35,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_fisher(close, period=9):
-    """
-    Ehlers Fisher Transform - normalizes price to Gaussian distribution.
-    Catches turning points better than RSI in ranging markets.
-    Reference: Ehlers, J.F. "Rocket Science for Traders"
-    """
-    close_s = pd.Series(close)
-    # Calculate highest high and lowest low over period
-    hh = close_s.rolling(window=period, min_periods=period).max().values
-    ll = close_s.rolling(window=period, min_periods=period).min().values
-    
-    # Normalize price to range -1 to +1
-    range_hl = hh - ll
-    range_hl = np.where(range_hl == 0, 0.001, range_hl)  # avoid division by zero
-    normalized = 0.66 * ((close - ll) / range_hl - 0.5) + 0.67 * np.roll(normalized, 1) if len(close) > 1 else np.zeros(len(close))
-    
-    # Proper Fisher calculation
-    fisher = np.zeros(len(close))
-    fisher[:] = np.nan
-    
-    for i in range(period, len(close)):
-        if range_hl[i] > 0:
-            val = 0.66 * ((close[i] - ll[i]) / range_hl[i] - 0.5) + 0.67 * (normalized[i-1] if i > 0 else 0)
-            val = np.clip(val, -0.99, 0.99)  # prevent log errors
-            fisher[i] = 0.5 * np.log((1 + val) / (1 - val))
-    
-    return fisher
-
-def calculate_fisher_signal(close, period=9):
-    """
-    Simplified Fisher Transform with signal line for cleaner crossovers.
-    """
-    close_s = pd.Series(close)
-    hh = close_s.rolling(window=period, min_periods=period).max().values
-    ll = close_s.rolling(window=period, min_periods=period).min().values
-    
-    range_hl = hh - ll
-    range_hl = np.where(range_hl < 0.0001, 0.0001, range_hl)
-    
-    fisher = np.zeros(len(close))
-    fisher[:] = np.nan
-    
-    prev_val = 0.0
-    for i in range(period, len(close)):
-        normalized = 0.66 * ((close[i] - ll[i]) / range_hl[i] - 0.5) + 0.67 * prev_val
-        normalized = np.clip(normalized, -0.99, 0.99)
-        fisher[i] = 0.5 * np.log((1 + normalized) / (1 - normalized))
-        prev_val = normalized
-    
-    return fisher
-
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -97,6 +46,42 @@ def calculate_rsi(close, period=14):
     rsi = 100 - 100 / (1 + rs)
     rsi = np.clip(rsi, 0, 100)
     return rsi
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = ranging market (mean reversion)
+    CHOP < 38.2 = trending market (trend follow)
+    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    """
+    n = period
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    atr_sum = pd.Series(tr).rolling(window=n, min_periods=n).sum().values
+    highest_high = pd.Series(high).rolling(window=n, min_periods=n).max().values
+    lowest_low = pd.Series(low).rolling(window=n, min_periods=n).min().values
+    
+    price_range = highest_high - lowest_low
+    
+    chop = np.zeros(len(close))
+    chop[:] = np.nan
+    mask = (price_range > 0) & (atr_sum > 0)
+    chop[mask] = 100 * np.log10(atr_sum[mask] / price_range[mask]) / np.log10(n)
+    chop = np.clip(chop, 0, 100)
+    return chop
+
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return sma, upper, lower
 
 def calculate_slope(values, lookback=5):
     """Calculate slope of values over lookback period."""
@@ -115,25 +100,27 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    hma_1h = calculate_hma(close, 21)
-    hma_1h_fast = calculate_hma(close, 9)
+    hma_4h = calculate_hma(close, 21)
+    hma_4h_fast = calculate_hma(close, 9)
     rsi = calculate_rsi(close, 14)
-    fisher = calculate_fisher_signal(close, 9)
-    hma_slope = calculate_slope(hma_1h, lookback=5)
+    rsi_fast = calculate_rsi(close, 7)
+    chop = calculate_choppiness(high, low, close, 14)
+    bb_sma, bb_upper, bb_lower = calculate_bollinger(close, 20, 2.0)
+    hma_slope = calculate_slope(hma_4h, lookback=5)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.28
-    SIZE_HALF = 0.14
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -149,79 +136,109 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1h[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_4h[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(hma_slope[i]) or np.isnan(fisher[i]):
+        if np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(bb_upper[i]):
             signals[i] = 0.0
             continue
         
-        # 4h trend bias (HTF)
-        trend_bullish = close[i] > hma_4h_aligned[i]
-        trend_bearish = close[i] < hma_4h_aligned[i]
+        # Daily trend bias (HTF)
+        daily_bullish = close[i] > hma_1d_aligned[i]
+        daily_bearish = close[i] < hma_1d_aligned[i]
         
-        # 1h HMA trend
-        hma_1h_bullish = close[i] > hma_1h[i]
-        hma_1h_bearish = close[i] < hma_1h[i]
+        # 4h HMA trend
+        hma_4h_bullish = close[i] > hma_4h[i]
+        hma_4h_bearish = close[i] < hma_4h[i]
         hma_rising = hma_slope[i] > 0
         hma_falling = hma_slope[i] < 0
         
         # Fast HMA crossover
-        fast_above_slow = hma_1h_fast[i] > hma_1h[i]
-        fast_below_slow = hma_1h_fast[i] < hma_1h[i]
+        fast_above_slow = hma_4h_fast[i] > hma_4h[i]
+        fast_below_slow = hma_4h_fast[i] < hma_4h[i]
         
-        # Fisher Transform signals (loose thresholds for more trades)
-        fisher_oversold = fisher[i] < -1.0
-        fisher_overbought = fisher[i] > 1.0
-        fisher_cross_up = fisher[i] > -1.2 and fisher[i-1] <= -1.2 if i > 0 else False
-        fisher_cross_down = fisher[i] < 1.2 and fisher[i-1] >= 1.2 if i > 0 else False
+        # Regime detection
+        is_ranging = chop[i] > 55  # Mean reversion regime
+        is_trending = chop[i] < 45  # Trend following regime
         
         # RSI zones
-        rsi_neutral = rsi[i] > 35 and rsi[i] < 65
-        rsi_bullish = rsi[i] > 45
-        rsi_bearish = rsi[i] < 55
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
+        rsi_neutral = rsi[i] > 40 and rsi[i] < 60
+        
+        # Bollinger zones
+        near_lower_bb = close[i] < bb_lower[i] * 1.005  # Within 0.5% of lower band
+        near_upper_bb = close[i] > bb_upper[i] * 0.995  # Within 0.5% of upper band
         
         new_signal = 0.0
         
         # === LONG ENTRIES (multiple paths for >=10 trades) ===
-        # Path 1: 4h bullish + Fisher cross up + HMA rising
-        if trend_bullish and fisher_cross_up and hma_rising:
+        
+        # TRENDING REGIME - Trend Following Entries
+        if is_trending:
+            # Path 1: Daily bullish + 4h bullish + RSI pullback + HMA rising
+            if daily_bullish and hma_4h_bullish and rsi[i] > 35 and rsi[i] < 55 and hma_rising:
+                new_signal = SIZE_ENTRY
+            # Path 2: Daily bullish + Fast HMA above slow + RSI neutral
+            elif daily_bullish and fast_above_slow and rsi_neutral:
+                new_signal = SIZE_ENTRY
+            # Path 3: 4h bullish + HMA rising + RSI not overbought
+            elif hma_4h_bullish and hma_rising and rsi[i] < 60:
+                new_signal = SIZE_ENTRY
+        
+        # RANGING REGIME - Mean Reversion Entries
+        if is_ranging:
+            # Path 4: Near lower Bollinger + RSI oversold + Daily bullish bias
+            if near_lower_bb and rsi_oversold and daily_bullish:
+                new_signal = SIZE_ENTRY
+            # Path 5: RSI deeply oversold + Price above daily HMA
+            elif rsi[i] < 30 and daily_bullish:
+                new_signal = SIZE_ENTRY
+            # Path 6: Price at lower BB + RSI < 40 (any daily bias for more trades)
+            elif near_lower_bb and rsi[i] < 40:
+                new_signal = SIZE_ENTRY
+        
+        # CROSS-REGIME entries (ensure trade frequency)
+        # Path 7: Fast HMA crossover up + RSI rising
+        if fast_above_slow and rsi_fast[i] > rsi_fast[i-1] and rsi[i] < 55:
             new_signal = SIZE_ENTRY
-        # Path 2: 4h bullish + 1h bullish + Fisher oversold (reversal)
-        elif trend_bullish and hma_1h_bullish and fisher_oversold:
-            new_signal = SIZE_ENTRY
-        # Path 3: Fast HMA above slow + Fisher cross up + RSI > 40
-        elif fast_above_slow and fisher_cross_up and rsi[i] > 40:
-            new_signal = SIZE_ENTRY
-        # Path 4: 4h bullish + Fast HMA crossover + RSI neutral
-        elif trend_bullish and fast_above_slow and rsi_neutral:
-            new_signal = SIZE_ENTRY
-        # Path 5: Price above both HMA + Fisher < -0.5 (pullback entry)
-        elif close[i] > hma_1h[i] and close[i] > hma_4h_aligned[i] and fisher[i] < -0.5:
-            new_signal = SIZE_ENTRY
-        # Path 6: HMA rising + Fisher cross up (momentum continuation)
-        elif hma_rising and fisher_cross_up and rsi_bullish:
+        # Path 8: Daily bullish + 4h HMA crossover
+        if daily_bullish and fast_above_slow and hma_4h_fast[i] > hma_4h_fast[i-1]:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES (multiple paths for >=10 trades) ===
-        # Path 1: 4h bearish + Fisher cross down + HMA falling
-        if trend_bearish and fisher_cross_down and hma_falling:
+        
+        # TRENDING REGIME - Trend Following Entries
+        if is_trending:
+            # Path 1: Daily bearish + 4h bearish + RSI pullback + HMA falling
+            if daily_bearish and hma_4h_bearish and rsi[i] > 45 and rsi[i] < 65 and hma_falling:
+                new_signal = -SIZE_ENTRY
+            # Path 2: Daily bearish + Fast HMA below slow + RSI neutral
+            elif daily_bearish and fast_below_slow and rsi_neutral:
+                new_signal = -SIZE_ENTRY
+            # Path 3: 4h bearish + HMA falling + RSI not oversold
+            elif hma_4h_bearish and hma_falling and rsi[i] > 40:
+                new_signal = -SIZE_ENTRY
+        
+        # RANGING REGIME - Mean Reversion Entries
+        if is_ranging:
+            # Path 4: Near upper Bollinger + RSI overbought + Daily bearish bias
+            if near_upper_bb and rsi_overbought and daily_bearish:
+                new_signal = -SIZE_ENTRY
+            # Path 5: RSI deeply overbought + Price below daily HMA
+            elif rsi[i] > 70 and daily_bearish:
+                new_signal = -SIZE_ENTRY
+            # Path 6: Price at upper BB + RSI > 60 (any daily bias for more trades)
+            elif near_upper_bb and rsi[i] > 60:
+                new_signal = -SIZE_ENTRY
+        
+        # CROSS-REGIME entries (ensure trade frequency)
+        # Path 7: Fast HMA crossover down + RSI falling
+        if fast_below_slow and rsi_fast[i] < rsi_fast[i-1] and rsi[i] > 45:
             new_signal = -SIZE_ENTRY
-        # Path 2: 4h bearish + 1h bearish + Fisher overbought (reversal)
-        elif trend_bearish and hma_1h_bearish and fisher_overbought:
-            new_signal = -SIZE_ENTRY
-        # Path 3: Fast HMA below slow + Fisher cross down + RSI < 60
-        elif fast_below_slow and fisher_cross_down and rsi[i] < 60:
-            new_signal = -SIZE_ENTRY
-        # Path 4: 4h bearish + Fast HMA crossover + RSI neutral
-        elif trend_bearish and fast_below_slow and rsi_neutral:
-            new_signal = -SIZE_ENTRY
-        # Path 5: Price below both HMA + Fisher > 0.5 (rally short)
-        elif close[i] < hma_1h[i] and close[i] < hma_4h_aligned[i] and fisher[i] > 0.5:
-            new_signal = -SIZE_ENTRY
-        # Path 6: HMA falling + Fisher cross down (momentum continuation)
-        elif hma_falling and fisher_cross_down and rsi_bearish:
+        # Path 8: Daily bearish + 4h HMA crossover
+        if daily_bearish and fast_below_slow and hma_4h_fast[i] < hma_4h_fast[i-1]:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -230,7 +247,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for 1h timeframe)
+            # Calculate trailing stop (2.5*ATR for 4h timeframe)
             current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -251,7 +268,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for 1h timeframe)
+            # Calculate trailing stop (2.5*ATR for 4h timeframe)
             current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
