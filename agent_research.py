@@ -194,14 +194,19 @@ WHAT FAILED (don't repeat):
 - Pure long-only: works on train but fails test (2025 is bearish)
 - Strategies only working on SOL: SOL is biased (100x rally)
 
-WHAT MIGHT WORK:
-1. REGIME-ADAPTIVE: detect bull/bear/range, different logic per regime
-2. VOLATILITY TARGETING: reduce size in high vol (skip 2022 crash)
-3. ASYMMETRIC: bigger longs in clear bull, tiny or no shorts in unclear
-4. MEAN REVERSION in range-bound periods (2025 test)
-5. VERY FEW TRADES on daily/12h (minimize 0.10% cost impact)
-6. Combine trend + mean reversion with regime switch
-7. Use Bollinger BandWidth percentile as regime detector
+WHAT MIGHT WORK (from research — NEW strategies for bear/range markets):
+1. CONNORS RSI (CRSI): (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+   Long: CRSI<10 + price>SMA200. Short: CRSI>90 + price<SMA200. 75% win rate.
+2. CHOPPINESS INDEX regime filter: CHOP(14) > 61.8 = range (mean revert),
+   CHOP < 38.2 = trending (trend follow). Best meta-filter for bear markets.
+3. EHLERS FISHER TRANSFORM: period=9, long when Fisher crosses above -1.5,
+   short when crosses below +1.5. Catches reversals in bear rallies.
+4. PAIRS TRADING: BTC-ETH spread via z-score. Market-neutral. Entry z>2.0.
+5. LARRY WILLIAMS VOL BREAKOUT: Long = open + K*prev_range. K=0.5-0.6.
+6. ADAPTIVE KELLY SIZING: quarter-Kelly * vol_scaling on ANY strategy.
+7. FUNDING RATE CONTRARIAN: short when funding >0.03%, long when <-0.03%.
+8. REGIME-ADAPTIVE: different logic per regime (bull/bear/range)
+9. VERY FEW TRADES on 12h/1d (minimize cost impact)
 
 RISK MANAGEMENT (MANDATORY):
 - Every position MUST have stoploss: signal → 0 when price moves > 2-3*ATR

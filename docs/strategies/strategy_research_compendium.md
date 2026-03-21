@@ -863,6 +863,113 @@ Based on available data (OHLCV from Binance), here are strategies ranked by impl
 
 ---
 
+---
+
+## 10. BEAR/RANGE MARKET STRATEGIES (Added 2026-03-22)
+
+These strategies specifically address the challenge of profitability in bear/range-bound crypto markets (like 2025).
+
+### 10.1 Connors RSI (CRSI) Short-Term Mean Reversion
+
+**Concept**: Composite of 3 RSI components — catches short-term reversals with 75% win rate.
+
+**Formula**: CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+- RSI(3): ultra-short-term RSI
+- RSI_Streak: RSI of consecutive up/down bar streak count
+- PercentRank(100): where current return ranks in last 100 bars
+
+**Entry/Exit**:
+- Long: CRSI < 10 AND price > SMA(200) (oversold dip in uptrend)
+- Short: CRSI > 90 AND price < SMA(200) (overbought rally in downtrend)
+- Exit: price crosses 5-period SMA
+
+**Bear market**: EXCELLENT — designed for short-term mean reversion in choppy markets.
+
+### 10.2 Ehlers Fisher Transform
+
+**Concept**: Transforms price into Gaussian distribution, making turning points identifiable.
+
+**Parameters**: Period=9, Overbought > +1.5, Oversold < -1.5
+- Short: Fisher crosses below +1.5 (overbought reversal)
+- Long: Fisher crosses above -1.5 (oversold reversal)
+- Exit: Fisher crosses zero
+- Reported: 233% gross return on 8h BTC, PF 1.627
+
+**Bear market**: GOOD — catches tops of bear rallies and bottoms of oversold bounces.
+
+### 10.3 Choppiness Index + Aroon Regime Filter
+
+**Concept**: Detects chop vs trend, different from BBW. Use as meta-filter.
+
+**Parameters**: CHOP period=14, Aroon period=14
+- CHOP > 61.8: ranging → use mean reversion
+- CHOP < 38.2 + Aroon confirms: trending → use trend following
+- CHOP 38.2-61.8: reduce size or flat (transition)
+
+**Bear market**: EXCELLENT — primary purpose is detecting when NOT to trade.
+
+### 10.4 Larry Williams Volatility Breakout
+
+**Concept**: Different from Donchian. Uses previous day's range for breakout levels.
+
+- Range = Previous day High - Low
+- Long: Today open + K × Range (K=0.5-0.6)
+- Short: Today open - K × Range
+- Stop: 2% from entry
+- Size: inverse ATR
+
+**Bear market**: MODERATE — captures intraday momentum in both directions.
+
+### 10.5 Pairs Trading (BTC-ETH Spread)
+
+**Concept**: Market-neutral. Profit from relative mispricing regardless of direction.
+
+- Test cointegration with ADF test (p < 0.05)
+- Spread = BTC - beta × ETH (beta from rolling OLS, 120 bars)
+- Entry: Z-score of spread > +2.0 (short spread) or < -2.0 (long spread)
+- Exit: Z-score reverts to ±0.5
+- Stop: Z-score hits ±3.5
+
+**Bear market**: EXCELLENT — market-neutral by design. Reported 43.4% in 6 months.
+
+### 10.6 Funding Rate Contrarian
+
+**Concept**: Trade against extreme funding rate (crowded trade reversal).
+
+- Funding > +0.03% (3x normal): overcrowded longs → go short
+- Funding < -0.03%: overcrowded shorts → go long
+- Confirm with price vs 20-period VWAP
+- Exit: funding normalizes to ±0.01%
+
+**Bear market**: GOOD — deep negative funding in bear = squeeze opportunities.
+**Note**: Requires funding rate data (already available in data/processed/funding/).
+
+### 10.7 Adaptive Kelly Position Sizing
+
+**Layer on ANY existing strategy**:
+- Kelly: f* = (p × b - q) / b, use Quarter-Kelly (f*/4) for crypto
+- Vol scaling: size = target_vol(15%) / realized_vol(20)
+- High vol (ATR >75th pctile): 1/8 Kelly
+- Low vol (ATR <25th pctile): 1/2 Kelly
+- Recalculate every 50 trades
+
+**Bear market**: CRITICAL — cuts position size during drawdowns automatically.
+
+---
+
+## COMBINATION PRIORITY FOR BEAR MARKETS
+
+| Priority | Strategy | Rating |
+|----------|----------|--------|
+| 1 | CRSI mean reversion + CHOP regime filter | EXCELLENT |
+| 2 | BTC-ETH pairs trading (market neutral) | EXCELLENT |
+| 3 | Adaptive Kelly sizing on existing strategies | CRITICAL add-on |
+| 4 | Fisher Transform + trend filter | GOOD |
+| 5 | Larry Williams volatility breakout | MODERATE |
+| 6 | Funding rate contrarian | GOOD |
+
+---
+
 ## Sources
 
 - [Hull Kaufman SuperTrend Cloud](https://www.tradingview.com/script/XHnsbKXg-Hull-Kaufman-SuperTrend-Cloud-HKST-Cloud/)
