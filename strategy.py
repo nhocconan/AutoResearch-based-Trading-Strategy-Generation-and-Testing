@@ -1,36 +1,71 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #015 - MACD Momentum + Bollinger Squeeze Breakout with 4h Trend Filter (1h)
-======================================================================================
-Hypothesis: 1h MACD histogram momentum combined with Bollinger Band squeeze detection
-captures volatility expansion breakouts when aligned with 4h HMA trend direction.
-Volume confirmation filters false breakouts. This differs from previous RSI/KAMA
-approaches by using momentum + volatility regime detection instead of mean reversion.
+EXPERIMENT #016 - KAMA Adaptive Trend + Volume Momentum + Daily Filter (4h)
+===========================================================================
+Hypothesis: KAMA (Kaufman's Adaptive Moving Average) adapts to market noise better
+than HMA/EMA, providing cleaner trend signals on 4h timeframe. Combined with volume
+momentum confirmation and daily HMA trend filter, this should capture sustained
+trends while filtering choppy periods. Different from failed KAMA strategies by:
+- Using 4h primary timeframe (not 12h/30m)
+- Adding volume momentum ratio as entry confirmation
+- Daily HMA filter instead of weekly
+- Tighter ATR stoploss (2.0x instead of 2.5x)
+- Discrete position sizing to reduce fee churn
 
 Key features:
-- Primary TF: 1h (hourly candles)
-- HTF filter: 4h HMA(21) for trend direction
-- Entry: MACD histogram expansion + Bollinger squeeze breakout
-- Filter: 4h trend must align with breakout direction
-- Volume: must be > 20-period average
+- Primary TF: 4h (four-hour candles)
+- HTF filter: 1d HMA(50) for major trend direction
+- Entry: KAMA(14) crossover + volume ratio > 1.5
+- Filter: Daily trend must align with signal direction
 - Stoploss: 2.0*ATR(14) trailing
 - Position sizing: 0.25-0.30 discrete levels
 - Take profit: Reduce to half at 2R profit
-
-Why this should work:
-- MACD histogram captures momentum shifts before price
-- Bollinger squeeze identifies low-volatility compression before expansion
-- 4h trend filter prevents counter-trend trades
-- Volume confirmation reduces false breakouts
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "macd_bb_squeeze_4h_trend_1h_v1"
-timeframe = "1h"
+name = "kama_volume_momentum_daily_4h_v1"
+timeframe = "4h"
 leverage = 1.0
+
+
+def calculate_kama(close, period=14, fast=2, slow=30):
+    """
+    Calculate Kaufman's Adaptive Moving Average (KAMA)
+    KAMA adapts to market noise using Efficiency Ratio (ER)
+    ER = |net change| / sum of absolute changes
+    SC = [ER * (fast_sc - slow_sc) + slow_sc]^2
+    """
+    n = len(close)
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    if n < period + slow:
+        return kama
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(period, n):
+        net_change = abs(close[i] - close[i - period])
+        sum_changes = 0.0
+        for j in range(i - period + 1, i + 1):
+            sum_changes += abs(close[j] - close[j - 1])
+        er[i] = net_change / (sum_changes + 1e-10) if sum_changes > 0 else 0
+    
+    # Calculate Smoothing Constant (SC)
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
+    sc = np.power(er * (fast_sc - slow_sc) + slow_sc, 2)
+    
+    # Calculate KAMA
+    kama[period] = close[period]
+    for i in range(period + 1, n):
+        if not np.isnan(kama[i - 1]):
+            kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    return kama
 
 
 def calculate_hma(close, period):
@@ -56,31 +91,24 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram"""
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs moving average"""
+    volume_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    volume_ratio = volume / (volume_sma + 1e-10)
+    return volume_ratio
+
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI"""
     close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, adjust=False, min_periods=fast).mean()
-    ema_slow = close_s.ewm(span=slow, adjust=False, min_periods=slow).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
-
-
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands"""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma  # Normalized bandwidth for squeeze detection
-    return upper.values, lower.values, bandwidth.values
-
-
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume simple moving average"""
-    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -90,20 +118,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load 4h HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    # Load 1d HTF data ONCE before loop (Rule 1)
+    df_1d = get_htf_data(prices, '1d')
+    hma_1d = calculate_hma(df_1d['close'].values, 50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
-    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
-    bb_upper, bb_lower, bb_bandwidth = calculate_bollinger(close, 20, 2.0)
+    # Calculate 4h indicators
+    kama = calculate_kama(close, period=14, fast=2, slow=30)
+    kama_fast = calculate_kama(close, period=7, fast=2, slow=15)
     atr = calculate_atr(high, low, close, 14)
-    volume_sma = calculate_volume_sma(volume, 20)
+    volume_ratio = calculate_volume_ratio(volume, 20)
+    rsi = calculate_rsi(close, 14)
     
-    # Calculate Bollinger Band squeeze threshold (bottom 20% of historical bandwidth)
-    bb_bandwidth_s = pd.Series(bb_bandwidth)
-    bb_squeeze_threshold = bb_bandwidth_s.rolling(window=100, min_periods=50).quantile(0.20).values
+    # KAMA crossover signal (fast crosses slow)
+    kama_signal = np.zeros(n)
+    for i in range(20, n):
+        if not np.isnan(kama_fast[i]) and not np.isnan(kama[i]):
+            if kama_fast[i] > kama[i] and kama_fast[i-1] <= kama[i-1]:
+                kama_signal[i] = 1
+            elif kama_fast[i] < kama[i] and kama_fast[i-1] >= kama[i-1]:
+                kama_signal[i] = -1
     
     # Generate signals
     signals = np.zeros(n)
@@ -118,62 +152,34 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     profit_target_hit = False
     entry_atr = 0.0
     
-    min_period = 150  # Wait for all indicators to stabilize
+    min_period = 100  # Wait for daily HMA and indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(macd_hist[i]) or 
-            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(bb_bandwidth[i]) or np.isnan(atr[i]) or 
-            np.isnan(volume_sma[i]) or np.isnan(bb_squeeze_threshold[i]) or 
-            atr[i] == 0 or bb_squeeze_threshold[i] == 0):
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(kama_fast[i]) or np.isnan(atr[i]) or 
+            np.isnan(volume_ratio[i]) or np.isnan(rsi[i]) or atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # 4h trend filter
-        trend_4h = 1 if close[i] > hma_4h_aligned[i] else -1
+        # Daily trend filter
+        daily_trend = 1 if close[i] > hma_1d_aligned[i] else -1
         
-        # Volume confirmation (must be above 20-period average)
-        volume_confirmed = volume[i] > volume_sma[i]
+        # Volume momentum confirmation (must be above 1.5x average)
+        volume_confirmed = volume_ratio[i] > 1.5
         
-        # Bollinger squeeze detection (bandwidth below 20th percentile)
-        squeeze_active = bb_bandwidth[i] < bb_squeeze_threshold[i]
+        # RSI filter (avoid extreme overbought/oversold entries)
+        rsi_valid = 30 < rsi[i] < 70
         
-        # Bollinger breakout detection
-        breakout_signal = 0
-        if i > 0:
-            # Long breakout: price crosses above upper band
-            if close[i] > bb_upper[i] and close[i - 1] <= bb_upper[i - 1]:
-                breakout_signal = 1
-            # Short breakout: price crosses below lower band
-            elif close[i] < bb_lower[i] and close[i - 1] >= bb_lower[i - 1]:
-                breakout_signal = -1
-        
-        # MACD histogram momentum confirmation
-        macd_momentum = 0
-        if i > 1:
-            # Long momentum: histogram increasing and positive
-            if macd_hist[i] > 0 and macd_hist[i] > macd_hist[i - 1]:
-                macd_momentum = 1
-            # Short momentum: histogram decreasing and negative
-            elif macd_hist[i] < 0 and macd_hist[i] < macd_hist[i - 1]:
-                macd_momentum = -1
+        # KAMA crossover signal
+        kama_breakout = kama_signal[i]
         
         # Determine target signal based on all filters
         target_signal = 0.0
-        if breakout_signal != 0:
-            # Breakout must align with 4h trend
-            if breakout_signal == trend_4h:
-                # Require volume confirmation
-                if volume_confirmed:
-                    # Require MACD momentum alignment
-                    if macd_momentum == breakout_signal:
-                        # Bonus: squeeze breakout gets full size
-                        if squeeze_active:
-                            target_signal = SIZE * breakout_signal
-                        else:
-                            # Non-squeeze breakout gets half size
-                            target_signal = (SIZE / 2) * breakout_signal
+        if kama_breakout != 0:
+            # Signal must align with daily trend
+            if kama_breakout == daily_trend and volume_confirmed and rsi_valid:
+                target_signal = SIZE * kama_breakout
         
         # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
@@ -183,7 +189,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.0 * atr[i]
+                trailing_stop = highest_since_entry - 2.0 * entry_atr
                 
                 # Check stoploss
                 if close[i] < trailing_stop:
@@ -191,13 +197,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit (2R from entry)
                 if not profit_target_hit:
-                    risk = entry_price - (entry_price - entry_atr * 2.0)
-                    if close[i] >= entry_price + 2.0 * entry_atr * 2.0:  # 2R = 4*ATR
+                    risk = entry_price - (entry_price - 2.0 * entry_atr)
+                    if close[i] >= entry_price + 2.0 * risk:  # 2R profit
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.0 * atr[i]
+                trailing_stop = lowest_since_entry + 2.0 * entry_atr
                 
                 # Check stoploss
                 if close[i] > trailing_stop:
@@ -205,7 +211,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 2.0 * entry_atr * 2.0:  # 2R profit
+                    risk = (entry_price + 2.0 * entry_atr) - entry_price
+                    if close[i] <= entry_price - 2.0 * risk:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -214,12 +221,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry = 0.0
             lowest_since_entry = float('inf')
             entry_price = 0.0
-            entry_atr = 0.0
             profit_target_hit = False
+            entry_atr = 0.0
         elif take_profit_triggered:
             # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
+            # Trail stop tighter after TP (1R from highest/lowest)
+            if position_side == 1:
+                highest_since_entry = max(highest_since_entry, close[i])
+            else:
+                lowest_since_entry = min(lowest_since_entry, close[i])
         else:
             # Apply signal change
             if target_signal != 0.0 and position_side == 0:
@@ -232,11 +244,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 entry_atr = atr[i]
                 profit_target_hit = False
             elif position_side != 0:
-                # Maintain existing position
-                if profit_target_hit:
-                    signals[i] = HALF_SIZE * position_side
+                # Maintain existing position (or reverse if strong opposite signal)
+                if target_signal != 0.0 and np.sign(target_signal) != position_side:
+                    # Reverse position
+                    signals[i] = target_signal
+                    position_side = 1 if target_signal > 0 else -1
+                    highest_since_entry = close[i]
+                    lowest_since_entry = close[i]
+                    entry_price = close[i]
+                    entry_atr = atr[i]
+                    profit_target_hit = False
                 else:
-                    signals[i] = SIZE * position_side
+                    # Keep current position
+                    signals[i] = SIZE * position_side if not profit_target_hit else HALF_SIZE * position_side
             else:
                 signals[i] = 0.0
     
