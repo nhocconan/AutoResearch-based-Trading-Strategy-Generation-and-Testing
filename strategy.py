@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #064 - ENSEMBLE_REGIME_CONFIDENCE_HMA_ST_RSI_ZSCORE_BBW_15M_4H_V1
+EXPERIMENT #065 - ADAPTIVE_KAMA_DONCHIAN_VOLREGIME_ENSEMBLE_15M_4H_V2
 ==================================================================================================
-Hypothesis: Combine 3 independent signal generators with regime-based weighting.
-- Signal 1: Trend (HMA + Supertrend agreement on 4h)
-- Signal 2: Momentum (RSI + MACD histogram on 15m)
-- Signal 3: Mean Reversion (Z-score + Bollinger position on 15m)
+Hypothesis: Improve ensemble by adding KAMA (adaptive MA) + Donchian breakout confirmation.
+- Signal 1: Adaptive Trend (KAMA + HMA agreement on 4h)
+- Signal 2: Breakout Momentum (Donchian channel + MACD on 15m)
+- Signal 3: Mean Reversion (Z-score + RSI extremes on 15m)
 
-Regime Detection:
-- BBW percentile (rolling 100 bars) → low vol = trend follow, high vol = mean revert
+Regime Detection (TRIPLE FILTER):
+- BBW percentile (rolling 100 bars) → low/high vol regime
 - ADX (4h) → trend strength filter
-- Volatility clustering (ATR ratio) → reduce size in high vol
+- ATR ratio (current/rolling avg) → volatility clustering
 
-Confidence Scaling:
-- 1 signal agrees: 0.20 position
-- 2 signals agree: 0.28 position
-- 3 signals agree: 0.35 position
+Volatility-Based Position Sizing:
+- Low vol regime: 0.35 position (confident trend following)
+- Medium vol: 0.28 position
+- High vol: 0.20 position (reduce risk in choppy markets)
 
-Key improvements over #040:
-- True ensemble voting (3 independent signals)
-- Regime-adaptive (trend vs mean-reversion mode)
-- Confidence-based position sizing
-- Hysteresis on signal changes (reduce churn)
-- Cleaner state management
+Key improvements over #064:
+- KAMA instead of simple HMA (adapts to market efficiency)
+- Donchian channel for breakout confirmation
+- Triple regime filter (BBW + ADX + ATR ratio)
+- Volatility-based position sizing (not just confidence)
+- Stronger hysteresis (0.18 vs 0.15) to reduce churn
 
 Timeframe: 15m entries + 4h trend filter (16 bars per 4h)
-Position Size: 0.20-0.35 (discrete levels)
+Position Size: 0.20-0.35 (volatility-adjusted)
 Stoploss: 2.0*ATR trailing
 Take Profit: 2R → half position, trail at 1R
 """
@@ -33,7 +33,7 @@ Take Profit: 2R → half position, trail at 1R
 import numpy as np
 import pandas as pd
 
-name = "ensemble_regime_confidence_hma_st_rsi_zscore_bbw_15m_4h_v1"
+name = "adaptive_kama_donchian_volregime_ensemble_15m_4h_v2"
 timeframe = "15m"
 leverage = 1.0
 
@@ -59,6 +59,39 @@ def calculate_atr(high, low, close, period=14):
         atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
     
     return atr
+
+
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Calculate Kaufman's Adaptive Moving Average"""
+    n = len(close)
+    if n < period + slow:
+        return np.zeros(n)
+    
+    kama = np.zeros(n)
+    er = np.zeros(n)  # Efficiency Ratio
+    
+    # Calculate Efficiency Ratio
+    for i in range(period, n):
+        change = abs(close[i] - close[i - period])
+        volatility = np.sum(np.abs(np.diff(close[i - period:i + 1])))
+        if volatility > 0:
+            er[i] = change / volatility
+        else:
+            er[i] = 0
+    
+    # Calculate smoothing constant
+    sc = np.zeros(n)
+    for i in range(period, n):
+        sc[i] = (er[i] * (2.0 / (fast + 1) - 2.0 / (slow + 1)) + 2.0 / (slow + 1)) ** 2
+    
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    # Calculate KAMA
+    for i in range(period + 1, n):
+        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    return kama
 
 
 def calculate_hma(close, period=21):
@@ -306,6 +339,40 @@ def calculate_bbw_percentile(bbw, period=100):
     return percentile
 
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel"""
+    n = len(high)
+    if n < period:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    middle = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+        middle[i] = (upper[i] + lower[i]) / 2
+    
+    return upper, middle, lower
+
+
+def calculate_atr_ratio(atr, period=20):
+    """Calculate ATR ratio (current ATR / rolling average ATR)"""
+    n = len(atr)
+    ratio = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        window = atr[i - period + 1:i + 1]
+        avg_atr = np.mean(window)
+        if avg_atr > 0:
+            ratio[i] = atr[i] / avg_atr
+        else:
+            ratio[i] = 1.0
+    
+    return ratio
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
@@ -317,10 +384,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     rsi_15m = calculate_rsi(close, period=14)
     zscore_15m = calculate_zscore(close, period=20)
     hma_15m = calculate_hma(close, period=21)
+    kama_15m = calculate_kama(close, period=10, fast=2, slow=30)
     supertrend_15m, st_direction_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
     macd_line_15m, macd_signal_15m, macd_hist_15m = calculate_macd(close, fast=12, slow=26, signal=9)
     upper_15m, middle_15m, lower_15m, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     bbw_pct_15m = calculate_bbw_percentile(bbw_15m, period=100)
+    donchian_upper_15m, donchian_mid_15m, donchian_lower_15m = calculate_donchian(high, low, period=20)
+    atr_ratio_15m = calculate_atr_ratio(atr_15m, period=20)
     
     # Resample to 4h for trend filters (16 x 15m = 4h)
     bars_per_4h = 16
@@ -340,6 +410,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # 4h indicators for trend
     hma_4h = calculate_hma(c_4h, period=21)
+    kama_4h = calculate_kama(c_4h, period=10, fast=2, slow=30)
     supertrend_4h, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
     adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
     _, _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
@@ -349,6 +420,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     st_trend_4h = np.zeros(n)
     adx_4h_mapped = np.zeros(n)
     bbw_4h_mapped = np.zeros(n)
+    kama_trend_4h = np.zeros(n)
     
     for i in range(n):
         idx_4h = i // bars_per_4h
@@ -358,6 +430,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             elif c_4h[idx_4h] < hma_4h[idx_4h]:
                 trend_4h[i] = -1
             
+            if c_4h[idx_4h] > kama_4h[idx_4h]:
+                kama_trend_4h[i] = 1
+            elif c_4h[idx_4h] < kama_4h[idx_4h]:
+                kama_trend_4h[i] = -1
+            
             st_trend_4h[i] = st_direction_4h[idx_4h]
             adx_4h_mapped[i] = adx_4h[idx_4h]
             bbw_4h_mapped[i] = bbw_4h[idx_4h]
@@ -365,10 +442,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Generate signals with ensemble voting
     signals = np.zeros(n)
     
-    # Position sizing - DISCRETE levels based on confidence
-    SIZE_LOW = 0.20    # 1 signal agrees
-    SIZE_MED = 0.28    # 2 signals agree
-    SIZE_HIGH = 0.35   # 3 signals agree
+    # Position sizing - DISCRETE levels based on volatility regime
+    SIZE_LOW = 0.20    # High volatility
+    SIZE_MED = 0.28    # Medium volatility
+    SIZE_HIGH = 0.35   # Low volatility (confident trend following)
     
     # Thresholds
     RSI_LONG_MIN = 40
@@ -379,13 +456,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     ADX_MIN = 20
     BBW_PCT_LOW = 0.30   # Low volatility regime
     BBW_PCT_HIGH = 0.70  # High volatility regime
+    ATR_RATIO_HIGH = 1.5  # High volatility clustering
     MACD_HIST_MIN = 0
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.0
     
     # Hysteresis threshold (signal must change by this much to flip)
-    HYSTERESIS = 0.15
+    HYSTERESIS = 0.18
     
     first_valid = max(200, 40 * bars_per_4h, 100, 28)
     
@@ -401,9 +479,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             signals[i] = 0.0
             continue
         
-        # Regime detection
+        # Triple regime detection
         bbw_pct = bbw_pct_15m[i]
         adx_val = adx_4h_mapped[i]
+        atr_ratio = atr_ratio_15m[i]
         
         # Skip if ADX too low (no trend)
         if adx_val < ADX_MIN:
@@ -411,63 +490,72 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             position_side[i] = 0
             continue
         
-        # Determine regime
-        if bbw_pct < BBW_PCT_LOW:
-            regime = "trend"      # Low vol = trend following
-        elif bbw_pct > BBW_PCT_HIGH:
-            regime = "mean_rev"   # High vol = mean reversion
+        # Determine volatility regime (BBW + ATR ratio)
+        if bbw_pct < BBW_PCT_LOW and atr_ratio < ATR_RATIO_HIGH:
+            regime = "low_vol"      # Best for trend following
+            vol_size = SIZE_HIGH
+        elif bbw_pct > BBW_PCT_HIGH or atr_ratio > ATR_RATIO_HIGH:
+            regime = "high_vol"     # Reduce position size
+            vol_size = SIZE_LOW
         else:
-            regime = "neutral"    # Medium vol = mixed
+            regime = "med_vol"      # Medium confidence
+            vol_size = SIZE_MED
         
-        # Signal 1: Trend signal (4h HMA + Supertrend agreement)
+        # Signal 1: Adaptive Trend signal (4h KAMA + HMA + Supertrend agreement)
         trend_signal = 0
-        if trend_4h[i] == 1 and st_trend_4h[i] == 1:
+        if trend_4h[i] == 1 and kama_trend_4h[i] == 1 and st_trend_4h[i] == 1:
             trend_signal = 1
-        elif trend_4h[i] == -1 and st_trend_4h[i] == -1:
+        elif trend_4h[i] == -1 and kama_trend_4h[i] == -1 and st_trend_4h[i] == -1:
             trend_signal = -1
+        elif trend_4h[i] == 1 and kama_trend_4h[i] == 1:
+            trend_signal = 0.5
+        elif trend_4h[i] == -1 and kama_trend_4h[i] == -1:
+            trend_signal = -0.5
         
-        # Signal 2: Momentum signal (15m RSI + MACD)
+        # Signal 2: Breakout Momentum signal (15m Donchian + MACD + RSI)
         momentum_signal = 0
         rsi_val = rsi_15m[i]
         macd_hist = macd_hist_15m[i]
+        donchian_position = (close[i] - donchian_lower_15m[i]) / (donchian_upper_15m[i] - donchian_lower_15m[i] + 1e-10)
         
-        if regime == "trend":
-            # In trend regime: RSI pullback + MACD confirmation
+        if regime == "low_vol":
+            # In low vol: breakout confirmation
+            if donchian_position > 0.7 and macd_hist > MACD_HIST_MIN and rsi_val > 50:
+                momentum_signal = 1
+            elif donchian_position < 0.3 and macd_hist < -MACD_HIST_MIN and rsi_val < 50:
+                momentum_signal = -1
+        else:
+            # In high/med vol: pullback entries
             if RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and macd_hist > MACD_HIST_MIN:
                 momentum_signal = 1
             elif RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and macd_hist < -MACD_HIST_MIN:
                 momentum_signal = -1
-        else:
-            # In mean reversion regime: RSI extremes
-            if rsi_val < 35 and macd_hist > 0:
-                momentum_signal = 1
-            elif rsi_val > 65 and macd_hist < 0:
-                momentum_signal = -1
         
-        # Signal 3: Mean reversion signal (15m Z-score + BB position)
+        # Signal 3: Mean Reversion signal (15m Z-score + BB position)
         mr_signal = 0
         zscore_val = zscore_15m[i]
         bb_position = (close[i] - lower_15m[i]) / (upper_15m[i] - lower_15m[i] + 1e-10)
         
-        if regime == "mean_rev" or regime == "neutral":
+        if regime == "high_vol":
+            # High vol = mean reversion mode
             if zscore_val < -1.5 and bb_position < 0.3:
                 mr_signal = 1
             elif zscore_val > 1.5 and bb_position > 0.7:
                 mr_signal = -1
         else:
-            # In trend regime: only extreme mean reversion
+            # Low/med vol = only extreme mean reversion (counter-trend)
             if zscore_val < -2.0 and bb_position < 0.2:
                 mr_signal = 1
             elif zscore_val > 2.0 and bb_position > 0.8:
                 mr_signal = -1
         
         # Ensemble voting with regime weighting
-        if regime == "trend":
-            # Weight trend signal higher
-            votes = trend_signal * 2 + momentum_signal + mr_signal
-        elif regime == "mean_rev":
+        if regime == "low_vol":
+            # Weight trend and breakout signals higher
+            votes = trend_signal * 2 + momentum_signal * 1.5 + mr_signal * 0.5
+        elif regime == "high_vol":
             # Weight mean reversion signal higher
-            votes = trend_signal + momentum_signal + mr_signal * 2
+            votes = trend_signal * 0.5 + momentum_signal * 1.0 + mr_signal * 2.0
         else:
             # Equal weighting
             votes = trend_signal + momentum_signal + mr_signal
@@ -478,13 +566,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         # Determine target signal based on vote count and direction
         target_signal = 0.0
-        if vote_sum > 0 and vote_count >= 1:
-            if vote_count == 1:
-                target_signal = SIZE_LOW * np.sign(vote_sum)
-            elif vote_count == 2:
-                target_signal = SIZE_MED * np.sign(vote_sum)
+        if vote_sum > 0.5 and vote_count >= 1:
+            if vote_count <= 1.5:
+                target_signal = vol_size * 0.57 * np.sign(vote_sum)  # ~0.20, 0.16, 0.11
+            elif vote_count <= 2.5:
+                target_signal = vol_size * 0.80 * np.sign(vote_sum)  # ~0.28, 0.22, 0.16
             else:
-                target_signal = SIZE_HIGH * np.sign(vote_sum)
+                target_signal = vol_size * np.sign(vote_sum)  # 0.35, 0.28, 0.20
         
         # Apply hysteresis (don't flip unless signal changes significantly)
         prev_signal = signals[i - 1] if i > 0 else 0.0
@@ -528,7 +616,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = prev_side * SIZE_LOW
+                    signals[i] = prev_side * vol_size * 0.57
                     position_side[i] = prev_side
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
@@ -560,7 +648,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = prev_side * SIZE_LOW
+                    signals[i] = prev_side * vol_size * 0.57
                     position_side[i] = prev_side
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
