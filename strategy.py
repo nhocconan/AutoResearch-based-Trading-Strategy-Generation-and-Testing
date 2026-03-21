@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #142: 4h Volatility Breakout with Daily/Weekly Trend Filter
-Hypothesis: 4h timeframe captures medium-term moves without excessive noise.
-Volatility contraction (BB squeeze) followed by breakout produces strong directional moves.
-Daily HMA provides primary trend filter, Weekly HMA provides macro confirmation.
-Only trade breakouts in direction of HTF trend to avoid whipsaws.
-Volume confirmation ensures breakout has participation. Time-based exit prevents
-giving back profits in choppy conditions. This differs from failed 4h strategies
-by focusing on volatility breakouts rather than regime detection or simple trend following.
-Position sizing: 0.25 entry, reduce to 0.12 at 1.5R, stoploss at 2.5*ATR trailing.
+Experiment #143: 12h Donchian Breakout with Daily/Weekly HMA Trend Filter
+Hypothesis: 12h timeframe captures medium-term trends while avoiding noise.
+Donchian Channel (20-period) breakout provides clear trend entry signals.
+Daily HMA filters major trend direction, Weekly HMA confirms long-term bias.
+RSI pullback (40-60 range) ensures we enter on retracement, not exhaustion.
+This should work in both bull (2021) and bear (2022, 2025) markets by
+following the HTF trend direction. Position sizing: 0.25 entry, 0.125 at 2R.
+Stoploss: 2.5*ATR trailing stop. Target: Sharpe > 0.5, trades > 30/year.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_vol_breakout_daily_weekly_hma_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_daily_weekly_hma_rsi_pullback_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -42,21 +41,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and bandwidth percentile."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma
-    # Calculate bandwidth percentile over 100 bars
-    bw_percentile = pd.Series(bandwidth).rolling(window=100, min_periods=50).apply(
-        lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min()) if (x.max() - x.min()) > 0 else 0.5,
-        raw=False
-    ).values
-    return upper, lower, bandwidth, bw_percentile
-
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -69,16 +53,58 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_volume_ma(volume, period=20):
-    """Calculate volume moving average."""
-    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_ma
+def calculate_donchian_channels(high, low, period=20):
+    """Calculate Donchian Channel upper and lower bands."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    middle = (upper + lower) / 2
+    return upper, lower, middle
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX for trend strength."""
+    n = len(close)
+    adx = np.zeros(n)
+    
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    # Directional Movement
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+    
+    # Smooth with Wilder's method
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # DI calculations
+    plus_di = np.where(tr_s > 0, 100 * plus_dm_s / tr_s, 0)
+    minus_di = np.where(tr_s > 0, 100 * minus_dm_s / tr_s, 0)
+    
+    # DX and ADX
+    di_sum = plus_di + minus_di
+    dx = np.where(di_sum > 0, 100 * np.abs(plus_di - minus_di) / di_sum, 0)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
@@ -93,85 +119,87 @@ def generate_signals(prices):
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_bw, bb_bw_pct = calculate_bollinger_bands(close, 20, 2.0)
-    vol_ma = calculate_volume_ma(volume, 20)
+    adx = calculate_adx(high, low, close, 14)
+    donch_upper, donch_lower, donch_middle = calculate_donchian_channels(high, low, 20)
     
-    # Calculate price momentum (ROC 10)
-    roc = np.zeros(n)
-    for i in range(10, n):
-        roc[i] = (close[i] - close[i-10]) / close[i-10] * 100 if close[i-10] > 0 else 0
+    # Additional trend filter - EMA crossover
+    ema_fast = pd.Series(close).ewm(span=12, min_periods=12, adjust=False).mean().values
+    ema_slow = pd.Series(close).ewm(span=26, min_periods=26, adjust=False).mean().values
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.28
     SIZE_HALF = 0.14
     
-    # Track positions for stoploss and time exit
+    # Track positions for stoploss
     position_side = 0
     entry_price = 0.0
-    entry_bar = 0
     trailing_stop = 0.0
     position_reduced = False
     highest_close = 0.0
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filters
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        # Weekly trend filter (major trend direction)
         weekly_bullish = close[i] > hma_1w_aligned[i]
         weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # Strong trend: both daily and weekly agree
-        strong_bullish = daily_bullish and weekly_bullish
-        strong_bearish = daily_bearish and weekly_bearish
+        # Daily trend filter
+        daily_bullish = close[i] > hma_1d_aligned[i]
+        daily_bearish = close[i] < hma_1d_aligned[i]
         
-        # Volatility squeeze detection (BB bandwidth in lower 20th percentile)
-        squeeze = bb_bw_pct[i] < 0.25 if not np.isnan(bb_bw_pct[i]) else False
+        # EMA crossover trend
+        ema_trend_long = ema_fast[i] > ema_slow[i]
+        ema_trend_short = ema_fast[i] < ema_slow[i]
         
-        # Volume confirmation (current volume > 1.5x 20-bar average)
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
+        # Donchian breakout signals
+        breakout_long = close[i] > donch_upper[i-1] if i > 0 else False
+        breakout_short = close[i] < donch_lower[i-1] if i > 0 else False
         
-        # Price position relative to BB
-        bb_range = bb_upper[i] - bb_lower[i]
-        bb_position = (close[i] - bb_lower[i]) / bb_range if bb_range > 0 else 0.5
+        # Pullback entry (price near Donchian middle after breakout)
+        pullback_long = close[i] < donch_middle[i] and close[i] > donch_lower[i]
+        pullback_short = close[i] > donch_middle[i] and close[i] < donch_upper[i]
         
-        # Breakout detection
-        breakout_long = close[i] > bb_upper[i] and close[i-1] <= bb_upper[i-1]
-        breakout_short = close[i] < bb_lower[i] and close[i-1] >= bb_lower[i-1]
+        # RSI conditions for entry timing
+        rsi_bullish = rsi[i] > 45 and rsi[i] < 70
+        rsi_bearish = rsi[i] < 55 and rsi[i] > 30
         
-        # Momentum confirmation
-        momentum_long = roc[i] > 2.0
-        momentum_short = roc[i] < -2.0
-        
-        # RSI filter (avoid extreme overbought/oversold on entry)
-        rsi_ok_long = rsi[i] < 75
-        rsi_ok_short = rsi[i] > 25
+        # ADX trend strength filter
+        trend_strong = adx[i] > 20
+        trend_weak = adx[i] < 25
         
         new_signal = 0.0
         
-        # LONG ENTRY: Squeeze + breakout + volume + trend + momentum
-        if breakout_long and volume_confirmed and strong_bullish and rsi_ok_long and momentum_long:
-            new_signal = SIZE_ENTRY
+        # LONG ENTRY: Donchian breakout + HTF bullish + RSI confirmation
+        if weekly_bullish and daily_bullish:
+            # Breakout entry with strong trend
+            if breakout_long and trend_strong and rsi_bullish:
+                new_signal = SIZE_ENTRY
+            # Pullback entry in established uptrend
+            elif ema_trend_long and pullback_long and rsi[i] > 40 and rsi[i] < 60:
+                new_signal = SIZE_ENTRY
         
-        # SHORT ENTRY: Squeeze + breakout + volume + trend + momentum
-        elif breakout_short and volume_confirmed and strong_bearish and rsi_ok_short and momentum_short:
-            new_signal = -SIZE_ENTRY
+        # SHORT ENTRY: Donchian breakdown + HTF bearish + RSI confirmation
+        elif weekly_bearish and daily_bearish:
+            # Breakdown entry with strong trend
+            if breakout_short and trend_strong and rsi_bearish:
+                new_signal = -SIZE_ENTRY
+            # Pullback entry in established downtrend
+            elif ema_trend_short and pullback_short and rsi[i] > 40 and rsi[i] < 60:
+                new_signal = -SIZE_ENTRY
         
-        # Alternative: Trend continuation without squeeze (weaker signal)
-        elif strong_bullish and not daily_bearish and rsi[i] > 50 and rsi[i] < 70:
-            # Enter on pullback to middle BB
-            if bb_position < 0.5 and close[i] > close[i-1]:
-                new_signal = SIZE_ENTRY * 0.7  # Smaller position for continuation
+        # NEUTRAL/TRANSITION: EMA crossover with ADX confirmation
+        else:
+            # Long on EMA cross up with momentum
+            if ema_trend_long and ema_fast[i-1] <= ema_slow[i-1] and adx[i] > 18 and rsi[i] > 50:
+                new_signal = SIZE_ENTRY
+            # Short on EMA cross down with momentum
+            elif ema_trend_short and ema_fast[i-1] >= ema_slow[i-1] and adx[i] > 18 and rsi[i] < 50:
+                new_signal = -SIZE_ENTRY
         
-        elif strong_bearish and not daily_bullish and rsi[i] < 50 and rsi[i] > 30:
-            # Enter on pullback to middle BB
-            if bb_position > 0.5 and close[i] < close[i-1]:
-                new_signal = -SIZE_ENTRY * 0.7
-        
-        # Stoploss and profit taking logic (Rule 6) - check BEFORE updating position tracking
+        # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
             # Update highest close for trailing
             if close[i] > highest_close:
@@ -186,19 +214,12 @@ def generate_signals(prices):
             if close[i] < trailing_stop:
                 new_signal = 0.0
             elif not position_reduced:
-                # Take profit at 1.5R (reduce position)
-                risk = 2.5 * atr[entry_bar] if entry_bar > 0 else 2.5 * atr[i]
+                # Take profit at 2R
+                risk = 2.5 * atr[i]
                 profit = close[i] - entry_price
-                if profit >= 1.5 * risk:
+                if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
                     position_reduced = True
-            
-            # Time-based exit: reduce after 20 bars if not profitable
-            bars_held = i - entry_bar
-            if bars_held > 20 and not position_reduced and profit < 0.5 * risk:
-                new_signal = SIZE_HALF
-            if bars_held > 40:
-                new_signal = 0.0
         
         if position_side < 0 and entry_price > 0:
             # Update lowest close for trailing
@@ -214,19 +235,12 @@ def generate_signals(prices):
             if close[i] > trailing_stop:
                 new_signal = 0.0
             elif not position_reduced:
-                # Take profit at 1.5R (reduce position)
-                risk = 2.5 * atr[entry_bar] if entry_bar > 0 else 2.5 * atr[i]
+                # Take profit at 2R
+                risk = 2.5 * atr[i]
                 profit = entry_price - close[i]
-                if profit >= 1.5 * risk:
+                if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
                     position_reduced = True
-            
-            # Time-based exit: reduce after 20 bars if not profitable
-            bars_held = i - entry_bar
-            if bars_held > 20 and not position_reduced and profit < 0.5 * risk:
-                new_signal = -SIZE_HALF
-            if bars_held > 40:
-                new_signal = 0.0
         
         # Update position tracking AFTER signal calculation
         prev_signal = signals[i-1] if i > 0 else 0.0
@@ -235,7 +249,6 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            entry_bar = i
             trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
@@ -245,7 +258,6 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            entry_bar = i
             trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
@@ -259,7 +271,6 @@ def generate_signals(prices):
         elif new_signal == 0.0 and prev_signal != 0.0:
             position_side = 0
             entry_price = 0.0
-            entry_bar = 0
             trailing_stop = 0.0
             highest_close = 0.0
             lowest_close = 0.0
