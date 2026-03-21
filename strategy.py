@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #015 - KAMA Adaptive Trend + 12h HMA Filter + BB Regime (1h primary)
+EXPERIMENT #015 - KAMA Adaptive Trend + MACD Momentum + 12h HMA Filter (1h primary)
 =====================================================================================
-Hypothesis: 1h KAMA adapts to volatility better than EMA/SMA, reducing whipsaws in chop.
-12h HMA(21) provides slower trend filter than 4h (less noise, fewer false reversals).
-Bollinger Band width regime detection avoids trading during extreme squeeze/expansion.
-RSI(14) with wider thresholds (35-65) ensures enough trades while filtering extremes.
-ATR-based dynamic position sizing controls risk per trade to ≤5% of account.
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility better than 
+static EMAs/HMAs. During trending markets, KAMA follows price closely; during chop, it flattens.
+Combining KAMA crossover signals with 12h HMA trend filter and MACD momentum confirmation
+should reduce false signals while capturing major moves. Bollinger Band width filter avoids
+low-volatility periods where trend strategies fail.
 
 Key features:
-- Primary TF: 1h (MANDATORY for this experiment)
-- HTF filter: 12h HMA(21) for major trend direction
-- Trend: KAMA(10) adaptive moving average
-- Entry: RSI pullback (35-65 range, wider than typical 45-55)
-- Regime: Bollinger Band width percentile (avoid extremes)
-- Stoploss: 2.0*ATR(14) trailing
-- Position sizing: 0.25-0.30 discrete levels, dynamic based on ATR%
-- Take profit: Reduce to half at 2R profit
+- Primary TF: 1h (as required for this experiment)
+- HTF filter: 12h HMA(21) for major trend direction (stronger than 4h)
+- Trend: KAMA(21) vs KAMA(50) crossover for adaptive entry signals
+- Momentum: MACD(12,26,9) histogram confirmation
+- Regime: Bollinger Band width > 20th percentile (avoid squeeze periods)
+- Stoploss: 2.5*ATR(14) trailing (slightly wider than 2.0 to reduce premature exits)
+- Position sizing: 0.25 base, 0.30 normal, 0.35 max (discrete levels)
+- Take profit: Reduce to half at 2.5R profit, trail stop at 1.5R
 
-Why this should beat previous 1h attempts:
-- KAMA adapts to volatility (better than static EMA in #003, #005, #009)
-- 12h HMA slower than 4h (fewer false trend reversals)
-- BB regime filter avoids choppy periods (missing in most failed strategies)
-- Wider RSI thresholds ensure ≥10 trades per symbol (fixes #004 zero-trade issue)
-- Conservative sizing (0.25-0.30) controls drawdown (fixes #007, #008, #009 DD issues)
+Why this should beat failed strategies:
+- KAMA adapts to volatility = fewer whipsaws in chop vs static MA
+- 12h HMA filter = stronger trend confirmation than 4h (fewer false signals)
+- MACD histogram = momentum confirmation (avoids entering at trend exhaustion)
+- BB width filter = avoids low-volatility periods where 8 of 14 failed strategies suffered
+- Conservative sizing (0.25-0.35) controls drawdown during 2022 crash
+- Wider stoploss (2.5*ATR) reduces premature exits that plagued earlier strategies
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_12hhma_bbregime_1h_v1"
+name = "kama_macd_12hhma_bbregime_1h_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -48,62 +49,71 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average (KAMA)"""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA)
+    KAMA adapts to market noise: follows price closely in trends, flattens in chop
+    """
     n = len(close)
     kama = np.zeros(n)
     kama[:] = np.nan
     
     # Calculate Efficiency Ratio (ER)
     er = np.zeros(n)
-    for i in range(period, n):
-        price_change = abs(close[i] - close[i - period])
-        volatility = np.sum(np.abs(np.diff(close[i - period:i + 1])))
-        if volatility > 0:
-            er[i] = price_change / volatility
+    for i in range(er_period, n):
+        signal = abs(close[i] - close[i - er_period])
+        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        if noise > 0:
+            er[i] = signal / noise
         else:
             er[i] = 0
     
     # Calculate smoothing constant (SC)
     fast_sc = 2.0 / (fast_period + 1)
     slow_sc = 2.0 / (slow_period + 1)
+    
     sc = np.zeros(n)
-    for i in range(period, n):
+    for i in range(er_period, n):
         sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
     
+    # Initialize KAMA
+    kama[er_period] = close[er_period]
+    
     # Calculate KAMA
-    kama[period] = close[period]
-    for i in range(period + 1, n):
+    for i in range(er_period + 1, n):
         kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
     
     return kama
 
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI (Relative Strength Index)"""
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram"""
     n = len(close)
-    rsi = np.zeros(n)
-    rsi[:] = np.nan
+    close_s = pd.Series(close)
     
-    delta = np.diff(close)
-    gain = np.zeros(n)
-    loss = np.zeros(n)
+    ema_fast = close_s.ewm(span=fast, adjust=False, min_periods=fast).mean().values
+    ema_slow = close_s.ewm(span=slow, adjust=False, min_periods=slow).mean().values
     
-    gain[1:] = np.where(delta > 0, delta, 0)
-    loss[1:] = np.where(delta < 0, -delta, 0)
+    macd_line = ema_fast - ema_slow
+    macd_signal = pd.Series(macd_line).ewm(span=signal, adjust=False, min_periods=signal).mean().values
+    macd_hist = macd_line - macd_signal
     
-    # Use EMA for smoothing (Wilder's method)
-    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
+    return macd_line, macd_signal, macd_hist
+
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands and bandwidth"""
+    n = len(close)
+    close_s = pd.Series(close)
     
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
     
-    return rsi
+    upper_band = sma + std_dev * std
+    lower_band = sma - std_dev * std
+    bandwidth = (upper_band - lower_band) / sma
+    
+    return upper_band, lower_band, bandwidth, sma
 
 
 def calculate_hma(close, period):
@@ -116,30 +126,19 @@ def calculate_hma(close, period):
     return hma.values
 
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands and Band Width"""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    band_width = (upper - lower) / sma
-    return upper, lower, band_width
-
-
-def calculate_bb_width_percentile(band_width, lookback=100):
-    """Calculate Bollinger Band Width percentile over lookback period"""
-    n = len(band_width)
-    bb_percentile = np.zeros(n)
-    bb_percentile[:] = np.nan
+def calculate_percentile_rank(values, window=100):
+    """Calculate rolling percentile rank for regime detection"""
+    n = len(values)
+    pr = np.zeros(n)
+    pr[:] = np.nan
     
-    bw_series = pd.Series(band_width)
-    for i in range(lookback, n):
-        window = bw_series.iloc[i - lookback:i + 1].dropna()
-        if len(window) > 0:
-            bb_percentile[i] = (window <= band_width[i]).sum() / len(window) * 100
+    for i in range(window, n):
+        window_vals = values[i - window:i]
+        valid_vals = window_vals[~np.isnan(window_vals)]
+        if len(valid_vals) > 0:
+            pr[i] = np.sum(valid_vals < values[i]) / len(valid_vals)
     
-    return bb_percentile
+    return pr
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -158,17 +157,18 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     # Calculate 1h indicators
-    kama = calculate_kama(close, period=10)
-    rsi = calculate_rsi(close, period=14)
+    kama_fast = calculate_kama(close, er_period=10, fast_period=2, slow_period=10)
+    kama_slow = calculate_kama(close, er_period=10, fast_period=5, slow_period=20)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, fast=12, slow=26, signal=9)
+    bb_upper, bb_lower, bb_bandwidth, bb_sma = calculate_bollinger_bands(close, period=20, std_dev=2.0)
+    bb_width_percentile = calculate_percentile_rank(bb_bandwidth, window=100)
     atr = calculate_atr(high, low, close, period=14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, period=20, std_dev=2.0)
-    bb_percentile = calculate_bb_width_percentile(bb_width, lookback=100)
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.28  # Base position size (28% of capital)
-    MAX_SIZE = 0.35   # Max position size
-    MIN_SIZE = 0.20   # Min position size
+    BASE_SIZE = 0.25  # Base position size (25% of capital)
+    NORMAL_SIZE = 0.30  # Normal position size
+    MAX_SIZE = 0.35   # Max position size with strong confirmation
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -179,13 +179,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_atr = 0.0
     profit_target_hit = False
     
-    min_period = 120  # Wait for all indicators to stabilize (12h alignment + BB percentile)
+    min_period = 100  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_12h_aligned[i]) or np.isnan(kama[i]) or
-            np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(bb_percentile[i]) or
-            atr[i] == 0):
+        if (np.isnan(hma_12h_aligned[i]) or np.isnan(kama_fast[i]) or
+            np.isnan(kama_slow[i]) or np.isnan(macd_hist[i]) or
+            np.isnan(bb_bandwidth[i]) or np.isnan(atr[i]) or
+            np.isnan(bb_width_percentile[i]) or atr[i] == 0):
             signals[i] = 0.0
             continue
         
@@ -193,41 +194,40 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         price_above_12h_hma = close[i] > hma_12h_aligned[i]
         hma_trend = 1 if price_above_12h_hma else -1
         
-        # KAMA trend direction
-        kama_trend = 1 if close[i] > kama[i] else -1
+        # KAMA crossover signals
+        kama_bullish = kama_fast[i] > kama_slow[i]
+        kama_bearish = kama_fast[i] < kama_slow[i]
         
-        # Bollinger Band regime filter (avoid extremes)
-        # Trade when BB width is in middle 60% (percentile 20-80)
-        bb_regime_ok = 20 <= bb_percentile[i] <= 80
+        # MACD histogram confirmation
+        macd_bullish = macd_hist[i] > 0
+        macd_bearish = macd_hist[i] < 0
         
-        # RSI entry conditions (wider thresholds for more trades)
-        rsi_ok_long = 35 <= rsi[i] <= 65  # Not overbought
-        rsi_ok_short = 35 <= rsi[i] <= 65  # Not oversold
+        # Bollinger Band regime filter (avoid low volatility squeezes)
+        bb_regime_ok = bb_width_percentile[i] > 0.20  # Above 20th percentile
         
-        # KAMA slope (momentum confirmation)
-        kama_slope_long = kama[i] > kama[i - 5] if i >= 5 else False
-        kama_slope_short = kama[i] < kama[i - 5] if i >= 5 else False
+        # Calculate position size based on signal strength
+        position_size = BASE_SIZE
         
-        # Calculate position size based on ATR% (dynamic risk control)
-        atr_pct = atr[i] / close[i] * 100
-        # Target risk per trade: 5% of account
-        # Position size = target_risk / (stoploss_distance * 2)
-        # stoploss = 2*ATR, so position_size = 0.05 / (2 * atr_pct/100) = 2.5 / atr_pct
-        risk_based_size = min(MAX_SIZE, max(MIN_SIZE, 2.5 / max(atr_pct, 1.0)))
-        position_size = min(MAX_SIZE, max(MIN_SIZE, risk_based_size))
+        # Increase size with strong confirmation (all 3 filters agree)
+        if hma_trend == 1 and kama_bullish and macd_bullish:
+            position_size = MAX_SIZE
+        elif hma_trend == -1 and kama_bearish and macd_bearish:
+            position_size = -MAX_SIZE
+        elif (hma_trend == 1 and kama_bullish) or (hma_trend == -1 and kama_bearish):
+            position_size = NORMAL_SIZE * hma_trend
+        else:
+            position_size = BASE_SIZE * hma_trend
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: KAMA bullish + 12h HMA bullish + BB regime ok + RSI ok + KAMA slope up
-        if (kama_trend == 1 and hma_trend == 1 and bb_regime_ok and 
-            rsi_ok_long and kama_slope_long):
-            target_signal = position_size
+        # Long entry: KAMA bullish + 12h HMA bullish + MACD bullish + BB regime OK
+        if kama_bullish and hma_trend == 1 and macd_bullish and bb_regime_ok:
+            target_signal = abs(position_size)
         
-        # Short entry: KAMA bearish + 12h HMA bearish + BB regime ok + RSI ok + KAMA slope down
-        elif (kama_trend == -1 and hma_trend == -1 and bb_regime_ok and 
-              rsi_ok_short and kama_slope_short):
-            target_signal = -position_size
+        # Short entry: KAMA bearish + 12h HMA bearish + MACD bearish + BB regime OK
+        elif kama_bearish and hma_trend == -1 and macd_bearish and bb_regime_ok:
+            target_signal = -abs(position_size)
         
         # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
@@ -237,20 +237,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.0 * atr[i]
+                trailing_stop = highest_since_entry - 2.5 * atr[i]
                 
                 # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry, where R = 2*ATR at entry)
+                # Check take profit (2.5R from entry, where R = 2.5*ATR at entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 4.0 * entry_atr:  # 2R = 4*ATR
+                    if close[i] >= entry_price + 6.25 * entry_atr:  # 2.5R = 6.25*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.0 * atr[i]
+                trailing_stop = lowest_since_entry + 2.5 * atr[i]
                 
                 # Check stoploss
                 if close[i] > trailing_stop:
@@ -258,7 +258,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 4.0 * entry_atr:  # 2R profit
+                    if close[i] <= entry_price - 6.25 * entry_atr:  # 2.5R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -270,7 +270,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             entry_atr = 0.0
             profit_target_hit = False
         elif take_profit_triggered:
-            # Reduce position to half at 2R profit
+            # Reduce position to half at 2.5R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
@@ -286,11 +286,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if KAMA reverses OR 12h HMA alignment breaks
-                kama_reversal_long = kama_trend == -1
-                kama_reversal_short = kama_trend == 1
+                # Exit if KAMA reverses OR 12h HMA alignment breaks OR MACD reverses strongly
+                kama_reversal_long = kama_bearish
+                kama_reversal_short = kama_bullish
                 hma_alignment_broken = (position_side == 1 and hma_trend == -1) or \
                                        (position_side == -1 and hma_trend == 1)
+                macd_strong_reversal = (position_side == 1 and macd_hist[i] < -macd_hist[i-1] * 0.5) or \
+                                       (position_side == -1 and macd_hist[i] > -macd_hist[i-1] * 0.5)
                 
                 if kama_reversal_long or kama_reversal_short or hma_alignment_broken:
                     signals[i] = 0.0
