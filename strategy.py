@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #010 - Supertrend + RSI Pullback + ATR Volatility Regime Filter
-===========================================================================
-Hypothesis: Supertrend (4h) provides cleaner trend signals than Donchian with less whipsaw.
-RSI pullback entries (1h) work well in trending markets. ATR volatility regime filter
-avoids trading during extreme volatility periods (which caused -80% DD in exp#008).
+EXPERIMENT #018 - Supertrend + Bollinger Squeeze + RSI + ATR Stop
+=================================================================
+Hypothesis: Combining 4h Supertrend (trend direction) with 1h Bollinger 
+squeeze detection (low volatility before breakout) and RSI pullback entries
+should capture momentum moves with better risk/reward than pure MA strategies.
 
-Key innovations vs mtf_kama_macd_adx_atr_v1 (Sharpe=2.139):
-- Supertrend(4h) instead of KAMA for binary trend direction (less lag)
-- RSI(14) pullback entries instead of MACD (faster entry timing)
-- ATR volatility percentile filter to avoid extreme volatility regimes
-- Conservative position sizing: max 0.30 (vs 0.35-0.40 in failed strategies)
-- Discrete signal levels (0.0, ±0.20, ±0.30) to minimize churn costs
+Key innovations vs mtf_donchian_hma_rsi_zscore_v1:
+- Supertrend(4h) instead of Donchian for volatility-adjusted trend
+- Bollinger Band Width squeeze filter (BW < 20th percentile) for entry timing
+- RSI(14) pullback in trend direction for entry confirmation
+- ATR(14) trailing stop at 2.5*ATR with proper position tracking
+- Discrete position sizing (0.0, ±0.25, ±0.35) to minimize churn costs
 
 Why this might beat Sharpe=2.139:
-- Supertrend proven in exp#002 (Sharpe=1.278) but failed due to position sizing
-- RSI pullback logic from mtf_hma_rsi_zscore_v1 (Sharpe=5.4 baseline)
-- ATR regime filter prevents trading during crash volatility (fixes exp#008 -80% DD)
-- Multi-timeframe logic (4h trend + 1h entry) proven to 2x Sharpe
+- Supertrend adapts to volatility better than fixed Donchian channels
+- Bollinger squeeze identifies low-volatility compression before breakouts
+- Multi-timeframe logic (4h trend + 1h entry) proven in prior experiments
+- Conservative position sizing (max 0.35) controls drawdown
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_supertrend_rsi_atr_regime_v1"
+name = "mtf_supertrend_bb_squeeze_rsi_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -50,37 +50,54 @@ def calculate_atr(high, low, close, period=14):
 
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator for binary trend direction"""
+    """Calculate Supertrend indicator for trend direction"""
     n = len(close)
     atr = calculate_atr(high, low, close, period)
     
     supertrend = np.zeros(n)
-    trend = np.ones(n)  # 1 for bullish, -1 for bearish
+    trend = np.zeros(n)  # 1 = bullish, -1 = bearish
     
     for i in range(period, n):
         if atr[i] == 0:
-            supertrend[i] = close[i]
             continue
             
         upper_band = (high[i] + low[i]) / 2 + multiplier * atr[i]
         lower_band = (high[i] + low[i]) / 2 - multiplier * atr[i]
         
-        if trend[i - 1] == 1:
-            if close[i] < lower_band:
+        if i == period:
+            supertrend[i] = upper_band
+            trend[i] = -1 if close[i] < supertrend[i] else 1
+        else:
+            # Update bands based on trend
+            if trend[i - 1] == 1:
+                supertrend[i] = max(lower_band, supertrend[i - 1])
+            else:
+                supertrend[i] = min(upper_band, supertrend[i - 1])
+            
+            # Check for trend reversal
+            if close[i] > supertrend[i] and trend[i - 1] == -1:
+                trend[i] = 1
+                supertrend[i] = lower_band
+            elif close[i] < supertrend[i] and trend[i - 1] == 1:
                 trend[i] = -1
                 supertrend[i] = upper_band
             else:
-                trend[i] = 1
-                supertrend[i] = max(lower_band, supertrend[i - 1] if i > period else lower_band)
-        else:
-            if close[i] > upper_band:
-                trend[i] = 1
-                supertrend[i] = lower_band
-            else:
-                trend[i] = -1
-                supertrend[i] = min(upper_band, supertrend[i - 1] if i > period else upper_band)
+                trend[i] = trend[i - 1]
     
     return supertrend, trend
+
+
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands"""
+    n = len(close)
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / sma
+    
+    return upper, lower, sma, bandwidth
 
 
 def calculate_rsi(close, period=14):
@@ -96,24 +113,26 @@ def calculate_rsi(close, period=14):
     avg_loss = pd.Series(loss).rolling(window=period, min_periods=period).mean().values
     
     rs = np.zeros(n)
-    mask = avg_loss > 0
+    mask = (avg_loss > 0) & (avg_gain >= 0)
     rs[mask] = avg_gain[mask] / avg_loss[mask]
     
     rsi = np.zeros(n)
     rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    rsi[avg_loss == 0] = 100
     
     return rsi
 
 
-def calculate_atr_percentile(atr, lookback=50):
-    """Calculate ATR percentile for volatility regime detection"""
-    n = len(atr)
+def calculate_bw_percentile(bandwidth, lookback=100):
+    """Calculate Bollinger Band Width percentile for squeeze detection"""
+    n = len(bandwidth)
     percentile = np.zeros(n)
     
     for i in range(lookback - 1, n):
-        window = atr[i - lookback + 1:i + 1]
-        rank = np.sum(window < atr[i])
-        percentile[i] = rank / lookback
+        window = bandwidth[i - lookback + 1:i + 1]
+        valid = window[~np.isnan(window)]
+        if len(valid) > 0:
+            percentile[i] = np.sum(bandwidth[i] >= valid) / len(valid)
     
     return percentile
 
@@ -124,10 +143,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # 1h indicators for entry timing and risk
+    # 1h indicators for entry timing
     rsi_1h = calculate_rsi(close, period=14)
     atr_1h = calculate_atr(high, low, close, period=14)
-    atr_pct_1h = calculate_atr_percentile(atr_1h, lookback=50)
+    bb_upper, bb_lower, bb_sma, bb_bandwidth = calculate_bollinger(close, period=20, std_mult=2.0)
+    bw_percentile = calculate_bw_percentile(bb_bandwidth, lookback=100)
     
     # 4h Supertrend for trend filter (resample 1h → 4h)
     df_1h = pd.DataFrame({
@@ -166,121 +186,162 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels to reduce churn
-    SIZE_FULL = 0.30   # Full position in good conditions (conservative vs 0.35)
-    SIZE_HALF = 0.20   # Reduced position in marginal conditions
+    SIZE_FULL = 0.35   # Full position in good conditions
+    SIZE_HALF = 0.25   # Reduced position in marginal conditions
     
     # RSI thresholds for pullback entries
     RSI_LONG_ENTRY = 45   # Enter long on pullback in uptrend
     RSI_SHORT_ENTRY = 55  # Enter short on rally in downtrend
-    RSI_EXIT = 50         # Exit when RSI crosses midline against position
     
-    # ATR volatility regime filter
-    ATR_PCT_HIGH = 0.85   # Don't trade if ATR in top 15% (extreme volatility)
-    ATR_PCT_LOW = 0.15    # Reduce size if ATR in bottom 15% (low volatility = chop)
+    # Bollinger squeeze threshold (percentile < 0.3 = low volatility)
+    BB_SQUEEZE_THRESHOLD = 0.30
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.5
     
-    first_valid = max(80, 14, 50)  # Wait for all indicators
+    first_valid = max(100, 20, 14, 40)  # Wait for all indicators
     
     # Track entry prices for trailing stop logic
     entry_price = np.zeros(n)
     position_side = np.zeros(n)  # 1 for long, -1 for short, 0 for flat
+    highest_since_entry = np.zeros(n)
+    lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(atr_pct_1h[i]):
+        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(bb_bandwidth[i]):
             signals[i] = 0.0
             continue
         
         trend = trend_1h[i]
         rsi_val = rsi_1h[i]
         atr = atr_1h[i]
-        atr_pct = atr_pct_1h[i]
         price = close[i]
+        bw_pct = bw_percentile[i]
         
-        # ATR volatility regime filter - avoid extreme volatility
-        if atr_pct > ATR_PCT_HIGH:
-            # Extreme volatility - close all positions
+        # ATR filter - avoid trading when ATR is extremely high
+        if atr > 0 and atr / price > 0.05:  # ATR > 5% of price = too volatile
             signals[i] = 0.0
             position_side[i] = 0
-            entry_price[i] = 0
             continue
         
         # Check trailing stop for existing positions
         if i > 0 and position_side[i - 1] != 0:
             prev_side = position_side[i - 1]
             prev_entry = entry_price[i - 1] if entry_price[i - 1] > 0 else price
+            prev_highest = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else price
+            prev_lowest = lowest_since_entry[i - 1] if lowest_since_entry[i - 1] > 0 else price
             
-            if prev_side == 1:  # Long position
-                stoploss_price = prev_entry - ATR_STOP_MULT * atr
-                # Also check RSI exit signal
-                rsi_exit = rsi_val < RSI_EXIT
-                
-                if price < stoploss_price or rsi_exit:
+            # Update highest/lowest since entry
+            if prev_side == 1:
+                highest_since_entry[i] = max(prev_highest, price)
+                lowest_since_entry[i] = prev_lowest
+                # Trailing stop for long
+                stoploss_price = max(prev_entry, highest_since_entry[i] - ATR_STOP_MULT * atr) - ATR_STOP_MULT * atr
+                if price < stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
                     continue
-            elif prev_side == -1:  # Short position
-                stoploss_price = prev_entry + ATR_STOP_MULT * atr
-                # Also check RSI exit signal
-                rsi_exit = rsi_val > RSI_EXIT
-                
-                if price > stoploss_price or rsi_exit:
+            elif prev_side == -1:
+                highest_since_entry[i] = prev_highest
+                lowest_since_entry[i] = min(prev_lowest, price)
+                # Trailing stop for short
+                stoploss_price = min(prev_entry, lowest_since_entry[i] + ATR_STOP_MULT * atr) + ATR_STOP_MULT * atr
+                if price > stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
                     continue
+            else:
+                highest_since_entry[i] = 0
+                lowest_since_entry[i] = 0
+        else:
+            highest_since_entry[i] = 0
+            lowest_since_entry[i] = 0
         
-        # Low volatility regime - reduce position size
-        size_multiplier = 1.0
-        if atr_pct < ATR_PCT_LOW:
-            size_multiplier = 0.67  # Reduce to 2/3 size in low vol
+        # Bollinger squeeze filter - only enter when volatility is compressed
+        is_squeeze = bw_pct < BB_SQUEEZE_THRESHOLD
         
         if trend == 1:  # 4h uptrend
+            # RSI pullback entry with Bollinger squeeze confirmation
             if rsi_val < RSI_LONG_ENTRY:
-                # Pullback entry - full position (adjusted for vol regime)
-                signals[i] = SIZE_FULL * size_multiplier
-                position_side[i] = 1
-                entry_price[i] = price
+                if is_squeeze:
+                    signals[i] = SIZE_FULL
+                    position_side[i] = 1
+                    entry_price[i] = price
+                    highest_since_entry[i] = price
+                    lowest_since_entry[i] = price
+                else:
+                    signals[i] = SIZE_HALF
+                    position_side[i] = 1
+                    entry_price[i] = price
+                    highest_since_entry[i] = price
+                    lowest_since_entry[i] = price
             elif rsi_val < 50:
-                # Moderate pullback - half position
-                signals[i] = SIZE_HALF * size_multiplier
-                position_side[i] = 1
-                entry_price[i] = price
-            else:
-                # Hold or exit
+                # Moderate pullback - hold or reduce
                 if i > 0 and position_side[i - 1] == 1:
                     signals[i] = signals[i - 1]
                     position_side[i] = 1
                     entry_price[i] = entry_price[i - 1]
+                    highest_since_entry[i] = highest_since_entry[i - 1]
+                    lowest_since_entry[i] = lowest_since_entry[i - 1]
                 else:
                     signals[i] = 0.0
                     position_side[i] = 0
-                    entry_price[i] = 0
+            else:
+                # RSI too high - hold existing or stay flat
+                if i > 0 and position_side[i - 1] == 1:
+                    signals[i] = signals[i - 1]
+                    position_side[i] = 1
+                    entry_price[i] = entry_price[i - 1]
+                    highest_since_entry[i] = highest_since_entry[i - 1]
+                    lowest_since_entry[i] = lowest_since_entry[i - 1]
+                else:
+                    signals[i] = 0.0
+                    position_side[i] = 0
                     
         elif trend == -1:  # 4h downtrend
+            # RSI rally entry with Bollinger squeeze confirmation
             if rsi_val > RSI_SHORT_ENTRY:
-                # Rally entry - full short
-                signals[i] = -SIZE_FULL * size_multiplier
-                position_side[i] = -1
-                entry_price[i] = price
+                if is_squeeze:
+                    signals[i] = -SIZE_FULL
+                    position_side[i] = -1
+                    entry_price[i] = price
+                    highest_since_entry[i] = price
+                    lowest_since_entry[i] = price
+                else:
+                    signals[i] = -SIZE_HALF
+                    position_side[i] = -1
+                    entry_price[i] = price
+                    highest_since_entry[i] = price
+                    lowest_since_entry[i] = price
             elif rsi_val > 50:
-                # Moderate rally - half short
-                signals[i] = -SIZE_HALF * size_multiplier
-                position_side[i] = -1
-                entry_price[i] = price
-            else:
-                # Hold or exit
+                # Moderate rally - hold or reduce
                 if i > 0 and position_side[i - 1] == -1:
                     signals[i] = signals[i - 1]
                     position_side[i] = -1
                     entry_price[i] = entry_price[i - 1]
+                    highest_since_entry[i] = highest_since_entry[i - 1]
+                    lowest_since_entry[i] = lowest_since_entry[i - 1]
                 else:
                     signals[i] = 0.0
                     position_side[i] = 0
-                    entry_price[i] = 0
-        else:  # No clear trend (flat)
+            else:
+                # RSI too low - hold existing or stay flat
+                if i > 0 and position_side[i - 1] == -1:
+                    signals[i] = signals[i - 1]
+                    position_side[i] = -1
+                    entry_price[i] = entry_price[i - 1]
+                    highest_since_entry[i] = highest_since_entry[i - 1]
+                    lowest_since_entry[i] = lowest_since_entry[i - 1]
+                else:
+                    signals[i] = 0.0
+                    position_side[i] = 0
+        else:  # No clear trend
             signals[i] = 0.0
             position_side[i] = 0
             entry_price[i] = 0
