@@ -244,6 +244,7 @@ def render_html() -> str:
 <meta http-equiv="refresh" content="600">
 <title>LLM Trading Research Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   * {{ box-sizing: border-box; }}
   body {{ font-family: 'Courier New', monospace; background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }}
@@ -614,12 +615,11 @@ async function loadDetail(strategy, symbol, period) {{
     html += `Fees=$<b>${{m.total_fees.toFixed(0)}}</b> | Funding=$<b>${{m.total_funding.toFixed(0)}}</b>`;
     html += `</div>`;
 
-    // Price chart with entries/exits + indicators
-    html += `<h4 style="margin-top:8px">Price Chart (${{data.timeframe}}) with Entry/Exit Markers</h4>`;
-    html += `<div class="detail-chart" style="height:320px"><canvas id="detailPriceChart"></canvas></div>`;
-
-    // Signal strength chart
-    html += `<div style="height:80px;margin:-5px 0 5px"><canvas id="detailSignalChart"></canvas></div>`;
+    // Button to open candlestick chart overlay
+    html += `<div style="margin:10px 0">`;
+    html += `<button class="detail-btn" style="font-size:0.9em;padding:6px 16px" onclick="openCandleChart(detailData)">Open Candlestick Chart (zoom/scroll)</button>`;
+    html += `<span style="color:#8b949e;font-size:0.75em;margin-left:10px">Shows OHLC candles, EMA lines, entry/exit markers</span>`;
+    html += `</div>`;
 
     // Equity chart
     html += `<h4>Equity Curve</h4>`;
@@ -661,6 +661,9 @@ async function loadDetail(strategy, symbol, period) {{
 
     dv.innerHTML = html;
 
+    // Store data for chart overlay
+    window.detailData = data;
+
     // Render equity chart
     if (detailChart) detailChart.destroy();
     const ctx = document.getElementById('detailEquityChart').getContext('2d');
@@ -690,155 +693,139 @@ async function loadDetail(strategy, symbol, period) {{
       }}
     }});
 
-    // --- Price chart with indicators + trade markers ---
-    if (data.price_close && data.price_close.length > 0) {{
-      if (window._priceChart) window._priceChart.destroy();
-      if (window._sigChart) window._sigChart.destroy();
-
-      // Build entry/exit annotation points
-      const entryPoints = [];
-      const exitPoints = [];
-      const timeLookup = {{}};
-      data.price_times.forEach((t, i) => {{ timeLookup[t.substring(0,16)] = i; }});
-
-      (data.trade_markers || []).forEach(tm => {{
-        const ei = timeLookup[tm.entry_time];
-        const xi = timeLookup[tm.exit_time];
-        if (ei !== undefined) entryPoints.push({{x: ei, y: tm.entry_price, dir: tm.direction}});
-        if (xi !== undefined) exitPoints.push({{x: xi, y: tm.exit_price, pnl: tm.pnl_pct}});
-      }});
-
-      const pLabels = data.price_times.map(t => t.substring(5,16));
-
-      const pCtx = document.getElementById('detailPriceChart').getContext('2d');
-      window._priceChart = new Chart(pCtx, {{
-        type: 'line',
-        data: {{
-          labels: pLabels,
-          datasets: [
-            {{
-              label: 'Close',
-              data: data.price_close,
-              borderColor: '#c9d1d9',
-              borderWidth: 1,
-              pointRadius: 0,
-              tension: 0.1,
-              yAxisID: 'y',
-              order: 3,
-            }},
-            {{
-              label: 'EMA 21',
-              data: data.ema21,
-              borderColor: '#f0883e',
-              borderWidth: 1,
-              pointRadius: 0,
-              borderDash: [3,2],
-              tension: 0.1,
-              yAxisID: 'y',
-              order: 4,
-            }},
-            {{
-              label: 'EMA 55',
-              data: data.ema55,
-              borderColor: '#a371f7',
-              borderWidth: 1,
-              pointRadius: 0,
-              borderDash: [5,3],
-              tension: 0.1,
-              yAxisID: 'y',
-              order: 4,
-            }},
-            {{
-              label: 'Long Entry',
-              data: entryPoints.filter(p=>p.dir==='LONG').map(p=>({{x:p.x,y:p.y}})),
-              type: 'scatter',
-              backgroundColor: '#2ecc71',
-              borderColor: '#2ecc71',
-              pointRadius: 4,
-              pointStyle: 'triangle',
-              yAxisID: 'y',
-              order: 1,
-            }},
-            {{
-              label: 'Short Entry',
-              data: entryPoints.filter(p=>p.dir==='SHORT').map(p=>({{x:p.x,y:p.y}})),
-              type: 'scatter',
-              backgroundColor: '#e74c3c',
-              borderColor: '#e74c3c',
-              pointRadius: 4,
-              pointStyle: 'triangleDown',  // Fixed: use 'triangle' and rotation
-              rotation: 180,
-              yAxisID: 'y',
-              order: 1,
-            }},
-            {{
-              label: 'Exit (win)',
-              data: exitPoints.filter(p=>p.pnl>=0).map(p=>({{x:p.x,y:p.y}})),
-              type: 'scatter',
-              backgroundColor: 'rgba(46,204,113,0.5)',
-              pointRadius: 3,
-              pointStyle: 'crossRot',
-              yAxisID: 'y',
-              order: 2,
-            }},
-            {{
-              label: 'Exit (loss)',
-              data: exitPoints.filter(p=>p.pnl<0).map(p=>({{x:p.x,y:p.y}})),
-              type: 'scatter',
-              backgroundColor: 'rgba(231,76,60,0.5)',
-              pointRadius: 3,
-              pointStyle: 'crossRot',
-              yAxisID: 'y',
-              order: 2,
-            }},
-          ]
-        }},
-        options: {{
-          responsive: true,
-          maintainAspectRatio: false,
-          interaction: {{ mode: 'index', intersect: false }},
-          plugins: {{
-            legend: {{ labels: {{ color: '#c9d1d9', boxWidth: 12, font: {{size: 10}} }}, position: 'top' }},
-            tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + (ctx.parsed.y||0).toLocaleString() }} }}
-          }},
-          scales: {{
-            x: {{ ticks: {{ color: '#8b949e', maxTicksLimit: 15, font: {{size: 9}} }}, grid: {{ color: '#21262d' }} }},
-            y: {{ ticks: {{ color: '#8b949e', callback: v => '$' + v.toLocaleString() }}, grid: {{ color: '#21262d' }} }}
-          }}
-        }}
-      }});
-
-      // Signal strength mini-chart
-      const sCtx = document.getElementById('detailSignalChart').getContext('2d');
-      const sigColors = data.signals.map(s => s > 0 ? 'rgba(46,204,113,0.6)' : s < 0 ? 'rgba(231,76,60,0.6)' : 'rgba(139,148,158,0.2)');
-      window._sigChart = new Chart(sCtx, {{
-        type: 'bar',
-        data: {{
-          labels: pLabels,
-          datasets: [{{
-            label: 'Signal',
-            data: data.signals,
-            backgroundColor: sigColors,
-            borderWidth: 0,
-            barPercentage: 1.0,
-            categoryPercentage: 1.0,
-          }}]
-        }},
-        options: {{
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: {{ legend: {{ display: false }} }},
-          scales: {{
-            x: {{ display: false }},
-            y: {{ min: -0.5, max: 0.5, ticks: {{ color: '#8b949e', stepSize: 0.25, font: {{size: 9}} }}, grid: {{ color: '#21262d' }} }}
-          }}
-        }}
-      }});
-    }}
-
   }} catch(e) {{
     dv.innerHTML = `<p style="color:#e74c3c">Failed to load: ${{e.message}}</p>`;
   }}
+}}
+
+// --- Candlestick Chart Overlay (Lightweight Charts) ---
+function openCandleChart(data) {{
+  if (!data || !data.ohlc || data.ohlc.length === 0) return;
+
+  // Create fullscreen overlay
+  let overlay = document.getElementById('chartOverlay');
+  if (!overlay) {{
+    overlay = document.createElement('div');
+    overlay.id = 'chartOverlay';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:#0d1117;z-index:2000;display:flex;flex-direction:column;';
+    document.body.appendChild(overlay);
+  }}
+  overlay.style.display = 'flex';
+  overlay.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 15px;background:#161b22;border-bottom:1px solid #30363d;">
+      <div style="color:#58a6ff;font-size:0.9em;font-weight:bold">
+        ${{data.symbol}} · ${{data.timeframe}} · ${{data.period === 'train' ? 'Train 2021–2024' : 'Test 2025+'}}
+        <span style="color:#8b949e;font-weight:normal"> | Sharpe=${{data.metrics.sharpe.toFixed(3)}} | Return=${{data.metrics.return_pct > 0 ? '+' : ''}}${{data.metrics.return_pct.toFixed(1)}}% | DD=${{data.metrics.max_dd_pct.toFixed(1)}}% | Trades=${{data.metrics.num_trades}}</span>
+      </div>
+      <div>
+        <span style="color:#f0883e;font-size:0.75em;margin-right:15px">━ EMA 21</span>
+        <span style="color:#a371f7;font-size:0.75em;margin-right:15px">━ EMA 55</span>
+        <span style="color:#2ecc71;font-size:0.75em;margin-right:10px">▲ Long</span>
+        <span style="color:#e74c3c;font-size:0.75em;margin-right:15px">▼ Short</span>
+        <button onclick="document.getElementById('chartOverlay').style.display='none'" style="background:#e74c3c;border:none;color:#fff;padding:4px 12px;border-radius:4px;cursor:pointer;font-family:monospace">Close (Esc)</button>
+      </div>
+    </div>
+    <div id="candleChartContainer" style="flex:1;position:relative"></div>
+    <div id="signalChartContainer" style="height:80px;border-top:1px solid #30363d;position:relative"></div>
+  `;
+
+  // Candlestick chart
+  const container = document.getElementById('candleChartContainer');
+  const chart = LightweightCharts.createChart(container, {{
+    width: container.clientWidth,
+    height: container.clientHeight,
+    layout: {{ background: {{ color: '#0d1117' }}, textColor: '#c9d1d9' }},
+    grid: {{ vertLines: {{ color: '#1c2128' }}, horzLines: {{ color: '#1c2128' }} }},
+    crosshair: {{ mode: 0 }},
+    timeScale: {{ timeVisible: true, secondsVisible: false, borderColor: '#30363d' }},
+    rightPriceScale: {{ borderColor: '#30363d' }},
+  }});
+
+  // OHLC candles
+  const candleSeries = chart.addCandlestickSeries({{
+    upColor: '#2ecc71', downColor: '#e74c3c',
+    borderUpColor: '#2ecc71', borderDownColor: '#e74c3c',
+    wickUpColor: '#2ecc71', wickDownColor: '#e74c3c',
+  }});
+  candleSeries.setData(data.ohlc);
+
+  // EMA 21
+  if (data.ema21 && data.ema21.length > 0) {{
+    const ema21Series = chart.addLineSeries({{ color: '#f0883e', lineWidth: 1, lineStyle: 2 }});
+    ema21Series.setData(data.ema21);
+  }}
+
+  // EMA 55
+  if (data.ema55 && data.ema55.length > 0) {{
+    const ema55Series = chart.addLineSeries({{ color: '#a371f7', lineWidth: 1, lineStyle: 2 }});
+    ema55Series.setData(data.ema55);
+  }}
+
+  // Trade markers on candles
+  const markers = [];
+  (data.trade_markers || []).forEach(tm => {{
+    markers.push({{
+      time: tm.entry_time,
+      position: tm.direction === 'LONG' ? 'belowBar' : 'aboveBar',
+      color: tm.direction === 'LONG' ? '#2ecc71' : '#e74c3c',
+      shape: tm.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
+      text: tm.direction[0] + ' $' + tm.entry_price,
+    }});
+    markers.push({{
+      time: tm.exit_time,
+      position: tm.pnl_pct >= 0 ? 'aboveBar' : 'belowBar',
+      color: tm.pnl_pct >= 0 ? 'rgba(46,204,113,0.7)' : 'rgba(231,76,60,0.7)',
+      shape: 'circle',
+      text: (tm.pnl_pct >= 0 ? '+' : '') + tm.pnl_pct.toFixed(1) + '%',
+    }});
+  }});
+  markers.sort((a, b) => a.time - b.time);
+  candleSeries.setMarkers(markers);
+
+  // Signal pane
+  const sigContainer = document.getElementById('signalChartContainer');
+  const sigChart = LightweightCharts.createChart(sigContainer, {{
+    width: sigContainer.clientWidth,
+    height: sigContainer.clientHeight,
+    layout: {{ background: {{ color: '#0d1117' }}, textColor: '#8b949e' }},
+    grid: {{ vertLines: {{ color: '#1c2128' }}, horzLines: {{ color: '#1c2128' }} }},
+    timeScale: {{ visible: false }},
+    rightPriceScale: {{ borderColor: '#30363d' }},
+  }});
+
+  const sigSeries = sigChart.addHistogramSeries({{
+    priceFormat: {{ type: 'custom', formatter: v => v.toFixed(2) }},
+  }});
+  const sigData = (data.signals || []).map(s => ({{
+    time: s.time,
+    value: s.value,
+    color: s.value > 0 ? 'rgba(46,204,113,0.6)' : s.value < 0 ? 'rgba(231,76,60,0.6)' : 'rgba(139,148,158,0.15)',
+  }}));
+  sigSeries.setData(sigData);
+
+  // Sync time scales
+  chart.timeScale().subscribeVisibleLogicalRangeChange(range => {{
+    if (range) sigChart.timeScale().setVisibleLogicalRange(range);
+  }});
+
+  // Resize handler
+  const resizeObserver = new ResizeObserver(() => {{
+    chart.applyOptions({{ width: container.clientWidth, height: container.clientHeight }});
+    sigChart.applyOptions({{ width: sigContainer.clientWidth, height: sigContainer.clientHeight }});
+  }});
+  resizeObserver.observe(container);
+
+  // ESC to close
+  const escHandler = (e) => {{
+    if (e.key === 'Escape') {{
+      overlay.style.display = 'none';
+      document.removeEventListener('keydown', escHandler);
+      resizeObserver.disconnect();
+      chart.remove();
+      sigChart.remove();
+    }}
+  }};
+  document.addEventListener('keydown', escHandler);
 }}
 </script>
 </body>
@@ -928,32 +915,62 @@ def run_detail_backtest(strategy_name: str, symbol: str, period: str) -> dict:
         except Exception:
             signals = np.zeros(len(prices))
 
-        # Sample price data for chart (max 800 points for good resolution)
+        # OHLC data for candlestick chart (all bars, Lightweight Charts handles zoom)
         price_n = len(prices)
-        price_step = max(1, price_n // 800)
-        price_times = prices["open_time"].astype(str).values[::price_step].tolist()
-        price_close = [round(float(v), 2) for v in prices["close"].values[::price_step]]
-        price_high = [round(float(v), 2) for v in prices["high"].values[::price_step]]
-        price_low = [round(float(v), 2) for v in prices["low"].values[::price_step]]
-        signal_sampled = [round(float(v), 4) for v in signals[::price_step]]
+        # Convert timestamps to unix seconds for Lightweight Charts
+        open_times = prices["open_time"].values
+        # Convert to unix seconds reliably
+        unix_times = [int(pd.Timestamp(t).timestamp()) for t in open_times]
 
-        # Compute common indicators for chart overlay
+        # Sample for performance: max 3000 candles (LWC handles this well)
+        price_step = max(1, price_n // 3000)
+        ohlc = []
+        for i in range(0, price_n, price_step):
+            # Aggregate candles within the step
+            end = min(i + price_step, price_n)
+            ohlc.append({
+                "time": int(unix_times[i]),
+                "open": round(float(prices["open"].values[i]), 2),
+                "high": round(float(prices["high"].values[i:end].max()), 2),
+                "low": round(float(prices["low"].values[i:end].min()), 2),
+                "close": round(float(prices["close"].values[end - 1]), 2),
+            })
+
+        # Indicators (EMA 21 & 55) — sampled at same step
         close_s = pd.Series(prices["close"].values)
         ema21 = close_s.ewm(span=21, min_periods=21, adjust=False).mean().values
         ema55 = close_s.ewm(span=55, min_periods=55, adjust=False).mean().values
-        ema21_sampled = [round(float(v), 2) if not np.isnan(v) else None for v in ema21[::price_step]]
-        ema55_sampled = [round(float(v), 2) if not np.isnan(v) else None for v in ema55[::price_step]]
+        ema21_data = []
+        ema55_data = []
+        for i in range(0, price_n, price_step):
+            t = int(unix_times[i])
+            v21 = float(ema21[i])
+            v55 = float(ema55[i])
+            if not np.isnan(v21):
+                ema21_data.append({"time": t, "value": round(v21, 2)})
+            if not np.isnan(v55):
+                ema55_data.append({"time": t, "value": round(v55, 2)})
 
-        # Trade entry/exit markers (map to chart x-axis)
+        # Signal data for signal pane
+        signal_data = []
+        for i in range(0, price_n, price_step):
+            sig = float(signals[i])
+            signal_data.append({"time": int(unix_times[i]), "value": round(sig, 4)})
+
+        # Trade markers with unix timestamps
         trade_markers = []
-        for t in result.trades[:500]:  # max 500 markers
+        for t in result.trades:
+            entry_ts = int(pd.Timestamp(t.entry_time).timestamp())
+            exit_ts = int(pd.Timestamp(t.exit_time).timestamp())
             trade_markers.append({
-                "entry_time": str(t.entry_time)[:16],
-                "exit_time": str(t.exit_time)[:16],
+                "entry_time": entry_ts,
+                "exit_time": exit_ts,
+                "entry_time_str": str(t.entry_time)[:16],
+                "exit_time_str": str(t.exit_time)[:16],
                 "direction": "LONG" if t.direction == 1 else "SHORT",
-                "entry_price": round(t.entry_price, 2),
-                "exit_price": round(t.exit_price, 2),
-                "pnl_pct": round(t.pnl_pct * 100, 3),
+                "entry_price": round(float(t.entry_price), 2),
+                "exit_price": round(float(t.exit_price), 2),
+                "pnl_pct": round(float(t.pnl_pct) * 100, 3),
             })
 
         # Full trades list
@@ -992,14 +1009,11 @@ def run_detail_backtest(strategy_name: str, symbol: str, period: str) -> dict:
             "equity_labels": eq_labels,
             "trades": trades,
             "num_bars": n,
-            # Price chart data
-            "price_times": price_times,
-            "price_close": price_close,
-            "price_high": price_high,
-            "price_low": price_low,
-            "signals": signal_sampled,
-            "ema21": ema21_sampled,
-            "ema55": ema55_sampled,
+            # Candlestick chart data (Lightweight Charts format)
+            "ohlc": ohlc,
+            "ema21": ema21_data,
+            "ema55": ema55_data,
+            "signals": signal_data,
             "trade_markers": trade_markers,
         }
     except Exception as e:
