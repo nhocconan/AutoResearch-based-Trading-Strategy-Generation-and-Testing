@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #005 - MTF DEMA+Supertrend+MACD+BBPct+Zscore (4h+1h v1)
+EXPERIMENT #006 - MTF KAMA+Donchian Trend + RSI Pullback + ADX Filter (4h+1h v1)
 ==================================================================================================
-Hypothesis: Current best uses 4h HMA + 1h RSI. Let's try DEMA (faster than HMA) + MACD histogram
-for momentum confirmation + Bollinger %B for entry timing instead of RSI.
+Hypothesis: Current best uses 4h DEMA+Supertrend. Let's try KAMA (Kaufman Adaptive) which adjusts
+to market volatility - slower in choppy markets, faster in trending markets. Combine with Donchian
+breakout confirmation on 4h, RSI pullback entries on 1h, and ADX filter to only trade strong trends.
 
-Key changes from #040:
-- Timeframe: 1h entries + 4h trend (proven MTF combo, different from 15m+1h)
-- Trend: DEMA(8/21) crossover + Supertrend(10,3) on 4h
-- Entry: MACD histogram cross + BB %B (0.2-0.8 range) on 1h
-- Filter: Z-score(20) < 2.0 for regime
-- Position size: 0.30 (slightly conservative)
-- Stoploss: 2.0*ATR trailing
+Key changes from #005:
+- Timeframe: 1h entries + 4h trend (proven MTF combo)
+- Trend: KAMA(10,2,30) + Donchian(20) breakout on 4h
+- Entry: RSI(14) pullback to 40-60 zone on 1h (proven entry method)
+- Filter: ADX(14) > 25 for trend strength + Z-score(20) < 2.0
+- Position size: 0.30 (discrete levels: 0.0, ±0.20, ±0.30)
+- Stoploss: 2.0*ATR trailing, TP at 2R reduce to half
 
 Why this should work:
-- DEMA responds faster than HMA to trend changes
-- MACD histogram adds momentum confirmation (different from RSI)
-- BB %B gives better entry timing in trending markets
-- 4h trend filter reduces whipsaws vs 1h-only strategies
+- KAMA adapts to regime - reduces whipsaws in ranging markets
+- Donchian breakout confirms trend direction
+- RSI pullback entries catch retracements in trends (better than MACD for entries)
+- ADX filter ensures we only trade when trend is strong (>25)
+- 4h trend filter reduces false signals vs 1h-only strategies
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_dema_supertrend_macd_bbpct_zscore_4h_1h_v1"
+name = "mtf_kama_donchian_rsi_adx_zscore_4h_1h_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -51,125 +53,145 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average"""
     n = len(close)
-    if n < period:
+    if n < period + slow_period:
         return np.zeros(n)
     
-    ema = np.zeros(n)
-    multiplier = 2.0 / (period + 1)
+    kama = np.zeros(n)
     
-    ema[period - 1] = np.mean(close[:period])
+    # Calculate Efficiency Ratio
+    er = np.zeros(n)
+    for i in range(period - 1, n):
+        if i >= slow_period - 1:
+            change = abs(close[i] - close[i - slow_period + 1])
+            volatility = np.sum(np.abs(np.diff(close[i - slow_period + 1:i + 1])))
+            if volatility > 0:
+                er[i] = change / volatility
+            else:
+                er[i] = 0
     
-    for i in range(period, n):
-        ema[i] = (close[i] - ema[i - 1]) * multiplier + ema[i - 1]
-    
-    return ema
-
-
-def calculate_dema(close, period=21):
-    """Calculate Double Exponential Moving Average"""
-    n = len(close)
-    if n < period * 2:
-        return np.zeros(n)
-    
-    ema1 = calculate_ema(close, period)
-    ema2 = calculate_ema(ema1, period)
-    
-    dema = np.zeros(n)
-    for i in range(period * 2 - 1, n):
-        dema[i] = 2 * ema1[i] - ema2[i]
-    
-    return dema
-
-
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram"""
-    n = len(close)
-    if n < slow + signal:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    ema_fast = calculate_ema(close, fast)
-    ema_slow = calculate_ema(close, slow)
-    
-    macd_line = np.zeros(n)
-    for i in range(slow - 1, n):
-        macd_line[i] = ema_fast[i] - ema_slow[i]
-    
-    signal_line = calculate_ema(macd_line, signal)
-    
-    histogram = np.zeros(n)
-    for i in range(slow + signal - 1, n):
-        histogram[i] = macd_line[i] - signal_line[i]
-    
-    return macd_line, signal_line, histogram
-
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and %B"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    middle = np.zeros(n)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    bbpct = np.zeros(n)
+    # Calculate smoothing constant
+    sc = np.zeros(n)
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
     
     for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        middle[i] = np.mean(window)
-        std = np.std(window)
-        upper[i] = middle[i] + std_mult * std
-        lower[i] = middle[i] - std_mult * std
-        
-        if upper[i] != lower[i]:
-            bbpct[i] = (close[i] - lower[i]) / (upper[i] - lower[i])
-        else:
-            bbpct[i] = 0.5
+        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    return upper, middle, lower, bbpct
+    # Initialize KAMA
+    kama[period - 1] = close[period - 1]
+    
+    for i in range(period, n):
+        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    return kama
 
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator"""
-    n = len(close)
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (upper and lower bands)"""
+    n = len(high)
     if n < period:
         return np.zeros(n), np.zeros(n)
     
-    atr = calculate_atr(high, low, close, period)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
     
-    supertrend = np.zeros(n)
-    trend_direction = np.ones(n)
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
+    return upper, lower
+
+
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.zeros(n)
     
-    for i in range(period, n):
-        mid = (high[i] + low[i]) / 2
-        upper_band[i] = mid + multiplier * atr[i]
-        lower_band[i] = mid - multiplier * atr[i]
+    rsi = np.zeros(n)
+    gains = np.zeros(n)
+    losses = np.zeros(n)
     
-    supertrend[period] = lower_band[period]
+    for i in range(1, n):
+        diff = close[i] - close[i - 1]
+        gains[i] = max(0, diff)
+        losses[i] = max(0, -diff)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    
+    avg_gain[period] = np.mean(gains[1:period + 1])
+    avg_loss[period] = np.mean(losses[1:period + 1])
     
     for i in range(period + 1, n):
-        if trend_direction[i - 1] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i - 1])
-            if close[i] < supertrend[i]:
-                supertrend[i] = upper_band[i]
-                trend_direction[i] = -1
-            else:
-                trend_direction[i] = 1
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i - 1])
-            if close[i] > supertrend[i]:
-                supertrend[i] = lower_band[i]
-                trend_direction[i] = 1
-            else:
-                trend_direction[i] = -1
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gains[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + losses[i]) / period
     
-    return supertrend, trend_direction
+    for i in range(period, n):
+        if avg_loss[i] == 0:
+            rsi[i] = 100
+        else:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+    
+    return rsi
+
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index"""
+    n = len(close)
+    if n < period * 3:
+        return np.zeros(n)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+        
+        if high[i] - high[i - 1] > low[i - 1] - low[i]:
+            plus_dm[i] = max(0, high[i] - high[i - 1])
+        else:
+            plus_dm[i] = 0
+        
+        if low[i - 1] - low[i] > high[i] - high[i - 1]:
+            minus_dm[i] = max(0, low[i - 1] - low[i])
+        else:
+            minus_dm[i] = 0
+    
+    atr = np.zeros(n)
+    atr[period - 1] = np.mean(tr[1:period])
+    for i in range(period, n):
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    for i in range(period, n):
+        if atr[i] > 0:
+            plus_di[i] = 100 * plus_dm[i] / atr[i]
+            minus_di[i] = 100 * minus_dm[i] / atr[i]
+    
+    dx = np.zeros(n)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx = np.zeros(n)
+    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
+    for i in range(period * 2, n):
+        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+    
+    return adx
 
 
 def calculate_zscore(close, period=20):
@@ -212,7 +234,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     signals = np.zeros(n)
@@ -246,9 +267,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # 1h indicators for entry timing
     atr_1h = calculate_atr(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
     zscore_1h = calculate_zscore(close, period=20)
-    _, _, _, bbpct_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    _, _, macd_hist_1h = calculate_macd(close, fast=12, slow=26, signal=9)
     
     # 4h indicators for trend
     c_4h = df_4h['close'].values
@@ -256,34 +276,46 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     l_4h = df_4h['low'].values
     n_4h = len(c_4h)
     
-    dema_fast_4h = calculate_dema(c_4h, period=8)
-    dema_slow_4h = calculate_dema(c_4h, period=21)
-    _, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
+    kama_4h = calculate_kama(c_4h, period=10, fast_period=2, slow_period=30)
+    donchian_upper_4h, donchian_lower_4h = calculate_donchian(h_4h, l_4h, period=20)
+    adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
     
     # Map 4h indicators back to 1h timeframe using ffill
-    trend_4h = np.zeros(n)
-    st_trend_4h = np.zeros(n)
+    kama_trend_4h = np.zeros(n)
+    donchian_trend_4h = np.zeros(n)
+    adx_strength_4h = np.zeros(n)
     
     for i in range(n):
         # Find which 4h bar this 1h bar belongs to
         idx_4h = min(i // 4, n_4h - 1)
-        if idx_4h >= 21:  # Need enough data for DEMA
-            if c_4h[idx_4h] > dema_fast_4h[idx_4h] and dema_fast_4h[idx_4h] > dema_slow_4h[idx_4h]:
-                trend_4h[i] = 1
-            elif c_4h[idx_4h] < dema_fast_4h[idx_4h] and dema_fast_4h[idx_4h] < dema_slow_4h[idx_4h]:
-                trend_4h[i] = -1
+        if idx_4h >= 40:  # Need enough data for KAMA+ADX
+            # KAMA trend: price above/below KAMA
+            if c_4h[idx_4h] > kama_4h[idx_4h]:
+                kama_trend_4h[i] = 1
+            elif c_4h[idx_4h] < kama_4h[idx_4h]:
+                kama_trend_4h[i] = -1
             
-            st_trend_4h[i] = st_direction_4h[idx_4h]
+            # Donchian trend: price near upper/lower band
+            price_range = donchian_upper_4h[idx_4h] - donchian_lower_4h[idx_4h]
+            if price_range > 0:
+                price_position = (c_4h[idx_4h] - donchian_lower_4h[idx_4h]) / price_range
+                if price_position > 0.7:
+                    donchian_trend_4h[i] = 1
+                elif price_position < 0.3:
+                    donchian_trend_4h[i] = -1
+            
+            adx_strength_4h[i] = adx_4h[idx_4h]
     
     # Entry thresholds
-    BBPCT_LONG_MIN = 0.2
-    BBPCT_LONG_MAX = 0.7
-    BBPCT_SHORT_MIN = 0.3
-    BBPCT_SHORT_MAX = 0.8
+    RSI_LONG_MIN = 40
+    RSI_LONG_MAX = 60
+    RSI_SHORT_MIN = 40
+    RSI_SHORT_MAX = 60
     ZSCORE_MAX = 2.0
+    ADX_MIN = 25
     ATR_STOP_MULT = 2.0
     
-    first_valid = max(100, 21 * 4, 26 + 9, 20)
+    first_valid = max(100, 40 * 4, 14 + 1, 20)
     
     # Track position state
     position_side = np.zeros(n)
@@ -293,15 +325,15 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_1h[i]) or np.isnan(zscore_1h[i]) or np.isnan(bbpct_1h[i]) or atr_1h[i] == 0:
+        if np.isnan(atr_1h[i]) or np.isnan(rsi_1h[i]) or np.isnan(zscore_1h[i]) or atr_1h[i] == 0:
             signals[i] = 0.0
             continue
         
-        trend = trend_4h[i]
-        st_trend = st_trend_4h[i]
+        kama_trend = kama_trend_4h[i]
+        donchian_trend = donchian_trend_4h[i]
+        adx_val = adx_strength_4h[i]
+        rsi_val = rsi_1h[i]
         zscore_val = zscore_1h[i]
-        bbpct_val = bbpct_1h[i]
-        macd_hist = macd_hist_1h[i]
         atr = atr_1h[i]
         price = close[i]
         
@@ -398,11 +430,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h DEMA + Supertrend trend + 1h MACD + BB %B + Z-score
-        if trend == 1 and st_trend == 1:  # Bullish trend confirmed on 4h
-            if (BBPCT_LONG_MIN <= bbpct_val <= BBPCT_LONG_MAX and
-                abs(zscore_val) < ZSCORE_MAX and
-                macd_hist > 0):  # BB pullback + not extreme + momentum
+        # Entry logic: 4h KAMA + Donchian trend + ADX filter + 1h RSI pullback + Z-score
+        if kama_trend == 1 and donchian_trend == 1 and adx_val > ADX_MIN:  # Bullish trend confirmed
+            if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and
+                abs(zscore_val) < ZSCORE_MAX):  # RSI pullback + not extreme
                 signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = price
@@ -410,10 +441,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
                 
-        elif trend == -1 and st_trend == -1:  # Bearish trend confirmed on 4h
-            if (BBPCT_SHORT_MIN <= bbpct_val <= BBPCT_SHORT_MAX and
-                abs(zscore_val) < ZSCORE_MAX and
-                macd_hist < 0):  # BB pullback + not extreme + momentum
+        elif kama_trend == -1 and donchian_trend == -1 and adx_val > ADX_MIN:  # Bearish trend confirmed
+            if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and
+                abs(zscore_val) < ZSCORE_MAX):  # RSI pullback + not extreme
                 signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = price
