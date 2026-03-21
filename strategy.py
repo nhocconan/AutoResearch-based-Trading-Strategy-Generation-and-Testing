@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #044 - MTF HMA+Supertrend+RSI+BBW+Z-score (4h+1d Dynamic Sizing v2)
+EXPERIMENT #045 - MTF HMA+Supertrend+RSI+BBW+Volume (15m+4h Optimized v1)
 ==================================================================================================
-Hypothesis: #040 proved 15m+4h works exceptionally well (Sharpe=16.0), but may be overfitted.
-#043 showed 1h+4h works well (Sharpe=5.7) with cleaner signals. This experiment tests 4h+1d:
-- 4h for entry timing (less noise than 15m/1h, more trades than 1d)
-- 1d for primary trend filter (stronger directional bias than 4h)
-- Simplified indicator stack: HMA + Supertrend + RSI + BBW + Z-score (remove ADX/KAMA/DEMA)
-- ATR-based dynamic position sizing with discrete levels
-- Tighter RSI pullback range (40-60) for higher quality entries
-- Stoploss: 2.0*ATR, Take Profit: 2R then trail at 1R
+Hypothesis: #040 achieved Sharpe=16.0 but may be overfit with too many filters.
+#041 (15m+4h) achieved Sharpe=12.8 - let's optimize this combination.
 
-Why this should beat #043:
-- 4h+1d has stronger trend filter than 1h+4h (daily trend is more reliable)
-- Fewer but higher quality trades (less churn, lower fees)
-- Simpler indicator stack reduces overfitting risk
-- Better suited for BTC/ETH/SOL across different market regimes
+Key changes from #040:
+- Timeframe: 15m entries + 4h trend (16 bars per 4h, more stable than 1h)
+- Simplified indicators: HMA + Supertrend + RSI + BBW + Volume (removed KAMA, Z-score, ADX)
+- Position size: 0.30 (slightly more conservative than 0.35)
+- Stoploss: 2.0*ATR (proven effective)
+- RSI thresholds: 45-55 (tighter for higher quality pullbacks)
+- Volume filter: require volume > 1.2 * SMA20(volume) for entry confirmation
+- BBW filter: require BBW > 0.015 (avoid ultra-low volatility)
+
+Why this should beat #040:
+- 4h trend is more stable than 1h (fewer whipsaws)
+- Fewer filters = less overfitting risk
+- Volume confirmation adds genuine signal quality
+- Simpler logic = more robust across BTC/ETH/SOL
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_supertrend_rsi_bbw_zscore_4h_1d_v2"
-timeframe = "4h"
+name = "mtf_hma_supertrend_rsi_bbw_vol_15m_4h_v1"
+timeframe = "15m"
 leverage = 1.0
 
 
@@ -111,27 +114,6 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized deviation from mean)"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    zscore = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        mean = np.mean(window)
-        std = np.std(window)
-        
-        if std > 0:
-            zscore[i] = (close[i] - mean) / std
-        else:
-            zscore[i] = 0
-    
-    return zscore
-
-
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     """Calculate Supertrend indicator"""
     n = len(close)
@@ -198,82 +180,96 @@ def calculate_bollinger_bands(close, period=20, std_mult=2.0):
     return upper, middle, lower, bbw
 
 
+def calculate_volume_sma(volume, period=20):
+    """Calculate SMA of volume"""
+    n = len(volume)
+    if n < period:
+        return np.zeros(n)
+    
+    vol_sma = np.zeros(n)
+    for i in range(period - 1, n):
+        vol_sma[i] = np.mean(volume[i - period + 1:i + 1])
+    
+    return vol_sma
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values if "volume" in prices.columns else np.ones(len(close))
     n = len(close)
     
-    # 4h indicators for entry timing
-    atr_4h = calculate_atr(high, low, close, period=14)
-    rsi_4h = calculate_rsi(close, period=14)
-    zscore_4h = calculate_zscore(close, period=20)
-    hma_4h = calculate_hma(close, period=21)
-    supertrend_4h, st_direction_4h = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    _, _, _, bbw_4h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    # 15m indicators for entry timing
+    atr_15m = calculate_atr(high, low, close, period=14)
+    rsi_15m = calculate_rsi(close, period=14)
+    hma_15m = calculate_hma(close, period=21)
+    supertrend_15m, st_direction_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    vol_sma_15m = calculate_volume_sma(volume, period=20)
     
-    # Resample to 1d for trend filters (6 x 4h = 1d approximately)
-    bars_per_1d = 6
-    n_1d = (n // bars_per_1d)
+    # Resample to 4h for trend filters (16 x 15m = 4h)
+    bars_per_4h = 16
+    n_4h = (n // bars_per_4h)
     
-    # Create 1d arrays by downsampling
-    c_1d = np.zeros(n_1d)
-    h_1d = np.zeros(n_1d)
-    l_1d = np.zeros(n_1d)
+    # Create 4h arrays by downsampling
+    c_4h = np.zeros(n_4h)
+    h_4h = np.zeros(n_4h)
+    l_4h = np.zeros(n_4h)
+    v_4h = np.zeros(n_4h)
     
-    for i in range(n_1d):
-        start_idx = i * bars_per_1d
-        end_idx = start_idx + bars_per_1d
-        c_1d[i] = close[end_idx - 1]
-        h_1d[i] = np.max(high[start_idx:end_idx])
-        l_1d[i] = np.min(low[start_idx:end_idx])
+    for i in range(n_4h):
+        start_idx = i * bars_per_4h
+        end_idx = start_idx + bars_per_4h
+        c_4h[i] = close[end_idx - 1]
+        h_4h[i] = np.max(high[start_idx:end_idx])
+        l_4h[i] = np.min(low[start_idx:end_idx])
+        v_4h[i] = np.sum(volume[start_idx:end_idx])
     
-    # 1d indicators for primary trend
-    hma_1d = calculate_hma(c_1d, period=21)
-    supertrend_1d, st_direction_1d = calculate_supertrend(h_1d, l_1d, c_1d, period=10, multiplier=3.0)
-    _, _, _, bbw_1d = calculate_bollinger_bands(c_1d, period=20, std_mult=2.0)
+    # 4h indicators for trend
+    hma_4h = calculate_hma(c_4h, period=21)
+    supertrend_4h, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
+    _, _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
     
-    # Map 1d indicators back to 4h timeframe
-    trend_1d = np.zeros(n)
-    st_trend_1d = np.zeros(n)
-    bbw_1d_mapped = np.zeros(n)
+    # Map 4h indicators back to 15m timeframe
+    trend_4h = np.zeros(n)
+    st_trend_4h = np.zeros(n)
+    bbw_4h_mapped = np.zeros(n)
     
     for i in range(n):
-        idx_1d = i // bars_per_1d
-        if idx_1d < n_1d and idx_1d >= 40:
-            if c_1d[idx_1d] > hma_1d[idx_1d]:
-                trend_1d[i] = 1
-            elif c_1d[idx_1d] < hma_1d[idx_1d]:
-                trend_1d[i] = -1
+        idx_4h = i // bars_per_4h
+        if idx_4h < n_4h and idx_4h >= 40:
+            if c_4h[idx_4h] > hma_4h[idx_4h]:
+                trend_4h[i] = 1
+            elif c_4h[idx_4h] < hma_4h[idx_4h]:
+                trend_4h[i] = -1
             
-            st_trend_1d[i] = st_direction_1d[idx_1d]
-            bbw_1d_mapped[i] = bbw_1d[idx_1d]
+            st_trend_4h[i] = st_direction_4h[idx_4h]
+            bbw_4h_mapped[i] = bbw_4h[idx_4h]
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
-    # Position sizing - DISCRETE levels with dynamic ATR adjustment
-    BASE_SIZE = 0.35
-    SIZE_HALF = 0.175
-    TARGET_VOL = 0.025  # Target 2.5% daily volatility
+    # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
+    SIZE_FULL = 0.30
+    SIZE_HALF = 0.15
     
-    # RSI thresholds for pullback entries (wider range for 4h)
-    RSI_LONG_MIN = 40
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 60
+    # RSI thresholds for pullback entries (tighter range for quality)
+    RSI_LONG_MIN = 45
+    RSI_LONG_MAX = 55
+    RSI_SHORT_MIN = 45
+    RSI_SHORT_MAX = 55
     
-    # Z-score threshold for mean reversion filter
-    ZSCORE_MAX = 2.5
+    # Volume filter multiplier
+    VOL_MULT = 1.2
+    
+    # BBW minimum for regime filter (4h)
+    BBW_MIN = 0.015
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.0
     
-    # BBW minimum for regime filter (4h and 1d)
-    BBW_MIN_4H = 0.015
-    BBW_MIN_1D = 0.02
-    
-    first_valid = max(200, 40 * bars_per_1d, 14 * 2, 20, 28)
+    first_valid = max(200, 40 * bars_per_4h, 14 * 2, 20, 28)
     
     # Track position state
     position_side = np.zeros(n)
@@ -281,65 +277,30 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     tp_triggered = np.zeros(n)
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
-    current_size = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_4h[i]) or np.isnan(rsi_4h[i]) or np.isnan(zscore_4h[i]) or atr_4h[i] == 0:
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
             continue
         
-        trend = trend_1d[i]
-        st_trend = st_trend_1d[i]
-        rsi_val = rsi_4h[i]
-        zscore_val = zscore_4h[i]
-        atr = atr_4h[i]
+        trend = trend_4h[i]
+        st_trend = st_trend_4h[i]
+        rsi_val = rsi_15m[i]
+        atr = atr_15m[i]
         price = close[i]
-        bbw_4h_val = bbw_4h[i]
-        bbw_1d_val = bbw_1d_mapped[i]
+        bbw_4h_val = bbw_4h_mapped[i]
+        vol_ratio = volume[i] / vol_sma_15m[i] if vol_sma_15m[i] > 0 else 0
         
-        # Calculate dynamic position size based on ATR volatility
-        atr_pct = atr / price if price > 0 else 0.01
-        if atr_pct > 0:
-            vol_adjustment = min(2.0, max(0.5, TARGET_VOL / atr_pct))
-        else:
-            vol_adjustment = 1.0
-        
-        dynamic_size = BASE_SIZE * vol_adjustment
-        dynamic_size = min(0.40, max(0.20, dynamic_size))  # Clamp between 0.20 and 0.40
-        dynamic_half = dynamic_size / 2
-        
-        # BBW filter - avoid choppy markets (both 4h and 1d)
-        if bbw_4h_val < BBW_MIN_4H or bbw_1d_val < BBW_MIN_1D:
-            # Check if we have existing position - if so, hold it
-            if position_side[i - 1] != 0:
-                signals[i] = signals[i - 1]
-                position_side[i] = position_side[i - 1]
-                entry_price[i] = entry_price[i - 1]
-                tp_triggered[i] = tp_triggered[i - 1]
-                highest_since_entry[i] = highest_since_entry[i - 1]
-                lowest_since_entry[i] = lowest_since_entry[i - 1]
-                current_size[i] = current_size[i - 1]
-            else:
-                signals[i] = 0.0
-                position_side[i] = 0
-                current_size[i] = 0
+        # BBW filter - avoid ultra-low volatility markets (4h)
+        if bbw_4h_val < BBW_MIN:
+            signals[i] = 0.0
+            position_side[i] = 0
             continue
         
-        # Trend filters must agree (HMA + Supertrend on 1d)
+        # Trend filters must agree (HMA + Supertrend on 4h)
         if trend != st_trend or trend == 0:
-            # Check if we have existing position - if so, hold it
-            if position_side[i - 1] != 0:
-                signals[i] = signals[i - 1]
-                position_side[i] = position_side[i - 1]
-                entry_price[i] = entry_price[i - 1]
-                tp_triggered[i] = tp_triggered[i - 1]
-                highest_since_entry[i] = highest_since_entry[i - 1]
-                lowest_since_entry[i] = lowest_since_entry[i - 1]
-                current_size[i] = current_size[i - 1]
-            else:
-                signals[i] = 0.0
-                position_side[i] = 0
-                current_size[i] = 0
+            signals[i] = 0.0
+            position_side[i] = 0
             continue
         
         # Check stoploss and take profit for existing positions
@@ -349,7 +310,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             prev_tp = tp_triggered[i - 1]
             prev_high = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else prev_entry
             prev_low = lowest_since_entry[i - 1] if lowest_since_entry[i - 1] > 0 else prev_entry
-            prev_size = current_size[i - 1]
             
             # Update highest/lowest since entry
             if prev_side == 1:
@@ -372,17 +332,15 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     tp_triggered[i] = 0
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
-                    current_size[i] = 0
                     continue
                 
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = dynamic_half
+                    signals[i] = SIZE_HALF
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
-                    current_size[i] = dynamic_half
                     continue
                 
                 # Trail stop at 1R profit
@@ -395,7 +353,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         tp_triggered[i] = 0
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
-                        current_size[i] = 0
                         continue
                     
             elif prev_side == -1:
@@ -407,17 +364,15 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     tp_triggered[i] = 0
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
-                    current_size[i] = 0
                     continue
                 
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = -dynamic_half
+                    signals[i] = -SIZE_HALF
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
-                    current_size[i] = dynamic_half
                     continue
                 
                 # Trail stop at 1R profit
@@ -430,7 +385,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         tp_triggered[i] = 0
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
-                        current_size[i] = 0
                         continue
             
             # Hold position if no exit triggered
@@ -440,37 +394,31 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             tp_triggered[i] = tp_triggered[i - 1]
             highest_since_entry[i] = highest_since_entry[i - 1]
             lowest_since_entry[i] = lowest_since_entry[i - 1]
-            current_size[i] = current_size[i - 1]
             continue
         
-        # Entry logic: 1d HMA + Supertrend + 4h HMA + RSI + Z-score + BBW
-        hma_trend_4h = 1 if price > hma_4h[i] else (-1 if price < hma_4h[i] else 0)
-        
-        if trend == 1 and st_trend == 1 and hma_trend_4h == 1:  # Bullish trend confirmed
+        # Entry logic: 4h HMA + Supertrend + BBW + 15m RSI + Volume
+        if trend == 1 and st_trend == 1:  # Bullish trend confirmed on 4h
             if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
-                abs(zscore_val) < ZSCORE_MAX):  # Pullback + not extreme
-                signals[i] = dynamic_size
+                vol_ratio >= VOL_MULT):  # Pullback + volume confirmation
+                signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = price
                 tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
-                current_size[i] = dynamic_size
                 
-        elif trend == -1 and st_trend == -1 and hma_trend_4h == -1:  # Bearish trend confirmed
+        elif trend == -1 and st_trend == -1:  # Bearish trend confirmed on 4h
             if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
-                abs(zscore_val) < ZSCORE_MAX):  # Pullback + not extreme
-                signals[i] = -dynamic_size
+                vol_ratio >= VOL_MULT):  # Pullback + volume confirmation
+                signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = price
                 tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
-                current_size[i] = dynamic_size
         
         else:
             signals[i] = 0.0
             position_side[i] = 0
-            current_size[i] = 0
     
     return signals
