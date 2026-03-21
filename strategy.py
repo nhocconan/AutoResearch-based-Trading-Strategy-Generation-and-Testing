@@ -1,58 +1,18 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily (1d) primary with Weekly (1w) HTF trend filter captures major moves
-while avoiding noise from lower timeframes. Supertrend(10,3) for entries + RSI(14)
-pullback filter + volume confirmation. ATR(14) stoploss at 2.5*ATR protects capital.
-SIZE=0.30 discrete levels balance trade frequency vs fee churn on daily bars.
-Daily timeframe naturally produces fewer trades, so entry conditions are loosened
-to ensure >=10 trades/symbol on train and >=3 on test.
+Hypothesis: 15m primary with 4h HTF trend filter captures intraday moves while avoiding noise.
+HMA(8/21) crossover for entry timing + Z-score(20) for overextension filter + volume confirmation.
+4h HMA(21) determines primary trend direction - only trade in HTF trend direction.
+ATR(14) stoploss at 2.5*ATR protects capital. SIZE=0.25 discrete levels minimize fee churn.
+This differs from failed strategies by using HMA crossover + Z-score instead of Supertrend/Donchian.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_supertrend_rsi_vol_1d_v1"
-timeframe = "1d"
+name = "mtf_hma_zscore_volume_15m_v1"
+timeframe = "15m"
 leverage = 1.0
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Supertrend indicator - trend following with ATR-based stops"""
-    n = len(close)
-    
-    # ATR calculation
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    tr = np.maximum(high - low, np.maximum(abs(high - prev_close), abs(low - prev_close)))
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Basic bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Supertrend values
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 = bullish, -1 = bearish
-    
-    for i in range(period, n):
-        if close[i] > supertrend[i-1] if i > period else close[i] > lower_band[i]:
-            # Bullish
-            if lower_band[i] < supertrend[i-1] if i > period else True:
-                supertrend[i] = lower_band[i]
-                direction[i] = 1
-            else:
-                supertrend[i] = supertrend[i-1]
-                direction[i] = direction[i-1] if i > period else 1
-        else:
-            # Bearish
-            if upper_band[i] > supertrend[i-1] if i > period else True:
-                supertrend[i] = upper_band[i]
-                direction[i] = -1
-            else:
-                supertrend[i] = supertrend[i-1]
-                direction[i] = direction[i-1] if i > period else -1
-    
-    return supertrend, direction, atr
 
 def calculate_hma(close, period):
     """Hull Moving Average - faster response, smoother than EMA"""
@@ -63,6 +23,14 @@ def calculate_hma(close, period):
     hma = pd.Series(raw_hma).ewm(span=int(np.sqrt(period)), adjust=False).mean().values
     return hma
 
+def calculate_zscore(close, period):
+    """Z-score for mean reversion detection"""
+    close_s = pd.Series(close)
+    rolling_mean = close_s.rolling(period, min_periods=period).mean().values
+    rolling_std = close_s.rolling(period, min_periods=period).std().values
+    zscore = np.divide((close - rolling_mean), rolling_std, out=np.zeros_like(close), where=rolling_std>0)
+    return zscore
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -70,95 +38,79 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 1w HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    hma_1w = calculate_hma(close_1w, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Load 4h HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    hma_4h = calculate_hma(close_4h, 21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Daily indicators - all computed before loop (Rule 8)
+    # 15m indicators - all computed before loop (Rule 8)
     close_s = pd.Series(close)
     high_s = pd.Series(high)
     low_s = pd.Series(low)
+    volume_s = pd.Series(volume)
     
-    # Supertrend(10, 3)
-    supertrend, st_direction, atr = calculate_supertrend(high, low, close, 10, 3.0)
+    # HMA(8) and HMA(21) for crossover signals
+    hma8 = calculate_hma(close, 8)
+    hma21 = calculate_hma(close, 21)
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_g = pd.Series(gain).ewm(span=14, min_periods=14, adjust=False).mean().values
-    avg_l = pd.Series(loss).ewm(span=14, min_periods=14, adjust=False).mean().values
-    rs = np.divide(avg_g, avg_l, out=np.ones_like(avg_g), where=avg_l>0)
-    rsi = 100 - 100 / (1 + rs)
+    # Z-score(20) for overextension detection
+    zscore = calculate_zscore(close, 20)
     
-    # EMA(50) for additional trend filter
+    # ATR(14) for stoploss
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    tr = np.maximum(high - low, np.maximum(abs(high - prev_close), abs(low - prev_close)))
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Volume ratio (current vs 20-bar average)
+    volume_avg = volume_s.rolling(20, min_periods=20).mean().values
+    volume_ratio = np.divide(volume, volume_avg, out=np.ones_like(volume), where=volume_avg>0)
+    
+    # EMA(50) for additional trend confirmation
     ema50 = close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # EMA(200) for major trend
-    ema200 = close_s.ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # Volume SMA(20) for volume confirmation
-    vol_sma = pd.Series(volume).rolling(20, min_periods=20).mean().values
-    vol_ratio = volume / vol_sma
-    
-    # KAMA(14) for adaptive trend
-    def calculate_kama(close, period=14):
-        n = len(close)
-        kama = np.zeros(n)
-        kama[0] = close[0]
-        
-        for i in range(1, n):
-            change = abs(close[i] - close[max(0, i-period)])
-            volatility = np.sum(np.abs(np.diff(close[max(0, i-period):i+1])))
-            er = change / volatility if volatility > 0 else 0
-            sc = (er * (2/(period+1) - 2/(period+1)) + 2/(period+1)) ** 2
-            kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
-        
-        return kama
-    
-    kama = calculate_kama(close, 14)
-    
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     position_side = 0
     entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(250, n):  # Start after 200-day EMA is ready
-        # HTF trend: price vs 1w HMA (Rule 2 - use aligned array)
-        htf_bullish = close[i] > hma_1w_aligned[i]
-        htf_bearish = close[i] < hma_1w_aligned[i]
+    for i in range(100, n):
+        # HTF trend: 4h HMA direction (Rule 2 - use aligned array)
+        htf_bullish = close[i] > hma_4h_aligned[i]
+        htf_bearish = close[i] < hma_4h_aligned[i]
         
-        # Daily trend filters
-        daily_bullish = close[i] > ema50[i] and close[i] > ema200[i]
-        daily_bearish = close[i] < ema50[i] and close[i] < ema200[i]
+        # Local trend: HMA crossover
+        hma_cross_long = hma8[i] > hma21[i] and hma8[i-1] <= hma21[i-1]
+        hma_cross_short = hma8[i] < hma21[i] and hma8[i-1] >= hma21[i-1]
         
-        # Supertrend direction
-        st_bullish = st_direction[i] == 1
-        st_bearish = st_direction[i] == -1
+        # HMA alignment (already in trend)
+        hma_aligned_long = hma8[i] > hma21[i] and close[i] > hma21[i]
+        hma_aligned_short = hma8[i] < hma21[i] and close[i] < hma21[i]
         
-        # RSI conditions (loosened for daily to ensure trades)
-        rsi_ok_long = rsi[i] < 70  # not extremely overbought
-        rsi_ok_short = rsi[i] > 30  # not extremely oversold
+        # Z-score filter (not overextended)
+        zscore_ok_long = zscore[i] < 1.5  # not overbought
+        zscore_ok_short = zscore[i] > -1.5  # not oversold
         
-        # Volume confirmation (1.0x = average volume)
-        vol_ok = vol_ratio[i] > 0.8  # at least 80% of average
+        # Z-score mean reversion entries
+        zscore_oversold = zscore[i] < -2.0
+        zscore_overbought = zscore[i] > 2.0
         
-        # KAMA slope for momentum
-        kama_slope = kama[i] - kama[i-5] if i >= 5 else 0
-        kama_bullish = kama_slope > 0
-        kama_bearish = kama_slope < 0
+        # Volume confirmation
+        volume_confirmed = volume_ratio[i] > 0.8  # at least 80% of avg volume
         
-        # Stoploss and trailing logic (Rule 6) - 2.5*ATR
+        # Price vs EMA50 filter
+        above_ema50 = close[i] > ema50[i]
+        below_ema50 = close[i] < ema50[i]
+        
+        # Stoploss and trailing logic (Rule 6)
         if position_side == 1:
             highest_since_entry = max(highest_since_entry, high[i])
             trail_stop = highest_since_entry - 2.5 * atr[i]
             initial_stop = entry_price - 2.5 * atr[i]
-            stop_level = max(trail_stop, initial_stop)
-            if close[i] < stop_level:
+            if close[i] < max(trail_stop, initial_stop):
                 signals[i] = 0.0
                 position_side = 0
                 continue
@@ -167,32 +119,40 @@ def generate_signals(prices):
             lowest_since_entry = min(lowest_since_entry, low[i])
             trail_stop = lowest_since_entry + 2.5 * atr[i]
             initial_stop = entry_price + 2.5 * atr[i]
-            stop_level = min(trail_stop, initial_stop)
-            if close[i] > stop_level:
+            if close[i] > min(trail_stop, initial_stop):
                 signals[i] = 0.0
                 position_side = 0
                 continue
         
         # Entry logic - only enter when flat
         if position_side == 0:
-            # Long: HTF bullish + daily bullish + supertrend bullish
-            # Loosened conditions: need 2 of 3 trend filters + RSI + volume
-            trend_score_long = int(htf_bullish) + int(daily_bullish) + int(st_bullish) + int(kama_bullish)
+            # Long: HTF bullish + HMA aligned + volume confirmed + not overextended
+            if htf_bullish and hma_aligned_long and volume_confirmed and above_ema50:
+                if zscore_ok_long:
+                    signals[i] = SIZE
+                    position_side = 1
+                    entry_price = close[i]
+                    highest_since_entry = high[i]
+                # Mean reversion entry in uptrend (deep pullback)
+                elif zscore_oversold and close[i] > hma_4h_aligned[i]:
+                    signals[i] = SIZE
+                    position_side = 1
+                    entry_price = close[i]
+                    highest_since_entry = high[i]
             
-            if trend_score_long >= 2 and rsi_ok_long and vol_ok:
-                signals[i] = SIZE
-                position_side = 1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-            
-            # Short: HTF bearish + daily bearish + supertrend bearish
-            trend_score_short = int(htf_bearish) + int(daily_bearish) + int(st_bearish) + int(kama_bearish)
-            
-            if trend_score_short >= 2 and rsi_ok_short and vol_ok:
-                signals[i] = -SIZE
-                position_side = -1
-                entry_price = close[i]
-                lowest_since_entry = low[i]
+            # Short: HTF bearish + HMA aligned + volume confirmed + not overextended
+            elif htf_bearish and hma_aligned_short and volume_confirmed and below_ema50:
+                if zscore_ok_short:
+                    signals[i] = -SIZE
+                    position_side = -1
+                    entry_price = close[i]
+                    lowest_since_entry = low[i]
+                # Mean reversion entry in downtrend (sharp rally)
+                elif zscore_overbought and close[i] < hma_4h_aligned[i]:
+                    signals[i] = -SIZE
+                    position_side = -1
+                    entry_price = close[i]
+                    lowest_since_entry = low[i]
         else:
             # Hold position - maintain signal
             signals[i] = signals[i-1]
