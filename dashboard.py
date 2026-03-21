@@ -63,6 +63,17 @@ def get_strategy_code(strategy_name: str) -> str:
     return ""
 
 
+def get_strategy_timeframe(strategy_name: str) -> str:
+    """Extract timeframe from strategy code."""
+    import re
+    code = get_strategy_code(strategy_name)
+    if code:
+        m = re.search(r'timeframe\s*=\s*["\'](\w+)["\']', code)
+        if m:
+            return m.group(1)
+    return "?"
+
+
 def run_validation(code: str) -> ValidationResult:
     if not code:
         r = ValidationResult(valid=False)
@@ -212,9 +223,16 @@ def render_html() -> str:
     test_rows = _build_table_rows(test_df, limit=100)
     test_avg_rows = _build_avg_table_rows(test_df, limit=50)
 
-    # Get unique symbols
+    # Get unique symbols and timeframes
     symbols = sorted(df["symbol"].unique().tolist()) if total > 0 and "symbol" in df.columns else []
     symbols_json = json.dumps(symbols)
+    # Extract timeframes from strategy files
+    tf_set = set()
+    if total > 0:
+        for s in df["strategy"].unique():
+            tf_set.add(get_strategy_timeframe(str(s)))
+    tf_set.discard("?")
+    timeframes = sorted(tf_set)
 
     # Chart data: Sharpe over time for BTCUSDT (train only)
     chart_data, chart_labels, running_best_data = "[]", "[]", "[]"
@@ -365,15 +383,19 @@ def render_html() -> str:
 
 <h2>Train Results <span style="font-size:0.7em;color:#8b949e">(click row for details)</span></h2>
 <div class="filter-bar" id="train-filter-bar">
-  <label>View:</label>
-  <button class="filter-btn active" onclick="filterTable('train', 'ALL')">All Rows</button>
+  <label>Symbol:</label>
+  <button class="filter-btn active" onclick="filterTable('train', 'ALL')">All</button>
   {''.join(f'<button class="filter-btn" onclick="filterTable(&#39;train&#39;, &#39;{s}&#39;)">{s}</button>' for s in symbols)}
-  <button class="filter-btn" onclick="filterTable('train', 'AVG')" style="border-color:#f0883e;color:#f0883e">Avg All Symbols</button>
+  <button class="filter-btn" onclick="filterTable('train', 'AVG')" style="border-color:#f0883e;color:#f0883e">Avg All</button>
+  <span style="margin:0 8px;color:#30363d">|</span>
+  <label>TF:</label>
+  <button class="filter-btn active" onclick="filterTF('train', 'ALL')">All</button>
+  {''.join(f'<button class="filter-btn" onclick="filterTF(&#39;train&#39;, &#39;{tf}&#39;)">{tf}</button>' for tf in timeframes)}
   <span class="filter-info" id="train-filter-info"></span>
 </div>
 <table id="train-table">
   <thead><tr>
-    <th>Strategy</th><th>Symbol</th><th>Sharpe</th><th>Return</th>
+    <th>Strategy</th><th>Symbol</th><th>TF</th><th>Sharpe</th><th>Return</th>
     <th>Max DD</th><th>Win Rate</th><th>Trades</th><th>Status</th>
   </tr></thead>
   <tbody id="train-tbody-rows">{train_rows}</tbody>
@@ -382,14 +404,18 @@ def render_html() -> str:
 
 <h2>Test Results (2025+) <span style="font-size:0.7em;color:#8b949e">(click row for details)</span></h2>
 {f"""<div class="filter-bar" id="test-filter-bar">
-  <label>View:</label>
-  <button class="filter-btn active" onclick="filterTable('test', 'ALL')">All Rows</button>
+  <label>Symbol:</label>
+  <button class="filter-btn active" onclick="filterTable('test', 'ALL')">All</button>
   {''.join(f'<button class="filter-btn" onclick="filterTable(&#39;test&#39;, &#39;{s}&#39;)">{s}</button>' for s in symbols)}
-  <button class="filter-btn" onclick="filterTable('test', 'AVG')" style="border-color:#f0883e;color:#f0883e">Avg All Symbols</button>
+  <button class="filter-btn" onclick="filterTable('test', 'AVG')" style="border-color:#f0883e;color:#f0883e">Avg All</button>
+  <span style="margin:0 8px;color:#30363d">|</span>
+  <label>TF:</label>
+  <button class="filter-btn active" onclick="filterTF('test', 'ALL')">All</button>
+  {''.join(f'<button class="filter-btn" onclick="filterTF(&#39;test&#39;, &#39;{tf}&#39;)">{tf}</button>' for tf in timeframes)}
   <span class="filter-info" id="test-filter-info"></span>
 </div>
 <table id="test-table">
-  <thead><tr><th>Strategy</th><th>Symbol</th><th>Sharpe</th><th>Return</th><th>Max DD</th><th>Win Rate</th><th>Trades</th><th>Status</th></tr></thead>
+  <thead><tr><th>Strategy</th><th>Symbol</th><th>TF</th><th>Sharpe</th><th>Return</th><th>Max DD</th><th>Win Rate</th><th>Trades</th><th>Status</th></tr></thead>
   <tbody id="test-tbody-rows">{test_rows}</tbody>
   <tbody id="test-tbody-avg" style="display:none">{test_avg_rows}</tbody>
 </table>""" if test_total > 0 else '<p class="no-data">No test results yet — kept strategies are automatically evaluated on 2025+ data.</p>'}
@@ -583,6 +609,37 @@ function filterTable(tableId, symbol) {{
 
   const info = document.getElementById(tableId + '-filter-info');
   if (info && symbol === 'AVG') info.textContent = 'Showing average across all symbols per strategy';
+}}
+
+// --- Timeframe filter ---
+function filterTF(tableId, tf) {{
+  const tbodyRows = document.getElementById(tableId + '-tbody-rows');
+  if (!tbodyRows) return;
+  const rows = tbodyRows.querySelectorAll('tr[data-strategy]');
+  let shown = 0;
+  rows.forEach(row => {{
+    const rowTf = row.getAttribute('data-tf') || '';
+    if (tf === 'ALL' || rowTf === tf) {{
+      if (row.style.display !== 'none' || tf !== 'ALL') {{ shown++; }}
+      // Only hide by TF, don't override symbol filter
+      row.dataset.tfHidden = (tf !== 'ALL' && rowTf !== tf) ? '1' : '0';
+    }} else {{
+      row.dataset.tfHidden = '1';
+    }}
+    row.style.display = (row.dataset.tfHidden === '1') ? 'none' : '';
+  }});
+  // Update TF button states
+  const filterBar = document.getElementById(tableId + '-filter-bar');
+  if (filterBar) {{
+    let inTfSection = false;
+    filterBar.querySelectorAll('.filter-btn').forEach(btn => {{
+      if (btn.previousElementSibling && btn.previousElementSibling.textContent === 'TF:') inTfSection = true;
+      if (btn.previousElementSibling && btn.previousElementSibling.textContent === 'Symbol:') inTfSection = false;
+      if (inTfSection) {{
+        btn.classList.toggle('active', btn.textContent === (tf === 'ALL' ? 'All' : tf));
+      }}
+    }});
+  }}
 }}
 
 // --- Detail view: equity chart + trade list ---
@@ -852,8 +909,10 @@ function openCandleChart(data) {{
 
 def _build_table_rows(df: pd.DataFrame, limit: int = 100) -> str:
     if df.empty or "sharpe" not in df.columns:
-        return '<tr><td colspan="8" class="no-data" style="padding:10px;color:#8b949e">No data</td></tr>'
+        return '<tr><td colspan="9" class="no-data" style="padding:10px;color:#8b949e">No data</td></tr>'
 
+    # Cache timeframes
+    tf_cache = {}
     best = df.sort_values("sharpe", ascending=False).head(limit)
     rows = ""
     for _, row in best.iterrows():
@@ -863,10 +922,14 @@ def _build_table_rows(df: pd.DataFrame, limit: int = 100) -> str:
         badge_cls = f"badge-{status}" if status in ("keep", "discard", "crash") else "badge-discard"
         strategy = str(row.get("strategy", ""))
         symbol = str(row.get("symbol", ""))
+        if strategy not in tf_cache:
+            tf_cache[strategy] = get_strategy_timeframe(strategy)
+        tf = tf_cache[strategy]
         rows += f"""
-        <tr data-strategy="{_esc(strategy)}" data-symbol="{_esc(symbol)}" data-sharpe="{sharpe_val:.4f}" onclick="openModal('{_esc(strategy)}')">
+        <tr data-strategy="{_esc(strategy)}" data-symbol="{_esc(symbol)}" data-tf="{_esc(tf)}" data-sharpe="{sharpe_val:.4f}" onclick="openModal('{_esc(strategy)}')">
             <td>{_esc(strategy)}</td>
             <td>{_esc(symbol)}</td>
+            <td>{_esc(tf)}</td>
             <td style="color:{color}">{sharpe_val:.3f}</td>
             <td>{float(row.get('return_pct', 0) or 0):+.1f}%</td>
             <td>{float(row.get('max_dd_pct', 0) or 0):.1f}%</td>
