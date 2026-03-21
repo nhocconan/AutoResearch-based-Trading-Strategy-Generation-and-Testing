@@ -1,34 +1,36 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #054 - HMA Trend + RSI Pullback + Weekly Filter (1d primary)
-========================================================================
-Hypothesis: Daily HMA trend captures major moves, but entering on RSI pullbacks
-(40-60 zone) gives better risk/reward than breakout entries. Weekly HMA filter
-ensures we trade with the major trend. This differs from Donchian breakouts by
-fading short-term counter-trend moves within the larger trend.
+EXPERIMENT #055 - Supertrend + RSI Pullback + Volume Confirmation (15m primary)
+=====================================================================================
+Hypothesis: 15m supertrend captures intraday trends, but needs HTF filter to avoid chop.
+4h HMA provides major trend direction. 1h RSI pullback (40-60 range) ensures we enter on
+dips in uptrend rather than chasing breakouts. Volume confirmation (taker buy ratio > 0.55)
+filters false signals. This differs from #047 by using supertrend (not Donchian) + RSI
+pullback entries (not breakout entries) on faster 15m timeframe.
 
 Key features:
-- Primary TF: 1d
-- HTF filter: 1w HMA(50) for major trend alignment
-- Trend: HMA(21) vs HMA(50) crossover on daily
-- Entry: RSI(14) pullback to 40-60 zone in trend direction
-- Regime: Weekly HMA confirms major trend direction
-- Stoploss: 2.5*ATR(14) trailing
-- Position sizing: 0.25-0.30 discrete levels
+- Primary TF: 15m
+- HTF filters: 4h HMA(21) for trend, 1h RSI(14) for pullback detection
+- Trend: Supertrend(ATR=10, mult=3) for entry timing
+- Entry: Supertrend flip + RSI pullback (40-60 in uptrend, 40-60 in downtrend)
+- Volume: Taker buy volume ratio > 0.55 for longs, < 0.45 for shorts
+- Regime: 4h HMA slope filter (only trade with HTF trend)
+- Stoploss: 2.0*ATR(14) trailing
+- Position sizing: 0.25-0.30 discrete, scaled by RSI distance from 50
 
 Why this should beat current best (Sharpe=0.490):
-- Pullback entries have better R:R than breakouts
-- Fewer signals = less fee churn on daily TF
-- Weekly filter removes counter-trend trades in major reversals
-- HMA is more responsive than SMA for trend detection
+- 15m captures more intraday moves than 12h
+- RSI pullback entries have better risk/reward than breakout entries
+- Volume confirmation reduces false signals
+- Conservative sizing (0.25-0.30) controls drawdown
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "hma_rsi_pullback_weekly_1d_1w_v1"
-timeframe = "1d"
+name = "supertrend_rsi_volume_15m_1h_4h_v1"
+timeframe = "15m"
 leverage = 1.0
 
 
@@ -55,6 +57,55 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    hl2 = (high + low) / 2
+    basic_upper = hl2 + multiplier * atr
+    basic_lower = hl2 - multiplier * atr
+    
+    final_upper = np.zeros(n)
+    final_lower = np.zeros(n)
+    supertrend = np.zeros(n)
+    trend = np.ones(n)  # 1 = bullish, -1 = bearish
+    
+    final_upper[0] = basic_upper[0]
+    final_lower[0] = basic_lower[0]
+    supertrend[0] = basic_upper[0]
+    
+    for i in range(1, n):
+        # Calculate final upper/lower
+        if basic_upper[i] < final_upper[i - 1] or close[i - 1] > final_upper[i - 1]:
+            final_upper[i] = basic_upper[i]
+        else:
+            final_upper[i] = final_upper[i - 1]
+        
+        if basic_lower[i] > final_lower[i - 1] or close[i - 1] < final_lower[i - 1]:
+            final_lower[i] = basic_lower[i]
+        else:
+            final_lower[i] = final_lower[i - 1]
+        
+        # Determine trend and supertrend value
+        if trend[i - 1] == 1:
+            if close[i] < final_lower[i]:
+                trend[i] = -1
+                supertrend[i] = final_upper[i]
+            else:
+                trend[i] = 1
+                supertrend[i] = final_lower[i]
+        else:
+            if close[i] > final_upper[i]:
+                trend[i] = 1
+                supertrend[i] = final_lower[i]
+            else:
+                trend[i] = -1
+                supertrend[i] = final_upper[i]
+    
+    return supertrend, trend
+
+
 def calculate_rsi(close, period=14):
     """Calculate RSI using Wilder's smoothing"""
     n = len(close)
@@ -68,59 +119,72 @@ def calculate_rsi(close, period=14):
     avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
     avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
     
-    rs = np.zeros(n)
-    for i in range(period - 1, n):
-        if avg_loss[i] > 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
+    rsi = np.zeros(n)
+    for i in range(period, n):
+        if avg_loss[i] == 0:
+            rsi[i] = 100
         else:
-            rs[i] = 100
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
     
-    rsi = 100 - (100 / (1 + rs))
     return rsi
 
 
-def calculate_hma_crossover(hma_fast, hma_slow):
-    """Detect HMA crossovers (1=fast crosses above slow, -1=fast crosses below)"""
-    n = len(hma_fast)
-    crossover = np.zeros(n)
-    
-    for i in range(1, n):
-        if not np.isnan(hma_fast[i]) and not np.isnan(hma_slow[i]):
-            if hma_fast[i - 1] <= hma_slow[i - 1] and hma_fast[i] > hma_slow[i]:
-                crossover[i] = 1
-            elif hma_fast[i - 1] >= hma_slow[i - 1] and hma_fast[i] < hma_slow[i]:
-                crossover[i] = -1
-    
-    return crossover
+def calculate_volume_ratio(taker_buy_volume, volume):
+    """Calculate taker buy volume ratio"""
+    ratio = np.zeros(len(volume))
+    for i in range(len(volume)):
+        if volume[i] > 0:
+            ratio[i] = taker_buy_volume[i] / volume[i]
+        else:
+            ratio[i] = 0.5
+    return ratio
+
+
+def calculate_hma_slope(hma_values, lookback=5):
+    """Calculate HMA slope (positive = uptrend, negative = downtrend)"""
+    n = len(hma_values)
+    slope = np.zeros(n)
+    for i in range(lookback, n):
+        if hma_values[i - lookback] != 0:
+            slope[i] = (hma_values[i] - hma_values[i - lookback]) / hma_values[i - lookback]
+    return slope
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
+    volume = prices["volume"].values.copy()
+    taker_buy_volume = prices["taker_buy_volume"].values.copy()
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1w = get_htf_data(prices, '1w')
+    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 50)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
-    # Calculate 1d indicators
-    hma_21 = calculate_hma(close, 21)
-    hma_50 = calculate_hma(close, 50)
+    # Calculate 4h HMA slope for regime filter
+    hma_4h_slope = calculate_hma_slope(hma_4h_aligned, 5)
+    
+    # Calculate 15m indicators
+    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    
-    # HMA crossover signals
-    hma_cross = calculate_hma_crossover(hma_21, hma_50)
+    rsi_15m = calculate_rsi(close, 14)
+    volume_ratio = calculate_volume_ratio(taker_buy_volume, volume)
     
     # Generate signals
     signals = np.zeros(n)
     BASE_SIZE = 0.28  # Base position size (28% of capital)
+    MAX_SIZE = 0.35   # Max position size
+    MIN_SIZE = 0.20   # Min position size
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -128,52 +192,62 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     entry_price = 0.0
-    entry_atr = 0.0
     profit_target_hit = False
+    entry_atr = 0.0
     
     min_period = 100  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1w_aligned[i]) or np.isnan(hma_21[i]) or 
-            np.isnan(hma_50[i]) or np.isnan(atr[i]) or np.isnan(rsi[i]) or
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_1h_aligned[i]) or
+            np.isnan(supertrend[i]) or np.isnan(atr[i]) or np.isnan(rsi_15m[i]) or
+            np.isnan(volume_ratio[i]) or np.isnan(hma_4h_slope[i]) or
             atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter (major trend direction)
-        weekly_bullish = close[i] > hma_1w_aligned[i]
-        weekly_bearish = close[i] < hma_1w_aligned[i]
+        # 4h HMA trend filter
+        price_above_4h_hma = close[i] > hma_4h_aligned[i]
+        hma_4h_bullish = hma_4h_slope[i] > 0
+        hma_4h_bearish = hma_4h_slope[i] < 0
         
-        # Daily trend (HMA 21 vs 50)
-        daily_bullish = hma_21[i] > hma_50[i]
-        daily_bearish = hma_21[i] < hma_50[i]
+        # 1h RSI pullback detection (40-60 range = neutral/pullback zone)
+        rsi_1h_pullback_long = 40 <= rsi_1h_aligned[i] <= 60
+        rsi_1h_pullback_short = 40 <= rsi_1h_aligned[i] <= 60
         
-        # RSI pullback zones
-        rsi_pullback_long = 40 <= rsi[i] <= 60  # Pullback in uptrend
-        rsi_pullback_short = 40 <= rsi[i] <= 60  # Pullback in downtrend
-        rsi_extreme_long = rsi[i] < 35  # Oversold bounce
-        rsi_extreme_short = rsi[i] > 65  # Overbought fade
+        # 15m Supertrend signals
+        st_bullish = st_trend[i] == 1
+        st_bearish = st_trend[i] == -1
         
-        # Calculate position size
-        position_size = BASE_SIZE
+        # Check for supertrend flip (entry trigger)
+        st_flip_long = st_trend[i] == 1 and st_trend[i - 1] == -1
+        st_flip_short = st_trend[i] == -1 and st_trend[i - 1] == 1
+        
+        # Volume confirmation
+        volume_bullish = volume_ratio[i] > 0.55
+        volume_bearish = volume_ratio[i] < 0.45
+        
+        # 15m RSI confirmation (not overbought/oversold at entry)
+        rsi_15m_ok_long = rsi_15m[i] < 70
+        rsi_15m_ok_short = rsi_15m[i] > 30
+        
+        # Calculate position size based on RSI distance from 50 (stronger signal = larger size)
+        rsi_1h_dist = abs(rsi_1h_aligned[i] - 50)
+        rsi_multiplier = 1.0 + (rsi_1h_dist / 50) * 0.25  # Max 1.25x
+        position_size = min(MAX_SIZE, max(MIN_SIZE, BASE_SIZE * rsi_multiplier))
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: Weekly bullish + Daily bullish + RSI pullback or extreme
-        if (weekly_bullish and daily_bullish and 
-            (rsi_pullback_long or rsi_extreme_long)):
+        # Long entry: Supertrend flip + 4h bullish + 1h RSI pullback + volume confirmation
+        if (st_flip_long and price_above_4h_hma and hma_4h_bullish and
+            rsi_1h_pullback_long and volume_bullish and rsi_15m_ok_long):
             target_signal = position_size
         
-        # Short entry: Weekly bearish + Daily bearish + RSI pullback or extreme
-        elif (weekly_bearish and daily_bearish and 
-              (rsi_pullback_short or rsi_extreme_short)):
+        # Short entry: Supertrend flip + 4h bearish + 1h RSI pullback + volume confirmation
+        elif (st_flip_short and not price_above_4h_hma and hma_4h_bearish and
+              rsi_1h_pullback_short and volume_bearish and rsi_15m_ok_short):
             target_signal = -position_size
-        
-        # Exit signal: HMA crossover against position
-        exit_long = hma_cross[i] == -1  # Fast crosses below slow
-        exit_short = hma_cross[i] == 1  # Fast crosses above slow
         
         # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
@@ -183,20 +257,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.5 * atr[i]
+                trailing_stop = highest_since_entry - 2.0 * atr[i]
                 
                 # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2.5R from entry, where R = 2.5*ATR at entry)
+                # Check take profit (2R from entry, where R = 2*ATR at entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 6.25 * entry_atr:  # 2.5R = 6.25*ATR
+                    if close[i] >= entry_price + 4.0 * entry_atr:  # 2R = 4*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.5 * atr[i]
+                trailing_stop = lowest_since_entry + 2.0 * atr[i]
                 
                 # Check stoploss
                 if close[i] > trailing_stop:
@@ -204,7 +278,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 6.25 * entry_atr:  # 2.5R profit
+                    if close[i] <= entry_price - 4.0 * entry_atr:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -216,25 +290,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             entry_atr = 0.0
             profit_target_hit = False
         elif take_profit_triggered:
-            # Reduce position to half at 2.5R profit
+            # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
-        elif exit_long and position_side == 1:
-            signals[i] = 0.0
-            position_side = 0
-            highest_since_entry = 0.0
-            lowest_since_entry = float('inf')
-            entry_price = 0.0
-            entry_atr = 0.0
-            profit_target_hit = False
-        elif exit_short and position_side == -1:
-            signals[i] = 0.0
-            position_side = 0
-            highest_since_entry = 0.0
-            lowest_since_entry = float('inf')
-            entry_price = 0.0
-            entry_atr = 0.0
-            profit_target_hit = False
         else:
             # Apply signal change
             if target_signal != 0.0 and position_side == 0:
@@ -247,11 +305,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 entry_atr = atr[i]
                 profit_target_hit = False
             elif position_side != 0:
-                # Check if trend reversed (weekly filter broken)
-                trend_reversal = ((position_side == 1 and not weekly_bullish) or
-                                  (position_side == -1 and not weekly_bearish))
+                # Maintain existing position (check if trend reversed)
+                # Exit if Supertrend reverses OR 4h trend breaks
+                st_reversal_long = st_trend[i] == -1
+                st_reversal_short = st_trend[i] == 1
+                hma_trend_broken = (position_side == 1 and not price_above_4h_hma) or \
+                                   (position_side == -1 and price_above_4h_hma)
                 
-                if trend_reversal:
+                if st_reversal_long or st_reversal_short or hma_trend_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
