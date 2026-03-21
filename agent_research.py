@@ -208,6 +208,18 @@ WHAT MIGHT WORK (from research — NEW strategies for bear/range markets):
 8. REGIME-ADAPTIVE: different logic per regime (bull/bear/range)
 9. VERY FEW TRADES on 12h/1d (minimize cost impact)
 
+BTC/ETH SPECIFIC (these coins ALWAYS fail simple trend strategies):
+- FUNDING RATE MEAN REVERSION: Z-score of funding(30d) < -2 → long, > +2 → short.
+  Uses data/processed/funding/*.parquet. Load with: pd.read_parquet(funding_path).
+  Reported Sharpe 0.8-1.5 through 2022 crash. BEST EDGE for BTC/ETH.
+- VOL SPIKE REVERSION: ATR(7)/ATR(30) > 2.0 + price < BB(20,2.5) → long.
+  Captures "vol crush" after panic. Exit when ATR ratio < 1.2.
+- ASYMMETRIC REGIME: ADX>25 + price<SMA50 = bear (only short retrace to EMA21).
+  ADX<20 = range (mean revert at BB bounds). Hysteresis: enter 25, exit 18.
+- CROSS-ASSET LEAD-LAG: BTC breaks Donchian(20) low → short ETH (ETH lags 1-4h).
+- BEAR REGIME SQUEEZE BREAKOUT: BB Width at 30d low + price breaks Donchian(20)
+  low + price<SMA200 → short. Only short in bear.
+
 RISK MANAGEMENT (MANDATORY):
 - Every position MUST have stoploss: signal → 0 when price moves > 2-3*ATR
 - Fewer trades = less fee drag. Target 20-50 trades/year, not 200+.
