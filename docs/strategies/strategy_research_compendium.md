@@ -957,6 +957,45 @@ These strategies specifically address the challenge of profitability in bear/ran
 
 ---
 
+### 10.8 BTC/ETH-Specific: Why Trend Following Fails + What Works
+
+**Why BTC/ETH always negative Sharpe with trend following:**
+- 2022 crash had 20-40% counter-trend rallies WITHIN the downtrend → whipsaw
+- EMA/Supertrend lags the initial dump, enters short before relief rally
+- Negative funding during bear = shorts PAY longs (cost of being short)
+- BTC/ETH are most efficiently priced crypto → less edge than SOL
+
+**Strategies with documented positive Sharpe on BTC during 2022:**
+
+**A. Funding Rate Mean-Reversion** (Sharpe 0.8-1.5 reported)
+- Funding Z-score (vs 30-day rolling) < -2.0 → Long (shorts overcrowded)
+- Funding Z-score > +2.0 → Short (longs overcrowded)
+- Exit: Z-score returns to [-0.5, +0.5] or 24-72h max hold
+- Size: scale with |Z-score|
+- KEY: uses funding_rate data from data/processed/funding/
+
+**B. Volatility Spike Mean-Reversion** (Sharpe 0.5-1.0)
+- ATR(7) / ATR(30) > 2.0 AND price below BB(20, 2.5) → Long
+- Exit: ATR ratio < 1.2 OR price > BB middle
+- Logic: vol spikes on dumps then mean-reverts, capturing the "vol crush"
+
+**C. Asymmetric Regime with ADX Hysteresis**
+- ADX > 25 + price < SMA(50) = bear → ONLY short on EMA(21) retrace rejection
+- ADX < 20 = range → mean revert (BB bounds)
+- ADX > 25 + price > SMA(50) = bull → ONLY long
+- Hysteresis: enter regime at ADX 25, exit at ADX 18
+
+**D. Cross-Asset Lead-Lag** (BTC leads, trade ETH)
+- BTC breaks below Donchian(20) low on 4H → Short ETH
+- BTC breaks above Donchian(10) high → Close ETH short
+- Edge: ETH lags BTC by 1-4 hours on larger timeframes
+
+**E. Volatility Breakout + Bear Regime Filter**
+- Setup: BB Width reaches 30-day low (squeeze)
+- Entry: price breaks below Donchian(20) AFTER squeeze AND price < SMA(200)
+- Exit: price > Donchian(10) high
+- Only takes shorts in bear regime = eliminates false upside breakouts
+
 ## COMBINATION PRIORITY FOR BEAR MARKETS
 
 | Priority | Strategy | Rating |
