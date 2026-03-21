@@ -1,31 +1,72 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #004 - Donchian Breakout + HTF Trend + ADX Filter (4h primary, 1d HTF)
-=================================================================================
-Hypothesis: Donchian Channel breakouts (20-period) capture momentum moves, but 
-only when aligned with higher timeframe trend (1d HMA50) and confirmed by ADX 
-trend strength (>25). This differs from Supertrend approaches by using pure 
-price breakouts rather than ATR-based bands. Z-score filter avoids entering 
-during extreme mean-reversion conditions.
+EXPERIMENT #005 - KAMA Adaptive Trend + Volume + HTF Filter (12h primary, 1d HTF)
+================================================================================
+Hypothesis: 12h timeframe captures medium-term trends with less noise than 4h.
+KAMA (Kaufman Adaptive Moving Average) adapts to market efficiency - fast in trends,
+slow in chop. Combined with 1d HMA(50) for major trend alignment and volume
+confirmation, this should produce fewer but higher-quality trades than previous
+supertrend/donchian attempts. Bollinger regime filter avoids trading in compression.
 
-Key features:
-- Primary TF: 4h (mandatory for this experiment)
-- HTF filter: 1d HMA(50) for major trend direction
-- Entry: Donchian(20) breakout above/below channel
-- Confirmation: ADX(14) > 25 (trending market)
-- Filter: Z-score(20) between -2 and +2 (avoid extremes)
-- Stoploss: 2.5*ATR(14) trailing
-- Position sizing: 0.25-0.30 discrete levels
-- Take profit: Reduce to half at 2R profit
+Key improvements over failed strategies:
+- 12h primary TF (less noise than 4h, more signals than 1d)
+- KAMA adapts to volatility (better than static EMA/HMA in chop)
+- Volume confirmation filter (avoid low-liquidity false breakouts)
+- Stricter trend alignment (both 12h KAMA slope + 1d HMA position)
+- Conservative position sizing: 0.25 max (vs 0.30+ in failed strategies)
+- 2.5*ATR stoploss (tighter than 3*ATR to cut losses faster)
+
+Indicators:
+- Primary TF (12h): KAMA(10,2,30), ATR(14), Bollinger Bands(20,2)
+- HTF (1d): HMA(50) for major trend direction
+- Volume: 20-period SMA ratio for confirmation
+- Regime: BB Width percentile > 40th (avoid extreme compression)
+
+Position sizing: 0.25 base, discrete levels (0.0, ±0.25)
+Stoploss: 2.5*ATR trailing
+Take profit: Reduce to half at 2R profit
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "donchian_adx_zscore_4h_1d_v1"
-timeframe = "4h"
+name = "kama_volume_htf_12h_1d_v1"
+timeframe = "12h"
 leverage = 1.0
+
+
+def calculate_kama(close, fast_period=10, slow_period=30, smoothing_period=2):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA)
+    Adapts to market efficiency ratio - fast in trends, slow in chop
+    """
+    n = len(close)
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(slow_period - 1, n):
+        price_change = abs(close[i] - close[i - slow_period + 1])
+        volatility = np.sum(np.abs(np.diff(close[i - slow_period + 1:i + 1])))
+        if volatility > 0:
+            er[i] = price_change / volatility
+        else:
+            er[i] = 0
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA
+    kama[slow_period - 1] = close[slow_period - 1]
+    
+    for i in range(slow_period, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 
 def calculate_hma(close, period):
@@ -51,79 +92,39 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high, lowest low over period)"""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    n = len(close)
-    
-    # Calculate True Range and Directional Movement
-    tr = np.zeros(n)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    tr[0] = high[0] - low[0]
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i],
-                    abs(high[i] - close[i - 1]),
-                    abs(low[i] - close[i - 1]))
-        
-        if high[i] - high[i - 1] > low[i - 1] - low[i]:
-            plus_dm[i] = max(high[i] - high[i - 1], 0)
-        else:
-            plus_dm[i] = 0
-            
-        if low[i - 1] - low[i] > high[i] - high[i - 1]:
-            minus_dm[i] = max(low[i - 1] - low[i], 0)
-        else:
-            minus_dm[i] = 0
-    
-    # Smooth using Wilder's method (EMA with span=period)
-    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    # Calculate DI+ and DI-
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        if tr_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
-    
-    # Calculate DX and ADX
-    dx = np.zeros(n)
-    for i in range(period - 1, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    # ADX is smoothed DX
-    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    return adx
-
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized price deviation from mean)"""
+def calculate_bollinger_bands(close, period=20, std_dev=2):
+    """Calculate Bollinger Bands and Band Width"""
     close_s = pd.Series(close)
     sma = close_s.rolling(window=period, min_periods=period).mean()
     std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - sma) / (std + 1e-10)
-    return zscore.values
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    band_width = (upper - lower) / sma
+    return upper.values, lower.values, band_width.values
+
+
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs rolling average"""
+    vol_s = pd.Series(volume)
+    vol_sma = vol_s.rolling(window=period, min_periods=period).mean()
+    volume_ratio = vol_s / (vol_sma + 1e-10)
+    return volume_ratio.values
+
+
+def calculate_percentile_rank(series, window=100):
+    """Calculate rolling percentile rank"""
+    n = len(series)
+    pr = np.zeros(n)
+    pr[:] = np.nan
+    
+    for i in range(window - 1, n):
+        if not np.isnan(series[i]):
+            window_data = series[i - window + 1:i + 1]
+            window_data = window_data[~np.isnan(window_data)]
+            if len(window_data) > 0:
+                pr[i] = np.sum(window_data <= series[i]) / len(window_data)
+    
+    return pr
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -133,20 +134,30 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load 1d HTF data ONCE before loop (Rule 1)
+    # Load 1d HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
     hma_1d = calculate_hma(df_1d['close'].values, 50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    # Calculate 12h indicators
+    kama = calculate_kama(close, fast_period=10, slow_period=30, smoothing_period=2)
     atr = calculate_atr(high, low, close, 14)
-    adx = calculate_adx(high, low, close, 14)
-    zscore = calculate_zscore(close, 20)
+    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2)
+    volume_ratio = calculate_volume_ratio(volume, 20)
+    
+    # Calculate Bollinger Band Width percentile rank (regime filter)
+    bb_width_pr = calculate_percentile_rank(bb_width, 100)
+    
+    # Calculate KAMA slope (rate of change over 5 bars)
+    kama_slope = np.zeros(n)
+    kama_slope[:] = np.nan
+    for i in range(5, n):
+        if not np.isnan(kama[i]) and not np.isnan(kama[i - 5]):
+            kama_slope[i] = (kama[i] - kama[i - 5]) / (kama[i - 5] + 1e-10)
     
     # Generate signals
     signals = np.zeros(n)
-    SIZE = 0.28  # Base position size (28% of capital)
+    SIZE = 0.25  # Base position size (25% of capital - conservative)
     HALF_SIZE = SIZE / 2  # For take profit reduction
     
     # Track position state for stoploss and take profit
@@ -155,39 +166,47 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = float('inf')
     entry_price = 0.0
     profit_target_hit = False
+    bars_since_entry = 0
     
-    min_period = 100  # Wait for all indicators to stabilize
+    min_period = 150  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(atr[i]) or 
-            np.isnan(adx[i]) or np.isnan(zscore[i]) or atr[i] == 0):
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(atr[i]) or np.isnan(bb_width_pr[i]) or 
+            np.isnan(volume_ratio[i]) or np.isnan(kama_slope[i]) or
+            atr[i] == 0 or kama[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Daily trend filter (HTF) - price above/below 1d HMA50
+        # Daily trend filter (HTF) - price above/below 1d HMA(50)
         daily_trend = 1 if close[i] > hma_1d_aligned[i] else -1
         
-        # Donchian breakout detection
-        donchian_breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
-        donchian_breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
+        # 12h KAMA trend - price above/below KAMA
+        kama_trend = 1 if close[i] > kama[i] else -1
         
-        # ADX trend strength filter (>25 = trending market)
-        trend_strong = adx[i] > 25
+        # KAMA slope confirmation (must be positive for long, negative for short)
+        slope_threshold = 0.001  # 0.1% slope over 5 bars
+        slope_bullish = kama_slope[i] > slope_threshold
+        slope_bearish = kama_slope[i] < -slope_threshold
         
-        # Z-score filter (avoid extreme mean-reversion conditions)
-        zscore_valid = -2.0 <= zscore[i] <= 2.0
+        # Regime filter: only trade when BB Width is above 40th percentile
+        regime_valid = bb_width_pr[i] > 0.40
+        
+        # Volume confirmation: volume must be above average (ratio > 0.9)
+        volume_confirmed = volume_ratio[i] > 0.9
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: Donchian breakout + Daily trend bullish + ADX strong + Z-score valid
-        if donchian_breakout_long and daily_trend == 1 and trend_strong and zscore_valid:
+        # Long entry: All filters align bullish
+        if (kama_trend == 1 and daily_trend == 1 and slope_bullish and 
+            regime_valid and volume_confirmed):
             target_signal = SIZE
         
-        # Short entry: Donchian breakout + Daily trend bearish + ADX strong + Z-score valid
-        elif donchian_breakout_short and daily_trend == -1 and trend_strong and zscore_valid:
+        # Short entry: All filters align bearish
+        elif (kama_trend == -1 and daily_trend == -1 and slope_bearish and 
+              regime_valid and volume_confirmed):
             target_signal = -SIZE
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -195,6 +214,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         take_profit_triggered = False
         
         if position_side != 0:
+            bars_since_entry += 1
+            
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
@@ -229,6 +250,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry = float('inf')
             entry_price = 0.0
             profit_target_hit = False
+            bars_since_entry = 0
         elif take_profit_triggered:
             # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
@@ -236,32 +258,37 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         else:
             # Apply signal change
             if target_signal != 0.0 and position_side == 0:
-                # New entry
-                signals[i] = target_signal
-                position_side = 1 if target_signal > 0 else -1
-                highest_since_entry = close[i]
-                lowest_since_entry = close[i]
-                entry_price = close[i]
-                profit_target_hit = False
+                # New entry - require minimum 5 bars since last exit to reduce churn
+                if bars_since_entry >= 5 or bars_since_entry == 0:
+                    signals[i] = target_signal
+                    position_side = 1 if target_signal > 0 else -1
+                    highest_since_entry = close[i]
+                    lowest_since_entry = close[i]
+                    entry_price = close[i]
+                    profit_target_hit = False
+                    bars_since_entry = 1
+                else:
+                    signals[i] = 0.0
             elif position_side != 0:
-                # Maintain existing position (check if trend reversed on HTF)
-                current_daily_trend = 1 if close[i] > hma_1d_aligned[i] else -1
-                if position_side == 1 and current_daily_trend == -1:
-                    # HTF trend reversed, exit long
+                # Maintain existing position (check if trend reversed)
+                if position_side == 1 and kama_trend == -1:
+                    # Trend reversed, exit long
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
                     profit_target_hit = False
-                elif position_side == -1 and current_daily_trend == 1:
-                    # HTF trend reversed, exit short
+                    bars_since_entry = 0
+                elif position_side == -1 and kama_trend == 1:
+                    # Trend reversed, exit short
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
                     profit_target_hit = False
+                    bars_since_entry = 0
                 else:
                     # Maintain position
                     signals[i] = SIZE * position_side if not profit_target_hit else HALF_SIZE * position_side
