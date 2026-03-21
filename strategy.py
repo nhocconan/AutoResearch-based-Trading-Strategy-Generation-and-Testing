@@ -1,36 +1,32 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #103 - CLEAN MTF ENSEMBLE WITH CHANDELIER EXIT (15m+4h v4)
+EXPERIMENT #104 - OPTIMIZED MTF ENSEMBLE WITH CHANDELIER EXIT & VOL REGIME
 ==================================================================================================
-Hypothesis: Experiment #102 failed due to read-only array assignment issues. This version fixes
-all array mutability problems while keeping the proven ensemble logic that achieved Sharpe=16+.
+Hypothesis: Building on #103's Sharpe=5.020, this version adds:
+1. Proper Chandelier exit (3*ATR(22) from highest_high/lowest_low)
+2. Volatility regime detection via BBW percentile for position sizing
+3. Dynamic position sizing: low vol=0.35, high vol=0.20
+4. Better vote hysteresis to reduce churn (costs 0.10% per signal change)
+5. Cleaner state management for stop loss / take profit
 
-Key fixes for #103:
-1. All indicator arrays created as writable numpy arrays (no views)
-2. Simplified 4h resampling with proper array initialization
-3. Cleaner state management with fewer variables
-4. Maintain proven components: HMA trend, Supertrend, ADX filter, Chandelier exit
-5. Volatility-adjusted position sizing with discrete levels (0.20, 0.35)
-6. Reduced signal churn with vote streak hysteresis
-
-Risk controls:
-- Max position size: 0.35 (35% of capital)
-- Chandelier stop: 3*ATR(22) from highest high (long) / lowest low (short)
-- Volatility-adjusted sizing: base_size * (target_ATR% / current_ATR%)
-- ADX filter: only trade when 4h ADX > 20 (trend strength)
-- Take profit: reduce to half at 2R, trail stop
+Timeframe: 15m entries with 4h trend filter (proven 2x Sharpe vs single TF)
+Key improvements over #103:
+- ATR(22) for Chandelier (more stable than ATR(14))
+- BBW percentile for vol regime (low vol = expand size, high vol = contract)
+- Vote threshold increased to 4.0 for higher conviction entries
+- Take profit at 2R with stop trail at 1R
 """
 
 import numpy as np
 import pandas as pd
 
-name = "clean_mtf_ensemble_chandelier_15m_4h_v4"
+name = "optimized_mtf_chandelier_volregime_15m_4h_v1"
 timeframe = "15m"
 leverage = 1.0
 
 
 def calculate_atr(high, low, close, period=14):
-    """ATR calculation with proper warmup"""
+    """ATR with Wilder's smoothing"""
     n = len(close)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
@@ -46,7 +42,7 @@ def calculate_atr(high, low, close, period=14):
 
 
 def calculate_hma(close, period=16):
-    """Hull Moving Average"""
+    """Hull Moving Average - faster response than EMA"""
     n = len(close)
     close_s = pd.Series(close)
     
@@ -55,7 +51,9 @@ def calculate_hma(close, period=16):
     
     def wma(series, w):
         weights = np.arange(1, w + 1)
-        return series.rolling(window=w, min_periods=w).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
+        return series.rolling(window=w, min_periods=w).apply(
+            lambda x: np.dot(x, weights) / weights.sum(), raw=True
+        )
     
     wma_half = wma(close_s, half)
     wma_full = wma(close_s, period)
@@ -66,7 +64,7 @@ def calculate_hma(close, period=16):
 
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Supertrend with direction"""
+    """Supertrend with direction signal"""
     n = len(close)
     atr = calculate_atr(high, low, close, period)
     
@@ -92,7 +90,7 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
 
 
 def calculate_rsi(close, period=14):
-    """RSI calculation"""
+    """RSI with proper smoothing"""
     delta = np.diff(close)
     delta = np.insert(delta, 0, 0)
     
@@ -102,8 +100,8 @@ def calculate_rsi(close, period=14):
     gain_s = pd.Series(gain)
     loss_s = pd.Series(loss)
     
-    avg_gain = gain_s.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss_s.rolling(window=period, min_periods=period).mean()
+    avg_gain = gain_s.ewm(span=period, min_periods=period).mean()
+    avg_loss = loss_s.ewm(span=period, min_periods=period).mean()
     
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
@@ -112,7 +110,7 @@ def calculate_rsi(close, period=14):
 
 
 def calculate_zscore(close, period=20):
-    """Z-score calculation"""
+    """Z-score for mean reversion signals"""
     close_s = pd.Series(close)
     mean = close_s.rolling(window=period, min_periods=period).mean()
     std = close_s.rolling(window=period, min_periods=period).std()
@@ -122,7 +120,7 @@ def calculate_zscore(close, period=20):
 
 
 def calculate_bbw(close, period=20, std_dev=2.0):
-    """Bollinger Band Width"""
+    """Bollinger Band Width for volatility regime"""
     close_s = pd.Series(close)
     sma = close_s.rolling(window=period, min_periods=period).mean()
     std = close_s.rolling(window=period, min_periods=period).std()
@@ -135,7 +133,7 @@ def calculate_bbw(close, period=20, std_dev=2.0):
 
 
 def calculate_adx(high, low, close, period=14):
-    """ADX calculation"""
+    """ADX for trend strength filter"""
     n = len(close)
     
     plus_dm = np.zeros(n)
@@ -172,6 +170,28 @@ def calculate_adx(high, low, close, period=14):
     return adx.fillna(0).values.copy()
 
 
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Kaufman Adaptive Moving Average"""
+    n = len(close)
+    close_s = pd.Series(close)
+    
+    change = abs(close_s - close_s.shift(er_period))
+    volatility = close_s.diff().abs().rolling(window=er_period, min_periods=er_period).sum()
+    
+    er = change / volatility
+    er = er.fillna(0)
+    
+    sc = (er * (2/(fast_period+1) - 2/(slow_period+1)) + 2/(slow_period+1)) ** 2
+    
+    kama = np.zeros(n)
+    kama[er_period] = close[er_period]
+    
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
@@ -181,9 +201,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     signals = np.zeros(n)
     
     # ===== 15m indicators =====
-    atr_15m = calculate_atr(high, low, close, period=14)
+    atr_15m_14 = calculate_atr(high, low, close, period=14)
+    atr_15m_22 = calculate_atr(high, low, close, period=22)  # For Chandelier
     hma_16 = calculate_hma(close, period=16)
     hma_48 = calculate_hma(close, period=48)
+    kama_10 = calculate_kama(close, er_period=10)
     _, st_dir_15m, _ = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
     rsi_15m = calculate_rsi(close, period=14)
     zscore_15m = calculate_zscore(close, period=20)
@@ -208,8 +230,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             l_4h[i] = np.min(low[start_idx:end_idx])
     
     # ===== 4h indicators =====
-    hma_4h = calculate_hma(c_4h, period=16)
-    _, st_dir_4h, atr_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
+    hma_4h_16 = calculate_hma(c_4h, period=16)
+    hma_4h_48 = calculate_hma(c_4h, period=48)
+    _, st_dir_4h, atr_4h_22 = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
     adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
     bbw_4h = calculate_bbw(c_4h, period=20, std_dev=2.0)
     
@@ -223,13 +246,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     for i in range(n):
         idx_4h = min(i // bars_per_4h, n_4h - 1)
         if idx_4h >= 20:
-            trend_4h[i] = 1 if c_4h[idx_4h] > hma_4h[idx_4h] else (-1 if c_4h[idx_4h] < hma_4h[idx_4h] else 0)
+            trend_4h[i] = 1 if c_4h[idx_4h] > hma_4h_16[idx_4h] else (-1 if c_4h[idx_4h] < hma_4h_16[idx_4h] else 0)
             adx_4h_map[i] = adx_4h[idx_4h]
             st_dir_4h_map[i] = st_dir_4h[idx_4h]
             bbw_4h_map[i] = bbw_4h[idx_4h]
-            atr_4h_map[i] = atr_4h[idx_4h]
+            atr_4h_map[i] = atr_4h_22[idx_4h]
     
-    # ===== BBW percentile for regime =====
+    # ===== BBW percentile for vol regime =====
     bbw_percentile = np.zeros(n)
     valid_bbw = bbw_4h_map[320:][bbw_4h_map[320:] > 0]
     if len(valid_bbw) > 0:
@@ -239,11 +262,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 bbw_percentile[i] = np.searchsorted(bbw_sorted, bbw_4h_map[i]) / len(bbw_sorted)
     
     # ===== Parameters =====
-    SIZE_LOW = 0.20
-    SIZE_HIGH = 0.35
+    SIZE_LOW_VOL = 0.35   # Low volatility = larger position
+    SIZE_HIGH_VOL = 0.20  # High volatility = smaller position
+    VOL_THRESHOLD = 0.5   # BBW percentile threshold
     ATR_TARGET_PCT = 0.012
     ADX_MIN = 20
     ZSCORE_EXTREME = 2.0
+    VOTE_THRESHOLD = 4.0
+    VOTE_STREAK_MIN = 2
     FIRST_VALID = 350
     
     # ===== State =====
@@ -255,9 +281,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     highest_high = 0.0
     lowest_low = 0.0
     tp_triggered = False
+    chandelier_stop = 0.0
     
     for i in range(FIRST_VALID, n):
-        if atr_15m[i] == 0 or np.isnan(atr_15m[i]) or close[i] == 0:
+        if atr_15m_22[i] == 0 or np.isnan(atr_15m_22[i]) or close[i] == 0:
             signals[i] = 0.0
             prev_signal = 0.0
             continue
@@ -270,32 +297,38 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         # 15m signals
         hma_trend = 1 if hma_16[i] > hma_48[i] else -1
+        kama_trend = 1 if close[i] > kama_10[i] else -1
         st_trend = st_dir_15m[i]
         rsi_val = rsi_15m[i]
         zscore_val = zscore_15m[i]
         
-        # Regime
-        trend_regime = bbw_pct < 0.5
-        adx_filter = adx_val >= ADX_MIN
+        # Vol regime: low BBW = low vol = expand size
+        is_low_vol = bbw_pct < VOL_THRESHOLD
         
         # ===== Ensemble voting =====
         vote_long = 0.0
         vote_short = 0.0
         
-        # 4h HMA trend (weight: 1.5)
+        # 4h HMA trend (weight: 2.0) - primary trend filter
         if trend_4h_val == 1:
-            vote_long += 1.5
+            vote_long += 2.0
         elif trend_4h_val == -1:
-            vote_short += 1.5
+            vote_short += 2.0
         
-        # 4h Supertrend (weight: 1.0)
+        # 4h Supertrend (weight: 1.5)
         if st_dir_4h_val == 1:
-            vote_long += 1.0
+            vote_long += 1.5
         elif st_dir_4h_val == -1:
-            vote_short += 1.0
+            vote_short += 1.5
         
         # 15m HMA crossover (weight: 1.0)
         if hma_trend == 1:
+            vote_long += 1.0
+        else:
+            vote_short += 1.0
+        
+        # 15m KAMA trend (weight: 1.0)
+        if kama_trend == 1:
             vote_long += 1.0
         else:
             vote_short += 1.0
@@ -306,31 +339,31 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         else:
             vote_short += 1.0
         
-        # RSI with SMA filter (weight: 0.5)
+        # RSI with SMA200 filter (weight: 0.5)
         if rsi_val > 55 and close[i] > sma_200[i]:
             vote_long += 0.5
         elif rsi_val < 45 and close[i] < sma_200[i]:
             vote_short += 0.5
         
         # Z-score mean reversion in high BW regime (weight: 0.5)
-        if not trend_regime:
+        if bbw_pct > 0.5:  # High volatility regime
             if zscore_val < -ZSCORE_EXTREME:
                 vote_long += 0.5
             elif zscore_val > ZSCORE_EXTREME:
                 vote_short += 0.5
         
         # Determine vote
-        if vote_long > vote_short and vote_long >= 3.5:
+        if vote_long > vote_short and vote_long >= VOTE_THRESHOLD:
             current_vote = 1
             total_votes = vote_long
-        elif vote_short > vote_long and vote_short >= 3.5:
+        elif vote_short > vote_long and vote_short >= VOTE_THRESHOLD:
             current_vote = -1
             total_votes = vote_short
         else:
             current_vote = 0
             total_votes = 0
         
-        # Vote streak
+        # Vote streak for hysteresis
         if current_vote != 0 and current_vote == prev_vote:
             vote_streak += 1
         elif current_vote != 0:
@@ -340,26 +373,28 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             vote_streak = 0
             prev_vote = 0
         
-        # Volatility adjustment
-        atr_pct = atr_15m[i] / close[i] if close[i] > 0 else 0
-        vol_adj = min(1.5, max(0.5, ATR_TARGET_PCT / atr_pct)) if atr_pct > 0 else 1.0
+        # Volatility-adjusted position sizing
+        atr_pct = atr_15m_22[i] / close[i] if close[i] > 0 else 0
+        vol_adj = min(1.3, max(0.7, ATR_TARGET_PCT / atr_pct)) if atr_pct > 0 else 1.0
         
-        # ===== Chandelier Exit management =====
+        # ===== Chandelier Exit management (ATR(22) * 3) =====
         if prev_signal != 0.0 and entry_price > 0:
             chandelier_mult = 3.0
-            atr_stop = atr_15m[i]
+            atr_stop = atr_15m_22[i]
             
-            if prev_signal > 0:  # Long
+            if prev_signal > 0:  # Long position
                 highest_high = max(highest_high, high[i])
                 chandelier_stop = highest_high - chandelier_mult * atr_stop
                 
-                # Take profit at 2R
+                # Take profit at 2R - reduce to half
                 if not tp_triggered and close[i] >= entry_price + 2 * chandelier_mult * entry_atr:
                     signals[i] = prev_signal * 0.5
                     tp_triggered = True
+                    # Trail stop to 1R
+                    chandelier_stop = max(chandelier_stop, entry_price + chandelier_mult * entry_atr)
                     continue
                 
-                # Stop loss
+                # Stop loss - Chandelier exit
                 if close[i] < chandelier_stop:
                     signals[i] = 0.0
                     prev_signal = 0.0
@@ -368,17 +403,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     tp_triggered = False
                     highest_high = 0.0
                     continue
-            else:  # Short
+                    
+            else:  # Short position
                 lowest_low = min(lowest_low, low[i])
                 chandelier_stop = lowest_low + chandelier_mult * atr_stop
                 
-                # Take profit at 2R
+                # Take profit at 2R - reduce to half
                 if not tp_triggered and close[i] <= entry_price - 2 * chandelier_mult * entry_atr:
                     signals[i] = prev_signal * 0.5
                     tp_triggered = True
+                    # Trail stop to 1R
+                    chandelier_stop = min(chandelier_stop, entry_price - chandelier_mult * entry_atr)
                     continue
                 
-                # Stop loss
+                # Stop loss - Chandelier exit
                 if close[i] > chandelier_stop:
                     signals[i] = 0.0
                     prev_signal = 0.0
@@ -390,6 +428,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         # ===== Generate signal =====
         if prev_signal != 0.0:
+            # Hold position if vote agrees, exit if vote flips
             if current_vote == 0 or current_vote != np.sign(prev_signal):
                 signals[i] = 0.0
                 prev_signal = 0.0
@@ -399,28 +438,32 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 tp_triggered = False
             else:
                 signals[i] = prev_signal
-        elif vote_streak >= 2 and adx_filter:
+        elif vote_streak >= VOTE_STREAK_MIN and adx_val >= ADX_MIN:
+            # New entry with volatility-adjusted sizing
+            base_size = SIZE_LOW_VOL if is_low_vol else SIZE_HIGH_VOL
+            position_size = np.clip(base_size * vol_adj, 0.15, SIZE_LOW_VOL)
+            
             if current_vote == 1:
-                base_size = SIZE_HIGH if total_votes >= 5.0 else SIZE_LOW
-                signals[i] = np.clip(base_size * vol_adj, 0, SIZE_HIGH)
+                signals[i] = position_size
                 entry_price = close[i]
-                entry_atr = atr_15m[i]
+                entry_atr = atr_15m_22[i]
                 highest_high = high[i]
+                chandelier_stop = highest_high - chandelier_mult * entry_atr
                 prev_signal = signals[i]
                 tp_triggered = False
             else:
-                base_size = SIZE_HIGH if total_votes >= 5.0 else SIZE_LOW
-                signals[i] = -np.clip(base_size * vol_adj, 0, SIZE_HIGH)
+                signals[i] = -position_size
                 entry_price = close[i]
-                entry_atr = atr_15m[i]
+                entry_atr = atr_15m_22[i]
                 lowest_low = low[i]
+                chandelier_stop = lowest_low + chandelier_mult * entry_atr
                 prev_signal = signals[i]
                 tp_triggered = False
         else:
             signals[i] = 0.0
             prev_signal = 0.0
     
-    # Clip to max position size
+    # Clip to max position size (absolute max 0.40)
     signals = np.clip(signals, -0.40, 0.40)
     
     return signals
