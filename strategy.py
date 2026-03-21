@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #439: 15m HMA Trend + 1h RSI Pullback + 4h Bias + Volume + ATR Stop
-Hypothesis: 15m strategies fail due to noise and overtrading. This uses STRONG 4h HMA trend bias
-to only trade in direction of higher timeframe trend. 1h RSI pullback entries (wait for RSI dip
-in uptrend, rise in downtrend) reduce false entries. 15m ADX > 25 filters choppy conditions.
-Volume confirmation (volume > 1.5*avg) ensures real moves. Wide stoploss (2.5*ATR) avoids
-whipsaw exits on 15m timeframe. Multiple entry paths ensure >=10 trades per symbol.
-Position size: 0.25 discrete, stoploss 2.5*ATR for 15m timeframe.
-Timeframe: 15m (REQUIRED), HTF: 1h for RSI, 4h for trend bias via mtf_data helper.
+Experiment #440: 30m Donchian Breakout + 4h HMA Trend Bias + ADX/RSI Filters + ATR Stop
+Hypothesis: Donchian channel breakouts (Turtle Trading) on 30m timeframe capture medium-term
+trends while 4h HMA provides higher timeframe bias to filter false breakouts. 30m offers more
+trade opportunities than 1d/12h while maintaining trend-following edge. ADX > 20 ensures we
+only trade when trend strength is present. RSI filter avoids entering at extremes. Multiple
+entry paths ensure >=10 trades per symbol. ATR-based trailing stop (2.5*ATR) controls drawdown.
+Position size: 0.25 discrete (conservative for 30m volatility), stoploss 2.5*ATR.
+Timeframe: 30m (REQUIRED), HTF: 4h for trend bias via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_hma_4h_bias_1h_rsi_pullback_vol_adx_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_donchian_4h_hma_adx_rsi_breakout_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -49,11 +49,30 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_donchian(high, low, period=20):
+    """
+    Calculate Donchian Channel (Turtle Trading breakout system).
+    Upper = highest high over N periods
+    Lower = lowest low over N periods
+    """
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+
 def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index)."""
     n = len(close)
-    adx = np.zeros(n)
-    adx[:] = np.nan
+    adx = np.full(n, np.nan)
     
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
@@ -78,39 +97,25 @@ def calculate_adx(high, low, close, period=14):
     
     return adx, plus_di, minus_di
 
-def calculate_sma(close, period=50):
-    """Calculate Simple Moving Average."""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
-
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs moving average."""
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    vol_ratio = volume / (vol_sma + 1e-10)
-    return vol_ratio
-
 def calculate_kama(close, period=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average."""
+    """Calculate Kaufman Adaptive Moving Average (KAMA)."""
     n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
+    kama = np.full(n, np.nan)
     
+    if n < period:
+        return kama
+    
+    er = np.zeros(n)
+    for i in range(1, n):
+        change = np.abs(close[i] - close[i-period+1]) if i >= period - 1 else np.abs(close[i] - close[0])
+        volatility = np.sum(np.abs(np.diff(close[max(0, i-period+1):i+1])))
+        er[i] = change / (volatility + 1e-10) if volatility > 0 else 0
+    
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    
+    kama[period-1] = close[period-1]
     for i in range(period, n):
-        change = np.abs(close[i] - close[i - period])
-        volatility = np.sum(np.abs(np.diff(close[i - period:i + 1])))
-        
-        if volatility > 0:
-            er = change / volatility
-        else:
-            er = 0
-        
-        fast_sc = 2 / (fast + 1)
-        slow_sc = 2 / (slow + 1)
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-        
-        if i == period:
-            kama[i] = close[i]
-        else:
-            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     return kama
 
@@ -122,28 +127,28 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
     df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi_15m = calculate_rsi(close, 14)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
+    rsi = calculate_rsi(close, 14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     sma50 = calculate_sma(close, 50)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
     kama = calculate_kama(close, 10)
-    vol_ratio = calculate_volume_ratio(volume, 20)
+    
+    # Volume MA for confirmation
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.28
-    SIZE_HALF = 0.14
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -155,90 +160,103 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi_15m[i]) or atr[i] == 0:
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_1h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(sma50[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(sma50[i]) or np.isnan(kama[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        # 4h trend bias (STRONG filter - only trade with HTF trend)
+        if np.isnan(adx[i]) or np.isnan(kama[i]):
+            signals[i] = 0.0
+            continue
+        
+        # 4h trend bias (higher timeframe direction)
         hma_4h_bullish = close[i] > hma_4h_aligned[i]
         hma_4h_bearish = close[i] < hma_4h_aligned[i]
         
-        # 1h RSI pullback signals (entry timing)
-        rsi_1h_pullback_long = rsi_1h_aligned[i] > 40 and rsi_1h_aligned[i] < 60
-        rsi_1h_pullback_short = rsi_1h_aligned[i] > 40 and rsi_1h_aligned[i] < 60
-        rsi_1h_momentum_long = rsi_1h_aligned[i] > 50 and rsi_1h_aligned[i] < 70
-        rsi_1h_momentum_short = rsi_1h_aligned[i] > 30 and rsi_1h_aligned[i] < 50
-        
-        # 15m ADX trend strength (avoid chop)
-        trend_strong = adx[i] > 22
-        
-        # 15m RSI for entry timing
-        rsi_15m_not_overbought = rsi_15m[i] < 70
-        rsi_15m_not_oversold = rsi_15m[i] > 30
-        rsi_15m_long_entry = rsi_15m[i] > 40 and rsi_15m[i] < 65
-        rsi_15m_short_entry = rsi_15m[i] > 35 and rsi_15m[i] < 60
-        
-        # Volume confirmation
-        volume_confirmed = vol_ratio[i] > 1.2
-        
-        # Price position filters
+        # 30m trend filters
         above_sma50 = close[i] > sma50[i]
         below_sma50 = close[i] < sma50[i]
         above_kama = close[i] > kama[i]
         below_kama = close[i] < kama[i]
         
-        # DI signals
+        # ADX trend strength filter (only trade when ADX > 18)
+        trend_strength = adx[i] > 18
+        adx_rising = adx[i] > adx[i-1] if not np.isnan(adx[i-1]) else False
+        
+        # RSI filter (avoid extremes, favor momentum zone)
+        rsi_not_overbought = rsi[i] < 72
+        rsi_not_oversold = rsi[i] > 28
+        rsi_momentum_long = rsi[i] > 45 and rsi[i] < 68
+        rsi_momentum_short = rsi[i] > 32 and rsi[i] < 55
+        
+        # Volume confirmation
+        volume_above_avg = volume[i] > vol_sma[i] if not np.isnan(vol_sma[i]) else True
+        
+        # Donchian breakout signals (breakout from previous bar's channel)
+        breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
+        breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
+        
+        # DI crossover signals
         di_bullish = plus_di[i] > minus_di[i]
         di_bearish = plus_di[i] < minus_di[i]
+        
+        # Channel position
+        near_upper = close[i] > donchian_upper[i] * 0.985 if not np.isnan(donchian_upper[i]) else False
+        near_lower = close[i] < donchian_lower[i] * 1.015 if not np.isnan(donchian_lower[i]) else False
         
         new_signal = 0.0
         
         # === LONG ENTRIES (multiple paths to ensure >=10 trades) ===
-        # Path 1: 4h bullish + 1h RSI pullback + 15m ADX strong + volume
-        if hma_4h_bullish and rsi_1h_pullback_long and trend_strong and volume_confirmed:
+        # Path 1: Donchian breakout + 4h bullish + ADX trend + RSI not overbought
+        if breakout_long and hma_4h_bullish and trend_strength and rsi_not_overbought:
             new_signal = SIZE_ENTRY
-        # Path 2: 4h bullish + 15m above SMA50 + DI bullish + RSI ok
-        elif hma_4h_bullish and above_sma50 and di_bullish and rsi_15m_long_entry:
+        # Path 2: Donchian breakout + Above SMA50 + DI bullish + RSI momentum
+        elif breakout_long and above_sma50 and di_bullish and rsi_momentum_long:
             new_signal = SIZE_ENTRY
-        # Path 3: 4h bullish + 15m above KAMA + ADX > 25 + volume
-        elif hma_4h_bullish and above_kama and adx[i] > 25 and volume_confirmed:
+        # Path 3: Near upper Donchian + 4h bullish + ADX > 22 + Volume
+        elif near_upper and hma_4h_bullish and adx[i] > 22 and volume_above_avg and rsi[i] > 45:
             new_signal = SIZE_ENTRY
-        # Path 4: 4h bullish + 1h RSI momentum + 15m DI bullish
-        elif hma_4h_bullish and rsi_1h_momentum_long and di_bullish and rsi_15m[i] > 45:
+        # Path 4: Breakout + 4h bullish + Above KAMA + RSI 45-65
+        elif breakout_long and hma_4h_bullish and above_kama and rsi[i] > 45 and rsi[i] < 65:
             new_signal = SIZE_ENTRY
-        # Path 5: 4h bullish + above SMA50 + volume spike + RSI 45-65
-        elif hma_4h_bullish and above_sma50 and vol_ratio[i] > 1.5 and rsi_15m[i] > 45 and rsi_15m[i] < 65:
+        # Path 5: DI bullish + 4h bullish + Above SMA50 + ADX rising
+        elif di_bullish and hma_4h_bullish and above_sma50 and adx_rising and adx[i] > 16:
             new_signal = SIZE_ENTRY
-        # Path 6: 4h bullish + ADX rising + above KAMA + RSI ok
-        elif hma_4h_bullish and adx[i] > adx[i-1] and adx[i] > 20 and above_kama and rsi_15m[i] > 40:
+        # Path 6: Above KAMA + 4h bullish + ADX > 20 + RSI > 50
+        elif above_kama and hma_4h_bullish and adx[i] > 20 and rsi[i] > 50 and rsi[i] < 70:
+            new_signal = SIZE_ENTRY
+        # Path 7: Breakout + Volume spike + 4h bullish
+        elif breakout_long and volume_above_avg and hma_4h_bullish and rsi[i] > 40:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES (multiple paths to ensure >=10 trades) ===
-        # Path 1: 4h bearish + 1h RSI pullback + 15m ADX strong + volume
-        if hma_4h_bearish and rsi_1h_pullback_short and trend_strong and volume_confirmed:
+        # Path 1: Donchian breakout + 4h bearish + ADX trend + RSI not oversold
+        if breakout_short and hma_4h_bearish and trend_strength and rsi_not_oversold:
             new_signal = -SIZE_ENTRY
-        # Path 2: 4h bearish + 15m below SMA50 + DI bearish + RSI ok
-        elif hma_4h_bearish and below_sma50 and di_bearish and rsi_15m_short_entry:
+        # Path 2: Donchian breakout + Below SMA50 + DI bearish + RSI momentum
+        elif breakout_short and below_sma50 and di_bearish and rsi_momentum_short:
             new_signal = -SIZE_ENTRY
-        # Path 3: 4h bearish + 15m below KAMA + ADX > 25 + volume
-        elif hma_4h_bearish and below_kama and adx[i] > 25 and volume_confirmed:
+        # Path 3: Near lower Donchian + 4h bearish + ADX > 22 + Volume
+        elif near_lower and hma_4h_bearish and adx[i] > 22 and volume_above_avg and rsi[i] < 55:
             new_signal = -SIZE_ENTRY
-        # Path 4: 4h bearish + 1h RSI momentum + 15m DI bearish
-        elif hma_4h_bearish and rsi_1h_momentum_short and di_bearish and rsi_15m[i] < 55:
+        # Path 4: Breakout + 4h bearish + Below KAMA + RSI 35-55
+        elif breakout_short and hma_4h_bearish and below_kama and rsi[i] > 35 and rsi[i] < 55:
             new_signal = -SIZE_ENTRY
-        # Path 5: 4h bearish + below SMA50 + volume spike + RSI 35-55
-        elif hma_4h_bearish and below_sma50 and vol_ratio[i] > 1.5 and rsi_15m[i] > 35 and rsi_15m[i] < 55:
+        # Path 5: DI bearish + 4h bearish + Below SMA50 + ADX rising
+        elif di_bearish and hma_4h_bearish and below_sma50 and adx_rising and adx[i] > 16:
             new_signal = -SIZE_ENTRY
-        # Path 6: 4h bearish + ADX rising + below KAMA + RSI ok
-        elif hma_4h_bearish and adx[i] > adx[i-1] and adx[i] > 20 and below_kama and rsi_15m[i] < 60:
+        # Path 6: Below KAMA + 4h bearish + ADX > 20 + RSI < 50
+        elif below_kama and hma_4h_bearish and adx[i] > 20 and rsi[i] < 50 and rsi[i] > 30:
+            new_signal = -SIZE_ENTRY
+        # Path 7: Breakout + Volume spike + 4h bearish
+        elif breakout_short and volume_above_avg and hma_4h_bearish and rsi[i] < 60:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -247,7 +265,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR from highest for 15m timeframe)
+            # Calculate trailing stop (2.5*ATR from highest for 30m timeframe)
             current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -268,7 +286,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR from lowest for 15m timeframe)
+            # Calculate trailing stop (2.5*ATR from lowest for 30m timeframe)
             current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
