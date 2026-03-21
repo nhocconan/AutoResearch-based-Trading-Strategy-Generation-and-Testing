@@ -1,36 +1,34 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #002 - Donchian Breakout + Multi-HMA Trend + RSI Filter (30m primary)
+EXPERIMENT #016 - HMA Crossover + Z-Score Entries + 1d Trend Filter (4h primary)
 =====================================================================================
-Hypothesis: Donchian Channel breakouts capture sustained momentum moves, but generate
-false signals in ranging markets. Using BOTH 4h HMA(21) and 1d HMA(50) as dual trend
-filters ensures we only trade when both intermediate and major trends align. RSI(14)
-filter avoids entering at extremes. ADX(14) > 20 confirms trend strength.
+Hypothesis: 4h HMA crossover captures medium-term trends, but entry timing is poor.
+Adding Z-score(20) for mean reversion entries within the trend improves risk/reward.
+1d HMA(21) filter ensures we only trade with the weekly/major trend direction.
 
 Key features:
-- Primary TF: 30m (as required for Experiment #002)
-- HTF filters: 4h HMA(21) + 1d HMA(50) for dual trend confirmation
-- Entry: Donchian(20) breakout in trend direction
-- Strength: ADX(14) > 20 filter (more relaxed than 25 to ensure trades)
-- Filter: RSI(14) not at extremes (30-70 range for entries)
-- Stoploss: 2.0*ATR(14) trailing
-- Position sizing: 0.25 base, discrete levels (0.0, ±0.25, ±0.30)
+- Primary TF: 4h (captures swing moves, less noise than 1h/15m)
+- HTF filter: 1d HMA(21) for major trend direction
+- Trend: HMA(21) vs HMA(55) crossover on 4h
+- Entry: Z-score(20) extremes within trend (Z < -1.0 long, Z > 1.0 short)
+- Exit: HMA crossover reversal OR 2*ATR stoploss
+- Position sizing: 0.25-0.30 discrete levels
 - Take profit: Reduce to half at 2R profit
 
-Why this should work better:
-- 30m captures more opportunities than 1h/4h while avoiding 15m noise
-- Dual HMA filter (4h + 1d) is more robust than single HMA
-- Donchian breakouts are proven momentum signals (Turtle Trading)
-- Relaxed ADX > 20 (vs 25) ensures we get ≥10 trades per symbol
-- Conservative 0.25 sizing controls drawdown during crypto crashes
+Why this should work:
+- 4h timeframe balances signal frequency vs noise (unlike 15m which was too noisy)
+- HMA is faster than EMA, captures trends earlier
+- Z-score entries avoid chasing breakouts (buy dips in uptrend)
+- 1d filter removes counter-trend trades that caused massive DD in prior experiments
+- Conservative sizing (0.25-0.30) controls drawdown during crypto crashes
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "donchian_dualhma_rsi_30m_v1"
-timeframe = "30m"
+name = "hma_zscore_1dtrend_4h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 
@@ -47,103 +45,31 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low over period)"""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI (Relative Strength Index)"""
-    n = len(close)
-    rsi = np.zeros(n)
-    rsi[:] = np.nan
-    
-    delta = np.diff(close)
-    gain = np.zeros(n)
-    loss = np.zeros(n)
-    
-    gain[1:] = np.where(delta > 0, delta, 0)
-    loss[1:] = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-    
-    return rsi
-
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    n = len(close)
-    
-    tr = np.zeros(n)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    tr[0] = high[0] - low[0]
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i],
-                    abs(high[i] - close[i - 1]),
-                    abs(low[i] - close[i - 1]))
-        
-        if high[i] - high[i - 1] > low[i - 1] - low[i]:
-            plus_dm[i] = max(high[i] - high[i - 1], 0)
-        else:
-            plus_dm[i] = 0
-            
-        if low[i - 1] - low[i] > high[i] - high[i - 1]:
-            minus_dm[i] = max(low[i - 1] - low[i], 0)
-        else:
-            minus_dm[i] = 0
-    
-    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        if tr_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
-    
-    dx = np.zeros(n)
-    for i in range(period - 1, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    return adx, plus_di, minus_di
-
-
 def calculate_hma(close, period):
     """Calculate Hull Moving Average"""
     close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period // 2, adjust=False, min_periods=period // 2).mean()
+    half_period = period // 2
+    if half_period < 1:
+        half_period = 1
+    sqrt_period = int(np.sqrt(period))
+    if sqrt_period < 1:
+        sqrt_period = 1
+    
+    wma1 = close_s.ewm(span=half_period, adjust=False, min_periods=half_period).mean()
     wma2 = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
     raw_hma = 2 * wma1 - wma2
-    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False, min_periods=int(np.sqrt(period))).mean()
+    hma = raw_hma.ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean()
     return hma.values
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score (standardized price deviation from mean)"""
+    close_s = pd.Series(close)
+    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
+    rolling_std = close_s.rolling(window=period, min_periods=period).std()
+    zscore = (close_s - rolling_mean) / rolling_std
+    zscore = zscore.fillna(0).values
+    return zscore
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -152,28 +78,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values.copy()
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    # Load HTF data ONCE before loop (Rule 1)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h HMA(21) for intermediate trend
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    # Calculate 1d HMA for major trend filter
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
-    # Calculate 1d HMA(50) for major trend regime
-    hma_1d = calculate_hma(df_1d['close'].values, 50)
+    # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 30m indicators
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
-    rsi = calculate_rsi(close, period=14)
+    # Calculate 4h indicators
+    hma_fast = calculate_hma(close, 21)
+    hma_slow = calculate_hma(close, 55)
     atr = calculate_atr(high, low, close, period=14)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
+    zscore = calculate_zscore(close, period=20)
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.25  # Base position size (25% of capital)
-    STRONG_SIZE = 0.30  # Size when ADX is strong
+    BASE_SIZE = 0.28  # Base position size (28% of capital)
+    MAX_SIZE = 0.35   # Max position size
+    MIN_SIZE = 0.20   # Min position size
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -188,54 +112,44 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]) or
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(adx[i]) or
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(hma_fast[i]) or
+            np.isnan(hma_slow[i]) or np.isnan(atr[i]) or np.isnan(zscore[i]) or
             atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Dual HMA trend filter (both 4h and 1d must align)
-        price_above_4h_hma = close[i] > hma_4h_aligned[i]
+        # 1d HMA trend filter (major trend direction)
         price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        hma_1d_trend = 1 if price_above_1d_hma else -1
         
-        # Both HMAs bullish = strong uptrend
-        hma_bullish = price_above_4h_hma and price_above_1d_hma
-        # Both HMAs bearish = strong downtrend
-        hma_bearish = (not price_above_4h_hma) and (not price_above_1d_hma)
+        # 4h HMA crossover trend
+        hma_crossover_bullish = hma_fast[i] > hma_slow[i]
+        hma_crossover_bearish = hma_fast[i] < hma_slow[i]
         
-        # ADX strength filter (relaxed to > 20 to ensure trades)
-        adx_strong = adx[i] > 20
+        # Z-score entry signals (mean reversion within trend)
+        # Long: Z-score < -1.0 (price below mean) in uptrend
+        # Short: Z-score > 1.0 (price above mean) in downtrend
+        zscore_oversold = zscore[i] < -1.0
+        zscore_overbought = zscore[i] > 1.0
         
-        # RSI filter (avoid extremes - not overbought for long, not oversold for short)
-        rsi_ok_long = rsi[i] < 70  # Not overbought
-        rsi_ok_short = rsi[i] > 30  # Not oversold
-        
-        # DI+ vs DI- for trend confirmation
-        di_bullish = plus_di[i] > minus_di[i]
-        di_bearish = minus_di[i] > plus_di[i]
-        
-        # Donchian breakout signals
-        breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
-        
-        # Calculate position size based on ADX strength
-        if adx[i] > 30:
-            position_size = STRONG_SIZE
-        else:
+        # Calculate position size (dynamic based on Z-score magnitude)
+        zscore_magnitude = abs(zscore[i])
+        if zscore_magnitude > 2.0:
+            position_size = MAX_SIZE
+        elif zscore_magnitude > 1.5:
             position_size = BASE_SIZE
+        else:
+            position_size = MIN_SIZE
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: Donchian breakout + dual HMA bullish + ADX strong + RSI ok + DI+ > DI-
-        if (breakout_long and hma_bullish and adx_strong and 
-            rsi_ok_long and di_bullish):
+        # Long entry: 4h HMA bullish + 1d HMA bullish + Z-score oversold
+        if hma_crossover_bullish and hma_1d_trend == 1 and zscore_oversold:
             target_signal = position_size
         
-        # Short entry: Donchian breakout + dual HMA bearish + ADX strong + RSI ok + DI- > DI+
-        elif (breakout_short and hma_bearish and adx_strong and 
-              rsi_ok_short and di_bearish):
+        # Short entry: 4h HMA bearish + 1d HMA bearish + Z-score overbought
+        elif hma_crossover_bearish and hma_1d_trend == -1 and zscore_overbought:
             target_signal = -position_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -280,7 +194,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             profit_target_hit = False
         elif take_profit_triggered:
             # Reduce position to half at 2R profit
-            signals[i] = HALF_SIZE * np.sign(position_side)
+            signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
             # Apply signal change
@@ -295,15 +209,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if dual HMA alignment breaks
-                hma_alignment_broken = (position_side == 1 and not hma_bullish) or \
-                                       (position_side == -1 and not hma_bearish)
+                # Exit if HMA crossover reverses OR 1d HMA alignment breaks
+                hma_reversal_long = hma_crossover_bearish
+                hma_reversal_short = hma_crossover_bullish
+                hma_1d_alignment_broken = (position_side == 1 and hma_1d_trend == -1) or \
+                                          (position_side == -1 and hma_1d_trend == 1)
                 
-                # Also exit if Donchian reverses (price crosses opposite channel)
-                donchian_reversal_long = close[i] < donchian_lower[i]
-                donchian_reversal_short = close[i] > donchian_upper[i]
-                
-                if hma_alignment_broken or donchian_reversal_long or donchian_reversal_short:
+                if hma_reversal_long or hma_reversal_short or hma_1d_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
