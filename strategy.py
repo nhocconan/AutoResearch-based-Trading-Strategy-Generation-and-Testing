@@ -1,55 +1,28 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #068 - Donchian Channel Breakout with Volume Confirmation (1h + 4h)
+EXPERIMENT #069 - REGIME_ADAPTIVE_MTF_ENSEMBLE_15M_4H_V2
 ==================================================================================================
-Hypothesis: Current best uses Supertrend+MACD+RSI. Let me try a PURE breakout approach:
+Hypothesis: Combine regime detection (BBW percentile) with MTF ensemble voting.
+- Low volatility regime (BBW < 30th percentile): Trend-following signals weighted higher
+- High volatility regime (BBW > 70th percentile): Mean-reversion signals weighted higher
+- Use 4h trend via mtf_data helper to filter 15m entries
+- Ensemble of 3 signal types: Supertrend trend, MACD momentum, RSI mean-reversion
+- Adaptive position sizing based on signal agreement (more agree = larger position)
 
-Key insights from failures:
-- Ensemble voting creates conflicting signals
-- Too many indicators = overfitting and crashes
-- Regime detection alone doesn't work
-- KAMA/Supertrend/HMA combinations are overused
-
-New approach:
-- Donchian Channel (20-period high/low) - pure price action breakout
-- 4h Donchian for major trend direction (breakout above 20-period high = bullish regime)
-- 1h Donchian for entry triggers (breakout with volume confirmation)
-- Volume spike confirmation (volume > 1.5x SMA = real breakout, not fakeout)
-- ATR-based stoploss (2.5*ATR) and takeprofit (2R then trail)
-- Position sizing: discrete levels (0.0, ±0.25, ±0.35) based on 4h trend strength
-- NO complex regime detection - let the Donchian channels define the regime
-
-Why this should beat Sharpe=3.653:
-- Donchian channels are proven trend-following tools (Turtle Trading)
-- Volume confirmation filters false breakouts (major source of losses)
-- Multi-timeframe alignment (4h trend + 1h entries) reduces whipsaws
-- Simpler logic = fewer bugs and crashes
-- Conservative position sizing (max 0.35) controls drawdown
+Why this should beat #040 and current best:
+- Proper mtf_data usage (no manual resampling bugs)
+- Regime adaptation reduces losses in wrong market conditions
+- Ensemble voting reduces false signals
+- Conservative sizing (max 0.30) with dynamic scaling
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "donchian_volume_breakout_1h_4h_v1"
-timeframe = "1h"
+name = "regime_adaptive_mtf_ensemble_15m_4h_v2"
+timeframe = "15m"
 leverage = 1.0
-
-
-def calculate_donchian_channels(high, low, period=20):
-    """
-    Donchian Channels: Upper = highest high, Lower = lowest low over period
-    Middle = (Upper + Lower) / 2
-    """
-    n = len(high)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    middle = (upper + lower) / 2
-    
-    return upper, middle, lower
 
 
 def calculate_atr(high, low, close, period=14):
@@ -75,16 +48,28 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume simple moving average"""
-    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    wma1 = pd.Series(close).ewm(span=half_period, adjust=False).mean().values
+    wma2 = pd.Series(close).ewm(span=period, adjust=False).mean().values
+    
+    hma = pd.Series(2 * wma1 - wma2).ewm(span=sqrt_period, adjust=False).mean().values
+    
+    return hma
 
 
 def calculate_rsi(close, period=14):
     """Calculate RSI"""
     n = len(close)
     if n < period + 1:
-        return np.full(n, 50.0)
+        return np.zeros(n)
     
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
@@ -93,95 +78,214 @@ def calculate_rsi(close, period=14):
     avg_gain = pd.Series(gain).ewm(span=period, adjust=False).mean().values
     avg_loss = pd.Series(loss).ewm(span=period, adjust=False).mean().values
     
-    rsi = np.full(n, 50.0)
-    mask = avg_loss > 0
-    rsi[mask] = 100 - (100 / (1 + avg_gain[mask] / avg_loss[mask]))
-    rsi[~mask] = 100
+    rs = np.zeros(n)
+    for i in range(period, n):
+        if avg_loss[i] == 0:
+            rs[i] = 100
+        else:
+            rs[i] = avg_gain[i] / avg_loss[i]
+    
+    rsi = 100 - (100 / (1 + rs))
     
     return rsi
+
+
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD histogram"""
+    ema_fast = pd.Series(close).ewm(span=fast, adjust=False).mean().values
+    ema_slow = pd.Series(close).ewm(span=slow, adjust=False).mean().values
+    
+    macd_line = ema_fast - ema_slow
+    signal_line = pd.Series(macd_line).ewm(span=signal, adjust=False).mean().values
+    histogram = macd_line - signal_line
+    
+    return macd_line, signal_line, histogram
+
+
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n), np.zeros(n)
+    
+    atr = calculate_atr(high, low, close, period)
+    
+    supertrend = np.zeros(n)
+    trend_direction = np.ones(n)
+    
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    
+    for i in range(period, n):
+        mid = (high[i] + low[i]) / 2
+        upper_band[i] = mid + multiplier * atr[i]
+        lower_band[i] = mid - multiplier * atr[i]
+    
+    supertrend[period] = lower_band[period]
+    
+    for i in range(period + 1, n):
+        if trend_direction[i - 1] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i - 1])
+            if close[i] < supertrend[i]:
+                supertrend[i] = upper_band[i]
+                trend_direction[i] = -1
+            else:
+                trend_direction[i] = 1
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i - 1])
+            if close[i] > supertrend[i]:
+                supertrend[i] = lower_band[i]
+                trend_direction[i] = 1
+            else:
+                trend_direction[i] = -1
+    
+    return supertrend, trend_direction
+
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = middle + std_mult * std
+    lower = middle - std_mult * std
+    
+    bbw = np.zeros(n)
+    for i in range(period - 1, n):
+        if middle[i] > 0:
+            bbw[i] = (upper[i] - lower[i]) / middle[i]
+    
+    return upper, middle, lower, bbw
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score (standardized deviation from mean)"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    rolling_mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    rolling_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    zscore = np.zeros(n)
+    for i in range(period - 1, n):
+        if rolling_std[i] > 0:
+            zscore[i] = (close[i] - rolling_mean[i]) / rolling_std[i]
+    
+    return zscore
+
+
+def calculate_bbw_percentile(bbw, lookback=100):
+    """Calculate BBW percentile rank over lookback period"""
+    n = len(bbw)
+    percentile = np.zeros(n)
+    
+    for i in range(lookback - 1, n):
+        window = bbw[i - lookback + 1:i + 1]
+        rank = np.sum(window <= bbw[i])
+        percentile[i] = rank / lookback
+    
+    return percentile
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values if "volume" in prices.columns else np.ones(len(close))
     n = len(close)
     
-    # === 1h indicators (entry timing) ===
-    donch_upper_1h, donch_mid_1h, donch_lower_1h = calculate_donchian_channels(high, low, period=20)
-    atr_1h = calculate_atr(high, low, close, period=14)
-    volume_sma_1h = calculate_volume_sma(volume, period=20)
-    rsi_1h = calculate_rsi(close, period=14)
+    # 15m indicators for entry timing
+    atr_15m = calculate_atr(high, low, close, period=14)
+    rsi_15m = calculate_rsi(close, period=14)
+    zscore_15m = calculate_zscore(close, period=20)
+    supertrend_15m, st_direction_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    macd_line_15m, macd_signal_15m, macd_hist_15m = calculate_macd(close, fast=12, slow=26, signal=9)
     
-    # === 4h indicators (trend regime) using mtf_data helper ===
+    # Get 4h data using mtf_data helper (CRITICAL - no manual resampling!)
     try:
         df_4h = get_htf_data(prices, '4h')
-        c_4h = df_4h['close'].values
-        h_4h = df_4h['high'].values
-        l_4h = df_4h['low'].values
+        close_4h = df_4h['close'].values
+        high_4h = df_4h['high'].values
+        low_4h = df_4h['low'].values
         
-        # 4h Donchian channels
-        donch_upper_4h, donch_mid_4h, donch_lower_4h = calculate_donchian_channels(h_4h, l_4h, period=20)
+        # 4h trend indicators
+        hma_4h = calculate_hma(close_4h, period=21)
+        st_4h, st_direction_4h = calculate_supertrend(high_4h, low_4h, close_4h, period=10, multiplier=3.0)
+        _, _, _, bbw_4h = calculate_bollinger_bands(close_4h, period=20, std_mult=2.0)
+        macd_line_4h, macd_signal_4h, macd_hist_4h = calculate_macd(close_4h, fast=12, slow=26, signal=9)
         
-        # Align 4h indicators to 1h timeframe (auto shift for completed bars)
-        donch_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_upper_4h)
-        donch_mid_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_mid_4h)
-        donch_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_lower_4h)
+        # Align 4h indicators to 15m timeframe (auto shift for completed bars)
+        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+        st_dir_4h_aligned = align_htf_to_ltf(prices, df_4h, st_direction_4h)
+        bbw_4h_aligned = align_htf_to_ltf(prices, df_4h, bbw_4h)
+        macd_hist_4h_aligned = align_htf_to_ltf(prices, df_4h, macd_hist_4h)
         
     except Exception:
-        # Fallback: use 1h data only if 4h not available
-        donch_upper_4h_aligned = donch_upper_1h
-        donch_mid_4h_aligned = donch_mid_1h
-        donch_lower_4h_aligned = donch_lower_1h
+        # Fallback if mtf_data fails
+        hma_4h_aligned = np.zeros(n)
+        st_dir_4h_aligned = np.ones(n)
+        bbw_4h_aligned = np.zeros(n)
+        macd_hist_4h_aligned = np.zeros(n)
     
-    # === Position sizing (discrete levels) ===
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.35
-    SIZE_EXIT = 0.0
+    # Calculate BBW percentile for regime detection
+    bbw_percentile_15m = calculate_bbw_percentile(bbw_15m, lookback=100)
+    bbw_percentile_4h = calculate_bbw_percentile(bbw_4h_aligned, lookback=50)
     
-    # === Entry thresholds ===
-    VOLUME_SPIKE_MULT = 1.5
-    ATR_STOP_MULT = 2.5
-    RSI_OVERBOUGHT = 70
-    RSI_OVERSOLD = 30
-    
-    # === Initialize tracking arrays ===
+    # Generate signals with regime-adaptive ensemble
     signals = np.zeros(n)
-    position_side = np.zeros(n, dtype=np.int8)
+    
+    # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
+    SIZE_BASE = 0.25
+    SIZE_HIGH_CONF = 0.35
+    
+    # Regime thresholds
+    LOW_VOL_THRESHOLD = 0.30  # BBW percentile < 30% = low vol = trend follow
+    HIGH_VOL_THRESHOLD = 0.70  # BBW percentile > 70% = high vol = mean revert
+    
+    # Signal thresholds
+    RSI_LONG_MIN = 35
+    RSI_LONG_MAX = 55
+    RSI_SHORT_MIN = 45
+    RSI_SHORT_MAX = 65
+    ZSCORE_MAX = 1.8
+    ADX_MIN = 20
+    
+    # ATR stoploss multiplier
+    ATR_STOP_MULT = 2.0
+    
+    first_valid = max(200, 100, 26, 20, 14)
+    
+    # Track position state
+    position_side = np.zeros(n)
     entry_price = np.zeros(n)
-    tp_triggered = np.zeros(n, dtype=bool)
+    tp_triggered = np.zeros(n)
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
-    first_valid = 250  # Need enough data for Donchian and ATR
-    
     for i in range(first_valid, n):
-        # Skip invalid data
-        if np.isnan(atr_1h[i]) or atr_1h[i] <= 0:
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
-            position_side[i] = 0
             continue
         
-        if np.isnan(donch_upper_4h_aligned[i]) or np.isnan(donch_lower_4h_aligned[i]):
-            signals[i] = 0.0
-            position_side[i] = 0
-            continue
+        # 4h trend filter
+        trend_4h = 0
+        if hma_4h_aligned[i] > 0 and close[i] > hma_4h_aligned[i]:
+            trend_4h = 1
+        elif hma_4h_aligned[i] > 0 and close[i] < hma_4h_aligned[i]:
+            trend_4h = -1
         
-        price = close[i]
-        atr = atr_1h[i]
-        vol_ratio = volume[i] / volume_sma_1h[i] if volume_sma_1h[i] > 0 else 1.0
+        st_trend_4h = st_dir_4h_aligned[i]
+        macd_trend_4h = 1 if macd_hist_4h_aligned[i] > 0 else -1
         
-        # 4h trend regime
-        donch_4h_range = donch_upper_4h_aligned[i] - donch_lower_4h_aligned[i]
-        donch_4h_position = (price - donch_lower_4h_aligned[i]) / donch_4h_range if donch_4h_range > 0 else 0.5
+        # Regime detection (low vol = trend, high vol = mean reversion)
+        regime_low_vol = bbw_percentile_15m[i] < LOW_VOL_THRESHOLD
+        regime_high_vol = bbw_percentile_15m[i] > HIGH_VOL_THRESHOLD
         
-        # 1h channel levels
-        donch_upper = donch_upper_1h[i]
-        donch_lower = donch_lower_1h[i]
-        donch_mid = donch_mid_1h[i]
-        
-        # === Check existing positions (stoploss & take profit) ===
+        # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
             prev_side = position_side[i - 1]
             prev_entry = entry_price[i - 1] if entry_price[i - 1] > 0 else close[i - 1]
@@ -191,85 +295,81 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             
             # Update highest/lowest since entry
             if prev_side == 1:
-                current_high = max(prev_high, price)
-                current_low = min(prev_low, price) if prev_low > 0 else price
+                current_high = max(prev_high, close[i])
+                current_low = min(prev_low, close[i]) if prev_low > 0 else close[i]
             else:
-                current_high = max(prev_high, price) if prev_high > 0 else price
-                current_low = min(prev_low, price)
+                current_high = max(prev_high, close[i]) if prev_high > 0 else close[i]
+                current_low = min(prev_low, close[i])
             
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check
+            # Stoploss check (2.0*ATR)
             if prev_side == 1:
-                stoploss_price = prev_entry - ATR_STOP_MULT * atr
-                if price < stoploss_price:
+                stoploss_price = prev_entry - ATR_STOP_MULT * atr_15m[i]
+                if close[i] < stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
-                    tp_triggered[i] = False
+                    tp_triggered[i] = 0
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
                     continue
                 
-                # Take profit (2R) - reduce to half
-                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
-                if not prev_tp and price >= tp_price:
+                # Take profit check (2R) - reduce to half
+                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr_15m[i]
+                if not prev_tp and close[i] >= tp_price:
                     signals[i] = SIZE_BASE / 2
                     position_side[i] = 1
                     entry_price[i] = prev_entry
-                    tp_triggered[i] = True
-                    highest_since_entry[i] = current_high
-                    lowest_since_entry[i] = current_low
+                    tp_triggered[i] = 1
                     continue
                 
-                # Trail stop at 1R after TP triggered
+                # Trail stop at 1R profit
                 if prev_tp:
-                    trail_stop = current_high - ATR_STOP_MULT * atr
-                    if price < trail_stop:
+                    trail_stop = current_high - ATR_STOP_MULT * atr_15m[i]
+                    if close[i] < trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
                         entry_price[i] = 0
-                        tp_triggered[i] = False
+                        tp_triggered[i] = 0
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         continue
-                
+                    
             elif prev_side == -1:
-                stoploss_price = prev_entry + ATR_STOP_MULT * atr
-                if price > stoploss_price:
+                stoploss_price = prev_entry + ATR_STOP_MULT * atr_15m[i]
+                if close[i] > stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
-                    tp_triggered[i] = False
+                    tp_triggered[i] = 0
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
                     continue
                 
-                # Take profit (2R) - reduce to half
-                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
-                if not prev_tp and price <= tp_price:
+                # Take profit check (2R) - reduce to half
+                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr_15m[i]
+                if not prev_tp and close[i] <= tp_price:
                     signals[i] = -SIZE_BASE / 2
                     position_side[i] = -1
                     entry_price[i] = prev_entry
-                    tp_triggered[i] = True
-                    highest_since_entry[i] = current_high
-                    lowest_since_entry[i] = current_low
+                    tp_triggered[i] = 1
                     continue
                 
-                # Trail stop at 1R after TP triggered
+                # Trail stop at 1R profit
                 if prev_tp:
-                    trail_stop = current_low + ATR_STOP_MULT * atr
-                    if price > trail_stop:
+                    trail_stop = current_low + ATR_STOP_MULT * atr_15m[i]
+                    if close[i] > trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
                         entry_price[i] = 0
-                        tp_triggered[i] = False
+                        tp_triggered[i] = 0
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         continue
             
-            # Hold position - no new entry signal
+            # Hold position if no exit triggered
             signals[i] = signals[i - 1]
             position_side[i] = position_side[i - 1]
             entry_price[i] = entry_price[i - 1]
@@ -278,56 +378,110 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # === NEW ENTRY LOGIC ===
+        # Ensemble voting: count agreement between signals
+        long_votes = 0
+        short_votes = 0
         
-        # Determine 4h trend regime
-        # Price in upper half of 4h Donchian = bullish regime
-        # Price in lower half of 4h Donchian = bearish regime
-        bullish_regime = donch_4h_position > 0.5
-        bearish_regime = donch_4h_position < 0.5
+        # Signal 1: Supertrend direction (15m)
+        if st_direction_15m[i] == 1:
+            long_votes += 1
+        else:
+            short_votes += 1
         
-        # LONG entry: 1h breakout above Donchian upper + volume spike + 4h bullish
-        if bullish_regime:
-            if price > donch_upper and vol_ratio >= VOLUME_SPIKE_MULT:
-                # RSI filter - not extremely overbought
-                if rsi_1h[i] < RSI_OVERBOUGHT:
-                    # Strong trend if price well above 4h middle
-                    if price > donch_mid_4h_aligned[i] * 1.02:
-                        signals[i] = SIZE_STRONG
-                    else:
-                        signals[i] = SIZE_BASE
-                    
+        # Signal 2: MACD histogram (15m)
+        if macd_hist_15m[i] > 0:
+            long_votes += 1
+        else:
+            short_votes += 1
+        
+        # Signal 3: 4h trend filter
+        if trend_4h == 1:
+            long_votes += 1
+        elif trend_4h == -1:
+            short_votes += 1
+        
+        # Signal 4: 4h Supertrend
+        if st_trend_4h == 1:
+            long_votes += 1
+        elif st_trend_4h == -1:
+            short_votes += 1
+        
+        # Signal 5: 4h MACD
+        if macd_hist_4h_aligned[i] > 0:
+            long_votes += 1
+        else:
+            short_votes += 1
+        
+        # Regime-adaptive entry logic
+        signal_agreement = max(long_votes, short_votes) / 5.0
+        
+        if regime_low_vol:
+            # Low volatility: Trend-following mode
+            # Need 4h trend agreement + 15m momentum confirmation
+            if long_votes >= 4 and trend_4h == 1 and st_direction_15m[i] == 1:
+                # RSI pullback filter
+                if RSI_LONG_MIN <= rsi_15m[i] <= RSI_LONG_MAX:
+                    position_size = SIZE_HIGH_CONF if signal_agreement >= 0.8 else SIZE_BASE
+                    signals[i] = position_size
                     position_side[i] = 1
-                    entry_price[i] = price
-                    tp_triggered[i] = False
-                    highest_since_entry[i] = price
-                    lowest_since_entry[i] = price
-                    continue
-        
-        # SHORT entry: 1h breakout below Donchian lower + volume spike + 4h bearish
-        if bearish_regime:
-            if price < donch_lower and vol_ratio >= VOLUME_SPIKE_MULT:
-                # RSI filter - not extremely oversold
-                if rsi_1h[i] > RSI_OVERSOLD:
-                    # Strong trend if price well below 4h middle
-                    if price < donch_mid_4h_aligned[i] * 0.98:
-                        signals[i] = -SIZE_STRONG
-                    else:
-                        signals[i] = -SIZE_BASE
+                    entry_price[i] = close[i]
+                    tp_triggered[i] = 0
+                    highest_since_entry[i] = close[i]
+                    lowest_since_entry[i] = close[i]
                     
+            elif short_votes >= 4 and trend_4h == -1 and st_direction_15m[i] == -1:
+                # RSI pullback filter
+                if RSI_SHORT_MIN <= rsi_15m[i] <= RSI_SHORT_MAX:
+                    position_size = SIZE_HIGH_CONF if signal_agreement >= 0.8 else SIZE_BASE
+                    signals[i] = -position_size
                     position_side[i] = -1
-                    entry_price[i] = price
-                    tp_triggered[i] = False
-                    highest_since_entry[i] = price
-                    lowest_since_entry[i] = price
-                    continue
+                    entry_price[i] = close[i]
+                    tp_triggered[i] = 0
+                    highest_since_entry[i] = close[i]
+                    lowest_since_entry[i] = close[i]
+                    
+        elif regime_high_vol:
+            # High volatility: Mean-reversion mode
+            # Look for RSI extremes + Z-score confirmation
+            if rsi_15m[i] < 30 and zscore_15m[i] < -ZSCORE_MAX and long_votes >= 3:
+                position_size = SIZE_BASE
+                signals[i] = position_size
+                position_side[i] = 1
+                entry_price[i] = close[i]
+                tp_triggered[i] = 0
+                highest_since_entry[i] = close[i]
+                lowest_since_entry[i] = close[i]
+                
+            elif rsi_15m[i] > 70 and zscore_15m[i] > ZSCORE_MAX and short_votes >= 3:
+                position_size = SIZE_BASE
+                signals[i] = -position_size
+                position_side[i] = -1
+                entry_price[i] = close[i]
+                tp_triggered[i] = 0
+                highest_since_entry[i] = close[i]
+                lowest_since_entry[i] = close[i]
         
-        # No entry signal
-        signals[i] = 0.0
-        position_side[i] = 0
-        entry_price[i] = 0
-        tp_triggered[i] = False
-        highest_since_entry[i] = 0
-        lowest_since_entry[i] = 0
+        else:
+            # Neutral regime: Require strong agreement
+            if long_votes >= 4 and trend_4h == 1:
+                if RSI_LONG_MIN <= rsi_15m[i] <= RSI_LONG_MAX:
+                    signals[i] = SIZE_BASE
+                    position_side[i] = 1
+                    entry_price[i] = close[i]
+                    tp_triggered[i] = 0
+                    highest_since_entry[i] = close[i]
+                    lowest_since_entry[i] = close[i]
+                    
+            elif short_votes >= 4 and trend_4h == -1:
+                if RSI_SHORT_MIN <= rsi_15m[i] <= RSI_SHORT_MAX:
+                    signals[i] = -SIZE_BASE
+                    position_side[i] = -1
+                    entry_price[i] = close[i]
+                    tp_triggered[i] = 0
+                    highest_since_entry[i] = close[i]
+                    lowest_since_entry[i] = close[i]
+        
+        if signals[i] == 0:
+            position_side[i] = 0
     
     return signals
