@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #192: 1d Donchian Breakout with 4h HMA Trend Filter
-Hypothesis: Daily Donchian breakouts (20-period) capture multi-week momentum moves.
-4h HMA provides trend bias without being too restrictive. RSI filter avoids extreme
-entries but kept loose (20-80) to ensure trades generate. ATR trailing stop at 2.5*ATR.
-Position sizing: 0.30 entry, reduce to 0.15 at 2R profit. Target: Beat Sharpe=0.499.
-Key insight from failures: Keep entry conditions LOOSE to generate trades. Many
-strategies failed with 0 trades due to overly strict filters.
+Experiment #193: 15m KAMA Adaptive Trend with 4h HMA Filter and RSI Pullback
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility - 
+moves fast in trends, slows in chop. On 15m, this should reduce whipsaw compared 
+to EMA. 4h HMA provides trend bias (only trade with HTF trend). RSI(14) pullback 
+entries (RSI 40-60 for continuation, <35/>65 for reversals). ATR(14) trailing 
+stop at 2.5*ATR. Position sizing: 0.25 entry, 0.125 at 2R profit. Target: Beat 
+Sharpe=0.499 from current best by reducing false signals in choppy 15m markets.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_4h_hma_rsi_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_kama_4h_hma_rsi_pullback_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -25,6 +25,39 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average.
+    KAMA adapts to market noise - fast in trends, slow in chop.
+    """
+    n = len(close)
+    kama = np.zeros(n)
+    
+    # Calculate Efficiency Ratio (ER)
+    close_s = pd.Series(close)
+    price_change = np.abs(close - np.roll(close, er_period))
+    price_change[:er_period] = np.abs(close[:er_period] - close[0])
+    
+    volatility = np.zeros(n)
+    for i in range(er_period, n):
+        volatility[i] = np.sum(np.abs(close[i-er_period+1:i+1] - np.roll(close[i-er_period+1:i+1], 1)))
+    volatility[:er_period] = volatility[er_period]
+    
+    er = np.divide(price_change, volatility, out=np.zeros_like(price_change), where=volatility != 0)
+    er = np.clip(er, 0, 1)
+    
+    # Calculate Smoothing Constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -48,12 +81,9 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (upper/lower bounds)."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    mid = (upper + lower) / 2
-    return upper, lower, mid
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -63,27 +93,26 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
+    df_1h = get_htf_data(prices, '1h')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1h = calculate_hma(df_1h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, 20)
-    
-    # Track previous Donchian values for breakout detection
-    prev_donchian_upper = np.roll(donchian_upper, 1)
-    prev_donchian_lower = np.roll(donchian_lower, 1)
-    prev_donchian_upper[0] = donchian_upper[0]
-    prev_donchian_lower[0] = donchian_lower[0]
+    kama_fast = calculate_kama(close, er_period=10, fast_period=2, slow_period=20)
+    kama_slow = calculate_kama(close, er_period=10, fast_period=5, slow_period=40)
+    sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -93,40 +122,69 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):
-        # HTF trend filter (4h HMA) - soft bias, not hard requirement
-        four_hour_bullish = close[i] > hma_4h_aligned[i]
-        four_hour_bearish = close[i] < hma_4h_aligned[i]
+    for i in range(200, n):
+        # HTF trend filters
+        hma_4h_bullish = close[i] > hma_4h_aligned[i]
+        hma_4h_bearish = close[i] < hma_4h_aligned[i]
+        hma_1h_bullish = close[i] > hma_1h_aligned[i]
+        hma_1h_bearish = close[i] < hma_1h_aligned[i]
         
-        # RSI filter (loose - ensure trades generate on all symbols)
-        rsi_not_overbought = rsi[i] < 80
-        rsi_not_oversold = rsi[i] > 20
+        # LTF trend (KAMA crossover)
+        kama_bullish = kama_fast[i] > kama_slow[i]
+        kama_bearish = kama_fast[i] < kama_slow[i]
         
-        # Donchian breakout detection (price breaks previous bar's channel)
-        breakout_long = close[i] > prev_donchian_upper[i]
-        breakout_short = close[i] < prev_donchian_lower[i]
+        # KAMA crossover signals
+        kama_cross_long = kama_fast[i] > kama_slow[i] and kama_fast[i-1] <= kama_slow[i-1]
+        kama_cross_short = kama_fast[i] < kama_slow[i] and kama_fast[i-1] >= kama_slow[i-1]
+        
+        # RSI conditions
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
+        rsi_neutral = 40 <= rsi[i] <= 60
+        rsi_bullish = rsi[i] > 45
+        rsi_bearish = rsi[i] < 55
+        
+        # SMA200 filter (long-term trend)
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Breakout long with trend confirmation (loose filters for trade generation)
-        if breakout_long and rsi_not_overbought:
-            if four_hour_bullish:
+        # KAMA crossover long with HTF confirmation
+        if kama_cross_long:
+            if hma_4h_bullish and rsi_bullish:
                 new_signal = SIZE_ENTRY
-            else:
-                # Still enter if RSI supports momentum (avoid fighting strong downtrend)
-                if rsi[i] > 50:
-                    new_signal = SIZE_ENTRY * 0.67  # Reduced size without HTF confirmation
+            elif hma_1h_bullish and above_sma200 and rsi_neutral:
+                new_signal = SIZE_ENTRY
+        
+        # Pullback long (trend already established, RSI dip)
+        elif kama_bullish and hma_4h_bullish:
+            if rsi_oversold or (rsi[i] < 45 and rsi[i-1] >= 45):
+                new_signal = SIZE_ENTRY
+        
+        # Continuation long (price above both KAMA, RSI healthy)
+        elif kama_bullish and close[i] > kama_fast[i] and rsi_neutral:
+            if hma_4h_bullish or hma_1h_bullish:
+                new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Breakout short with trend confirmation (loose filters for trade generation)
-        elif breakout_short and rsi_not_oversold:
-            if four_hour_bearish:
+        # KAMA crossover short with HTF confirmation
+        if kama_cross_short:
+            if hma_4h_bearish and rsi_bearish:
                 new_signal = -SIZE_ENTRY
-            else:
-                # Still enter if RSI supports momentum
-                if rsi[i] < 50:
-                    new_signal = -SIZE_ENTRY * 0.67  # Reduced size without HTF confirmation
+            elif hma_1h_bearish and below_sma200 and rsi_neutral:
+                new_signal = -SIZE_ENTRY
+        
+        # Pullback short (trend already established, RSI spike)
+        elif kama_bearish and hma_4h_bearish:
+            if rsi_overbought or (rsi[i] > 55 and rsi[i-1] <= 55):
+                new_signal = -SIZE_ENTRY
+        
+        # Continuation short (price below both KAMA, RSI healthy)
+        elif kama_bearish and close[i] < kama_fast[i] and rsi_neutral:
+            if hma_4h_bearish or hma_1h_bearish:
+                new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
