@@ -1,34 +1,37 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #022 - HMA + Supertrend + RSI + Z-Score Multi-TF (4h+1h)
+EXPERIMENT #023 - HMA + Supertrend + RSI + ADX Multi-TF (4h+15m) with Tighter Stops
 ====================================================================================
-Hypothesis: HMA (Hull Moving Average) is more responsive than KAMA with less lag,
-and Supertrend provides clear ATR-based trend direction. Combining these on 4h
-for trend + 1h for entries should reduce noise vs 15m while maintaining responsiveness.
+Hypothesis: Moving from 4h+1h to 4h+15m provides faster entry signals while maintaining
+the proven multi-timeframe trend filter. Adding ADX (>25) ensures we only trade when
+trend strength is high, avoiding choppy markets. Tighter 1.5*ATR stoploss reduces
+drawdown vs the current 2.0*ATR. Lower base position size (0.25 vs 0.30) for better
+DD control while maintaining Sharpe.
 
-Why this might beat Sharpe=5.5:
-- HMA reacts faster to trend changes than KAMA or EMA
-- Supertrend gives clear trend direction with built-in ATR stops
-- 4h trend + 1h entries = good balance (less noise than 15m, faster than 4h)
-- Z-score filter avoids extreme regimes (proven in current best)
-- 2.0*ATR stoploss (slightly looser than #021's 1.5*ATR for fewer premature exits)
-- Position sizing: 0.25-0.35 discrete levels with ATR volatility adjustment
+Why this might beat Sharpe=7.16:
+- 15m entries = faster reaction to pullbacks vs 1h (more trade opportunities)
+- ADX filter = avoids trading in weak/choppy trends (reduces false signals)
+- 1.5*ATR stop = tighter risk control (current best uses 2.0*ATR)
+- Base size 0.25 = better drawdown control vs 0.30
+- Keep Z-score filter (proven in current best to avoid extreme regimes)
+- Keep HMA + Supertrend agreement (proven trend filter combination)
 
 Key features:
 - 4h HMA(21) for adaptive trend direction
 - 4h Supertrend(ATR=10, mult=3) for trend confirmation
-- 1h RSI(14) pullback entries
-- 1h Z-score(20) filter (avoid extremes >2.0)
-- 2.0*ATR stoploss, signal→0 when breached
-- Discrete signal levels: 0.0, ±0.25, ±0.35
+- 4h ADX(14) for trend strength filter (>25 = strong trend)
+- 15m RSI(14) pullback entries (faster than 1h)
+- 15m Z-score(20) filter (avoid extremes >2.0)
+- 1.5*ATR stoploss (tighter than current best's 2.0*ATR)
+- Discrete signal levels: 0.0, ±0.20, ±0.25
 - Dynamic sizing: base * (target_vol / current_vol)
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_supertrend_rsi_zscore_v1"
-timeframe = "1h"
+name = "mtf_hma_supertrend_adx_rsi_zscore_v1"
+timeframe = "15m"
 leverage = 1.0
 
 
@@ -187,6 +190,49 @@ def calculate_zscore(close, period=20):
     return zscore
 
 
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    if n < period * 2:
+        return np.zeros(n)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i - 1]
+        low_diff = low[i - 1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+    
+    atr = calculate_atr(high, low, close, period)
+    
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    adx = np.zeros(n)
+    
+    for i in range(period, n):
+        plus_di[i] = 100 * plus_dm[i] / atr[i] if atr[i] > 0 else 0
+        minus_di[i] = 100 * minus_dm[i] / atr[i] if atr[i] > 0 else 0
+        
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+        else:
+            dx[i] = 0
+    
+    # ADX = SMA of DX
+    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
+    for i in range(period * 2, n):
+        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+    
+    return adx
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
@@ -194,22 +240,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values if "volume" in prices.columns else np.ones(len(close))
     n = len(close)
     
-    # 1h indicators for entry timing
-    atr_1h = calculate_atr(high, low, close, period=14)
-    rsi_1h = calculate_rsi(close, period=14)
-    zscore_1h = calculate_zscore(close, period=20)
+    # 15m indicators for entry timing
+    atr_15m = calculate_atr(high, low, close, period=14)
+    rsi_15m = calculate_rsi(close, period=14)
+    zscore_15m = calculate_zscore(close, period=20)
     
     # Resample to 4h for trend filters
-    df_1h = pd.DataFrame({
+    df_15m = pd.DataFrame({
         'open': close,
         'high': high,
         'low': low,
         'close': close,
         'volume': volume
     })
-    df_1h.index = pd.date_range(start='2021-01-01', periods=n, freq='1h')
+    df_15m.index = pd.date_range(start='2021-01-01', periods=n, freq='15min')
     
-    df_4h = df_1h.resample('4h').agg({
+    df_4h = df_15m.resample('4h').agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',
@@ -227,50 +273,58 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # 4h Supertrend for trend confirmation
     supertrend_4h, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
     
-    # Map 4h indicators back to 1h timeframe (4 x 1h = 4h)
-    trend_1h = np.zeros(n)
-    st_trend_1h = np.zeros(n)
-    hma_1h = np.zeros(n)
+    # 4h ADX for trend strength
+    adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
+    
+    # Map 4h indicators back to 15m timeframe (16 x 15m = 4h)
+    trend_15m = np.zeros(n)
+    st_trend_15m = np.zeros(n)
+    adx_15m = np.zeros(n)
+    hma_15m = np.zeros(n)
     
     n_4h = len(c_4h)
-    idx_1h_to_4h = np.arange(n) // 4
+    idx_15m_to_4h = np.arange(n) // 16
     
     for i in range(n):
-        idx_4h = idx_1h_to_4h[i]
+        idx_4h = idx_15m_to_4h[i]
         if idx_4h < n_4h and idx_4h >= 40:
             # HMA trend: price above HMA = bullish, below = bearish
             if c_4h[idx_4h] > hma_4h[idx_4h]:
-                trend_1h[i] = 1
+                trend_15m[i] = 1
             elif c_4h[idx_4h] < hma_4h[idx_4h]:
-                trend_1h[i] = -1
+                trend_15m[i] = -1
             
             # Supertrend direction
-            st_trend_1h[i] = st_direction_4h[idx_4h]
-            hma_1h[i] = hma_4h[idx_4h]
+            st_trend_15m[i] = st_direction_4h[idx_4h]
+            adx_15m[i] = adx_4h[idx_4h]
+            hma_15m[i] = hma_4h[idx_4h]
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.30
-    SIZE_HALF = 0.15
+    SIZE_FULL = 0.25
+    SIZE_HALF = 0.125
     
-    # RSI thresholds for pullback entries
-    RSI_LONG_MIN = 35
-    RSI_LONG_MAX = 50
-    RSI_SHORT_MIN = 50
-    RSI_SHORT_MAX = 65
+    # RSI thresholds for pullback entries (tighter than current best for 15m)
+    RSI_LONG_MIN = 30
+    RSI_LONG_MAX = 45
+    RSI_SHORT_MIN = 55
+    RSI_SHORT_MAX = 70
     
     # Z-score filter (avoid extreme regimes like current best)
     ZSCORE_MAX = 2.0
     
-    # ATR stoploss multiplier
-    ATR_STOP_MULT = 2.0
+    # ADX threshold for trend strength
+    ADX_MIN = 25
+    
+    # ATR stoploss multiplier (TIGHTER than current best's 2.0)
+    ATR_STOP_MULT = 1.5
     
     # ATR volatility target for dynamic sizing
     TARGET_ATR_PCT = 0.02
     
-    first_valid = max(100, 40 * 4, 14 * 2, 20)
+    first_valid = max(100, 40 * 16, 14 * 2, 20, 28 * 2)
     
     # Track position state
     entry_price = np.zeros(n)
@@ -280,19 +334,33 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_1h[i]) or np.isnan(rsi_1h[i]) or np.isnan(zscore_1h[i]):
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(zscore_15m[i]) or np.isnan(adx_15m[i]):
             signals[i] = 0.0
             continue
         
-        trend = trend_1h[i]
-        st_trend = st_trend_1h[i]
-        rsi_val = rsi_1h[i]
-        zscore_val = zscore_1h[i]
-        atr = atr_1h[i]
+        trend = trend_15m[i]
+        st_trend = st_trend_15m[i]
+        adx_val = adx_15m[i]
+        rsi_val = rsi_15m[i]
+        zscore_val = zscore_15m[i]
+        atr = atr_15m[i]
         price = close[i]
         
         # Z-score filter - avoid extreme regimes (like current best)
         if abs(zscore_val) > ZSCORE_MAX:
+            if i > 0 and position_side[i - 1] != 0:
+                signals[i] = 0.0
+                position_side[i] = 0
+                entry_price[i] = 0
+                tp_triggered[i] = 0
+                highest_since_entry[i] = 0
+                lowest_since_entry[i] = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # ADX filter - only trade when trend is strong
+        if adx_val < ADX_MIN:
             if i > 0 and position_side[i - 1] != 0:
                 signals[i] = 0.0
                 position_side[i] = 0
@@ -336,7 +404,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.0*ATR)
+            # Stoploss check (1.5*ATR - tighter than current best)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -418,9 +486,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         position_size = SIZE_FULL * size_multiplier
         position_size = min(SIZE_FULL, max(SIZE_HALF, position_size))
         
-        # Entry logic: HMA + Supertrend agreement + RSI pullback + Z-score
+        # Entry logic: HMA + Supertrend + ADX agreement + RSI pullback + Z-score
         if trend == 1 and st_trend == 1:  # Bullish trend confirmed
-            # RSI pullback entry (35-50 range)
+            # RSI pullback entry (30-45 range for 15m)
             if RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX:
                 signals[i] = position_size
                 position_side[i] = 1
@@ -430,7 +498,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 lowest_since_entry[i] = price
                 
         elif trend == -1 and st_trend == -1:  # Bearish trend confirmed
-            # RSI pullback entry (50-65 range)
+            # RSI pullback entry (55-70 range for 15m)
             if RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX:
                 signals[i] = -position_size
                 position_side[i] = -1
