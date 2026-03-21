@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #079 - KAMA Adaptive Trend + Z-Score Pullback + Dual HTF Filter (15m primary)
-========================================================================================
-Hypothesis: 15m KAMA (Kaufman Adaptive Moving Average) captures trend direction while
-adapting to market noise. Z-score(20) identifies overextended pullbacks within the trend
-for optimal entry timing. Dual HTF filter (1h HMA + 4h HMA) ensures we trade with the
-major trend. This differs from failed supertrend+rsi strategies by using KAMA's adaptive
-nature (better in chop) + Z-score mean reversion entry (better timing than RSI extremes).
+EXPERIMENT #080 - Supertrend + RSI Pullback Zone + Volume Confirmation (30m primary)
+=====================================================================================
+Hypothesis: 30m Supertrend captures intraday trends, but entries on pullbacks to RSI 45-55
+zone (not extremes) provide better risk/reward. 4h HMA filter ensures we trade with HTF trend.
+Volume confirmation (taker_buy_volume ratio > 55%) filters weak breakouts. This differs from
+previous failures by using Supertrend (not KAMA) + RSI pullback ZONE (not extremes) + volume.
 
 Key features:
-- Primary TF: 15m (faster entries than 1h/4h strategies)
-- HTF filters: 1h HMA(21) + 4h HMA(21) for dual alignment
-- Trend: KAMA(10) adaptive moving average
-- Entry: Z-score(20) < -1.5 for long pullbacks, > 1.5 for short pullbacks
-- Regime: KAMA slope + HTF alignment confirmation
-- Stoploss: 2.5*ATR(14) trailing (wider for 15m noise)
+- Primary TF: 30m
+- HTF filter: 4h HMA(21) for trend direction
+- Trend: Supertrend(10, 3) for direction
+- Entry: RSI(14) pullback to 45-55 zone IN direction of Supertrend
+- Volume: taker_buy_volume_ratio > 0.55 for longs, < 0.45 for shorts
+- Regime: ADX(14) > 20 (avoid chop)
+- Stoploss: 2.5*ATR(14) trailing
+- Take profit: Reduce to half at 2R profit
 - Position sizing: 0.25 base, discrete levels (0.0, ±0.25, ±0.30)
-- Take profit: Reduce to half at 2.5R profit
 
 Why this should beat current best (Sharpe=0.490):
-- KAMA adapts to volatility (better than fixed Supertrend in chop)
-- Z-score pullback entries (better timing than breakout chasing)
-- 15m primary = more opportunities than 12h strategies
-- Dual HTF filter = stronger trend confirmation than single HTF
+- Supertrend works well on 30m for crypto volatility
+- RSI pullback zone (45-55) avoids chasing extremes
+- Volume confirmation filters false breakouts
 - Conservative sizing (0.25-0.30) controls drawdown
 """
 
@@ -30,56 +29,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_zscore_pullback_dualhtf_15m_1h_4h_v1"
-timeframe = "15m"
+name = "supertrend_rsi_pullback_vol_30m_4h_v1"
+timeframe = "30m"
 leverage = 1.0
-
-
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA)
-    KAMA adapts to market noise - moves fast in trends, slow in chop
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    if n < period:
-        return kama
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(period - 1, n):
-        signal = abs(close[i] - close[i - period + 1])
-        noise = np.sum(np.abs(np.diff(close[i - period + 1:i + 1])))
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0
-    
-    # Calculate smoothing constant (SC)
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
-    sc = er * (fast_sc - slow_sc) + slow_sc
-    
-    # Initialize KAMA
-    kama[period - 1] = close[period - 1]
-    
-    # Calculate KAMA
-    for i in range(period, n):
-        kama[i] = kama[i - 1] + sc[i] ** 2 * (close[i] - kama[i - 1])
-    
-    return kama
-
-
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period // 2, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, adjust=False).mean()
-    raw_hma = 2 * wma1 - wma2
-    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
-    return hma.values
 
 
 def calculate_atr(high, low, close, period=14):
@@ -95,56 +47,179 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_zscore(close, period=20):
-    """Calculate rolling Z-score"""
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    # Calculate HL2 and basic upper/lower bands
+    hl2 = (high + low) / 2.0
+    
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    final_upper = np.zeros(n)
+    final_lower = np.zeros(n)
+    supertrend = np.zeros(n)
+    trend = np.ones(n)  # 1 = bullish, -1 = bearish
+    
+    for i in range(period, n):
+        if np.isnan(atr[i]) or atr[i] == 0:
+            continue
+            
+        upper_band[i] = hl2[i] + multiplier * atr[i]
+        lower_band[i] = hl2[i] - multiplier * atr[i]
+        
+        # Final upper/lower calculation
+        if i == period:
+            final_upper[i] = upper_band[i]
+            final_lower[i] = lower_band[i]
+        else:
+            if upper_band[i] < final_upper[i - 1] or close[i - 1] > final_upper[i - 1]:
+                final_upper[i] = upper_band[i]
+            else:
+                final_upper[i] = final_upper[i - 1]
+                
+            if lower_band[i] > final_lower[i - 1] or close[i - 1] < final_lower[i - 1]:
+                final_lower[i] = lower_band[i]
+            else:
+                final_lower[i] = final_lower[i - 1]
+        
+        # Determine trend
+        if trend[i - 1] == 1:
+            if close[i] < final_lower[i]:
+                trend[i] = -1
+                supertrend[i] = final_upper[i]
+            else:
+                trend[i] = 1
+                supertrend[i] = final_lower[i]
+        else:
+            if close[i] > final_upper[i]:
+                trend[i] = 1
+                supertrend[i] = final_lower[i]
+            else:
+                trend[i] = -1
+                supertrend[i] = final_upper[i]
+    
+    return supertrend, trend
+
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI using Wilder's smoothing"""
+    n = len(close)
+    delta = np.zeros(n)
+    for i in range(1, n):
+        delta[i] = close[i] - close[i - 1]
+    
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    rsi = np.zeros(n)
+    for i in range(period, n):
+        if avg_loss[i] == 0:
+            rsi[i] = 100.0
+        else:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+    
+    return rsi
+
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    
+    tr = np.zeros(n)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    tr[0] = high[0] - low[0]
+    
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i - 1]),
+                    abs(low[i] - close[i - 1]))
+        
+        if high[i] - high[i - 1] > low[i - 1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i - 1], 0)
+        else:
+            plus_dm[i] = 0
+            
+        if low[i - 1] - low[i] > high[i] - high[i - 1]:
+            minus_dm[i] = max(low[i - 1] - low[i], 0)
+        else:
+            minus_dm[i] = 0
+    
+    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        if tr_smooth[i] > 0:
+            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
+            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
+    
+    dx = np.zeros(n)
+    for i in range(period - 1, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return adx
+
+
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
     close_s = pd.Series(close)
-    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - rolling_mean) / rolling_std
-    return zscore.values
-
-
-def calculate_kama_slope(kama, lookback=5):
-    """Calculate KAMA slope (rate of change)"""
-    n = len(kama)
-    slope = np.zeros(n)
-    slope[:] = np.nan
-    
-    for i in range(lookback, n):
-        if kama[i - lookback] != 0:
-            slope[i] = (kama[i] - kama[i - lookback]) / kama[i - lookback] * 100
-    
-    return slope
+    wma1 = close_s.ewm(span=period // 2, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, adjust=False).mean()
+    raw_hma = 2 * wma1 - wma2
+    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
+    return hma.values
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
+    volume = prices["volume"].values.copy()
+    taker_buy_vol = prices["taker_buy_volume"].values.copy()
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1h = get_htf_data(prices, '1h')
     df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1h = calculate_hma(df_1h['close'].values, 21)
     hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
-    kama = calculate_kama(close, period=10)
-    kama_slope = calculate_kama_slope(kama, lookback=5)
+    # Calculate 30m indicators
+    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
     atr = calculate_atr(high, low, close, 14)
-    zscore = calculate_zscore(close, 20)
+    rsi = calculate_rsi(close, 14)
+    adx = calculate_adx(high, low, close, 14)
+    
+    # Calculate taker buy volume ratio
+    taker_ratio = np.zeros(n)
+    for i in range(n):
+        if volume[i] > 0:
+            taker_ratio[i] = taker_buy_vol[i] / volume[i]
+        else:
+            taker_ratio[i] = 0.5
     
     # Generate signals
     signals = np.zeros(n)
     BASE_SIZE = 0.25  # Base position size (25% of capital)
-    MAX_SIZE = 0.30   # Max position size with strong confirmation
+    MAX_SIZE = 0.30   # Max position size
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -159,70 +234,43 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1h_aligned[i]) or np.isnan(hma_4h_aligned[i]) or
-            np.isnan(kama[i]) or np.isnan(kama_slope[i]) or
-            np.isnan(atr[i]) or np.isnan(zscore[i]) or
-            atr[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(supertrend[i]) or
+            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]) or
+            np.isnan(taker_ratio[i]) or atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Dual HTF trend alignment
-        price_above_1h_hma = close[i] > hma_1h_aligned[i]
+        # 4h HTF trend filter
         price_above_4h_hma = close[i] > hma_4h_aligned[i]
+        htf_trend = 1 if price_above_4h_hma else -1
         
-        # HTF trend direction
-        hourly_trend = 1 if price_above_1h_hma else -1
-        four_hour_trend = 1 if price_above_4h_hma else -1
+        # Supertrend direction
+        st_direction = st_trend[i]  # 1 = bullish, -1 = bearish
         
-        # KAMA trend direction
-        kama_bullish = close[i] > kama[i] and kama_slope[i] > 0
-        kama_bearish = close[i] < kama[i] and kama_slope[i] < 0
+        # ADX regime filter (avoid chop)
+        adx_strong = adx[i] > 20
         
-        # Z-score pullback signals (mean reversion within trend)
-        # For long: price pulled back (zscore < -1.0) but trend is bullish
-        # For short: price rallied (zscore > 1.0) but trend is bearish
-        zscore_oversold = zscore[i] < -1.0
-        zscore_overbought = zscore[i] > 1.0
+        # RSI pullback zone (45-55 for entries in trend direction)
+        rsi_pullback_long = 45 <= rsi[i] <= 55
+        rsi_pullback_short = 45 <= rsi[i] <= 55
         
-        # Strong Z-score for entry trigger
-        zscore_entry_long = zscore[i] < -1.5
-        zscore_entry_short = zscore[i] > 1.5
-        
-        # Calculate position size based on HTF alignment strength
-        htf_alignment_score = 0
-        if hourly_trend == 1 and four_hour_trend == 1:
-            htf_alignment_score = 2  # Strong bullish
-        elif hourly_trend == -1 and four_hour_trend == -1:
-            htf_alignment_score = -2  # Strong bearish
-        elif hourly_trend == four_hour_trend:
-            htf_alignment_score = hourly_trend  # Weak alignment
-        else:
-            htf_alignment_score = 0  # Conflicted
+        # Volume confirmation
+        vol_bullish = taker_ratio[i] > 0.55
+        vol_bearish = taker_ratio[i] < 0.45
         
         # Determine target signal based on all filters
         target_signal = 0.0
         position_size = BASE_SIZE
         
-        if htf_alignment_score == 2:
-            position_size = MAX_SIZE
-            # Long entry: KAMA bullish + HTF aligned bullish + Z-score pullback
-            if kama_bullish and zscore_entry_long:
-                target_signal = position_size
-        elif htf_alignment_score == -2:
-            position_size = MAX_SIZE
-            # Short entry: KAMA bearish + HTF aligned bearish + Z-score pullback
-            if kama_bearish and zscore_entry_short:
-                target_signal = -position_size
-        elif htf_alignment_score == 1:
-            position_size = BASE_SIZE
-            # Weak long signal
-            if kama_bullish and zscore_entry_long:
-                target_signal = position_size
-        elif htf_alignment_score == -1:
-            position_size = BASE_SIZE
-            # Weak short signal
-            if kama_bearish and zscore_entry_short:
-                target_signal = -position_size
+        # Long entry: Supertrend bullish + HTF bullish + ADX strong + RSI pullback + Volume bullish
+        if (st_direction == 1 and htf_trend == 1 and adx_strong and 
+            rsi_pullback_long and vol_bullish):
+            target_signal = position_size
+        
+        # Short entry: Supertrend bearish + HTF bearish + ADX strong + RSI pullback + Volume bearish
+        elif (st_direction == -1 and htf_trend == -1 and adx_strong and 
+              rsi_pullback_short and vol_bearish):
+            target_signal = -position_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
@@ -238,9 +286,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2.5R from entry, where R = 2.5*ATR at entry)
+                # Check take profit (2R from entry, where R = 2.5*ATR at entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 6.25 * entry_atr:  # 2.5R = 6.25*ATR
+                    if close[i] >= entry_price + 5.0 * entry_atr:  # 2R = 5*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
@@ -253,7 +301,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 6.25 * entry_atr:  # 2.5R profit
+                    if close[i] <= entry_price - 5.0 * entry_atr:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -265,7 +313,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             entry_atr = 0.0
             profit_target_hit = False
         elif take_profit_triggered:
-            # Reduce position to half at 2.5R profit
+            # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
@@ -281,13 +329,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if KAMA reverses OR HTF alignment breaks
-                kama_reversal_long = close[i] < kama[i] and kama_slope[i] < 0
-                kama_reversal_short = close[i] > kama[i] and kama_slope[i] > 0
-                hma_alignment_broken = (position_side == 1 and four_hour_trend == -1) or \
-                                       (position_side == -1 and four_hour_trend == 1)
+                # Exit if Supertrend reverses OR HTF alignment breaks
+                st_reversal = (position_side == 1 and st_direction == -1) or \
+                              (position_side == -1 and st_direction == 1)
+                htf_alignment_broken = (position_side == 1 and htf_trend == -1) or \
+                                       (position_side == -1 and htf_trend == 1)
                 
-                if kama_reversal_long or kama_reversal_short or hma_alignment_broken:
+                if st_reversal or htf_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
