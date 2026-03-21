@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #075: 1h Donchian Breakout with 4h HMA Trend + Volume Confirmation
-Hypothesis: Supertrend works well (current best Sharpe=0.499), but Donchian channels
-may catch breakouts cleaner with less whipsaw. Donchian 20-period breakout is a
-classic trend-following signal. Add 4h HMA for HTF trend bias (proven filter).
-Volume confirmation (>1.5x 20-bar MA) filters false breakouts. Simpler entry logic
-than RSI pullback (which failed in exp #063, #067, #073) to ensure 10+ trades.
-Position sizing: 0.25 entry, 0.125 at 1.5R profit, stoploss at 2.5*ATR trailing.
-1h timeframe provides good trade frequency while avoiding 15m/30m noise.
+Experiment #076: 4h Supertrend + Daily HMA + RSI Pullback
+Hypothesis: The current best (12h Supertrend + Daily HMA + RSI) works well.
+Adapt it for 4h timeframe which should catch trends earlier while maintaining
+the proven HTF filter (Daily HMA). Use simpler entry logic to ensure 10+ trades.
+Key: Supertrend flips for direction, Daily HMA for bias, RSI(14) 40-60 for pullback entries.
+Position sizing: 0.30 entry, stoploss at 2.5*ATR trailing. Discrete levels to reduce churn.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_donchian_4h_hma_volume_v1"
-timeframe = "1h"
+name = "mtf_4h_supertrend_daily_hma_rsi_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -41,46 +39,89 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (20-period high/low)."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator."""
+    atr = calculate_atr(high, low, close, period)
+    hl2 = (high + low) / 2.0
+    
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    n = len(close)
+    final_upper = np.zeros(n)
+    final_lower = np.zeros(n)
+    supertrend = np.zeros(n)
+    trend = np.ones(n)  # 1 = bullish, -1 = bearish
+    
+    final_upper[0] = upper_band[0]
+    final_lower[0] = lower_band[0]
+    supertrend[0] = final_lower[0]
+    
+    for i in range(1, n):
+        # Update final upper/lower bands
+        if upper_band[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]:
+            final_upper[i] = upper_band[i]
+        else:
+            final_upper[i] = final_upper[i-1]
+        
+        if lower_band[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]:
+            final_lower[i] = lower_band[i]
+        else:
+            final_lower[i] = final_lower[i-1]
+        
+        # Determine trend
+        if trend[i-1] == 1:
+            if close[i] < final_lower[i]:
+                trend[i] = -1
+                supertrend[i] = final_upper[i]
+            else:
+                trend[i] = 1
+                supertrend[i] = final_lower[i]
+        else:
+            if close[i] > final_upper[i]:
+                trend[i] = 1
+                supertrend[i] = final_lower[i]
+            else:
+                trend[i] = -1
+                supertrend[i] = final_upper[i]
+    
+    return supertrend, trend
 
-def calculate_volume_ma(volume, period=20):
-    """Calculate volume moving average."""
-    vol_s = pd.Series(volume)
-    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_ma
+def calculate_rsi(close, period=14):
+    """Calculate RSI indicator."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
+    rsi = 100 - 100 / (1 + rs)
+    rsi = np.clip(rsi, 0, 100)
+    return rsi
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    
-    # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    
-    # Volume MA
-    volume_ma = calculate_volume_ma(volume, 20)
+    rsi = calculate_rsi(close, 14)
+    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.125
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -91,49 +132,47 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # Skip if indicators not ready
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            signals[i] = 0.0
-            continue
+        # Daily trend filter (HTF) - price relative to Daily HMA
+        daily_bullish = close[i] > hma_1d_aligned[i]
+        daily_bearish = close[i] < hma_1d_aligned[i]
         
-        # 4h trend filter (HTF)
-        daily_bullish = close[i] > hma_4h_aligned[i]
-        daily_bearish = close[i] < hma_4h_aligned[i]
+        # 4h Supertrend signals
+        st_long = st_trend[i] == 1
+        st_short = st_trend[i] == -1
         
-        # Volume confirmation
-        volume_spike = volume[i] > 1.5 * volume_ma[i] if not np.isnan(volume_ma[i]) else False
+        # Supertrend flip detection
+        st_flip_long = st_trend[i] == 1 and (i > 0 and st_trend[i-1] == -1)
+        st_flip_short = st_trend[i] == -1 and (i > 0 and st_trend[i-1] == 1)
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        # RSI pullback filter (not extreme, just momentum confirmation)
+        rsi_ok_long = 35 < rsi[i] < 65  # Neutral zone for pullback entry
+        rsi_ok_short = 35 < rsi[i] < 65
         
-        # Donchian trend state
-        in_upper_half = close[i] > (donchian_upper[i] + donchian_lower[i]) / 2
-        in_lower_half = close[i] < (donchian_upper[i] + donchian_lower[i]) / 2
+        # RSI momentum confirmation
+        rsi_momentum_long = rsi[i] > 45
+        rsi_momentum_short = rsi[i] < 55
         
         new_signal = 0.0
         
         # LONG ENTRY conditions (simpler to ensure trades)
-        # Condition 1: Donchian breakout + 4h bullish + volume spike
-        if breakout_long and daily_bullish and volume_spike:
+        # Condition 1: Supertrend flip long + Daily bullish
+        if st_flip_long and daily_bullish:
             new_signal = SIZE_ENTRY
-        # Condition 2: Price in upper Donchian + 4h bullish (trend continuation)
-        elif in_upper_half and daily_bullish and close[i] > close[i-1]:
-            new_signal = SIZE_ENTRY
-        # Condition 3: Donchian breakout + volume spike (momentum)
-        elif breakout_long and volume_spike:
-            new_signal = SIZE_ENTRY
+        # Condition 2: Supertrend long + Daily bullish + RSI ok + RSI momentum
+        elif st_long and daily_bullish and rsi_ok_long and rsi_momentum_long:
+            # Only enter if not already in position
+            if position_side <= 0:
+                new_signal = SIZE_ENTRY
         
         # SHORT ENTRY conditions
-        # Condition 1: Donchian breakdown + 4h bearish + volume spike
-        if breakout_short and daily_bearish and volume_spike:
+        # Condition 1: Supertrend flip short + Daily bearish
+        if st_flip_short and daily_bearish:
             new_signal = -SIZE_ENTRY
-        # Condition 2: Price in lower Donchian + 4h bearish (trend continuation)
-        elif in_lower_half and daily_bearish and close[i] < close[i-1]:
-            new_signal = -SIZE_ENTRY
-        # Condition 3: Donchian breakdown + volume spike (momentum)
-        elif breakout_short and volume_spike:
-            new_signal = -SIZE_ENTRY
+        # Condition 2: Supertrend short + Daily bearish + RSI ok + RSI momentum
+        elif st_short and daily_bearish and rsi_ok_short and rsi_momentum_short:
+            # Only enter if not already in position
+            if position_side >= 0:
+                new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
@@ -159,7 +198,7 @@ def generate_signals(prices):
         
         if position_side < 0 and entry_price > 0:
             # Update lowest close for trailing
-            if lowest_close == 0.0 or close[i] < lowest_close:
+            if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
             # Calculate trailing stop (2.5*ATR from lowest)
