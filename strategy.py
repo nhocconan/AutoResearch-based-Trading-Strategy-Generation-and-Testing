@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #149: 12h Adaptive Trend-Following with ADX + KAMA + Volume
-Hypothesis: 12h timeframe balances noise reduction with trade frequency. 
-KAMA (Kaufman Adaptive Moving Average) adapts to volatility - fast in trends, 
-slow in ranges. ADX > 25 confirms trend strength. 1d HMA provides major trend 
-filter. RSI 40-60 pullback entries (not extremes) catch trend continuations. 
-Volume confirmation (1.5x average) filters false breakouts. This should work 
-in both 2021 bull and 2025 bear/range markets by only entering when ADX 
-confirms genuine trend momentum. Position sizing: 0.25 entry, 0.12 after 2R TP, 
-stoploss at 2.5*ATR trailing.
-Timeframe: 12h primary, 1d HTF for trend filter.
+Experiment #150: 1d Z-Score Mean Reversion with Weekly HMA Trend Filter
+Hypothesis: Daily timeframe with Z-score mean reversion works better than pure trend
+following in bear/range markets (2022, 2025). Z-score(20) identifies extreme deviations
+from recent mean. Weekly HMA provides major trend bias - only take long mean-reversion
+when weekly trend is bullish, short when bearish. This avoids counter-trend trades that
+get stopped out. Simpler entry conditions (Z<-2 or Z>2 + RSI confirmation) ensure
+sufficient trades while maintaining quality. ATR stoploss at 2.5*ATR protects capital.
+Position sizing: 0.28 entry, 0.14 at 2R profit, discrete levels minimize fee churn.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_adx_daily_hma_volume_v1"
-timeframe = "12h"
+name = "mtf_1d_zscore_weekly_hma_rsi_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -28,92 +26,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA).
-    KAMA adapts to market noise - fast during trends, slow during ranges.
-    Efficiency Ratio (ER) = |Close - Close[n]| / Sum(|Close[i] - Close[i-1]|)
-    Smoothing Constant (SC) = [ER * (fast_sc - slow_sc) + slow_sc]^2
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    
-    # Change over period
-    change = np.abs(close - np.roll(close, period))
-    change[:period] = np.abs(close[:period] - close[0])
-    
-    # Sum of absolute price changes (volatility)
-    diff = np.abs(close - np.roll(close, 1))
-    diff[0] = 0
-    volatility = pd.Series(diff).rolling(window=period, min_periods=period).sum().values
-    
-    # Efficiency Ratio (0 to 1)
-    er = np.zeros(n)
-    mask = volatility > 0
-    er[mask] = change[mask] / volatility[mask]
-    er = np.clip(er, 0, 1)
-    
-    # Smoothing constants
-    fast_sc = 2 / (fast + 1)
-    slow_sc = 2 / (slow + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
-def calculate_adx(high, low, close, period=14):
-    """
-    Calculate Average Directional Index (ADX).
-    ADX > 25 = trending market, ADX < 20 = ranging market
-    """
-    n = len(close)
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Directional Movement
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        plus_move = high[i] - high[i-1]
-        minus_move = low[i-1] - low[i]
-        
-        if plus_move > minus_move and plus_move > 0:
-            plus_dm[i] = plus_move
-        if minus_move > plus_move and minus_move > 0:
-            minus_dm[i] = minus_move
-    
-    # Smoothed DM and TR (Wilder's smoothing)
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Directional Indicators
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    mask = tr_s > 0
-    plus_di[mask] = 100 * plus_dm_s[mask] / tr_s[mask]
-    minus_di[mask] = 100 * minus_dm_s[mask] / tr_s[mask]
-    
-    # DX and ADX
-    dx = np.zeros(n)
-    di_sum = plus_di + minus_di
-    mask2 = di_sum > 0
-    dx[mask2] = 100 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx, plus_di, minus_di
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -141,36 +53,46 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs moving average."""
-    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    ratio = np.zeros(len(volume))
-    mask = vol_ma > 0
-    ratio[mask] = volume[mask] / vol_ma[mask]
-    return ratio
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion signals."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    zscore = np.where(std > 0, (close - sma) / std, 0.0)
+    return zscore
+
+def calculate_momentum(close, period=10):
+    """Calculate Rate of Change momentum."""
+    momentum = np.zeros(len(close))
+    for i in range(period, len(close)):
+        if close[i-period] > 0:
+            momentum[i] = (close[i] - close[i-period]) / close[i-period] * 100
+        else:
+            momentum[i] = 0.0
+    return momentum
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    kama = calculate_kama(close, period=10, fast=2, slow=30)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    vol_ratio = calculate_volume_ratio(volume, 20)
+    zscore = calculate_zscore(close, 20)
+    momentum = calculate_momentum(close, 10)
+    hma_20 = calculate_hma(close, 20)
+    hma_50 = calculate_hma(close, 50)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.28
@@ -185,51 +107,53 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # Daily trend filter (major trend direction)
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        # Weekly trend filter (major trend direction)
+        weekly_bullish = hma_1w_aligned[i] > 0 and close[i] > hma_1w_aligned[i]
+        weekly_bearish = hma_1w_aligned[i] > 0 and close[i] < hma_1w_aligned[i]
         
-        # KAMA trend direction
-        kama_trend_long = close[i] > kama[i]
-        kama_trend_short = close[i] < kama[i]
+        # Daily trend filter
+        daily_bullish = hma_20[i] > hma_50[i]
+        daily_bearish = hma_20[i] < hma_50[i]
         
-        # KAMA slope (acceleration)
-        kama_slope_long = kama[i] > kama[i-3] if i > 3 else False
-        kama_slope_short = kama[i] < kama[i-3] if i > 3 else False
+        # Z-score mean reversion signals
+        zscore_extreme_low = zscore[i] < -1.8
+        zscore_extreme_high = zscore[i] > 1.8
+        zscore_neutral = -1.0 < zscore[i] < 1.0
         
-        # ADX trend strength confirmation
-        trend_strength = adx[i] > 22.0  # Slightly lower than 25 for more trades
+        # RSI confirmation (wider thresholds for more trades)
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
+        rsi_rising = rsi[i] > rsi[i-3] if i > 3 else False
+        rsi_falling = rsi[i] < rsi[i-3] if i > 3 else False
         
-        # DI crossover confirmation
-        di_bullish = plus_di[i] > minus_di[i]
-        di_bearish = plus_di[i] < minus_di[i]
-        
-        # RSI pullback zone (not extremes - trend continuation)
-        rsi_pullback_long = 42 <= rsi[i] <= 58
-        rsi_pullback_short = 42 <= rsi[i] <= 58
-        
-        # Volume confirmation
-        volume_confirmed = vol_ratio[i] > 1.3  # 30% above average
+        # Momentum confirmation
+        mom_positive = momentum[i] > -5.0
+        mom_negative = momentum[i] < 5.0
         
         new_signal = 0.0
         
-        # LONG: Daily bullish + KAMA above + ADX confirms + DI bullish + RSI pullback + Volume
-        if daily_bullish and kama_trend_long and kama_slope_long:
-            if trend_strength and di_bullish and rsi_pullback_long:
-                if volume_confirmed:
-                    new_signal = SIZE_ENTRY
-                else:
-                    # Enter anyway but smaller if volume weak
-                    new_signal = SIZE_ENTRY * 0.7
+        # LONG ENTRY: Z-score extreme low + RSI oversold + Weekly not bearish
+        if zscore_extreme_low and rsi_oversold:
+            if weekly_bullish or (not weekly_bearish and daily_bullish):
+                new_signal = SIZE_ENTRY
+            elif not weekly_bearish and mom_positive:
+                new_signal = SIZE_ENTRY
         
-        # SHORT: Daily bearish + KAMA below + ADX confirms + DI bearish + RSI pullback + Volume
-        elif daily_bearish and kama_trend_short and kama_slope_short:
-            if trend_strength and di_bearish and rsi_pullback_short:
-                if volume_confirmed:
-                    new_signal = -SIZE_ENTRY
-                else:
-                    # Enter anyway but smaller if volume weak
-                    new_signal = -SIZE_ENTRY * 0.7
+        # SHORT ENTRY: Z-score extreme high + RSI overbought + Weekly not bullish
+        elif zscore_extreme_high and rsi_overbought:
+            if weekly_bearish or (not weekly_bullish and daily_bearish):
+                new_signal = -SIZE_ENTRY
+            elif not weekly_bullish and mom_negative:
+                new_signal = -SIZE_ENTRY
+        
+        # TREND FOLLOWING: HMA crossover with momentum
+        elif daily_bullish and hma_20[i-1] <= hma_50[i-1] and rsi_rising:
+            if weekly_bullish or zscore_neutral:
+                new_signal = SIZE_ENTRY
+        
+        elif daily_bearish and hma_20[i-1] >= hma_50[i-1] and rsi_falling:
+            if weekly_bearish or zscore_neutral:
+                new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
