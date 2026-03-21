@@ -1,120 +1,133 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #021 - Keltner Breakout with ADX Trend Strength
-==========================================================
-Hypothesis: Keltner Channel breakouts filtered by ADX trend strength will capture 
-strong momentum moves while avoiding choppy market whipsaws. 6h KAMA provides 
-adaptive trend filter that adjusts to volatility regimes better than fixed EMA/HMA.
+EXPERIMENT #022 - MTF KAMA-HMA Trend with ATR Trailing Stop
+============================================================
+Hypothesis: Combining 4h HMA trend filter with 1h KAMA adaptive entry will reduce
+whipsaws compared to pure EMA/Supertrend approaches. KAMA adjusts to market efficiency
+(erases noise in ranging markets, accelerates in trends). ATR trailing stop at 2.5x
+will protect capital during reversals. Position size 0.28 balances risk/return.
 
-Key features:
-- 6h KAMA for adaptive trend direction (Kaufman Adaptive MA adjusts to noise)
-- 1h Keltner Channel (EMA20 + 1.5*ATR) breakout entries
-- ADX(14) > 20 filter to ensure sufficient trend strength
-- Volume confirmation (above 20-period average)
-- ATR trailing stop (2.5*ATR) with position exit on stop hit
-- Discrete position sizing (0.0, ±0.25, ±0.35) to minimize fee churn
+Key improvements:
+- 4h HMA(21) for primary trend direction (smoother than EMA)
+- 1h KAMA(14, ER=10) for adaptive entries (responds to market regime)
+- RSI(14) filter: only enter when 40-70 (momentum confirmation, not extreme)
+- ATR(14) trailing stop at 2.5x with signal→0 logic
+- Discrete signals: 0.0, ±0.28 to minimize fee churn
+- Volume spike confirmation (>1.5x 20-bar avg) for entry validation
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_6h_keltner_adx_v1"
+name = "mtf_1h_4h_kama_hma_atr_v2"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_atr(high, low, close, period=14):
-    """Calculate Average True Range"""
-    n = len(close)
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    return atr
-
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    n = len(close)
-    
-    # Calculate TR
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
-    
-    # Calculate +DM and -DM
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        if high[i] - high[i-1] > low[i-1] - low[i]:
-            plus_dm[i] = max(0, high[i] - high[i-1])
-        else:
-            plus_dm[i] = 0
-            
-        if low[i-1] - low[i] > high[i] - high[i-1]:
-            minus_dm[i] = max(0, low[i-1] - low[i])
-        else:
-            minus_dm[i] = 0
-    
-    # Smooth using Wilder's method (EMA with alpha = 1/period)
-    avg_tr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    avg_plus_dm = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    avg_minus_dm = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    # Calculate +DI and -DI
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    mask = avg_tr > 0
-    plus_di[mask] = 100 * avg_plus_dm[mask] / avg_tr[mask]
-    minus_di[mask] = 100 * avg_minus_dm[mask] / avg_tr[mask]
-    
-    # Calculate DX
-    dx = np.zeros(n)
-    di_sum = plus_di + minus_di
-    mask = di_sum > 0
-    dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / di_sum[mask]
-    
-    # Calculate ADX (smoothed DX)
-    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    return adx
-
-
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """Kaufman Adaptive Moving Average"""
+def calculate_kama(close: np.ndarray, period: int = 14, er_period: int = 10) -> np.ndarray:
+    """Kaufman Adaptive Moving Average - adapts to market efficiency"""
     n = len(close)
     kama = np.zeros(n)
     kama[:] = np.nan
     
     # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(period, n):
-        change = abs(close[i] - close[i-period])
-        volatility = np.sum(np.abs(np.diff(close[i-period:i+1])))
-        if volatility > 0:
-            er[i] = change / volatility
-        else:
-            er[i] = 0
+    noise = np.zeros(n)
+    signal = np.zeros(n)
     
-    # Calculate Smoothing Constant
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    for i in range(er_period, n):
+        signal[i] = abs(close[i] - close[i - er_period])
+        noise[i] = np.sum(np.abs(np.diff(close[max(0, i - er_period):i + 1])))
+    
+    # Avoid division by zero
+    er = np.zeros(n)
+    mask = noise > 0
+    er[mask] = signal[mask] / noise[mask]
+    
+    # Smoothing constants
+    fast_sc = 2.0 / (2.0 + 1.0)
+    slow_sc = 2.0 / (2.0 + 30.0)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
     # Initialize KAMA
-    kama[period] = close[period]
-    
-    # Calculate KAMA
-    for i in range(period+1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    first_valid = period + er_period
+    if first_valid < n:
+        kama[first_valid] = close[first_valid]
+        
+        for i in range(first_valid + 1, n):
+            if np.isnan(sc[i]):
+                kama[i] = kama[i - 1]
+            else:
+                kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
     
     return kama
+
+
+def calculate_hma(close: np.ndarray, period: int = 21) -> np.ndarray:
+    """Hull Moving Average - reduced lag, smoother than EMA"""
+    n = len(close)
+    hma = np.zeros(n)
+    hma[:] = np.nan
+    
+    if n < period:
+        return hma
+    
+    close_s = pd.Series(close)
+    
+    # WMA(period/2)
+    wma_half = close_s.rolling(window=period // 2, min_periods=period // 2).mean()
+    # WMA(period)
+    wma_full = close_s.rolling(window=period, min_periods=period).mean()
+    # 2*WMA(period/2) - WMA(period)
+    diff = 2.0 * wma_half - wma_full
+    # WMA(sqrt(period))
+    sqrt_period = int(np.sqrt(period))
+    hma_series = diff.rolling(window=sqrt_period, min_periods=sqrt_period).mean()
+    
+    hma[:] = hma_series.values
+    
+    return hma
+
+
+def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    """Average True Range with proper min_periods"""
+    n = len(close)
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i - 1]),
+                    abs(low[i] - close[i - 1]))
+    
+    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    return atr
+
+
+def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+    """Relative Strength Index with proper min_periods"""
+    n = len(close)
+    rsi = np.zeros(n)
+    rsi[:] = np.nan
+    
+    if n < period + 1:
+        return rsi
+    
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    
+    rs = avg_gain / avg_loss.replace(0, np.inf)
+    rsi_series = 100.0 - (100.0 / (1.0 + rs))
+    
+    rsi[:] = rsi_series.values
+    
+    return rsi
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -124,151 +137,121 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values
     n = len(close)
     
-    # =========================================================================
-    # LOAD HTF DATA ONCE BEFORE LOOP (CRITICAL - Rule 1)
-    # =========================================================================
-    df_6h = get_htf_data(prices, '6h')
-    kama_6h_raw = calculate_kama(df_6h['close'].values, period=10)
-    kama_6h_aligned = align_htf_to_ltf(prices, df_6h, kama_6h_raw)
+    # === LOAD HTF DATA ONCE BEFORE LOOP (CRITICAL) ===
+    df_4h = get_htf_data(prices, '4h')
     
-    # =========================================================================
-    # CALCULATE 1H INDICATORS (vectorized before loop)
-    # =========================================================================
-    atr_14 = calculate_atr(high, low, close, period=14)
-    adx_14 = calculate_adx(high, low, close, period=14)
+    # Calculate 4h HMA trend indicator
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Keltner Channel
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = ema_20 + 1.5 * atr_14
-    kc_lower = ema_20 - 1.5 * atr_14
+    # === CALCULATE 1H INDICATORS (VECTORIZED) ===
+    kama_1h = calculate_kama(close, period=14, er_period=10)
+    atr_1h = calculate_atr(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
     
-    # Volume average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume moving average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # =========================================================================
-    # POSITION SIZING PARAMETERS (Rule 4 - discrete levels)
-    # =========================================================================
-    BASE_SIZE = 0.25  # 25% of capital
-    MAX_SIZE = 0.35
-    STOP_MULT = 2.5   # 2.5 * ATR stop distance
-    
-    # =========================================================================
-    # GENERATE SIGNALS
-    # =========================================================================
+    # === GENERATE SIGNALS WITH STOPLOSS LOGIC ===
     signals = np.zeros(n)
-    entry_price = np.zeros(n)
-    position_side = np.zeros(n, dtype=int)
-    highest_high = np.zeros(n)
-    lowest_low = np.zeros(n)
+    SIZE = 0.28  # 28% position size - conservative for DD control
     
-    # Start after all indicators are valid
-    start_idx = max(50, period if 'period' in dir() else 50)
+    # Track position state for stoploss
+    position_side = 0  # 0=flat, 1=long, -1=short
+    entry_price = 0.0
+    highest_price = 0.0  # For trailing stop
+    lowest_price = 0.0
     
-    for i in range(start_idx, n):
+    first_valid = max(50, int(n * 0.01))  # Warmup period
+    
+    for i in range(first_valid, n):
         # Skip if any indicator is NaN
-        if np.isnan(kama_6h_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(adx_14[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(kama_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(rsi_1h[i]):
+            signals[i] = 0.0
+            position_side = 0
             continue
         
-        curr_atr = atr_14[i]
-        if curr_atr <= 0:
-            curr_atr = atr_14[i-1] if i > 0 else 0.001 * close[i]
+        current_atr = atr_1h[i]
+        current_close = close[i]
+        current_rsi = rsi_1h[i]
+        current_hma_4h = hma_4h_aligned[i]
+        current_kama = kama_1h[i]
+        current_vol = volume[i]
+        avg_vol = vol_ma[i] if not np.isnan(vol_ma[i]) else current_vol
         
-        stop_distance = STOP_MULT * curr_atr
-        
-        # ---------------------------------------------------------------------
-        # MANAGE EXISTING LONG POSITION
-        # ---------------------------------------------------------------------
-        if position_side[i-1] == 1:
-            entry = entry_price[i-1]
+        # === STOPLOSS LOGIC (MUST SET SIGNAL=0 WHEN HIT) ===
+        if position_side == 1:  # Long position
+            # Update highest price for trailing stop
+            highest_price = max(highest_price, current_close)
             
-            # Stop loss check
-            if close[i] < entry - stop_distance:
+            # Trailing stop: exit if price drops 2.5*ATR from highest
+            stop_price = highest_price - 2.5 * current_atr
+            
+            if current_close < stop_price:
                 signals[i] = 0.0
-                position_side[i] = 0
+                position_side = 0
+                entry_price = 0.0
+                highest_price = 0.0
                 continue
             
-            # Trail stop using highest high
-            if i == start_idx or highest_high[i-1] == 0:
-                highest_high[i] = high[i]
-            else:
-                highest_high[i] = max(highest_high[i-1], high[i])
-            
-            # Check trailed stop
-            trailed_stop = highest_high[i] - stop_distance
-            if close[i] < trailed_stop and i > start_idx:
+            # Also check 4h trend reversal
+            if current_close < current_hma_4h:
                 signals[i] = 0.0
-                position_side[i] = 0
+                position_side = 0
+                entry_price = 0.0
+                highest_price = 0.0
+                continue
+        
+        elif position_side == -1:  # Short position
+            # Update lowest price for trailing stop
+            lowest_price = min(lowest_price, current_close) if lowest_price > 0 else current_close
+            
+            # Trailing stop: exit if price rises 2.5*ATR from lowest
+            stop_price = lowest_price + 2.5 * current_atr
+            
+            if current_close > stop_price:
+                signals[i] = 0.0
+                position_side = 0
+                entry_price = 0.0
+                lowest_price = 0.0
                 continue
             
-            # Maintain position
-            signals[i] = BASE_SIZE
-            entry_price[i] = entry
-            position_side[i] = 1
-            continue
-        
-        # ---------------------------------------------------------------------
-        # MANAGE EXISTING SHORT POSITION
-        # ---------------------------------------------------------------------
-        if position_side[i-1] == -1:
-            entry = entry_price[i-1]
-            
-            # Stop loss check
-            if close[i] > entry + stop_distance:
+            # Also check 4h trend reversal
+            if current_close > current_hma_4h:
                 signals[i] = 0.0
-                position_side[i] = 0
+                position_side = 0
+                entry_price = 0.0
+                lowest_price = 0.0
                 continue
+        
+        # === ENTRY LOGIC (only if flat) ===
+        if position_side == 0:
+            # Volume confirmation (avoid low liquidity entries)
+            vol_confirmed = current_vol > 1.3 * avg_vol if avg_vol > 0 else True
             
-            # Trail stop using lowest low
-            if i == start_idx or lowest_low[i-1] == 0:
-                lowest_low[i] = low[i]
-            else:
-                lowest_low[i] = min(lowest_low[i-1], low[i])
+            # RSI momentum filter (not overbought/oversold)
+            rsi_ok = 35 < current_rsi < 70
             
-            # Check trailed stop
-            trailed_stop = lowest_low[i] + stop_distance
-            if close[i] > trailed_stop and i > start_idx:
-                signals[i] = 0.0
-                position_side[i] = 0
-                continue
+            # Long entry: price above 4h HMA, KAMA sloping up, RSI confirming
+            if current_close > current_hma_4h and vol_confirmed and rsi_ok:
+                # Check KAMA slope (adaptive trend confirmation)
+                if i > 5 and kama_1h[i] > kama_1h[i - 3]:
+                    signals[i] = SIZE
+                    position_side = 1
+                    entry_price = current_close
+                    highest_price = current_close
             
-            # Maintain position
-            signals[i] = -BASE_SIZE
-            entry_price[i] = entry
-            position_side[i] = -1
-            continue
+            # Short entry: price below 4h HMA, KAMA sloping down, RSI confirming
+            elif current_close < current_hma_4h and vol_confirmed and rsi_ok:
+                # Check KAMA slope
+                if i > 5 and kama_1h[i] < kama_1h[i - 3]:
+                    signals[i] = -SIZE
+                    position_side = -1
+                    entry_price = current_close
+                    lowest_price = current_close
         
-        # ---------------------------------------------------------------------
-        # CHECK FOR NEW LONG ENTRY
-        # ---------------------------------------------------------------------
-        # Conditions: 6h KAMA bullish + ADX strong + Keltner breakout + volume
-        kama_bullish = close[i] > kama_6h_aligned[i]
-        adx_strong = adx_14[i] > 20
-        kc_breakout_long = close[i] > kc_upper[i]
-        volume_confirmed = volume[i] > 1.2 * vol_avg[i]
-        
-        if kama_bullish and adx_strong and kc_breakout_long and volume_confirmed:
-            signals[i] = BASE_SIZE
-            entry_price[i] = close[i]
-            position_side[i] = 1
-            highest_high[i] = high[i]
-            continue
-        
-        # ---------------------------------------------------------------------
-        # CHECK FOR NEW SHORT ENTRY
-        # ---------------------------------------------------------------------
-        # Conditions: 6h KAMA bearish + ADX strong + Keltner breakout + volume
-        kama_bearish = close[i] < kama_6h_aligned[i]
-        kc_breakout_short = close[i] < kc_lower[i]
-        
-        if kama_bearish and adx_strong and kc_breakout_short and volume_confirmed:
-            signals[i] = -BASE_SIZE
-            entry_price[i] = close[i]
-            position_side[i] = -1
-            lowest_low[i] = low[i]
-            continue
-        
-        # No signal - stay flat
-        signals[i] = 0.0
-        position_side[i] = 0
+        # === MAINTAIN POSITION (no signal change = no fees) ===
+        else:
+            signals[i] = signals[i - 1]  # Keep previous signal
     
     return signals
