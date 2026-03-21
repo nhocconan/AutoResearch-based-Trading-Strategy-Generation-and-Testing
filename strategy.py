@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #006 - KAMA MACD ADX Multi-Timeframe (1h Primary + 4h Trend)
+EXPERIMENT #007 - MACD Momentum with 4h Supertrend Filter (1h Primary)
 ==================================================================================================
-Hypothesis: Current best (Sharpe=0.537) uses 4h+1d with HMA+RSI. This uses 1h+4h with KAMA+MACD+ADX.
-KAMA (Kaufman Adaptive Moving Average) adapts to market efficiency - faster in trends, slower in noise.
-MACD histogram provides momentum entry signals (different from RSI pullback).
-ADX filter ensures we only trade when trend strength is sufficient (>25), avoiding choppy whipsaws.
+Hypothesis: Current best (Sharpe=0.537) uses 4h+1d with HMA+RSI. This uses 1h+4h with MACD+Supertrend.
+MACD histogram momentum captures trend acceleration better than RSI pullback alone.
+4h Supertrend provides cleaner trend filter than Daily HMA (less lag than 1d).
+1h primary gives more trade opportunities than 4h while maintaining signal quality.
 
 Key innovations:
-1. 1h PRIMARY + 4h HTF: More trade opportunities than 4h primary, cleaner than 30m
-2. KAMA for trend: Adaptive to volatility, proven in quantitative literature
-3. MACD histogram entry: Momentum-based, catches moves earlier than RSI pullback
-4. ADX strength filter: Only trade when ADX > 25 (strong trend), skip ranging markets
-5. Conservative sizing: 0.20-0.30 discrete levels, 2.0 ATR stoploss with trail
+1. 1h PRIMARY + 4h HTF: More trades than 4h strategies, cleaner than 15m/30m
+2. MACD histogram: Captures momentum acceleration (not just crossover)
+3. 4h Supertrend: Proven trend filter with ATR-based stops built-in
+4. Z-score filter: Avoids mean-reversion traps when price is >2σ from mean
+5. RSI confirmation: Ensures we're not entering at extremes
 
 Why this should beat #005 (Sharpe=0.537):
-- 1h timeframe captures more moves than 4h while avoiding 30m noise
-- KAMA adapts better than HMA in mixed trending/ranging conditions
-- MACD histogram gives earlier entries than waiting for RSI pullback
-- ADX filter eliminates low-quality trades in choppy markets (major DD source)
-- Different signal combo = uncorrelated returns, potential diversification benefit
+- 1h timeframe captures more momentum moves than 4h
+- MACD histogram leads price better than HMA crossover
+- 4h Supertrend is more responsive than Daily HMA for trend changes
+- Z-score filter avoids buying tops/selling bottoms
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_macd_adx_mtf_1h_4h_v1"
+name = "macd_supertrend_zscore_mtf_1h_4h_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -54,56 +53,13 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+def calculate_macd(close, fast=12, slow=26, signal=9):
     """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts to market efficiency ratio (ER)
-    ER = |close - close_n| / sum(|close_i - close_i-1|)
-    SC = (ER * (fast SC - slow SC) + slow SC)^2
-    KAMA = KAMA_prev + SC * (close - KAMA_prev)
+    MACD indicator
+    Returns: macd_line, signal_line, histogram
     """
     n = len(close)
-    if n < er_period + slow_period:
-        return np.zeros(n)
-    
-    kama = np.zeros(n)
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        signal = abs(close[i] - close[i - er_period])
-        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0
-    
-    # Calculate Smoothing Constant (SC)
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    sc = np.zeros(n)
-    for i in range(er_period, n):
-        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Initialize KAMA
-    kama[er_period] = close[er_period]
-    
-    # Calculate KAMA
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama
-
-
-def calculate_macd(close, fast=12, slow=26, signal_period=9):
-    """
-    Calculate MACD line, signal line, and histogram
-    MACD = EMA(fast) - EMA(slow)
-    Signal = EMA(MACD, signal_period)
-    Histogram = MACD - Signal
-    """
-    n = len(close)
-    if n < slow + signal_period:
+    if n < slow + signal:
         return np.zeros(n), np.zeros(n), np.zeros(n)
     
     close_series = pd.Series(close)
@@ -111,71 +67,103 @@ def calculate_macd(close, fast=12, slow=26, signal_period=9):
     ema_fast = close_series.ewm(span=fast, adjust=False, min_periods=fast).mean()
     ema_slow = close_series.ewm(span=slow, adjust=False, min_periods=slow).mean()
     
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal_period, adjust=False, min_periods=signal_period).mean()
+    macd_line = (ema_fast - ema_slow).values
+    signal_line = pd.Series(macd_line).ewm(span=signal, adjust=False, min_periods=signal).mean().values
     histogram = macd_line - signal_line
     
-    return macd_line.values, signal_line.values, histogram.values
+    return macd_line, signal_line, histogram
 
 
-def calculate_adx(high, low, close, period=14):
-    """
-    Calculate Average Directional Index (ADX)
-    Measures trend strength (not direction)
-    ADX > 25 = strong trend, ADX < 20 = weak/ranging
-    """
+def calculate_rsi(close, period=14):
+    """Calculate RSI"""
     n = len(close)
-    if n < period * 3:
+    if n < period + 1:
         return np.zeros(n)
     
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
+    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    rs = np.zeros(n)
+    mask = avg_loss > 0
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    rs[~mask] = 100
+    
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def calculate_supertrend(high, low, close, atr, multiplier=3.0):
+    """
+    Supertrend indicator - trend following with ATR-based stops
+    Returns: supertrend_values, trend_direction (1=up, -1=down)
+    """
+    n = len(close)
+    if n < len(atr) or len(atr) == 0:
+        return np.zeros(n), np.zeros(n)
+    
+    supertrend = np.zeros(n)
+    trend = np.zeros(n)
+    
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    
+    for i in range(n):
+        if atr[i] == 0:
+            continue
+        upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
+        lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
+    
+    first_valid = np.where(atr > 0)[0]
+    if len(first_valid) == 0:
+        return supertrend, trend
+    
+    start_idx = first_valid[0]
+    supertrend[start_idx] = upper_band[start_idx]
+    trend[start_idx] = 1
+    
+    for i in range(start_idx + 1, n):
+        if atr[i] == 0:
+            supertrend[i] = supertrend[i - 1]
+            trend[i] = trend[i - 1]
+            continue
         
-        plus_dm[i] = max(0, high[i] - high[i - 1]) if (high[i] - high[i - 1]) > (low[i - 1] - low[i]) else 0
-        minus_dm[i] = max(0, low[i - 1] - low[i]) if (low[i - 1] - low[i]) > (high[i] - high[i - 1]) else 0
-    
-    # Smooth with Wilder's method
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    dx = np.zeros(n)
-    adx = np.zeros(n)
-    
-    # Initialize sums
-    plus_sum = np.sum(plus_dm[1:period + 1])
-    minus_sum = np.sum(minus_dm[1:period + 1])
-    tr_sum = np.sum(tr[1:period + 1])
-    
-    for i in range(period, n):
-        if i == period:
-            plus_sum = np.sum(plus_dm[1:period + 1])
-            minus_sum = np.sum(minus_dm[1:period + 1])
-            tr_sum = np.sum(tr[1:period + 1])
+        if trend[i - 1] == 1:
+            if close[i] > lower_band[i]:
+                supertrend[i] = max(supertrend[i - 1], lower_band[i])
+                trend[i] = 1
+            else:
+                supertrend[i] = upper_band[i]
+                trend[i] = -1
         else:
-            plus_sum = plus_sum - plus_dm[i - 1] + plus_dm[i]
-            minus_sum = minus_sum - minus_dm[i - 1] + minus_dm[i]
-            tr_sum = tr_sum - tr[i - 1] + tr[i]
-        
-        if tr_sum > 0:
-            plus_di[i] = 100 * plus_sum / tr_sum
-            minus_di[i] = 100 * minus_sum / tr_sum
-        
-        if (plus_di[i] + minus_di[i]) > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+            if close[i] < upper_band[i]:
+                supertrend[i] = min(supertrend[i - 1], upper_band[i])
+                trend[i] = -1
+            else:
+                supertrend[i] = lower_band[i]
+                trend[i] = 1
     
-    # Smooth DX to get ADX
-    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
-    for i in range(period * 2, n):
-        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+    return supertrend, trend
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score (standardized price deviation from mean)"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
     
-    return adx
+    close_series = pd.Series(close)
+    rolling_mean = close_series.rolling(window=period, min_periods=period).mean().values
+    rolling_std = close_series.rolling(window=period, min_periods=period).std().values
+    
+    zscore = np.zeros(n)
+    mask = rolling_std > 0
+    zscore[mask] = (close[mask] - rolling_mean[mask]) / rolling_std[mask]
+    
+    return zscore
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -186,10 +174,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # ========== 1h INDICATORS (PRIMARY TIMEFRAME) ==========
     atr_1h = calculate_atr(high, low, close, period=14)
-    kama_1h = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    kama_1h_fast = calculate_kama(close, er_period=5, fast_period=2, slow_period=15)
-    macd_1h, signal_1h, hist_1h = calculate_macd(close, fast=12, slow=26, signal_period=9)
-    adx_1h = calculate_adx(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
+    macd_1h, macd_signal_1h, macd_hist_1h = calculate_macd(close, fast=12, slow=26, signal=9)
+    zscore_1h = calculate_zscore(close, period=20)
     
     # ========== 4h INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
@@ -198,17 +185,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         high_4h = df_4h['high'].values
         low_4h = df_4h['low'].values
         
-        # 4h KAMA for trend direction
-        kama_4h = calculate_kama(close_4h, er_period=10, fast_period=2, slow_period=30)
-        adx_4h = calculate_adx(high_4h, low_4h, close_4h, period=14)
+        # 4h ATR and Supertrend for trend direction
+        atr_4h = calculate_atr(high_4h, low_4h, close_4h, period=14)
+        _, st_trend_4h = calculate_supertrend(high_4h, low_4h, close_4h, atr_4h, multiplier=3.0)
+        
+        # 4h MACD for momentum confirmation
+        macd_4h, _, macd_hist_4h = calculate_macd(close_4h, fast=12, slow=26, signal=9)
         
         # Align to 1h timeframe (auto shift for completed bars)
-        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
-        adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+        st_trend_4h_aligned = align_htf_to_ltf(prices, df_4h, st_trend_4h)
+        macd_hist_4h_aligned = align_htf_to_ltf(prices, df_4h, macd_hist_4h)
         
     except Exception:
-        kama_4h_aligned = np.zeros(n)
-        adx_4h_aligned = np.zeros(n)
+        st_trend_4h_aligned = np.zeros(n)
+        macd_hist_4h_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
@@ -220,13 +210,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # ATR stoploss
     ATR_STOP_MULT = 2.0
     
-    # ADX threshold for trend strength
-    ADX_THRESHOLD = 25
+    # RSI zones
+    RSI_LONG_MIN = 35
+    RSI_LONG_MAX = 65
+    RSI_SHORT_MIN = 35
+    RSI_SHORT_MAX = 65
     
-    # MACD histogram threshold for entry
-    MACD_THRESHOLD = 0
+    # Z-score filter (avoid extremes)
+    ZSCORE_MAX = 2.0
     
-    first_valid = max(100, 60)
+    # MACD histogram threshold for momentum
+    MACD_HIST_THRESHOLD = 0.0
+    
+    first_valid = max(100, 50)
     
     # Track position state
     position_side = np.zeros(n, dtype=int)
@@ -237,26 +233,25 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_1h[i]) or atr_1h[i] == 0 or np.isnan(kama_1h[i]):
+        if np.isnan(atr_1h[i]) or atr_1h[i] == 0 or np.isnan(rsi_1h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
         atr = atr_1h[i]
-        kama_val = kama_1h[i]
-        kama_fast_val = kama_1h_fast[i]
-        macd_hist = hist_1h[i]
-        adx_val = adx_1h[i]
+        rsi_val = rsi_1h[i]
+        macd_hist = macd_hist_1h[i]
+        zscore_val = zscore_1h[i]
         
         # 4h trend filters (MASTER FILTER)
-        kama_4h_val = kama_4h_aligned[i]
-        adx_4h_val = adx_4h_aligned[i]
+        st_trend_4h_val = st_trend_4h_aligned[i]
+        macd_hist_4h = macd_hist_4h_aligned[i]
         
         # Determine 4h trend direction
         trend_4h = 0
-        if kama_4h_val > 0 and price > kama_4h_val:
+        if st_trend_4h_val == 1:
             trend_4h = 1
-        elif kama_4h_val > 0 and price < kama_4h_val:
+        elif st_trend_4h_val == -1:
             trend_4h = -1
         
         # ========== CHECK EXISTING POSITIONS ==========
@@ -353,33 +348,28 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             continue
         
         # ========== ENTRY LOGIC - MACD MOMENTUM IN TREND DIRECTION ==========
-        # Check ADX for trend strength (both 1h and 4h)
-        trend_strong_1h = adx_val > ADX_THRESHOLD
-        trend_strong_4h = adx_4h_val > ADX_THRESHOLD if adx_4h_val > 0 else False
-        
-        # LONG: 4h trend up + 1h ADX strong + MACD histogram crossing up + price above KAMA
+        # LONG: 4h trend up + 1h MACD hist positive + RSI not overbought + Z-score normal
         long_condition = (
             trend_4h == 1 and
-            trend_strong_1h and
-            macd_hist > MACD_THRESHOLD and
-            macd_hist > hist_1h[i - 1] if i > 0 else True and
-            price > kama_val and
-            kama_fast_val > kama_val
+            macd_hist > MACD_HIST_THRESHOLD and
+            rsi_val >= RSI_LONG_MIN and rsi_val <= RSI_LONG_MAX and
+            abs(zscore_val) <= ZSCORE_MAX and
+            macd_hist_4h > 0  # 4h momentum confirms
         )
         
-        # SHORT: 4h trend down + 1h ADX strong + MACD histogram crossing down + price below KAMA
+        # SHORT: 4h trend down + 1h MACD hist negative + RSI not oversold + Z-score normal
         short_condition = (
             trend_4h == -1 and
-            trend_strong_1h and
-            macd_hist < MACD_THRESHOLD and
-            macd_hist < hist_1h[i - 1] if i > 0 else True and
-            price < kama_val and
-            kama_fast_val < kama_val
+            macd_hist < -MACD_HIST_THRESHOLD and
+            rsi_val >= RSI_SHORT_MIN and rsi_val <= RSI_SHORT_MAX and
+            abs(zscore_val) <= ZSCORE_MAX and
+            macd_hist_4h < 0  # 4h momentum confirms
         )
         
-        # High conviction: 4h ADX also strong
-        high_conviction_long = long_condition and trend_strong_4h
-        high_conviction_short = short_condition and trend_strong_4h
+        # Determine position size based on conviction
+        # High conviction: MACD histogram strong + 4h trend strong
+        high_conviction_long = long_condition and macd_hist > macd_hist_4h * 0.5
+        high_conviction_short = short_condition and macd_hist < macd_hist_4h * 0.5
         
         if long_condition:
             size = SIZE_HIGH if high_conviction_long else SIZE_BASE
