@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #126 - MTF HMA+RSI+Zscore+Chandelier+VolRegime Optimized v126
+EXPERIMENT #127 - MTF HMA+KAMA+RSI+Zscore+Chandelier+ATR_VolRegime_v127
 ==================================================================================================
-Hypothesis: Beat Sharpe=16.016 by learning from #125's underperformance. Key insight: ROC filter
-added in #125 actually DECREASED Sharpe from 5.643 (#120) to 4.037 (#125). Removing ROC and returning
-to simpler, proven entry logic from #120 while maintaining proper risk management.
+Hypothesis: Beat Sharpe=16.016 by improving volatility regime detection and signal confirmation.
+Key insight from #126: ROC filter hurt performance. Return to simpler, proven logic but enhance:
+1. ATR-based volatility regime (more responsive than BBW percentile)
+2. 3-bar signal confirmation (reduces false entries vs 2-bar)
+3. Dual trend filter: HMA + KAMA agreement (reduces whipsaws)
+4. Improved Chandelier exit with proper highest_high tracking
+5. Asymmetric RSI bands tuned for crypto volatility
 
-Key improvements over #125:
-1. REMOVED ROC momentum filter - it was reducing win rate without improving risk-adjusted returns
-2. Asymmetric RSI bands: 35-55 for longs (deeper pullback), 45-65 for shorts (shallower)
-3. Simplified signal persistence: removed complex pending_signal tracking
-4. Cleaner position state management - explicit tracking separate from signal array
-5. Maintained proven components: HMA(16), RSI(14), Z-score(20), Chandelier(3*ATR22), Vol regime
+Key improvements over #126:
+1. ATR volatility regime instead of BBW (more direct vol measurement)
+2. 3-bar confirmation instead of 2-bar (fewer false signals)
+3. KAMA adaptive trend filter alongside HMA (better in ranging markets)
+4. Tighter RSI bands: 38-52 long, 48-62 short (more selective entries)
+5. Better position state tracking with explicit exit conditions
 
 Risk Management (per experiment instructions):
 - Max signal: 0.40 (Q1 low vol) down to 0.15 (Q4 high vol) - discrete quartile sizing
 - Chandelier exit: 3.0*ATR(22) trailing stop with 1R trail after 2R profit
-- ADX filter: 4h ADX > 18 (moderate trend requirement)
+- Dual trend filter: HMA + KAMA must agree on 4h timeframe
 - Hysteresis: 0.15 threshold (reduces churn costs from 0.10% per flip)
-- Position tracking with proper TP/SL state management
+- 3-bar signal confirmation (reduces false entries)
 - leverage=1.0 (no leverage, position sizing controls risk)
 
 Timeframe: 15m entries with 4h trend filter (proven MTF combination)
@@ -27,7 +31,7 @@ Timeframe: 15m entries with 4h trend filter (proven MTF combination)
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_rsi_zscore_chandelier_volregime_15m_4h_v126"
+name = "mtf_hma_kama_rsi_zscore_chandelier_atr_volregime_15m_4h_v127"
 timeframe = "15m"
 leverage = 1.0
 
@@ -81,6 +85,40 @@ def calculate_hma(close, period=16):
     hma = wma(raw_hma, sqrt_period)
     
     return hma
+
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman's Adaptive Moving Average - adapts to market noise
+    ER = |close - close[n]| / sum(|close[i] - close[i-1]|)
+    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    """
+    n = len(close)
+    if n < er_period + slow_period:
+        return np.zeros(n)
+    
+    kama = np.zeros(n)
+    
+    # Calculate Efficiency Ratio
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        signal = abs(close[i] - close[i - er_period])
+        noise = sum(abs(close[j] - close[j - 1]) for j in range(i - er_period + 1, i + 1))
+        er[i] = signal / noise if noise > 0 else 0
+    
+    # Calculate Smoothing Constant
+    fast_sc = 2 / (fast_period + 1)
+    slow_sc = 2 / (slow_period + 1)
+    sc = np.zeros(n)
+    for i in range(er_period, n):
+        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama[er_period] = close[er_period]
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    return kama
 
 
 def calculate_rsi(close, period=14):
@@ -283,6 +321,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     atr_15m = calculate_atr(high, low, close, period=14)
     rsi_15m = calculate_rsi(close, period=14)
     hma_15m = calculate_hma(close, period=16)
+    kama_15m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     zscore_15m = calculate_zscore(close, period=20)
     _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     chandelier_long_15m, chandelier_short_15m = calculate_chandelier_exit(
@@ -296,32 +335,50 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # === 4h indicators for trend direction ===
     atr_4h = calculate_atr(h_4h, l_4h, c_4h, period=14)
     hma_4h = calculate_hma(c_4h, period=16)
+    kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
     adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
     _, _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
     supertrend_4h, st_dir_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
     
-    # === Volatility regime detection (BBW percentile on 4h, 200-bar lookback) ===
-    vol_percentile = np.zeros(n_4h)
+    # === ATR-based Volatility regime detection (4h, 200-bar lookback) ===
+    # More responsive than BBW - uses ATR percentile directly
+    atr_percentile = np.zeros(n_4h)
     lookback = 200
     
     for i in range(lookback - 1, n_4h):
-        bbw_window = bbw_4h[i - lookback + 1:i + 1]
-        vol_percentile[i] = np.sum(bbw_window <= bbw_4h[i]) / lookback
+        atr_window = atr_4h[i - lookback + 1:i + 1]
+        # Normalize ATR by price for comparability
+        atr_norm = atr_window / c_4h[i - lookback + 1:i + 1]
+        current_atr_norm = atr_4h[i] / c_4h[i] if c_4h[i] > 0 else 0
+        atr_percentile[i] = np.sum(atr_norm <= current_atr_norm) / lookback
     
     # === Map 4h indicators back to 15m timeframe ===
     trend_4h = np.zeros(n)
     adx_4h_mapped = np.zeros(n)
     vol_regime = np.zeros(n)
     st_dir_4h_mapped = np.zeros(n)
+    hma_trend_4h = np.zeros(n)
+    kama_trend_4h = np.zeros(n)
     
     for i in range(n):
         idx_4h = i // bars_per_4h
         if idx_4h < n_4h and idx_4h >= 40:
-            trend_4h[i] = 1 if c_4h[idx_4h] > hma_4h[idx_4h] else (-1 if c_4h[idx_4h] < hma_4h[idx_4h] else 0)
+            # Dual trend: HMA and KAMA must agree
+            hma_trend = 1 if c_4h[idx_4h] > hma_4h[idx_4h] else (-1 if c_4h[idx_4h] < hma_4h[idx_4h] else 0)
+            kama_trend = 1 if c_4h[idx_4h] > kama_4h[idx_4h] else (-1 if c_4h[idx_4h] < kama_4h[idx_4h] else 0)
+            
+            # Only count as trend if both agree
+            if hma_trend == kama_trend and hma_trend != 0:
+                trend_4h[i] = hma_trend
+            else:
+                trend_4h[i] = 0  # No clear trend
+            
+            hma_trend_4h[i] = hma_trend
+            kama_trend_4h[i] = kama_trend
             st_dir_4h_mapped[i] = st_dir_4h[idx_4h]
             adx_4h_mapped[i] = adx_4h[idx_4h]
             if idx_4h >= lookback - 1:
-                vol_regime[i] = vol_percentile[idx_4h]
+                vol_regime[i] = atr_percentile[idx_4h]
     
     # === Generate signals with multi-timeframe logic ===
     signals = np.zeros(n)
@@ -332,11 +389,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     SIZE_Q3 = 0.20  # Vol regime 50-75%
     SIZE_Q4 = 0.15  # Vol regime > 75% (highest vol, most conservative)
     
-    # Asymmetric RSI bands (improved from #125 symmetric bands)
-    RSI_LONG_MIN, RSI_LONG_MAX = 35, 55  # Deeper pullback for longs
-    RSI_SHORT_MIN, RSI_SHORT_MAX = 45, 65  # Shallower for shorts
+    # Asymmetric RSI bands (tighter than #126 for more selective entries)
+    RSI_LONG_MIN, RSI_LONG_MAX = 38, 52  # Deeper pullback for longs
+    RSI_SHORT_MIN, RSI_SHORT_MAX = 48, 62  # Shallower for shorts
     
-    ADX_MIN = 18  # Moderate trend requirement
+    ADX_MIN = 20  # Slightly higher than #126 for better trend quality
     ZSCORE_MAX = 1.5
     ZSCORE_MIN = -1.5
     HYSTERESIS = 0.15  # Reduce churn costs
@@ -351,9 +408,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     initial_risk = 0.0
     prev_signal = 0.0
     
-    # Signal confirmation
+    # Signal confirmation - 3 bars for more stability
     signal_count = 0
     confirmed_signal = 0.0
+    last_signal_candidate = 0.0
     
     first_valid = max(300, 40 * bars_per_4h, lookback * bars_per_4h)
     
@@ -390,6 +448,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             prev_signal = 0.0
             signal_count = 0
             confirmed_signal = 0.0
+            last_signal_candidate = 0.0
             continue
         
         # === Position management (stoploss & take profit) ===
@@ -411,6 +470,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     prev_signal = 0.0
                     signal_count = 0
                     confirmed_signal = 0.0
+                    last_signal_candidate = 0.0
                     continue
                 
                 # Take profit at 2R
@@ -428,6 +488,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     prev_signal = 0.0
                     signal_count = 0
                     confirmed_signal = 0.0
+                    last_signal_candidate = 0.0
                     continue
                     
             elif position_side == -1:
@@ -438,6 +499,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     prev_signal = 0.0
                     signal_count = 0
                     confirmed_signal = 0.0
+                    last_signal_candidate = 0.0
                     continue
                 
                 if not tp_triggered and price <= entry_price - 2 * initial_risk:
@@ -453,38 +515,39 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     prev_signal = 0.0
                     signal_count = 0
                     confirmed_signal = 0.0
+                    last_signal_candidate = 0.0
                     continue
             
             # Hold position
             signals[i] = prev_signal
             continue
         
-        # === Entry logic: MTF confirmation (NO ROC filter - removed for #126) ===
+        # === Entry logic: MTF confirmation with dual trend filter ===
         target_signal = 0.0
         
-        # Long: 4h uptrend + Supertrend bullish + RSI pullback + Z-score normal
+        # Long: 4h uptrend (HMA+KAMA agree) + Supertrend bullish + RSI pullback + Z-score normal
         if trend == 1 and st_dir == 1:
             if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX) and (ZSCORE_MIN <= zscore_val <= ZSCORE_MAX):
                 target_signal = size_full
         
-        # Short: 4h downtrend + Supertrend bearish + RSI pullback + Z-score normal
+        # Short: 4h downtrend (HMA+KAMA agree) + Supertrend bearish + RSI pullback + Z-score normal
         elif trend == -1 and st_dir == -1:
             if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX) and (ZSCORE_MIN <= zscore_val <= ZSCORE_MAX):
                 target_signal = -size_full
         
-        # === Signal confirmation (2-bar persistence) ===
-        if target_signal != 0 and target_signal == confirmed_signal:
+        # === Signal confirmation (3-bar persistence for stability) ===
+        if target_signal != 0 and target_signal == last_signal_candidate:
             signal_count += 1
-        elif target_signal != 0 and target_signal != confirmed_signal:
-            confirmed_signal = target_signal
+        elif target_signal != 0 and target_signal != last_signal_candidate:
+            last_signal_candidate = target_signal
             signal_count = 1
         else:
             signal_count = 0
-            confirmed_signal = 0.0
+            last_signal_candidate = 0.0
         
-        # Execute if confirmed for 2 bars
-        if signal_count >= 2:
-            final_signal = confirmed_signal
+        # Execute if confirmed for 3 bars (more stable than 2-bar)
+        if signal_count >= 3:
+            final_signal = last_signal_candidate
         else:
             final_signal = prev_signal
         
