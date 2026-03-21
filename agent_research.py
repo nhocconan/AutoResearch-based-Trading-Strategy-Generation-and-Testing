@@ -187,21 +187,24 @@ STRATEGY KNOWLEDGE:
 - REGIME: Bollinger BW percentile detection
 - RISK: ATR trailing stop = signal→0 when price < highest - 3*ATR
 
-MULTI-TIMEFRAME RESAMPLING — CORRECT WAY:
-NEVER use pd.date_range('2021-01-01', ...) — this creates FAKE timestamps!
+MULTI-TIMEFRAME RESAMPLING — CRITICAL (46 strategies failed audit on this):
+NEVER use pd.date_range('2021-01-01', ...) — creates FAKE timestamps!
 NEVER set open=close for resampled bars!
-ALWAYS use the actual open_time column:
+ALWAYS use actual open_time + SHIFT by 1 HTF bar to avoid using unclosed bar:
 ```
-# CORRECT: use real timestamps from data
-prices_indexed = prices.set_index('open_time')
-df_4h = prices_indexed.resample('4h').agg({
-    'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-}).dropna()
-# Map 4h values back to 1h using merge_asof or reindex
+prices_idx = prices.set_index('open_time')
+df_4h = prices_idx.resample('4h').agg(
+    open=('open','first'), high=('high','max'), low=('low','min'),
+    close=('close','last'), volume=('volume','sum')
+).dropna()
 trend_4h = compute_trend(df_4h)
-# Align back: for each 1h bar, find the most recent 4h bar
-trend_aligned = trend_4h.reindex(prices_indexed.index, method='ffill')
+# CRITICAL: shift by 1 to only use COMPLETED 4h bars (avoid look-ahead!)
+trend_4h_shifted = trend_4h.shift(1)
+trend_aligned = trend_4h_shifted.reindex(prices_idx.index, method='ffill')
 ```
+The shift(1) ensures at 15m bar within a 4h window, you only see the PREVIOUS
+completed 4h bar, not the current one still forming. This is the #1 cause of
+look-ahead in MTF strategies.
 SOLUSDT has 2 data gaps of ~3 days. Synthetic date_range misaligns after gaps."""
 
 
