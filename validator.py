@@ -35,7 +35,8 @@ LOOK_AHEAD_PATTERNS = [
 ]
 
 SYNTHETIC_RESAMPLE_PATTERNS = [
-    (r"date_range\s*\(\s*(?:start\s*=\s*)?['\"]202", "SYNTHETIC: pd.date_range('202x...') creates fake timestamps — use prices['open_time'] as index for resampling"),
+    (r"date_range\s*\(\s*(?:start\s*=\s*)?['\"]202", "SYNTHETIC: pd.date_range('202x...') — use mtf_data.get_htf_data() instead"),
+    (r"\.resample\s*\(\s*['\"][14]", "Manual resample to HTF detected — use mtf_data.get_htf_data() for correct Binance boundaries"),
 ]
 
 
