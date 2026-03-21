@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #008: 30m Adaptive Regime Strategy with 4h Trend + Daily Filter
-Hypothesis: 30m timeframe captures swing trades with less noise than 15m.
-Regime-adaptive logic: trending markets use trend-following, ranging markets use mean-reversion.
-4h HMA provides intermediate trend filter, Daily SMA200 provides major regime filter.
-Bollinger Band Width percentile detects trending (low BW) vs ranging (high BW) regimes.
-ATR-based stoploss (2.5x) protects against crashes. Position sizing capped at 0.30.
-Relaxed entry conditions to ensure ≥10 trades/symbol on train data across all market regimes.
+Experiment #009: 1h Fisher Transform + BB Regime + 4h Trend Filter
+Hypothesis: Fisher Transform catches reversals in bear/range markets (2025 test period).
+Bollinger Band Width detects regime (squeeze = breakout, wide = trend).
+4h HMA provides major trend filter to avoid counter-trend trades.
+This differs from previous HMA/RSI/Supertrend combos by using Fisher for entries.
+Position sizing: 0.25 discrete with 2.5*ATR stoploss to control drawdown.
+Relaxed entry thresholds to ensure ≥10 trades/symbol on train data.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_regime_adaptive_4h_v1"
-timeframe = "30m"
+name = "mtf_1h_fisher_bb_4h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -34,9 +34,47 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
     return wma3.values
 
-def calculate_sma(close, period=20):
-    """Calculate Simple Moving Average."""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+def calculate_fisher_transform(high, low, close, period=9):
+    """
+    Ehlers Fisher Transform - normalizes price to Gaussian distribution.
+    Catches reversals when Fisher crosses extreme levels (-1.5/+1.5).
+    Works well in bear/range markets for mean reversion entries.
+    """
+    hl2 = (high + low) / 2
+    # Normalize price to 0-1 range
+    highest = pd.Series(hl2).rolling(window=period, min_periods=period).max().values
+    lowest = pd.Series(hl2).rolling(window=period, min_periods=period).min().values
+    range_val = highest - lowest
+    range_val = np.where(range_val == 0, 1e-6, range_val)  # avoid div by zero
+    normalized = (hl2 - lowest) / range_val
+    normalized = np.clip(normalized, 0.001, 0.999)  # avoid log(0)
+    
+    # Fisher transform
+    fisher = 0.5 * np.log((1 + normalized) / (1 - normalized))
+    fisher = np.nan_to_num(fisher, nan=0.0)
+    
+    # Signal line (1-period lag)
+    fisher_signal = np.roll(fisher, 1)
+    fisher_signal[0] = fisher[0]
+    
+    return fisher, fisher_signal
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width for regime detection."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    # Band Width = (Upper - Lower) / SMA (normalized)
+    bw = (upper - lower) / sma
+    bw = np.nan_to_num(bw, nan=1.0)
+    # BB Percentile - where price sits within bands
+    bb_pct = (close - lower) / (upper - lower)
+    bb_pct = np.where((upper - lower) == 0, 0.5, bb_pct)
+    bb_pct = np.clip(bb_pct, 0, 1)
+    bb_pct = np.nan_to_num(bb_pct, nan=0.5)
+    return upper, lower, bw, bb_pct
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -50,55 +88,6 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands and Band Width."""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    bw = (upper - lower) / sma
-    bw = np.nan_to_num(bw, nan=0.0)
-    return upper, lower, sma, bw
-
-def calculate_bw_percentile(bw, lookback=100):
-    """Calculate Bollinger Band Width percentile for regime detection."""
-    bw_percentile = np.zeros(len(bw))
-    for i in range(lookback, len(bw)):
-        window = bw[i-lookback:i+1]
-        bw_percentile[i] = np.sum(window <= bw[i]) / len(window) * 100
-    return bw_percentile
-
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD indicator."""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
-    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator."""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    upper = hl2 + multiplier * atr
-    lower = hl2 - multiplier * atr
-    
-    supertrend = np.zeros(len(close))
-    direction = np.ones(len(close))
-    
-    supertrend[0] = upper[0]
-    for i in range(1, len(close)):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = lower[i]
-            direction[i] = 1
-        else:
-            supertrend[i] = upper[i]
-            direction[i] = -1
-    
-    return supertrend, direction
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -106,150 +95,148 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1)
+    # Load 4h HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 4h HMA trend
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)  # auto shift(1)
     
-    # Calculate 1d SMA200 for major trend
-    sma_1d = calculate_sma(df_1d['close'].values, 200)
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
-    
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
+    fisher, fisher_signal = calculate_fisher_transform(high, low, close, 9)
+    bb_upper, bb_lower, bb_width, bb_pct = calculate_bollinger_bands(close, 20, 2.0)
     rsi = calculate_rsi(close, 14)
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
-    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
     
-    # Bollinger Bands for regime detection
-    bb_upper, bb_lower, bb_sma, bb_bw = calculate_bollinger_bands(close, 20, 2.0)
-    bw_percentile = calculate_bw_percentile(bb_bw, 100)
+    # BB Width percentile for regime detection (rolling 100 periods)
+    bb_width_pct = pd.Series(bb_width).rolling(window=100, min_periods=50).apply(
+        lambda x: np.percentile(x, 50), raw=True
+    ).values
+    bb_width_pct = np.nan_to_num(bb_width_pct, nan=50.0)
     
-    # Volume SMA for confirmation
+    # Volume confirmation
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_sma = np.nan_to_num(vol_sma, nan=1.0)
     
     signals = np.zeros(n)
-    SIZE = 0.30
-    HALF_SIZE = 0.15
+    SIZE = 0.25
+    HALF_SIZE = 0.12
     
     # Track positions for stoploss
     entry_price = np.zeros(n)
     position_side = 0
     trailing_stop = np.zeros(n)
+    max_close = np.zeros(n)
+    min_close = np.zeros(n)
     
-    for i in range(150, n):
-        # Regime detection: low BW percentile = trending, high = ranging
-        trending_regime = bw_percentile[i] < 40  # Bottom 40% = trending
-        ranging_regime = bw_percentile[i] > 60   # Top 40% = ranging
+    for i in range(100, n):
+        # 4h trend filter (major regime)
+        hma_4h_valid = hma_4h_aligned[i] > 0
+        trend_4h_bullish = hma_4h_valid and close[i] > hma_4h_aligned[i]
+        trend_4h_bearish = hma_4h_valid and close[i] < hma_4h_aligned[i]
         
-        # 4h trend filter
-        hma_4h_bullish = hma_4h_aligned[i] > 0 and close[i] > hma_4h_aligned[i]
-        hma_4h_bearish = hma_4h_aligned[i] > 0 and close[i] < hma_4h_aligned[i]
+        # Regime detection from BB Width
+        # Low BW (<30th percentile) = squeeze = breakout coming
+        # High BW (>70th percentile) = trend = mean revert
+        regime_squeeze = bb_width_pct[i] < 35
+        regime_trend = bb_width_pct[i] > 65
         
-        # 1d major trend filter (relaxed for more trades)
-        daily_bullish = sma_1d_aligned[i] > 0 and close[i] > sma_1d_aligned[i] * 0.95
-        daily_bearish = sma_1d_aligned[i] > 0 and close[i] < sma_1d_aligned[i] * 1.05
+        # Fisher Transform signals
+        # Long: Fisher crosses above -1.5 from below (oversold reversal)
+        fisher_long = fisher[i] > -1.5 and fisher_signal[i] <= -1.5
+        # Short: Fisher crosses below +1.5 from above (overbought reversal)
+        fisher_short = fisher[i] < 1.5 and fisher_signal[i] >= 1.5
         
-        # Supertrend direction
-        st_long = st_direction[i] == 1
-        st_short = st_direction[i] == -1
+        # RSI confirmation (relaxed for more trades)
+        rsi_oversold = rsi[i] < 45
+        rsi_overbought = rsi[i] > 55
         
-        # MACD momentum
-        macd_bullish = macd_hist[i] > 0 and macd_hist[i] > macd_hist[i-1]
-        macd_bearish = macd_hist[i] < 0 and macd_hist[i] < macd_hist[i-1]
-        
-        # RSI conditions
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
-        rsi_neutral = rsi[i] > 35 and rsi[i] < 65
+        # BB position confirmation
+        bb_low = bb_pct[i] < 0.35  # price in lower band
+        bb_high = bb_pct[i] > 0.65  # price in upper band
         
         # Volume confirmation
         vol_confirm = volume[i] > vol_sma[i] * 0.8 if vol_sma[i] > 0 else True
         
-        # Entry logic - regime adaptive
+        # Entry logic - multiple paths to ensure trades
         new_signal = 0.0
         
-        # TRENDING REGIME: Follow 4h trend with momentum
-        if trending_regime:
-            # Long: 4h bullish + Supertrend long + MACD positive
-            if hma_4h_bullish and st_long and macd_bullish and vol_confirm:
-                new_signal = SIZE
-            # Short: 4h bearish + Supertrend short + MACD negative
-            elif hma_4h_bearish and st_short and macd_bearish and vol_confirm:
-                new_signal = -SIZE
-            # Supertrend flip entries
-            elif st_direction[i] == 1 and st_direction[i-1] == -1 and hma_4h_bullish:
-                new_signal = SIZE
-            elif st_direction[i] == -1 and st_direction[i-1] == 1 and hma_4h_bearish:
-                new_signal = -SIZE
+        # Path 1: Fisher reversal with 4h trend support (primary)
+        if trend_4h_bullish and fisher_long and rsi_oversold:
+            new_signal = SIZE
+        elif trend_4h_bearish and fisher_short and rsi_overbought:
+            new_signal = -SIZE
         
-        # RANGING REGIME: Mean reversion with RSI extremes
-        elif ranging_regime:
-            # Long: RSI oversold + price near BB lower + 4h not strongly bearish
-            if rsi_oversold and close[i] < bb_lower[i] * 1.005 and not hma_4h_bearish:
-                new_signal = SIZE
-            # Short: RSI overbought + price near BB upper + 4h not strongly bullish
-            elif rsi_overbought and close[i] > bb_upper[i] * 0.995 and not hma_4h_bullish:
-                new_signal = -SIZE
-            # RSI reversal from extremes
-            elif rsi[i] < 35 and rsi[i-1] < rsi[i] and close[i] > bb_sma[i] * 0.98:
-                new_signal = SIZE
-            elif rsi[i] > 65 and rsi[i-1] > rsi[i] and close[i] < bb_sma[i] * 1.02:
-                new_signal = -SIZE
+        # Path 2: BB squeeze breakout (regime-based)
+        elif regime_squeeze and bb_low and rsi[i] < 40 and vol_confirm:
+            new_signal = SIZE
+        elif regime_squeeze and bb_high and rsi[i] > 60 and vol_confirm:
+            new_signal = -SIZE
         
-        # NEUTRAL REGIME: Use daily trend filter
-        else:
-            if daily_bullish and st_long and rsi_neutral:
-                new_signal = SIZE
-            elif daily_bearish and st_short and rsi_neutral:
-                new_signal = -SIZE
-            elif st_direction[i] == 1 and st_direction[i-1] == -1 and vol_confirm:
-                new_signal = SIZE
-            elif st_direction[i] == -1 and st_direction[i-1] == 1 and vol_confirm:
-                new_signal = -SIZE
+        # Path 3: Mean reversion in trending regime
+        elif regime_trend and bb_low and fisher[i] < -1.0:
+            new_signal = SIZE
+        elif regime_trend and bb_high and fisher[i] > 1.0:
+            new_signal = -SIZE
+        
+        # Path 4: Simple Fisher extreme (fallback for more trades)
+        elif fisher[i] < -2.0 and fisher_signal[i] < fisher[i]:
+            new_signal = SIZE
+        elif fisher[i] > 2.0 and fisher_signal[i] > fisher[i]:
+            new_signal = -SIZE
         
         # Stoploss logic (Rule 6) - ATR based
         if position_side > 0 and entry_price[i-1] > 0:
             stop_loss = entry_price[i-1] - 2.5 * atr[i]
             if close[i] < stop_loss:
-                new_signal = 0.0
+                new_signal = 0.0  # Stoploss hit
             else:
-                trailing_stop[i] = max(trailing_stop[i-1] if i > 0 else 0, close[i] - 2.5 * atr[i])
+                # Update max close for trailing
+                max_close[i] = max(max_close[i-1] if i > 0 else 0, close[i])
+                trailing_stop[i] = max_close[i] - 2.5 * atr[i]
                 if close[i] < trailing_stop[i] and trailing_stop[i] > 0:
                     new_signal = 0.0
-                elif close[i] > entry_price[i-1] + 3.0 * atr[i] and signals[i-1] == SIZE:
+                # Take partial profit at 2.5R
+                elif close[i] > entry_price[i-1] + 2.5 * atr[i] and signals[i-1] == SIZE:
                     new_signal = HALF_SIZE
         
         if position_side < 0 and entry_price[i-1] > 0:
             stop_loss = entry_price[i-1] + 2.5 * atr[i]
             if close[i] > stop_loss:
-                new_signal = 0.0
+                new_signal = 0.0  # Stoploss hit
             else:
-                trailing_stop[i] = min(trailing_stop[i-1] if i > 0 else 999999, close[i] + 2.5 * atr[i])
+                # Update min close for trailing
+                min_close[i] = min(min_close[i-1] if i > 0 else 999999, close[i])
+                trailing_stop[i] = min_close[i] + 2.5 * atr[i]
                 if close[i] > trailing_stop[i] and trailing_stop[i] < 999999:
                     new_signal = 0.0
-                elif close[i] < entry_price[i-1] - 3.0 * atr[i] and signals[i-1] == -SIZE:
+                # Take partial profit at 2.5R
+                elif close[i] < entry_price[i-1] - 2.5 * atr[i] and signals[i-1] == -SIZE:
                     new_signal = -HALF_SIZE
         
         # Update position tracking
         if new_signal != 0 and position_side == 0:
             entry_price[i] = close[i]
             position_side = np.sign(new_signal)
+            max_close[i] = close[i] if position_side > 0 else max_close[i-1] if i > 0 else 0
+            min_close[i] = close[i] if position_side < 0 else min_close[i-1] if i > 0 else 999999
             trailing_stop[i] = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
         elif new_signal != 0 and position_side != 0:
             if np.sign(new_signal) != position_side:
                 entry_price[i] = close[i]
                 position_side = np.sign(new_signal)
+                max_close[i] = close[i] if position_side > 0 else max_close[i-1] if i > 0 else 0
+                min_close[i] = close[i] if position_side < 0 else min_close[i-1] if i > 0 else 999999
                 trailing_stop[i] = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            else:
+                max_close[i] = max_close[i-1] if i > 0 else max_close[i]
+                min_close[i] = min_close[i-1] if i > 0 else min_close[i]
+                trailing_stop[i] = trailing_stop[i-1] if i > 0 else trailing_stop[i]
         else:
             entry_price[i] = entry_price[i-1] if i > 0 else 0
+            max_close[i] = max_close[i-1] if i > 0 else 0
+            min_close[i] = min_close[i-1] if i > 0 else 999999
             trailing_stop[i] = trailing_stop[i-1] if i > 0 else 0
             if position_side != 0 and new_signal == 0:
-                position_side = 0
+                position_side = 0  # Position closed
         
         signals[i] = new_signal
     
