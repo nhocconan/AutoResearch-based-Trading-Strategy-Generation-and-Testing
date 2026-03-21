@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #346: 4h ADX Trend + Daily HMA + RSI Entry + Volume Confirm + ATR Stop
-Hypothesis: 4h timeframe captures medium-term trends well. Using ADX(14)>20 for trend
-strength (not too strict like ADX>40), Daily HMA(21) for macro bias, RSI(14) 45-55
-range for entries (loose enough for trades), and volume>vol_sma20 for confirmation.
-This avoids over-filtering that caused 0 trades in recent experiments while maintaining
-signal quality. ATR(14)*2.5 trailing stop controls drawdown. Position size=0.25.
-Timeframe: 4h (REQUIRED), HTF: 1d for trend bias via mtf_data helper.
-Target: Beat Sharpe=0.499 with 30-60 trades/year, controlled DD<-30%.
-Key insight: ADX>20 is achievable frequently vs ADX>40, RSI 45-55 allows more entries
-than extreme values, volume filter removes low-liquidity false signals.
+Experiment #347: 12h Dual Supertrend + Daily HMA + RSI Momentum + ATR Stop
+Hypothesis: Current best uses single Supertrend. Dual Supertrend (fast+slow) provides
+better trend confirmation - fast ST for entry timing, slow ST for trend direction.
+Combined with daily HMA macro filter and loose RSI (>40/<60), this should generate
+more high-quality trades than Donchian breakouts while maintaining trend alignment.
+12h timeframe captures multi-day moves, daily HMA provides weekly bias.
+Key improvement: Dual ST reduces false signals vs single ST, looser RSI ensures trades.
+Target: Beat Sharpe=0.499 with 25-50 trades/year, cleaner trend entries.
+Timeframe: 12h (REQUIRED), HTF: 1d for trend bias via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_adx_trend_daily_hma_rsi_volume_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_dual_supertrend_daily_hma_rsi_momentum_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -28,6 +27,38 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_supertrend(high, low, close, atr, multiplier=3.0):
+    """Calculate Supertrend indicator (returns trend direction: 1=long, -1=short)."""
+    n = len(close)
+    hl2 = (high + low) / 2.0
+    
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    supertrend = np.zeros(n)
+    trend = np.ones(n)  # 1 = long trend, -1 = short trend
+    
+    supertrend[0] = upper_band[0]
+    trend[0] = 1
+    
+    for i in range(1, n):
+        if trend[i-1] == 1:
+            if close[i] < lower_band[i]:
+                trend[i] = -1
+                supertrend[i] = upper_band[i]
+            else:
+                trend[i] = 1
+                supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            if close[i] > upper_band[i]:
+                trend[i] = 1
+                supertrend[i] = lower_band[i]
+            else:
+                trend[i] = -1
+                supertrend[i] = min(upper_band[i], supertrend[i-1])
+    
+    return trend, supertrend
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -51,44 +82,10 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    # Calculate +DM and -DM
-    plus_dm = np.where(high - np.roll(high, 1) > np.roll(low, 1) - low, 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where(np.roll(low, 1) - low > high - np.roll(high, 1),
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    
-    # Calculate ATR for TR
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Smooth TR, +DM, -DM using Wilder's method (EMA with span=period)
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx, plus_di, minus_di
-
-def calculate_volume_sma(volume, period=20):
-    """Calculate SMA of volume."""
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
@@ -100,15 +97,18 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
-    vol_sma = calculate_volume_sma(volume, 20)
+    
+    # Dual Supertrend: fast (7, 2.5) for entry, slow (14, 3.0) for trend
+    atr_fast = calculate_atr(high, low, close, 7)
+    st_fast_trend, st_fast_val = calculate_supertrend(high, low, close, atr_fast, 2.5)
+    st_slow_trend, st_slow_val = calculate_supertrend(high, low, close, atr, 3.0)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.125
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -120,58 +120,57 @@ def generate_signals(prices):
     
     for i in range(250, n):  # Start after 250 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]) or np.isnan(vol_sma[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(st_fast_trend[i]):
             signals[i] = 0.0
             continue
         
         # Daily macro trend bias
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        daily_bullish = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
+        daily_bearish = not np.isnan(hma_1d_aligned[i]) and close[i] < hma_1d_aligned[i]
         
-        # ADX trend strength (loose threshold >20, not >40)
-        trend_strong = adx[i] > 20
+        # Supertrend signals
+        st_fast_long = st_fast_trend[i] == 1
+        st_fast_short = st_fast_trend[i] == -1
+        st_slow_long = st_slow_trend[i] == 1
+        st_slow_short = st_slow_trend[i] == -1
         
-        # DI crossover for direction
-        di_bullish = plus_di[i] > minus_di[i]
-        di_bearish = minus_di[i] > plus_di[i]
+        # Supertrend crossover (trend change)
+        st_fast_cross_long = (i > 0 and st_fast_trend[i] == 1 and st_fast_trend[i-1] == -1)
+        st_fast_cross_short = (i > 0 and st_fast_trend[i] == -1 and st_fast_trend[i-1] == 1)
         
-        # RSI entry zone (loose - not extremes)
-        rsi_ok_long = rsi[i] > 45 and rsi[i] < 70  # Not overbought
-        rsi_ok_short = rsi[i] < 55 and rsi[i] > 30  # Not oversold
-        
-        # Volume confirmation (above average)
-        volume_ok = volume[i] > vol_sma[i]
-        
-        # Price momentum (close > open for long, close < open for short)
-        price_momentum_long = close[i] > prices["open"].values[i]
-        price_momentum_short = close[i] < prices["open"].values[i]
+        # RSI momentum filter (LOOSE - ensure trades)
+        rsi_ok_long = rsi[i] > 40  # Very loose
+        rsi_ok_short = rsi[i] < 60  # Very loose
+        rsi_neutral = 40 <= rsi[i] <= 60
         
         new_signal = 0.0
         
         # === LONG ENTRIES ===
-        # Primary: Daily bullish + ADX strong + DI bullish + RSI ok + Volume ok
-        if daily_bullish and trend_strong and di_bullish and rsi_ok_long and volume_ok:
+        # Primary: Fast ST cross long + Slow ST long + Daily bullish + RSI ok
+        if st_fast_cross_long and st_slow_long and daily_bullish and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        # Secondary: Daily bullish + DI bullish + Rsi ok (no ADX filter for more trades)
-        elif daily_bullish and di_bullish and rsi_ok_long and price_momentum_long:
+        # Secondary: Fast ST long + Slow ST long + Daily bullish (no cross needed)
+        elif st_fast_long and st_slow_long and daily_bullish and rsi[i] > 45:
             new_signal = SIZE_ENTRY
-        # Tertiary: Breakout momentum (RSI strong + volume)
-        elif rsi[i] > 55 and rsi[i] < 70 and volume_ok and price_momentum_long:
+        # Tertiary: Fast ST cross long + RSI strong (momentum play)
+        elif st_fast_cross_long and rsi[i] > 50:
+            new_signal = SIZE_ENTRY
+        # Quaternary: Price above both ST + Daily bullish (trend continuation)
+        elif close[i] > st_fast_val[i] and close[i] > st_slow_val[i] and daily_bullish and rsi[i] > 45:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES ===
-        # Primary: Daily bearish + ADX strong + DI bearish + RSI ok + Volume ok
-        if daily_bearish and trend_strong and di_bearish and rsi_ok_short and volume_ok:
+        # Primary: Fast ST cross short + Slow ST short + Daily bearish + RSI ok
+        if st_fast_cross_short and st_slow_short and daily_bearish and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        # Secondary: Daily bearish + DI bearish + RSI ok (no ADX filter for more trades)
-        elif daily_bearish and di_bearish and rsi_ok_short and price_momentum_short:
+        # Secondary: Fast ST short + Slow ST short + Daily bearish (no cross needed)
+        elif st_fast_short and st_slow_short and daily_bearish and rsi[i] < 55:
             new_signal = -SIZE_ENTRY
-        # Tertiary: Breakdown momentum (RSI weak + volume)
-        elif rsi[i] < 45 and rsi[i] > 30 and volume_ok and price_momentum_short:
+        # Tertiary: Fast ST cross short + RSI weak (momentum play)
+        elif st_fast_cross_short and rsi[i] < 50:
+            new_signal = -SIZE_ENTRY
+        # Quaternary: Price below both ST + Daily bearish (trend continuation)
+        elif close[i] < st_fast_val[i] and close[i] < st_slow_val[i] and daily_bearish and rsi[i] < 55:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
