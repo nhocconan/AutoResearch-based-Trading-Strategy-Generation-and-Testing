@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #041 - MTF HMA+Supertrend+ADX+KAMA+RSI+Z-score+BBW (15m+4h Optimized v1)
+EXPERIMENT #042 - MTF HMA+Supertrend+ADX+KAMA+RSI+Z-score+BBW (15m Optimized v2)
 ==================================================================================================
-Hypothesis: #040 achieved Sharpe=16.016 with 15m+1h. Let's test 15m+4h for stronger trend filter.
-4h trend is more stable than 1h, may reduce false signals during choppy periods.
+Hypothesis: #040 achieved Sharpe=16.016 with 15m. Let's optimize parameters and add better
+regime detection to reduce false signals during choppy periods.
 
 Key changes from #040:
-- MTF: 15m + 4h (16 bars per 4h) instead of 15m + 1h (4 bars per 1h)
-- Stoploss: 1.5*ATR (tighter for better R:R ratio)
-- ADX threshold: 20 (lower to capture more trends on 4h)
-- RSI thresholds: 35-65 (wider range for more entry opportunities)
-- Position size: 0.30 (slightly more conservative than 0.35)
-- Add volume filter on 15m for entry confirmation
-- Z-score threshold: 1.8 (tighter to avoid extreme mean reversion)
+- Position size: 0.35 (slightly more aggressive but still safe)
+- Stoploss: 2.0*ATR (wider to avoid premature stops)
+- ADX threshold: 25 (higher for stronger trend confirmation)
+- RSI thresholds: 40-60 (tighter range for better pullback entries)
+- Z-score threshold: 2.0 (slightly wider to capture more valid entries)
+- BBW percentile filter: only trade when BBW > 30th percentile (avoid squeeze)
+- Add DEMA for faster trend confirmation
+- Require 3/4 trend indicators to agree (more flexible than all 4)
 
 Why this should beat #040:
-- 4h trend filter is more stable, fewer whipsaws
-- Tighter stoploss improves risk/reward
-- Lower ADX on 4h still captures strong trends
-- Volume filter adds confirmation for entries
-- More conservative sizing reduces drawdown risk
+- Wider stoploss reduces premature exits
+- Higher ADX ensures stronger trends
+- Tighter RSI range captures better pullbacks
+- BBW percentile avoids low-volatility traps
+- DEMA adds faster trend confirmation
+- 3/4 agreement reduces false negatives while maintaining quality
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_supertrend_adx_kama_rsi_zscore_bbw_15m_4h_v1"
+name = "mtf_hma_supertrend_adx_kama_rsi_zscore_bbw_15m_v2"
 timeframe = "15m"
 leverage = 1.0
 
@@ -81,6 +83,33 @@ def calculate_hma(close, period=21):
         hma[i] = np.sum(raw_vals * weights) / np.sum(weights)
     
     return hma
+
+
+def calculate_dema(close, period=21):
+    """Calculate Double Exponential Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    ema1 = np.zeros(n)
+    ema2 = np.zeros(n)
+    dema = np.zeros(n)
+    
+    multiplier = 2.0 / (period + 1)
+    ema1[period - 1] = np.mean(close[:period])
+    
+    for i in range(period, n):
+        ema1[i] = multiplier * close[i] + (1 - multiplier) * ema1[i - 1]
+    
+    ema2[period - 1] = np.mean(ema1[:period])
+    
+    for i in range(period, n):
+        ema2[i] = multiplier * ema1[i] + (1 - multiplier) * ema2[i - 1]
+    
+    for i in range(period - 1, n):
+        dema[i] = 2 * ema1[i] - ema2[i]
+    
+    return dema
 
 
 def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
@@ -280,17 +309,17 @@ def calculate_bollinger_bands(close, period=20, std_mult=2.0):
     return upper, middle, lower, bbw
 
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate Volume SMA for volume filter"""
-    n = len(volume)
-    if n < period:
-        return np.zeros(n)
+def calculate_bbw_percentile(bbw, lookback=100):
+    """Calculate BBW percentile rank over lookback period"""
+    n = len(bbw)
+    percentile = np.zeros(n)
     
-    vol_sma = np.zeros(n)
-    for i in range(period - 1, n):
-        vol_sma[i] = np.mean(volume[i - period + 1:i + 1])
+    for i in range(lookback - 1, n):
+        window = bbw[i - lookback + 1:i + 1]
+        rank = np.sum(window <= bbw[i]) / lookback
+        percentile[i] = rank * 100
     
-    return vol_sma
+    return percentile
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -305,90 +334,39 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     rsi_15m = calculate_rsi(close, period=14)
     zscore_15m = calculate_zscore(close, period=20)
     hma_15m = calculate_hma(close, period=21)
+    dema_15m = calculate_dema(close, period=21)
     kama_15m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     supertrend_15m, st_direction_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
     adx_15m = calculate_adx(high, low, close, period=14)
     _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    vol_sma_15m = calculate_volume_sma(volume, period=20)
+    bbw_pct_15m = calculate_bbw_percentile(bbw_15m, lookback=100)
     
-    # Resample to 4h for trend filters (16 x 15m = 4h)
-    bars_per_4h = 16
-    n_4h = (n // bars_per_4h)
-    
-    # Create 4h arrays by downsampling
-    c_4h = np.zeros(n_4h)
-    h_4h = np.zeros(n_4h)
-    l_4h = np.zeros(n_4h)
-    v_4h = np.zeros(n_4h)
-    
-    for i in range(n_4h):
-        start_idx = i * bars_per_4h
-        end_idx = start_idx + bars_per_4h
-        c_4h[i] = close[end_idx - 1]
-        h_4h[i] = np.max(high[start_idx:end_idx])
-        l_4h[i] = np.min(low[start_idx:end_idx])
-        v_4h[i] = np.sum(volume[start_idx:end_idx])
-    
-    # 4h indicators for trend
-    hma_4h = calculate_hma(c_4h, period=21)
-    kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
-    supertrend_4h, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
-    adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
-    _, _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
-    
-    # Map 4h indicators back to 15m timeframe
-    trend_4h = np.zeros(n)
-    st_trend_4h = np.zeros(n)
-    kama_trend_4h = np.zeros(n)
-    adx_4h_mapped = np.zeros(n)
-    bbw_4h_mapped = np.zeros(n)
-    
-    for i in range(n):
-        idx_4h = i // bars_per_4h
-        if idx_4h < n_4h and idx_4h >= 40:
-            if c_4h[idx_4h] > hma_4h[idx_4h]:
-                trend_4h[i] = 1
-            elif c_4h[idx_4h] < hma_4h[idx_4h]:
-                trend_4h[i] = -1
-            
-            if c_4h[idx_4h] > kama_4h[idx_4h]:
-                kama_trend_4h[i] = 1
-            elif c_4h[idx_4h] < kama_4h[idx_4h]:
-                kama_trend_4h[i] = -1
-            
-            st_trend_4h[i] = st_direction_4h[idx_4h]
-            adx_4h_mapped[i] = adx_4h[idx_4h]
-            bbw_4h_mapped[i] = bbw_4h[idx_4h]
-    
-    # Generate signals with multi-timeframe logic
+    # Generate signals with optimized logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.30
-    SIZE_HALF = 0.15
+    SIZE_FULL = 0.35
+    SIZE_HALF = 0.175
     
-    # RSI thresholds for pullback entries (wider range for more opportunities)
-    RSI_LONG_MIN = 35
-    RSI_LONG_MAX = 65
-    RSI_SHORT_MIN = 35
-    RSI_SHORT_MAX = 65
+    # RSI thresholds for pullback entries (tighter range for better quality)
+    RSI_LONG_MIN = 40
+    RSI_LONG_MAX = 60
+    RSI_SHORT_MIN = 40
+    RSI_SHORT_MAX = 60
     
-    # Z-score threshold for mean reversion filter (tighter)
-    ZSCORE_MAX = 1.8
+    # Z-score threshold for mean reversion filter
+    ZSCORE_MAX = 2.0
     
-    # ADX threshold for trend strength (4h) - lower to capture more trends
-    ADX_MIN = 20
+    # ADX threshold for trend strength (higher for stronger trends)
+    ADX_MIN = 25
     
-    # ATR stoploss multiplier (tighter for better R:R)
-    ATR_STOP_MULT = 1.5
+    # ATR stoploss multiplier (wider to avoid premature stops)
+    ATR_STOP_MULT = 2.0
     
-    # BBW minimum for regime filter
-    BBW_MIN = 0.02
+    # BBW percentile minimum (avoid low volatility regimes)
+    BBW_PCT_MIN = 30
     
-    # Volume filter threshold
-    VOL_MIN_RATIO = 0.8
-    
-    first_valid = max(200, 40 * bars_per_4h, 14 * 2, 20, 28)
+    first_valid = max(200, 14 * 2, 20, 28, 100)
     
     # Track position state
     position_side = np.zeros(n)
@@ -402,31 +380,42 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             signals[i] = 0.0
             continue
         
-        trend = trend_4h[i]
-        st_trend = st_trend_4h[i]
-        kama_trend = kama_trend_4h[i]
+        # Get trend indicators
+        hma_trend = 1 if close[i] > hma_15m[i] else (-1 if close[i] < hma_15m[i] else 0)
+        dema_trend = 1 if close[i] > dema_15m[i] else (-1 if close[i] < dema_15m[i] else 0)
+        kama_trend = 1 if close[i] > kama_15m[i] else (-1 if close[i] < kama_15m[i] else 0)
+        st_trend = st_direction_15m[i]
+        
         rsi_val = rsi_15m[i]
         zscore_val = zscore_15m[i]
         atr = atr_15m[i]
         price = close[i]
-        adx_4h_val = adx_4h_mapped[i]
-        bbw_4h_val = bbw_4h_mapped[i]
-        vol_ratio = volume[i] / vol_sma_15m[i] if vol_sma_15m[i] > 0 else 0
+        adx_val = adx_15m[i]
+        bbw_pct_val = bbw_pct_15m[i]
         
-        # ADX filter (4h) - only trade when trend is strong enough
-        if adx_4h_val < ADX_MIN:
+        # ADX filter - only trade when trend is strong enough
+        if adx_val < ADX_MIN:
             signals[i] = 0.0
             position_side[i] = 0
             continue
         
-        # BBW filter - avoid choppy markets (4h)
-        if bbw_4h_val < BBW_MIN:
+        # BBW percentile filter - avoid low volatility regimes
+        if bbw_pct_val < BBW_PCT_MIN:
             signals[i] = 0.0
             position_side[i] = 0
             continue
         
-        # Trend filters must agree (HMA + Supertrend + KAMA on 4h)
-        if trend != st_trend or trend == 0 or trend != kama_trend:
+        # Count trend agreement (need 3/4 to agree)
+        trend_signals = [hma_trend, dema_trend, kama_trend, st_trend]
+        bullish_count = sum(1 for t in trend_signals if t == 1)
+        bearish_count = sum(1 for t in trend_signals if t == -1)
+        
+        # Determine dominant trend (need at least 3/4 agreement)
+        if bullish_count >= 3:
+            trend = 1
+        elif bearish_count >= 3:
+            trend = -1
+        else:
             signals[i] = 0.0
             position_side[i] = 0
             continue
@@ -450,7 +439,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (1.5*ATR)
+            # Stoploss check (2.0*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -524,11 +513,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h HMA + Supertrend + KAMA + ADX + BBW + 15m RSI + Z-score + Volume
-        if trend == 1 and st_trend == 1 and kama_trend == 1:  # Bullish trend confirmed on 4h
+        # Entry logic: 15m HMA + DEMA + KAMA + Supertrend + ADX + BBW% + RSI + Z-score
+        if trend == 1:  # Bullish trend confirmed
             if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
-                abs(zscore_val) < ZSCORE_MAX and
-                vol_ratio >= VOL_MIN_RATIO):  # Pullback + not extreme + volume confirmation
+                abs(zscore_val) < ZSCORE_MAX):  # Pullback + not extreme
                 signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = price
@@ -536,10 +524,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
                 
-        elif trend == -1 and st_trend == -1 and kama_trend == -1:  # Bearish trend confirmed on 4h
+        elif trend == -1:  # Bearish trend confirmed
             if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
-                abs(zscore_val) < ZSCORE_MAX and
-                vol_ratio >= VOL_MIN_RATIO):  # Pullback + not extreme + volume confirmation
+                abs(zscore_val) < ZSCORE_MAX):  # Pullback + not extreme
                 signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = price
