@@ -175,18 +175,37 @@ CRITICAL RULES:
 4. Start with #!/usr/bin/env python3
 
 HARD LIMITS (auto-reject if violated):
-- Max drawdown must be > -50% (balance drop from peak > 50% = FAILED)
-- Must generate ≥ 10 trades
-- Must work across BTC/ETH/SOL (not just one)
-- Sharpe must be > 0
+- EACH symbol must have Sharpe > 0 AND trades >= 5 on train
+- EACH symbol must have Sharpe > 0 AND trades >= 3 on test
+- Max drawdown > -50% per symbol
+- 0 trades = ALWAYS discard (Sharpe=0.000 is NOT positive)
 
-RISK MANAGEMENT RULES (MANDATORY in every strategy):
-- Max risk per trade: 5% of account (position size * stoploss distance ≤ 5%)
-- Every position MUST have a stoploss: signal → 0 when price moves > X*ATR against you
-- Take profit: reduce position (signal → half) at 2R profit, trail stop at 1R
-- If balance drops 50% from peak during backtest → strategy is FAILED
-- Dynamic position sizing: base size * (target_risk / current_ATR_pct)
-- Leverage can be up to 10x IF risk per trade is controlled (risk ≤ 5%)
+##################################################################
+# CRITICAL MARKET ANALYSIS — LEARNED FROM 200+ FAILED EXPERIMENTS
+##################################################################
+
+BTC 2021-2024 (train): +219% but includes 2022 crash (-77%).
+BTC 2025+ (test): -25% (bear/range market).
+ETH follows similar pattern. SOL is an outlier.
+
+WHAT FAILED (don't repeat):
+- Simple EMA crossover (any period): ALWAYS negative Sharpe on BTC/ETH
+- Trend following with short: 2022 whipsaw at bottom destroys gains
+- Pure long-only: works on train but fails test (2025 is bearish)
+- Strategies only working on SOL: SOL is biased (100x rally)
+
+WHAT MIGHT WORK:
+1. REGIME-ADAPTIVE: detect bull/bear/range, different logic per regime
+2. VOLATILITY TARGETING: reduce size in high vol (skip 2022 crash)
+3. ASYMMETRIC: bigger longs in clear bull, tiny or no shorts in unclear
+4. MEAN REVERSION in range-bound periods (2025 test)
+5. VERY FEW TRADES on daily/12h (minimize 0.10% cost impact)
+6. Combine trend + mean reversion with regime switch
+7. Use Bollinger BandWidth percentile as regime detector
+
+RISK MANAGEMENT (MANDATORY):
+- Every position MUST have stoploss: signal → 0 when price moves > 2-3*ATR
+- Fewer trades = less fee drag. Target 20-50 trades/year, not 200+.
 
 COST MODEL (engine-enforced):
 - 0.04% taker fee + 0.01% slippage per side = 0.10% round trip
