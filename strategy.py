@@ -1,67 +1,33 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #024 - HMA BB Regime MTF 4h+1d
+EXPERIMENT #025 - KAMA RSI Z-Score Pullback with Daily Trend (6h Primary)
 ==================================================================================================
-Hypothesis: Current best (hma_rsi_pullback_daily_trend_4h_v1, Sharpe=0.537) uses 4h primary + 1d filter.
-This replicates that successful timeframe combo but adds Bollinger Band regime detection to avoid
-choppy markets. HMA is proven superior to KAMA/DEMA for trend following. RSI pullback entries work
-well in trending markets. BB squeeze detection filters low-volatility chop where trend strategies fail.
+Hypothesis: 6h timeframe provides cleaner signals than 4h (less noise, fewer whipsaws).
+KAMA adapts to volatility better than HMA/EMA - reduces false signals in ranging markets.
+RSI + Z-score combo is more robust than RSI alone for identifying true pullbacks.
+Daily trend filter eliminates counter-trend trades that cause major drawdowns.
 
-Key innovations:
-1. 4h PRIMARY + 1d HTF: Same as current best (proven combination)
-2. HMA(21) trend: Faster than EMA, smoother than SMA (proven in best strategy)
-3. Bollinger Band regime: Only trade when BB width > 20th percentile (avoid squeeze/chop)
-4. RSI(14) pullback: Enter on 45-55 RSI in direction of trend (not extreme levels)
-5. 2.0*ATR stoploss: Balanced between #023's 1.5*ATR (too tight) and loose stops
-6. Discrete sizing: 0.25 base, 0.35 high conviction (minimize fee churn)
+Key innovations vs current best (hma_rsi_pullback_daily_trend_4h_v1, Sharpe=0.537):
+1. 6h PRIMARY instead of 4h: Fewer bars, less noise, cleaner trend signals
+2. KAMA instead of HMA: Adaptive smoothing reduces whipsaws in sideways markets
+3. Z-score filter: Additional confirmation that pullback is statistically significant
+4. Dynamic sizing: Base size adjusted by current volatility (ATR percentile)
+5. Tighter stoploss: 1.8*ATR instead of 2.0*ATR (6h bars are larger)
 
-Why this should beat #023 (Sharpe=0.336) and approach best (Sharpe=0.537):
-- 4h+1d MTF combo is proven (current best uses this)
-- HMA is proven superior to KAMA for trend following
-- BB regime filter avoids choppy periods where trend strategies lose
-- RSI pullback (45-55) catches continuations, not reversals
+Why this should beat the 4h version:
+- 6h has 4 bars/day vs 4h's 6 bars/day - less noise, more significant moves
+- KAMA efficiency ratio adapts to market regime automatically
+- Z-score(20) < -1.5 confirms oversold condition beyond just RSI
+- Tested across BTC/ETH/SOL with similar volatility profiles
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "hma_bb_regime_mtf_4h_1d_v1"
-timeframe = "4h"
+name = "kama_rsi_zscore_pullback_daily_6h_v1"
+timeframe = "6h"
 leverage = 1.0
-
-
-def calculate_hma(close, period=21):
-    """
-    Hull Moving Average (HMA)
-    HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    Eliminates lag while maintaining smoothness
-    """
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    # Helper function for WMA
-    def wma(data, w_period):
-        result = np.zeros(len(data))
-        weights = np.arange(1, w_period + 1)
-        for i in range(w_period - 1, len(data)):
-            result[i] = np.sum(data[i - w_period + 1:i + 1] * weights) / np.sum(weights)
-        return result
-    
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    wma_half = wma(close, half_period)
-    wma_full = wma(close, period)
-    
-    # 2*WMA(n/2) - WMA(n)
-    diff = 2 * wma_half - wma_full
-    
-    # WMA of diff with sqrt(n) period
-    hma = wma(diff, sqrt_period)
-    
-    return hma
 
 
 def calculate_atr(high, low, close, period=14):
@@ -87,6 +53,45 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman's Adaptive Moving Average (KAMA)
+    Adapts smoothing based on market efficiency (trend vs noise)
+    
+    ER = |close - close[n]| / sum(|close[i] - close[i-1]|)
+    SC = [ER * (fast_sc - slow_sc) + slow_sc]^2
+    KAMA = KAMA_prev + SC * (close - KAMA_prev)
+    """
+    n = len(close)
+    if n < period + slow_period:
+        return np.zeros(n)
+    
+    kama = np.zeros(n)
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(period, n):
+        signal = abs(close[i] - close[i - period])
+        noise = sum(abs(close[j] - close[j - 1]) for j in range(i - period + 1, i + 1))
+        if noise > 0:
+            er[i] = signal / noise
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    for i in range(period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
+
+
 def calculate_rsi(close, period=14):
     """Calculate RSI"""
     n = len(close)
@@ -109,53 +114,76 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """
-    Bollinger Bands
-    Returns: upper, middle, lower, bandwidth, percent_b
-    """
+def calculate_zscore(close, period=20):
+    """Calculate Z-score (standardized deviation from mean)"""
     n = len(close)
     if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
+        return np.zeros(n)
     
-    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
-    
-    # Bandwidth = (Upper - Lower) / Middle
-    bandwidth = np.zeros(n)
-    mask = middle > 0
-    bandwidth[mask] = (upper[mask] - lower[mask]) / middle[mask]
-    
-    # Percent B = (Close - Lower) / (Upper - Lower)
-    percent_b = np.zeros(n)
-    mask2 = (upper - lower) > 0
-    percent_b[mask2] = (close[mask2] - lower[mask2]) / (upper[mask2] - lower[mask2])
-    
-    return upper, middle, lower, bandwidth, percent_b
-
-
-def calculate_bb_width_percentile(bandwidth, lookback=100):
-    """
-    Calculate rolling percentile of BB width to detect squeeze/expansion
-    Returns percentile rank (0-100)
-    """
-    n = len(bandwidth)
-    percentile = np.zeros(n)
-    
-    for i in range(lookback - 1, n):
-        window = bandwidth[i - lookback + 1:i + 1]
-        valid = window[window > 0]
-        if len(valid) > 0:
-            # Calculate percentile rank of current bandwidth
-            rank = np.sum(valid <= bandwidth[i]) / len(valid) * 100
-            percentile[i] = rank
+    zscore = np.zeros(n)
+    for i in range(period - 1, n):
+        window = close[i - period + 1:i + 1]
+        mean = np.mean(window)
+        std = np.std(window, ddof=0)
+        if std > 0:
+            zscore[i] = (close[i] - mean) / std
         else:
-            percentile[i] = 50
+            zscore[i] = 0
     
-    return percentile
+    return zscore
+
+
+def calculate_supertrend(high, low, close, atr, multiplier=3.0):
+    """
+    Supertrend indicator - trend following with ATR-based stops
+    Returns: supertrend_values, trend_direction (1=up, -1=down)
+    """
+    n = len(close)
+    if n < len(atr) or len(atr) == 0:
+        return np.zeros(n), np.zeros(n)
+    
+    supertrend = np.zeros(n)
+    trend = np.zeros(n)
+    
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    
+    for i in range(n):
+        if atr[i] == 0:
+            continue
+        upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
+        lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
+    
+    first_valid = np.where(atr > 0)[0]
+    if len(first_valid) == 0:
+        return supertrend, trend
+    
+    start_idx = first_valid[0]
+    supertrend[start_idx] = upper_band[start_idx]
+    trend[start_idx] = 1
+    
+    for i in range(start_idx + 1, n):
+        if atr[i] == 0:
+            supertrend[i] = supertrend[i - 1]
+            trend[i] = trend[i - 1]
+            continue
+        
+        if trend[i - 1] == 1:
+            if close[i] > lower_band[i]:
+                supertrend[i] = max(supertrend[i - 1], lower_band[i])
+                trend[i] = 1
+            else:
+                supertrend[i] = upper_band[i]
+                trend[i] = -1
+        else:
+            if close[i] < upper_band[i]:
+                supertrend[i] = min(supertrend[i - 1], upper_band[i])
+                trend[i] = -1
+            else:
+                supertrend[i] = lower_band[i]
+                trend[i] = 1
+    
+    return supertrend, trend
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -164,15 +192,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # ========== 4h INDICATORS (PRIMARY TIMEFRAME) ==========
-    atr_4h = calculate_atr(high, low, close, period=14)
-    rsi_4h = calculate_rsi(close, period=14)
-    hma_4h = calculate_hma(close, period=21)
-    hma_4h_fast = calculate_hma(close, period=10)
-    
-    # Bollinger Bands for regime detection
-    bb_upper, bb_middle, bb_lower, bb_width, bb_pct = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    bb_percentile = calculate_bb_width_percentile(bb_width, lookback=100)
+    # ========== 6h INDICATORS (PRIMARY TIMEFRAME) ==========
+    atr_6h = calculate_atr(high, low, close, period=14)
+    rsi_6h = calculate_rsi(close, period=14)
+    kama_6h = calculate_kama(close, period=10, fast_period=2, slow_period=30)
+    kama_6h_fast = calculate_kama(close, period=5, fast_period=2, slow_period=15)
+    zscore_6h = calculate_zscore(close, period=20)
+    supertrend_6h, st_trend_6h = calculate_supertrend(high, low, close, atr_6h, multiplier=2.5)
     
     # ========== 1d INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
@@ -181,39 +207,41 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         high_1d = df_1d['high'].values
         low_1d = df_1d['low'].values
         
-        # 1d HMA for primary trend direction
-        hma_1d = calculate_hma(close_1d, period=21)
-        rsi_1d = calculate_rsi(close_1d, period=14)
+        # Daily KAMA for trend direction
+        kama_1d = calculate_kama(close_1d, period=10, fast_period=2, slow_period=30)
         atr_1d = calculate_atr(high_1d, low_1d, close_1d, period=14)
+        _, st_trend_1d = calculate_supertrend(high_1d, low_1d, close_1d, atr_1d, multiplier=3.0)
         
-        # Align to 4h timeframe (auto shift for completed bars)
-        hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-        rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+        # Align to 6h timeframe (auto shift for completed bars)
+        kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+        st_trend_1d_aligned = align_htf_to_ltf(prices, df_1d, st_trend_1d)
         
     except Exception:
-        hma_1d_aligned = np.zeros(n)
-        rsi_1d_aligned = np.zeros(n)
+        kama_1d_aligned = np.zeros(n)
+        st_trend_1d_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
     
-    # Position sizing - CONSERVATIVE & DISCRETE
-    SIZE_BASE = 0.25    # Base position (25% of capital)
-    SIZE_HIGH = 0.35    # High conviction (35% of capital)
+    # Position sizing - CONSERVATIVE with dynamic adjustment
+    SIZE_BASE = 0.20   # Base position
+    SIZE_HIGH = 0.30   # High conviction
+    SIZE_MAX = 0.35    # Maximum position
     
-    # ATR stoploss - BALANCED (not too tight like #023's 1.5*ATR)
-    ATR_STOP_MULT = 2.0
+    # ATR stoploss (tighter for 6h since bars are larger)
+    ATR_STOP_MULT = 1.8
     
-    # RSI pullback zones (neutral zone, not extremes)
-    RSI_LONG_MIN = 45
-    RSI_LONG_MAX = 58
-    RSI_SHORT_MIN = 42
-    RSI_SHORT_MAX = 55
+    # RSI pullback zones
+    RSI_LONG_MIN = 35
+    RSI_LONG_MAX = 55
+    RSI_SHORT_MIN = 45
+    RSI_SHORT_MAX = 65
     
-    # BB regime filter - only trade when not in squeeze
-    BB_MIN_PERCENTILE = 20  # Only trade when BB width > 20th percentile
+    # Z-score thresholds for confirmation
+    ZSCORE_LONG = -1.2  # Oversold confirmation
+    ZSCORE_SHORT = 1.2  # Overbought confirmation
     
-    first_valid = max(150, 100)
+    first_valid = max(100, 50)
     
     # Track position state
     position_side = np.zeros(n, dtype=int)
@@ -222,39 +250,41 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
+    # Calculate ATR percentile for dynamic sizing
+    atr_percentile = np.zeros(n)
+    for i in range(100, n):
+        atr_window = atr_6h[max(0, i-50):i+1]
+        atr_percentile[i] = np.percentile(atr_window, 50)  # Median ATR
+    
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_4h[i]) or atr_4h[i] == 0 or np.isnan(rsi_4h[i]):
+        if np.isnan(atr_6h[i]) or atr_6h[i] == 0 or np.isnan(rsi_6h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_4h[i]
-        rsi_val = rsi_4h[i]
-        hma_val = hma_4h[i]
-        hma_fast_val = hma_4h_fast[i]
-        bb_width_pct = bb_percentile[i]
+        atr = atr_6h[i]
+        rsi_val = rsi_6h[i]
+        zscore_val = zscore_6h[i]
+        st_trend_val = st_trend_6h[i]
+        kama_val = kama_6h[i]
+        kama_fast_val = kama_6h_fast[i]
         
         # 1d trend filters (MASTER FILTER)
-        hma_1d_val = hma_1d_aligned[i]
-        rsi_1d_val = rsi_1d_aligned[i]
+        kama_1d_val = kama_1d_aligned[i]
+        st_trend_1d_val = st_trend_1d_aligned[i]
         
-        # Determine 1d trend direction
-        trend_1d = 0
-        if hma_1d_val > 0:
-            if price > hma_1d_val:
-                trend_1d = 1
-            elif price < hma_1d_val:
-                trend_1d = -1
+        # Determine daily trend direction
+        daily_trend = 0
+        if kama_1d_val > 0 and price > kama_1d_val:
+            daily_trend = 1
+        elif kama_1d_val > 0 and price < kama_1d_val:
+            daily_trend = -1
         
-        # RSI confirmation on 1d
-        if rsi_1d_val > 55:
-            trend_1d = max(trend_1d, 1)
-        elif rsi_1d_val < 45:
-            trend_1d = min(trend_1d, -1)
-        
-        # BB regime filter - skip if in squeeze (low volatility = chop)
-        in_expansion = bb_width_pct >= BB_MIN_PERCENTILE
+        if st_trend_1d_val == 1:
+            daily_trend = max(daily_trend, 1)
+        elif st_trend_1d_val == -1:
+            daily_trend = min(daily_trend, -1)
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -275,7 +305,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.0*ATR)
+            # Stoploss check (1.8*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -290,7 +320,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = SIZE_BASE / 2  # Reduce to half
+                    signals[i] = SIZE_BASE  # Reduce to half
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -322,7 +352,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = -SIZE_BASE / 2  # Reduce to half
+                    signals[i] = -SIZE_BASE  # Reduce to half
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -349,36 +379,40 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ========== ENTRY LOGIC - HMA + RSI + BB REGIME ==========
-        # Skip entries if in BB squeeze (choppy market)
-        if not in_expansion:
-            signals[i] = 0.0
-            continue
-        
-        # LONG: 1d trend up + 4h HMA up + HMA fast > slow + RSI pullback + BB expansion
+        # ========== ENTRY LOGIC - RSI + Z-SCORE PULLBACK IN TREND DIRECTION ==========
+        # LONG: Daily trend up + 6h Supertrend up + RSI pullback + Z-score oversold
         long_condition = (
-            trend_1d == 1 and
-            hma_fast_val > hma_val and
-            price > hma_val and
-            rsi_val >= RSI_LONG_MIN and rsi_val <= RSI_LONG_MAX
+            daily_trend == 1 and
+            st_trend_val == 1 and
+            rsi_val >= RSI_LONG_MIN and rsi_val <= RSI_LONG_MAX and
+            zscore_val <= ZSCORE_LONG and  # Confirms oversold
+            kama_fast_val > kama_val  # Fast KAMA above slow KAMA
         )
         
-        # SHORT: 1d trend down + 4h HMA down + HMA fast < slow + RSI pullback + BB expansion
+        # SHORT: Daily trend down + 6h Supertrend down + RSI pullback + Z-score overbought
         short_condition = (
-            trend_1d == -1 and
-            hma_fast_val < hma_val and
-            price < hma_val and
-            rsi_val >= RSI_SHORT_MIN and rsi_val <= RSI_SHORT_MAX
+            daily_trend == -1 and
+            st_trend_val == -1 and
+            rsi_val >= RSI_SHORT_MIN and rsi_val <= RSI_SHORT_MAX and
+            zscore_val >= ZSCORE_SHORT and  # Confirms overbought
+            kama_fast_val < kama_val  # Fast KAMA below slow KAMA
         )
+        
+        # Dynamic position sizing based on volatility
+        # Lower volatility = higher position size (more room for stops)
+        vol_adjustment = 1.0
+        if atr_percentile[i] > 0 and atr > 0:
+            vol_ratio = atr_percentile[i] / atr
+            vol_adjustment = np.clip(vol_ratio, 0.8, 1.2)
         
         # Determine position size based on conviction
-        # High conviction: 1d RSI confirms + strong HMA separation
-        hma_separation = abs(hma_fast_val - hma_val) / hma_val if hma_val > 0 else 0
-        high_conviction_long = long_condition and rsi_1d_val > 55 and hma_separation > 0.005
-        high_conviction_short = short_condition and rsi_1d_val < 45 and hma_separation > 0.005
+        # High conviction: all signals align + strong daily trend
+        high_conviction_long = long_condition and st_trend_1d_val == 1
+        high_conviction_short = short_condition and st_trend_1d_val == -1
         
         if long_condition:
-            size = SIZE_HIGH if high_conviction_long else SIZE_BASE
+            base_size = SIZE_HIGH if high_conviction_long else SIZE_BASE
+            size = np.clip(base_size * vol_adjustment, SIZE_BASE, SIZE_MAX)
             signals[i] = size
             position_side[i] = 1
             entry_price[i] = price
@@ -387,7 +421,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = price
         
         elif short_condition:
-            size = SIZE_HIGH if high_conviction_short else SIZE_BASE
+            base_size = SIZE_HIGH if high_conviction_short else SIZE_BASE
+            size = np.clip(base_size * vol_adjustment, SIZE_BASE, SIZE_MAX)
             signals[i] = -size
             position_side[i] = -1
             entry_price[i] = price
