@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #053 - Bollinger Regime + Supertrend + RSI Ensemble (1h Primary)
+EXPERIMENT #054 - Donchian Breakout + ADX Regime + RSI Momentum (30m Primary)
 ==================================================================================================
-Hypothesis: Current best (Sharpe=0.537) is pure trend-following with pullback entries.
-This strategy adapts to market regime: trend-follow in low vol, mean-revert in high vol.
-Uses 1h primary (more trades than 4h) + 4h trend filter + BB width regime detection.
+Hypothesis: Current best (Sharpe=0.563) uses BB width for regime detection. 
+This strategy uses ADX for trend strength + Donchian channels for breakouts.
 
 Key innovations:
-1. Regime detection: BB Width percentile (low=20th, high=80th) to switch strategies
-2. Low vol regime: Supertrend trend-following (proven in #045, #047)
-3. High vol regime: RSI mean-reversion at extremes (30/70) with 4h trend filter
-4. Ensemble voting: 3 signals (Supertrend, RSI, BB regime) must agree for entry
-5. Adaptive sizing: 0.30 for high conviction (all 3 align), 0.20 for base
+1. ADX regime detection: ADX>25 = strong trend (follow breakouts), ADX<20 = choppy (avoid)
+2. Donchian channel breakouts: 20-period high/low for clean entry signals
+3. RSI momentum confirmation: RSI>55 for longs, RSI<45 for shorts (not just extremes)
+4. Multi-timeframe: 30m entries + 4h trend + 1d regime filter
+5. Adaptive sizing: 0.25 base, 0.35 when ADX confirms strong trend
 
-Why this should beat current best (Sharpe=0.537):
-- Adapts to volatility regime instead of always trend-following
-- 1h timeframe captures more opportunities than 4h
-- Ensemble reduces false signals (need 2/3 agreement minimum)
-- Mean-reversion in high vol captures choppy market profits that trend strategies miss
+Why this should beat current best (Sharpe=0.563):
+- Donchian breakouts capture clean trend moves without whipsaw
+- ADX filters out choppy markets where trend strategies fail
+- 30m timeframe captures more opportunities than 1h
+- 1d regime filter avoids trading against major trend
+- RSI momentum confirmation reduces false breakouts
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "bb_regime_supertrend_rsi_ensemble_1h_4h_v1"
-timeframe = "1h"
+name = "donchian_adx_rsi_mtf_30m_4h_1d_v1"
+timeframe = "30m"
 leverage = 1.0
 
 
@@ -52,24 +52,70 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width"""
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
     n = len(close)
+    if n < period * 2:
+        return np.zeros(n)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+        
+        if high[i] - high[i - 1] > low[i - 1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i - 1], 0)
+        else:
+            plus_dm[i] = 0
+            
+        if low[i - 1] - low[i] > high[i] - high[i - 1]:
+            minus_dm[i] = max(low[i - 1] - low[i], 0)
+        else:
+            minus_dm[i] = 0
+    
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    # Smooth over period
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    mask = tr_smooth > 0
+    plus_di[mask] = 100 * plus_dm_smooth[mask] / tr_smooth[mask]
+    minus_di[mask] = 100 * minus_dm_smooth[mask] / tr_smooth[mask]
+    
+    dx = np.zeros(n)
+    mask2 = (plus_di + minus_di) > 0
+    dx[mask2] = 100 * np.abs(plus_di[mask2] - minus_di[mask2]) / (plus_di[mask2] + minus_di[mask2])
+    
+    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return adx
+
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high, lowest low over period)"""
+    n = len(high)
     if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
+        return np.zeros(n), np.zeros(n), np.zeros(n)
     
-    close_series = pd.Series(close)
-    sma = close_series.rolling(window=period, min_periods=period).mean().values
-    std = close_series.rolling(window=period, min_periods=period).std().values
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    middle = np.zeros(n)
     
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+        middle[i] = (upper[i] + lower[i]) / 2
     
-    # Handle division by zero
-    bandwidth = np.where(sma > 0, bandwidth, 0)
-    
-    return upper, lower, sma, bandwidth
+    return upper, lower, middle
 
 
 def calculate_rsi(close, period=14):
@@ -94,72 +140,27 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_supertrend(high, low, close, atr, multiplier=3.0):
-    """
-    Supertrend indicator - trend following with ATR-based stops
-    Returns: supertrend_values, trend_direction (1=up, -1=down, 0=neutral)
-    """
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average"""
     n = len(close)
-    if n < len(atr) or len(atr) == 0:
-        return np.zeros(n), np.zeros(n)
+    if n < period:
+        return np.zeros(n)
     
-    supertrend = np.zeros(n)
-    trend = np.zeros(n)
+    close_series = pd.Series(close)
     
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
+    # WMA with period/2
+    wma_half = close_series.ewm(span=period // 2, adjust=False, min_periods=period // 2).mean().values
     
-    for i in range(n):
-        if atr[i] == 0:
-            continue
-        upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
-        lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
+    # WMA with period
+    wma_full = close_series.ewm(span=period, adjust=False, min_periods=period).mean().values
     
-    first_valid = np.where(atr > 0)[0]
-    if len(first_valid) == 0:
-        return supertrend, trend
+    # 2*WMA_half - WMA_full
+    raw_hma = 2 * wma_half - wma_full
     
-    start_idx = first_valid[0]
-    supertrend[start_idx] = upper_band[start_idx]
-    trend[start_idx] = 1
+    # Smooth with sqrt(period) WMA
+    hma = pd.Series(raw_hma).ewm(span=int(np.sqrt(period)), adjust=False, min_periods=int(np.sqrt(period))).mean().values
     
-    for i in range(start_idx + 1, n):
-        if atr[i] == 0:
-            supertrend[i] = supertrend[i - 1]
-            trend[i] = trend[i - 1]
-            continue
-        
-        if trend[i - 1] == 1:
-            if close[i] > lower_band[i]:
-                supertrend[i] = max(supertrend[i - 1], lower_band[i])
-                trend[i] = 1
-            else:
-                supertrend[i] = upper_band[i]
-                trend[i] = -1
-        else:
-            if close[i] < upper_band[i]:
-                supertrend[i] = min(supertrend[i - 1], upper_band[i])
-                trend[i] = -1
-            else:
-                supertrend[i] = lower_band[i]
-                trend[i] = 1
-    
-    return supertrend, trend
-
-
-def calculate_bb_percentile(bandwidth, lookback=100):
-    """Calculate BB Width percentile over lookback period"""
-    n = len(bandwidth)
-    percentile = np.zeros(n)
-    
-    for i in range(lookback - 1, n):
-        window = bandwidth[i - lookback + 1:i + 1]
-        valid_window = window[window > 0]
-        if len(valid_window) > 0:
-            rank = np.sum(valid_window < bandwidth[i])
-            percentile[i] = rank / len(valid_window) * 100
-    
-    return percentile
+    return hma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -168,12 +169,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # ========== 1h INDICATORS (PRIMARY TIMEFRAME) ==========
-    atr_1h = calculate_atr(high, low, close, period=14)
-    rsi_1h = calculate_rsi(close, period=14)
-    bb_upper, bb_lower, bb_sma, bb_width = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    bb_pct = calculate_bb_percentile(bb_width, lookback=100)
-    supertrend_1h, st_trend_1h = calculate_supertrend(high, low, close, atr_1h, multiplier=3.0)
+    # ========== 30m INDICATORS (PRIMARY TIMEFRAME) ==========
+    atr_30m = calculate_atr(high, low, close, period=14)
+    adx_30m = calculate_adx(high, low, close, period=14)
+    rsi_30m = calculate_rsi(close, period=14)
+    donchian_upper, donchian_lower, donchian_middle = calculate_donchian(high, low, period=20)
+    hma_30m = calculate_hma(close, period=21)
     
     # ========== 4h INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
@@ -182,38 +183,59 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         high_4h = df_4h['high'].values
         low_4h = df_4h['low'].values
         
-        # 4h indicators for trend filter
-        atr_4h = calculate_atr(high_4h, low_4h, close_4h, period=14)
+        # 4h indicators
+        adx_4h = calculate_adx(high_4h, low_4h, close_4h, period=14)
         rsi_4h = calculate_rsi(close_4h, period=14)
-        _, st_trend_4h = calculate_supertrend(high_4h, low_4h, close_4h, atr_4h, multiplier=3.0)
+        hma_4h = calculate_hma(close_4h, period=21)
         
-        # Align to 1h timeframe (auto shift for completed bars)
-        st_trend_4h_aligned = align_htf_to_ltf(prices, df_4h, st_trend_4h)
+        # Align to 30m timeframe (auto shift for completed bars)
+        adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
         rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
         
     except Exception:
-        st_trend_4h_aligned = np.zeros(n)
+        adx_4h_aligned = np.zeros(n)
         rsi_4h_aligned = np.zeros(n)
+        hma_4h_aligned = np.zeros(n)
+    
+    # ========== 1d INDICATORS (REGIME FILTER) - PROPER MTF ==========
+    try:
+        df_1d = get_htf_data(prices, '1d')
+        close_1d = df_1d['close'].values
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        
+        # 1d indicators
+        adx_1d = calculate_adx(high_1d, low_1d, close_1d, period=14)
+        hma_1d = calculate_hma(close_1d, period=21)
+        
+        # Align to 30m timeframe
+        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+        hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+        
+    except Exception:
+        adx_1d_aligned = np.zeros(n)
+        hma_1d_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
     
     # Position sizing - CONSERVATIVE
-    SIZE_BASE = 0.20   # Base position
-    SIZE_HIGH = 0.30   # High conviction (all signals align)
+    SIZE_BASE = 0.25   # Base position
+    SIZE_HIGH = 0.35   # High conviction (all signals align)
     
     # ATR stoploss
-    ATR_STOP_MULT = 2.0
+    ATR_STOP_MULT = 2.5
     
-    # RSI thresholds for mean reversion
-    RSI_OVERSOLD = 35
-    RSI_OVERBOUGHT = 65
+    # RSI momentum thresholds
+    RSI_LONG_THRESHOLD = 55
+    RSI_SHORT_THRESHOLD = 45
     
-    # BB regime thresholds
-    BB_LOW_VOL = 25    # Below 25th percentile = low vol (trend follow)
-    BB_HIGH_VOL = 75   # Above 75th percentile = high vol (mean revert)
+    # ADX thresholds
+    ADX_STRONG = 25    # Strong trend
+    ADX_WEAK = 20      # Weak/choppy
     
-    first_valid = max(150, 100)
+    first_valid = max(200, 150)
     
     # Track position state
     position_side = np.zeros(n, dtype=int)
@@ -224,31 +246,45 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_1h[i]) or atr_1h[i] == 0 or np.isnan(rsi_1h[i]):
+        if np.isnan(atr_30m[i]) or atr_30m[i] == 0 or np.isnan(rsi_30m[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_1h[i]
-        rsi_val = rsi_1h[i]
-        st_trend_val = st_trend_1h[i]
-        bb_percentile = bb_pct[i]
+        atr = atr_30m[i]
+        rsi_val = rsi_30m[i]
+        adx_val = adx_30m[i]
+        dc_upper = donchian_upper[i]
+        dc_lower = donchian_lower[i]
+        hma_val = hma_30m[i]
         
         # 4h trend filters
-        st_trend_4h_val = st_trend_4h_aligned[i]
+        adx_4h_val = adx_4h_aligned[i]
         rsi_4h_val = rsi_4h_aligned[i]
+        hma_4h_val = hma_4h_aligned[i]
+        
+        # 1d regime filters
+        adx_1d_val = adx_1d_aligned[i]
+        hma_1d_val = hma_1d_aligned[i]
         
         # Determine 4h trend direction
         trend_4h = 0
-        if st_trend_4h_val == 1:
+        if hma_4h_val > 0 and price > hma_4h_val:
             trend_4h = 1
-        elif st_trend_4h_val == -1:
+        elif hma_4h_val > 0 and price < hma_4h_val:
             trend_4h = -1
         
-        # Determine regime
-        is_low_vol = bb_percentile < BB_LOW_VOL
-        is_high_vol = bb_percentile > BB_HIGH_VOL
-        is_neutral_vol = not is_low_vol and not is_high_vol
+        # Determine 1d regime
+        trend_1d = 0
+        if hma_1d_val > 0 and price > hma_1d_val:
+            trend_1d = 1
+        elif hma_1d_val > 0 and price < hma_1d_val:
+            trend_1d = -1
+        
+        # Determine if trend is strong (ADX filter)
+        is_strong_trend_30m = adx_val > ADX_STRONG
+        is_strong_trend_4h = adx_4h_val > ADX_STRONG
+        is_choppy_30m = adx_val < ADX_WEAK
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -269,7 +305,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.0*ATR)
+            # Stoploss check (2.5*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -343,51 +379,63 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ========== ENTRY LOGIC - REGIME-BASED ==========
-        # Signal votes
-        trend_vote = 0  # Supertrend vote
-        rsi_vote = 0    # RSI vote
-        regime_vote = 0 # Regime-based vote
+        # ========== ENTRY LOGIC - DONCHIAN BREAKOUT + ADX + RSI ==========
         
-        # Supertrend vote (trend direction)
-        if st_trend_val == 1:
-            trend_vote = 1
-        elif st_trend_val == -1:
-            trend_vote = -1
+        # Donchian breakout signals
+        breakout_long = price > dc_upper and dc_upper > 0
+        breakout_short = price < dc_lower and dc_lower > 0
         
-        # RSI vote (extremes indicate reversal potential)
-        if rsi_val < RSI_OVERSOLD:
-            rsi_vote = 1  # Oversold = potential long
-        elif rsi_val > RSI_OVERBOUGHT:
-            rsi_vote = -1  # Overbought = potential short
+        # RSI momentum confirmation
+        rsi_confirms_long = rsi_val > RSI_LONG_THRESHOLD
+        rsi_confirms_short = rsi_val < RSI_SHORT_THRESHOLD
         
-        # Regime-based logic
-        if is_low_vol:
-            # Low volatility = trend following
-            regime_vote = trend_vote
-        elif is_high_vol:
-            # High volatility = mean reversion (opposite of RSI extreme)
-            regime_vote = rsi_vote
-        else:
-            # Neutral = wait for clear signal
-            regime_vote = 0
+        # 4h trend filter
+        trend_4h_confirms_long = trend_4h != -1  # Not bearish on 4h
+        trend_4h_confirms_short = trend_4h != 1  # Not bullish on 4h
         
-        # 4h trend filter (must align or be neutral)
-        trend_filter_pass = (trend_4h == 0) or (trend_vote == trend_4h) or (regime_vote == trend_4h)
+        # 1d regime filter (only trade with daily trend)
+        regime_confirms_long = trend_1d != -1  # Not bearish on 1d
+        regime_confirms_short = trend_1d != 1  # Not bullish on 1d
+        
+        # ADX trend strength filter
+        adx_confirms_long = is_strong_trend_30m or is_strong_trend_4h
+        adx_confirms_short = is_strong_trend_30m or is_strong_trend_4h
+        
+        # Avoid trading in choppy markets (ADX < 20 on both timeframes)
+        avoid_choppy = not (is_choppy_30m and adx_4h_val < ADX_WEAK)
         
         # LONG conditions
-        long_trend = (is_low_vol and trend_vote == 1 and trend_filter_pass)
-        long_mean_revert = (is_high_vol and rsi_vote == 1 and trend_4h != -1)
-        long_condition = long_trend or long_mean_revert
+        long_condition = (
+            breakout_long and
+            rsi_confirms_long and
+            trend_4h_confirms_long and
+            regime_confirms_long and
+            avoid_choppy
+        )
         
         # SHORT conditions
-        short_trend = (is_low_vol and trend_vote == -1 and trend_filter_pass)
-        short_mean_revert = (is_high_vol and rsi_vote == -1 and trend_4h != 1)
-        short_condition = short_trend or short_mean_revert
+        short_condition = (
+            breakout_short and
+            rsi_confirms_short and
+            trend_4h_confirms_short and
+            regime_confirms_short and
+            avoid_choppy
+        )
         
-        # High conviction: regime + trend + 4h all align
-        high_conviction_long = long_condition and trend_vote == 1 and trend_4h == 1
-        high_conviction_short = short_condition and trend_vote == -1 and trend_4h == -1
+        # High conviction: ADX confirms strong trend + all timeframes align
+        high_conviction_long = (
+            long_condition and
+            is_strong_trend_30m and
+            trend_4h == 1 and
+            trend_1d == 1
+        )
+        
+        high_conviction_short = (
+            short_condition and
+            is_strong_trend_30m and
+            trend_4h == -1 and
+            trend_1d == -1
+        )
         
         if long_condition:
             size = SIZE_HIGH if high_conviction_long else SIZE_BASE
