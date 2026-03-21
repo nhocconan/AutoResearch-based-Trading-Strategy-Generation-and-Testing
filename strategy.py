@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #033: 1h Donchian Breakout + 4h HMA Trend + Volume Confirmation
-Hypothesis: 1h timeframe captures multi-day swings better than intraday noise.
-Donchian(20) breakouts catch momentum moves when price breaks 20-bar high/low.
-4h HMA(21) provides major trend filter - only trade breakouts in trend direction.
-Volume confirmation filters false breakouts (real moves have volume).
-RSI(14) momentum filter ensures we're not entering at exhaustion.
-Multiple entry triggers ensure ≥10 trades while 4h filter prevents counter-trend disasters.
-Position sizing 0.30 with 2.5x ATR stoploss protects against 2022-style crashes.
+Experiment #034: 4h Fisher Transform + Daily HMA Regime + ATR Volatility Scaling
+Hypothesis: 4h timeframe captures multi-day swings while avoiding intraday noise.
+Ehlers Fisher Transform (period=9) excels at detecting reversals in bear/range markets.
+Daily HMA provides major trend regime filter (avoid counter-trend trades).
+ATR volatility scaling reduces position size during high volatility (2022 crash protection).
+Multiple Fisher entry triggers (cross above -1.5 long, cross below +1.5 short) ensure ≥10 trades.
+Position sizing 0.25-0.30 with vol_scaling and 2.5x ATR stoploss controls drawdown.
+This differs from failed 4h strategies by using Fisher instead of Supertrend/RSI/MACD.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_donchian_4h_hma_vol_v1"
-timeframe = "1h"
+name = "mtf_4h_fisher_daily_hma_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -35,6 +35,34 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
     return wma3.values
 
+def calculate_fisher_transform(high, low, close, period=9):
+    """
+    Ehlers Fisher Transform - normalizes price to -1 to +1 range.
+    Sharp turning points indicate reversals.
+    Reference: Ehlers, J.F. "Fisher Transform" Technical Analysis of Stocks & Commodities, 2002.
+    """
+    hl2 = (high + low) / 2
+    
+    # Calculate highest high and lowest low over period
+    hh = pd.Series(hl2).rolling(window=period, min_periods=period).max().values
+    ll = pd.Series(hl2).rolling(window=period, min_periods=period).min().values
+    
+    # Normalize to 0-1 range with bounds checking
+    range_hl = hh - ll
+    range_hl = np.where(range_hl < 0.001, 0.001, range_hl)  # avoid division by zero
+    normalized = (hl2 - ll) / range_hl
+    normalized = np.clip(normalized, 0.001, 0.999)  # bounds for log calculation
+    
+    # Fisher transform
+    fisher = 0.5 * np.log((1 + normalized) / (1 - normalized))
+    fisher = np.nan_to_num(fisher, nan=0.0)
+    
+    # Signal line (previous fisher value)
+    fisher_signal = np.roll(fisher, 1)
+    fisher_signal[0] = fisher[0]
+    
+    return fisher, fisher_signal
+
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -47,13 +75,6 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (20-bar high/low)."""
-    donchian_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    donchian_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    return donchian_high, donchian_low, donchian_mid
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -61,151 +82,165 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 4h HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    # Load daily HTF data ONCE before loop (Rule 1)
+    df_1d = get_htf_data(prices, '1d')
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    donchian_high, donchian_low, donchian_mid = calculate_donchian(high, low, 20)
+    fisher, fisher_signal = calculate_fisher_transform(high, low, close, 9)
+    
+    # 4h HMA for trend confirmation
+    hma_21 = calculate_hma(close, 21)
+    hma_50 = calculate_hma(close, 50)
+    
+    # ATR percentile for volatility scaling (reduce size in high vol)
+    atr_percentile = pd.Series(atr).rolling(window=100, min_periods=50).apply(
+        lambda x: np.percentile(x, 50), raw=True
+    ).values
+    atr_percentile = np.nan_to_num(atr_percentile, nan=np.median(atr))
     
     # Volume SMA for confirmation
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_sma = np.nan_to_num(vol_sma, nan=np.nanmean(volume))
     
-    # 1h HMA for additional trend confirmation
-    hma_21 = calculate_hma(close, 21)
-    hma_50 = calculate_hma(close, 50)
-    
     signals = np.zeros(n)
-    SIZE = 0.30
-    HALF_SIZE = 0.15
+    BASE_SIZE = 0.28
+    HALF_SIZE = 0.14
     
     # Track positions for stoploss
     position_side = 0
     entry_price = 0.0
     trailing_stop = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
+    entry_atr = 0.0
     
     for i in range(100, n):
-        # 4h trend filter (major regime)
-        trend_4h_bullish = hma_4h_aligned[i] > 0 and close[i] > hma_4h_aligned[i]
-        trend_4h_bearish = hma_4h_aligned[i] > 0 and close[i] < hma_4h_aligned[i]
+        # Daily trend filter (major regime)
+        daily_bullish = hma_1d_aligned[i] > 0 and close[i] > hma_1d_aligned[i]
+        daily_bearish = hma_1d_aligned[i] > 0 and close[i] < hma_1d_aligned[i]
+        daily_neutral = abs(close[i] - hma_1d_aligned[i]) < hma_1d_aligned[i] * 0.02 if hma_1d_aligned[i] > 0 else True
         
-        # 1h HMA trend confirmation
+        # Fisher Transform signals
+        fisher_long_cross = fisher[i] > -1.5 and fisher_signal[i] <= -1.5
+        fisher_short_cross = fisher[i] < 1.5 and fisher_signal[i] >= 1.5
+        fisher_extreme_long = fisher[i] < -1.8 and fisher[i] > fisher_signal[i]
+        fisher_extreme_short = fisher[i] > 1.8 and fisher[i] < fisher_signal[i]
+        fisher_rising = fisher[i] > fisher_signal[i]
+        fisher_falling = fisher[i] < fisher_signal[i]
+        
+        # 4h HMA trend
         hma_trend_long = hma_21[i] > hma_50[i]
         hma_trend_short = hma_21[i] < hma_50[i]
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donchian_high[i-1] if not np.isnan(donchian_high[i-1]) else False
-        breakout_short = close[i] < donchian_low[i-1] if not np.isnan(donchian_low[i-1]) else False
+        # RSI momentum filter
+        rsi_bullish = rsi[i] > 40 and rsi[i] < 75
+        rsi_bearish = rsi[i] > 25 and rsi[i] < 60
+        rsi_rising = rsi[i] > rsi[i-3] if i > 3 else True
+        rsi_falling = rsi[i] < rsi[i-3] if i > 3 else True
         
-        # Previous bar was inside channel (confirms breakout)
-        prev_inside_long = close[i-1] <= donchian_high[i-1] if not np.isnan(donchian_high[i-1]) else False
-        prev_inside_short = close[i-1] >= donchian_low[i-1] if not np.isnan(donchian_low[i-1]) else False
+        # Volume confirmation
+        vol_confirm = volume[i] > vol_sma[i] * 0.9 if vol_sma[i] > 0 else True
         
-        # Volume confirmation (1.5x average for strong breakout)
-        vol_confirm = volume[i] > vol_sma[i] * 1.3 if vol_sma[i] > 0 else True
+        # Price position vs HMA21
+        price_above_hma = close[i] > hma_21[i]
+        price_below_hma = close[i] < hma_21[i]
         
-        # RSI momentum (not overextended)
-        rsi_bullish = rsi[i] > 45 and rsi[i] < 75
-        rsi_bearish = rsi[i] > 25 and rsi[i] < 55
-        rsi_rising = rsi[i] > rsi[i-2] if i > 2 else True
-        rsi_falling = rsi[i] < rsi[i-2] if i > 2 else True
+        # Volatility scaling (reduce size when ATR is high)
+        vol_scale = 1.0
+        if atr_percentile[i] > 0:
+            vol_scale = min(1.5, max(0.6, atr_percentile[i] / (atr[i] + 0.0001)))
+        vol_scale = np.clip(vol_scale, 0.6, 1.5)
+        
+        SIZE = BASE_SIZE * vol_scale
+        SIZE = np.clip(SIZE, 0.15, 0.35)  # Keep within bounds
         
         # Entry logic - MULTIPLE triggers to ensure trades (Rule 9)
         new_signal = 0.0
         
-        # LONG ENTRY TRIGGERS
-        # Trigger 1: Donchian breakout + 4h bullish trend + volume
-        if breakout_long and prev_inside_long and trend_4h_bullish and vol_confirm:
+        # LONG ENTRY TRIGGERS (any one can trigger)
+        # Trigger 1: Fisher cross above -1.5 (reversal signal)
+        if fisher_long_cross and (daily_bullish or daily_neutral):
             new_signal = SIZE
-        # Trigger 2: Donchian breakout + 1h HMA trend + RSI ok
-        elif breakout_long and prev_inside_long and hma_trend_long and rsi_bullish:
+        # Trigger 2: Fisher extreme long + turning up + RSI ok
+        elif fisher_extreme_long and rsi_bullish and price_above_hma:
             new_signal = SIZE
-        # Trigger 3: 4h bullish + 1h HMA bull + RSI rising (trend continuation)
-        elif trend_4h_bullish and hma_trend_long and rsi_rising and rsi[i] > 50:
+        # Trigger 3: Daily bullish + Fisher rising + HMA trend long
+        elif daily_bullish and fisher_rising and hma_trend_long:
             new_signal = SIZE
-        # Trigger 4: Price above Donchian mid + 4h trend + volume
-        elif close[i] > donchian_mid[i] and trend_4h_bullish and vol_confirm:
+        # Trigger 4: Fisher rising from oversold + volume confirmation
+        elif fisher_rising and fisher[i] < -1.0 and vol_confirm:
+            new_signal = SIZE
+        # Trigger 5: RSI rising from neutral + Fisher support
+        elif rsi_rising and rsi[i] > 45 and fisher[i] > fisher_signal[i]:
             new_signal = SIZE
         
-        # SHORT ENTRY TRIGGERS
-        # Trigger 1: Donchian breakout + 4h bearish trend + volume
-        if breakout_short and prev_inside_short and trend_4h_bearish and vol_confirm:
+        # SHORT ENTRY TRIGGERS (any one can trigger)
+        # Trigger 1: Fisher cross below +1.5 (reversal signal)
+        if fisher_short_cross and (daily_bearish or daily_neutral):
             new_signal = -SIZE
-        # Trigger 2: Donchian breakout + 1h HMA trend + RSI ok
-        elif breakout_short and prev_inside_short and hma_trend_short and rsi_bearish:
+        # Trigger 2: Fisher extreme short + turning down + RSI ok
+        elif fisher_extreme_short and rsi_bearish and price_below_hma:
             new_signal = -SIZE
-        # Trigger 3: 4h bearish + 1h HMA bear + RSI falling (trend continuation)
-        elif trend_4h_bearish and hma_trend_short and rsi_falling and rsi[i] < 50:
+        # Trigger 3: Daily bearish + Fisher falling + HMA trend short
+        elif daily_bearish and fisher_falling and hma_trend_short:
             new_signal = -SIZE
-        # Trigger 4: Price below Donchian mid + 4h trend + volume
-        elif close[i] < donchian_mid[i] and trend_4h_bearish and vol_confirm:
+        # Trigger 4: Fisher falling from overbought + volume confirmation
+        elif fisher_falling and fisher[i] > 1.0 and vol_confirm:
+            new_signal = -SIZE
+        # Trigger 5: RSI falling from neutral + Fisher support
+        elif rsi_falling and rsi[i] < 55 and fisher[i] < fisher_signal[i]:
             new_signal = -SIZE
         
         # Stoploss logic (Rule 6) - ATR based with trailing
         if position_side > 0 and entry_price > 0:
-            # Update highest since entry for trailing
-            if close[i] > highest_since_entry:
-                highest_since_entry = close[i]
-            
-            stop_loss = entry_price - 2.5 * atr[i]
+            stop_loss = entry_price - 2.5 * entry_atr
             if close[i] < stop_loss:
                 new_signal = 0.0  # Stoploss hit
+            # Trail stop for longs
             else:
-                # Trail stop: 2.5 ATR below highest
-                new_trailing = highest_since_entry - 2.5 * atr[i]
+                new_trailing = close[i] - 2.5 * atr[i]
                 if new_trailing > trailing_stop:
                     trailing_stop = new_trailing
-                if close[i] < trailing_stop and trailing_stop > 0:
+                if close[i] < trailing_stop and trailing_stop > stop_loss:
                     new_signal = 0.0
-                # Take partial profit at 3R
-                elif close[i] > entry_price + 3.0 * atr[i] and signals[i-1] == SIZE:
+                # Take partial profit at 2.5R
+                elif close[i] > entry_price + 2.5 * entry_atr and signals[i-1] == SIZE:
                     new_signal = HALF_SIZE
         
         if position_side < 0 and entry_price > 0:
-            # Update lowest since entry for trailing
-            if close[i] < lowest_since_entry or lowest_since_entry == 0:
-                lowest_since_entry = close[i]
-            
-            stop_loss = entry_price + 2.5 * atr[i]
+            stop_loss = entry_price + 2.5 * entry_atr
             if close[i] > stop_loss:
                 new_signal = 0.0  # Stoploss hit
+            # Trail stop for shorts
             else:
-                # Trail stop: 2.5 ATR above lowest
-                new_trailing = lowest_since_entry + 2.5 * atr[i]
+                new_trailing = close[i] + 2.5 * atr[i]
                 if new_trailing < trailing_stop or trailing_stop == 0:
                     trailing_stop = new_trailing
-                if close[i] > trailing_stop and trailing_stop > 0:
+                if close[i] > trailing_stop and trailing_stop < stop_loss:
                     new_signal = 0.0
-                # Take partial profit at 3R
-                elif close[i] < entry_price - 3.0 * atr[i] and signals[i-1] == -SIZE:
+                # Take partial profit at 2.5R
+                elif close[i] < entry_price - 2.5 * entry_atr and signals[i-1] == -SIZE:
                     new_signal = -HALF_SIZE
         
         # Update position tracking
         if new_signal != 0 and position_side == 0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
-            highest_since_entry = close[i] if position_side > 0 else 0.0
-            lowest_since_entry = close[i] if position_side < 0 else 0.0
+            entry_atr = atr[i]
+            trailing_stop = close[i] - 2.5 * entry_atr if position_side > 0 else close[i] + 2.5 * entry_atr
         elif new_signal != 0 and position_side != 0:
             if np.sign(new_signal) != position_side:
                 entry_price = close[i]
                 position_side = np.sign(new_signal)
-                trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
-                highest_since_entry = close[i] if position_side > 0 else 0.0
-                lowest_since_entry = close[i] if position_side < 0 else 0.0
+                entry_atr = atr[i]
+                trailing_stop = close[i] - 2.5 * entry_atr if position_side > 0 else close[i] + 2.5 * entry_atr
         elif new_signal == 0 and position_side != 0:
             position_side = 0
             entry_price = 0.0
+            entry_atr = 0.0
             trailing_stop = 0.0
-            highest_since_entry = 0.0
-            lowest_since_entry = 0.0
         
         signals[i] = new_signal
     
