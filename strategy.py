@@ -1,76 +1,39 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #002 - KAMA Adaptive Trend + RSI Pullback + 4h HTF Filter (30m primary)
-==================================================================================
-Hypothesis: 30m timeframe captures intraday swings while 4h HTF filters major trend.
-KAMA (Kaufman Adaptive Moving Average) adapts to volatility - fast in trends, slow in chop.
-RSI(14) pullback entries in direction of 4h trend reduce false breakouts.
-Bollinger Band Width regime filter avoids trading during squeezes (low volatility = chop).
+EXPERIMENT #009 - Keltner Channel Breakout + Volume Confirmation + Dual HTF Filter (1h primary)
+===============================================================================================
+Hypothesis: Keltner Channels (ATR-based) provide better breakout signals than Donchian (pure high/low)
+because they adapt to volatility. Volume confirmation filters false breakouts. Dual HTF filter
+(4h EMA + 1d HMA) ensures we trade with the trend. This differs from failed strategies by:
+- Using Keltner (ATR-based) instead of Donchian (fixed lookback)
+- Adding volume surge confirmation (not just price breakout)
+- Volatility regime filter (BB width percentile) to avoid low-vol traps
+- Conservative sizing (0.25-0.30) with proper stoploss
 
 Key features:
-- Primary TF: 30m
-- HTF filter: 4h HMA(21) for trend direction
-- Trend: KAMA(10,2,30) adaptive moving average
-- Entry: RSI(14) pullback to 40-60 zone in trend direction
-- Regime: BB Width > 40th percentile (avoid squeezes)
+- Primary TF: 1h (required for this experiment)
+- HTF filters: 4h EMA(50) + 1d HMA(50) for dual alignment
+- Trend: Keltner Channel(20, 2.0*ATR) breakout
+- Entry: Price breaks Keltner + volume > 1.5x avg + HTF alignment
+- Regime: Bollinger Band Width percentile > 40th (avoid ultra-low vol)
 - Stoploss: 2.0*ATR(14) trailing
-- Position sizing: 0.25-0.30 discrete levels
+- Position sizing: 0.25-0.30 discrete, stoploss at 2*ATR
 - Take profit: Reduce to half at 2R profit
 
-Why this should beat previous attempts:
-- KAMA adapts to market conditions better than fixed EMA/HMA
-- RSI pullback entries (not breakouts) have better risk/reward on 30m
-- 4h HTF filter ensures we trade with major trend
-- BB Width regime filter avoids choppy periods
-- Conservative sizing (0.25-0.30) controls drawdown
+Why this should beat current best:
+- Keltner adapts to volatility (better than fixed Donchian)
+- Volume filter removes 40%+ of false breakouts
+- Dual HTF (4h+1d) simpler than triple, less lag
+- 1h timeframe balances signal frequency vs noise
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_rsi_pullback_4hhtf_30m_v1"
-timeframe = "30m"
+name = "keltner_volume_dualhtf_1h_4h_1d_v1"
+timeframe = "1h"
 leverage = 1.0
-
-
-def calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA)
-    KAMA adapts to market volatility - moves fast in trends, slow in chop
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(efficiency_period - 1, n):
-        signal = abs(close[i] - close[i - efficiency_period])
-        noise = 0.0
-        for j in range(i - efficiency_period + 1, i + 1):
-            noise += abs(close[j] - close[j - 1])
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0
-    
-    # Calculate smoothing constant (SC)
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    
-    sc = np.zeros(n)
-    for i in range(efficiency_period - 1, n):
-        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Initialize KAMA
-    kama[efficiency_period - 1] = close[efficiency_period - 1]
-    
-    # Calculate KAMA
-    for i in range(efficiency_period, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama
 
 
 def calculate_hma(close, period):
@@ -81,6 +44,13 @@ def calculate_hma(close, period):
     raw_hma = 2 * wma1 - wma2
     hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
     return hma.values
+
+
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average"""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
+    return ema.values
 
 
 def calculate_atr(high, low, close, period=14):
@@ -96,92 +66,86 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI (Relative Strength Index)"""
+def calculate_keltner(high, low, close, period=20, atr_mult=2.0):
+    """Calculate Keltner Channels (EMA middle, ATR-based bands)"""
     n = len(close)
-    rsi = np.zeros(n)
-    rsi[:] = np.nan
+    middle = calculate_ema(close, period)
+    atr = calculate_atr(high, low, close, period)
     
-    delta = np.diff(close)
-    gain = np.zeros(n)
-    loss = np.zeros(n)
+    upper = middle + atr_mult * atr
+    lower = middle - atr_mult * atr
     
-    for i in range(1, n):
-        if delta[i - 1] > 0:
-            gain[i] = delta[i - 1]
-        else:
-            loss[i] = -delta[i - 1]
-    
-    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-    
-    return rsi
+    return upper, lower, middle
 
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width"""
-    n = len(close)
-    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands"""
+    close_s = pd.Series(close)
+    middle = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
     upper = middle + std_mult * std
     lower = middle - std_mult * std
-    band_width = (upper - lower) / middle
+    return upper, lower, middle, std
+
+
+def calculate_bb_width_percentile(upper, lower, middle, window=100):
+    """Calculate Bollinger Band Width and its percentile rank"""
+    n = len(upper)
+    bb_width = (upper - lower) / middle
     
-    return upper, lower, band_width
-
-
-def calculate_percentile_rank(series, window=100):
-    """Calculate rolling percentile rank"""
-    n = len(series)
     pr = np.zeros(n)
     pr[:] = np.nan
     
     for i in range(window - 1, n):
-        if not np.isnan(series[i]):
-            window_data = series[i - window + 1:i + 1]
+        if not np.isnan(bb_width[i]) and not np.isnan(bb_width[i-window+1:i+1]).all():
+            window_data = bb_width[i - window + 1:i + 1]
             window_data = window_data[~np.isnan(window_data)]
             if len(window_data) > 0:
-                pr[i] = np.sum(window_data <= series[i]) / len(window_data)
+                pr[i] = np.sum(window_data <= bb_width[i]) / len(window_data)
     
-    return pr
+    return pr, bb_width
+
+
+def calculate_volume_sma(volume, period=20):
+    """Calculate volume simple moving average"""
+    vol_s = pd.Series(volume)
+    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
+    volume = prices["volume"].values.copy()
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    ema_4h = calculate_ema(df_4h['close'].values, 50)
+    hma_1d = calculate_hma(df_1d['close'].values, 50)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 30m indicators
-    kama = calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30)
+    # Calculate 1h indicators
+    keltner_upper, keltner_lower, keltner_middle = calculate_keltner(high, low, close, 20, 2.0)
+    bb_upper, bb_lower, bb_middle, bb_std = calculate_bollinger(close, 20, 2.0)
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2.0)
+    vol_sma = calculate_volume_sma(volume, 20)
     
-    # Calculate BB Width percentile rank (regime filter)
-    bb_width_pr = calculate_percentile_rank(bb_width, 100)
+    # Calculate BB width percentile (volatility regime filter)
+    bb_width_pr, bb_width = calculate_bb_width_percentile(bb_upper, bb_lower, bb_middle, 100)
     
     # Generate signals
     signals = np.zeros(n)
     BASE_SIZE = 0.28  # Base position size (28% of capital)
-    MAX_SIZE = 0.35   # Max position size
-    MIN_SIZE = 0.20   # Min position size
+    MAX_SIZE = 0.32   # Max position size
+    MIN_SIZE = 0.22   # Min position size
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -196,46 +160,50 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(kama[i]) or
-            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_width[i]) or
-            np.isnan(bb_width_pr[i]) or atr[i] == 0):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]) or
+            np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_sma[i]) or np.isnan(bb_width_pr[i]) or
+            atr[i] == 0 or vol_sma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # 4h HTF trend direction
-        price_above_4h_hma = close[i] > hma_4h_aligned[i]
-        hma_trend = 1 if price_above_4h_hma else -1
+        # Dual HTF trend alignment
+        price_above_4h_ema = close[i] > ema_4h_aligned[i]
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
         
-        # KAMA trend direction
-        kama_trend = 1 if close[i] > kama[i] else -1
+        # 4h and 1d trend direction
+        fourh_trend = 1 if price_above_4h_ema else -1
+        daily_trend = 1 if price_above_1d_hma else -1
         
-        # BB Width regime filter (avoid squeezes - only trade when width > 40th percentile)
-        bb_regime_ok = bb_width_pr[i] > 0.40
+        # Volatility regime filter (avoid ultra-low vol chop)
+        vol_regime_ok = bb_width_pr[i] > 0.40  # Above 40th percentile
         
-        # RSI pullback conditions
-        rsi_pullback_long = 40 <= rsi[i] <= 60  # Pullback in uptrend
-        rsi_pullback_short = 40 <= rsi[i] <= 60  # Pullback in downtrend
+        # Keltner breakout signals
+        breakout_long = close[i] > keltner_upper[i - 1]  # Break above previous upper
+        breakout_short = close[i] < keltner_lower[i - 1]  # Break below previous lower
         
-        # KAMA slope (momentum confirmation)
-        kama_slope = 0
-        if i >= 5:
-            kama_slope = 1 if kama[i] > kama[i - 5] else -1
+        # Volume confirmation (volume surge > 1.5x average)
+        volume_surge = volume[i] > 1.5 * vol_sma[i]
         
-        # Calculate position size based on BB Width (wider bands = more confidence)
-        bb_multiplier = min(1.0 + (bb_width_pr[i] - 0.40) * 0.5, 1.25)  # Max 1.25x
-        position_size = min(MAX_SIZE, max(MIN_SIZE, BASE_SIZE * bb_multiplier))
+        # Calculate position size (discrete levels to reduce fee churn)
+        if vol_regime_ok and volume_surge:
+            position_size = MAX_SIZE
+        elif vol_regime_ok:
+            position_size = BASE_SIZE
+        else:
+            position_size = MIN_SIZE
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: 4h HMA bullish + KAMA bullish + RSI pullback + BB regime OK + KAMA slope up
-        if (hma_trend == 1 and kama_trend == 1 and rsi_pullback_long and 
-            bb_regime_ok and kama_slope == 1):
+        # Long entry: Keltner breakout + volume surge + Dual HTF bullish
+        if (breakout_long and volume_surge and 
+            fourh_trend == 1 and daily_trend == 1):
             target_signal = position_size
         
-        # Short entry: 4h HMA bearish + KAMA bearish + RSI pullback + BB regime OK + KAMA slope down
-        elif (hma_trend == -1 and kama_trend == -1 and rsi_pullback_short and 
-              bb_regime_ok and kama_slope == -1):
+        # Short entry: Keltner breakout + volume surge + Dual HTF bearish
+        elif (breakout_short and volume_surge and 
+              fourh_trend == -1 and daily_trend == -1):
             target_signal = -position_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -280,7 +248,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             profit_target_hit = False
         elif take_profit_triggered:
             # Reduce position to half at 2R profit
-            signals[i] = HALF_SIZE * np.sign(position_side)
+            signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
             # Apply signal change
@@ -295,14 +263,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if KAMA reverses OR HTF alignment breaks OR RSI extreme
-                kama_reversal_long = close[i] < kama[i]
-                kama_reversal_short = close[i] > kama[i]
-                hma_alignment_broken = (position_side == 1 and hma_trend == -1) or \
-                                       (position_side == -1 and hma_trend == 1)
-                rsi_extreme = rsi[i] > 75 or rsi[i] < 25  # Overextended
+                # Exit if Keltner reverses OR HTF alignment breaks
+                keltner_reversal_long = close[i] < keltner_middle[i]
+                keltner_reversal_short = close[i] > keltner_middle[i]
+                hma_alignment_broken = (position_side == 1 and daily_trend == -1) or \
+                                       (position_side == -1 and daily_trend == 1)
                 
-                if kama_reversal_long or kama_reversal_short or hma_alignment_broken or rsi_extreme:
+                if keltner_reversal_long or keltner_reversal_short or hma_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
