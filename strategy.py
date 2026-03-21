@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #016 - MTF DEMA+Stochastic+Volume+ATR Dynamic Sizing (1h+4h v1)
+EXPERIMENT #017 - MTF KAMA+RSI+BBWidth+Volume (15m+4h v2)
 ==================================================================================================
-Hypothesis: Current best #004 uses 15m/1h/4h with Supertrend+MACD+RSI. This experiment tries:
-- 4h DEMA trend (faster than HMA, more responsive than SMA)
-- 1h Stochastic entry (different momentum measure than RSI)
-- Volume confirmation (proven in #009, #012 kept strategies)
-- ATR-based dynamic position sizing (reduce size in high volatility)
-- ADX filter for trend strength validation
+Hypothesis: Current best #004 uses Supertrend+MACD+RSI on 15m/1h/4h. This experiment tries:
+- 4h KAMA trend (Kaufman Adaptive - adjusts to market noise better than HMA/DEMA)
+- 15m RSI pullback entries (proven in #007, #012 kept strategies)
+- Bollinger Band Width regime filter (detects squeeze vs expansion - different from ADX)
+- Volume confirmation (proven in #009, #012)
+- ATR trailing stop with proper signal→0 logic
 
 Why this should beat #004 (Sharpe=3.653):
-- 4h trend is more stable than 1h trend (less whipsaw)
-- Stochastic has better overbought/oversold detection than RSI
-- Volume confirmation filters false breakouts
-- Dynamic sizing reduces risk during high volatility periods
-- Based on lessons from #009 (volume worked) and #012 (kept strategy)
+- KAMA adapts to volatility better than static EMAs (less whipsaw in choppy markets)
+- BB Width regime detection filters low-volatility traps (different from ADX filter)
+- 15m entries give more trade opportunities than 1h entries
+- Based on lessons from #007 (Supertrend+RSI worked) and #012 (volume helped)
 
-Key differences from #040:
-- Uses 4h trend instead of 1h trend (slower, more stable)
-- Uses Stochastic instead of RSI (different momentum)
-- Uses DEMA instead of HMA (faster response)
-- Dynamic position sizing based on ATR volatility
+Key differences from failed #016:
+- Uses KAMA instead of DEMA (more adaptive to market conditions)
+- Uses RSI instead of Stochastic (more proven in crypto)
+- Uses BB Width regime instead of ADX (different volatility measure)
+- Proper numpy array handling (no read-only issues)
+- Simpler position state tracking
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_dema_stochastic_volume_atr_1h_4h_v1"
-timeframe = "1h"
+name = "mtf_kama_rsi_bbw_volume_15m_4h_v2"
+timeframe = "15m"
 leverage = 1.0
 
 
@@ -55,97 +55,85 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_dema(close, period=21):
-    """Calculate Double Exponential Moving Average"""
+def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    n = len(close)
+    if n < er_period:
+        return np.zeros(n)
+    
+    kama = np.zeros(n)
+    
+    # Calculate Efficiency Ratio
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        change = abs(close[i] - close[i - er_period])
+        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        if volatility > 0:
+            er[i] = change / volatility
+        else:
+            er[i] = 0
+    
+    # Calculate Smoothing Constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Initialize KAMA
+    kama[er_period] = close[er_period]
+    
+    # Calculate KAMA
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    return kama
+
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI"""
+    n = len(close)
+    if n < period + 1:
+        return np.zeros(n)
+    
+    delta = np.diff(close)
+    gain = np.zeros(n)
+    loss = np.zeros(n)
+    
+    gain[1:] = np.where(delta > 0, delta, 0)
+    loss[1:] = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=period, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).rolling(window=period, min_periods=period).mean().values
+    
+    rsi = np.zeros(n)
+    for i in range(period, n):
+        if avg_loss[i] == 0:
+            rsi[i] = 100
+        else:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+    
+    return rsi
+
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width"""
     n = len(close)
     if n < period:
-        return np.zeros(n)
+        return np.zeros(n), np.zeros(n), np.zeros(n)
     
-    ema1 = pd.Series(close).ewm(span=period, adjust=False).mean().values
-    ema2 = pd.Series(ema1).ewm(span=period, adjust=False).mean().values
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     
-    dema = 2 * ema1 - ema2
-    dema[:period] = 0
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
     
-    return dema
-
-
-def calculate_stochastic(high, low, close, k_period=14, d_period=3):
-    """Calculate Stochastic Oscillator (%K and %D)"""
-    n = len(close)
-    if n < k_period + d_period:
-        return np.zeros(n), np.zeros(n)
-    
-    k_percent = np.zeros(n)
-    d_percent = np.zeros(n)
-    
-    for i in range(k_period - 1, n):
-        lowest_low = np.min(low[i - k_period + 1:i + 1])
-        highest_high = np.max(high[i - k_period + 1:i + 1])
-        
-        if highest_high > lowest_low:
-            k_percent[i] = 100 * (close[i] - lowest_low) / (highest_high - lowest_low)
-        else:
-            k_percent[i] = 50
-    
-    d_percent = pd.Series(k_percent).rolling(window=d_period, min_periods=d_period).mean().values
-    d_percent[:d_period + k_period - 2] = 0
-    
-    return k_percent, d_percent
-
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    n = len(close)
-    if n < period * 2:
-        return np.zeros(n)
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
-        
-        if high[i] - high[i - 1] > low[i - 1] - low[i]:
-            plus_dm[i] = max(0, high[i] - high[i - 1])
-        else:
-            plus_dm[i] = 0
-            
-        if low[i - 1] - low[i] > high[i] - high[i - 1]:
-            minus_dm[i] = max(0, low[i - 1] - low[i])
-        else:
-            minus_dm[i] = 0
-    
-    atr = np.zeros(n)
-    atr[period - 1] = np.mean(tr[1:period])
+    # Band Width = (Upper - Lower) / SMA
+    bw = np.zeros(n)
     for i in range(period, n):
-        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+        if sma[i] > 0:
+            bw[i] = (upper[i] - lower[i]) / sma[i]
+        else:
+            bw[i] = 0
     
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period, n):
-        if atr[i] > 0:
-            plus_di[i] = 100 * plus_dm[i] / atr[i]
-            minus_di[i] = 100 * minus_dm[i] / atr[i]
-    
-    dx = np.zeros(n)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = np.zeros(n)
-    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
-    for i in range(period * 2, n):
-        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
-    
-    return adx
+    return upper, lower, bw
 
 
 def calculate_volume_sma(volume, period=20):
@@ -165,12 +153,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values
     n = len(close)
     
-    # 1h indicators for entry timing
-    atr_1h = calculate_atr(high, low, close, period=14)
-    stoch_k_1h, stoch_d_1h = calculate_stochastic(high, low, close, k_period=14, d_period=3)
-    adx_1h = calculate_adx(high, low, close, period=14)
-    volume_sma_1h = calculate_volume_sma(volume, period=20)
-    dema_1h = calculate_dema(close, period=21)
+    # 15m indicators for entry timing
+    atr_15m = calculate_atr(high, low, close, period=14)
+    rsi_15m = calculate_rsi(close, period=14)
+    bb_upper_15m, bb_lower_15m, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    volume_sma_15m = calculate_volume_sma(volume, period=20)
+    kama_15m = calculate_kama(close, er_period=10)
     
     # Get 4h data using mtf_data helper (CRITICAL - no manual resampling!)
     try:
@@ -181,22 +169,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         volume_4h = df_4h['volume'].values
         
         # 4h indicators for trend
-        dema_4h_raw = calculate_dema(close_4h, period=21)
-        adx_4h_raw = calculate_adx(high_4h, low_4h, close_4h, period=14)
+        kama_4h_raw = calculate_kama(close_4h, er_period=10)
+        bbw_4h_raw = calculate_bollinger_bands(close_4h, period=20, std_mult=2.0)[2]
         atr_4h_raw = calculate_atr(high_4h, low_4h, close_4h, period=14)
-        volume_sma_4h_raw = calculate_volume_sma(volume_4h, period=20)
         
-        # Align 4h indicators to 1h timeframe (auto shift for completed bars)
-        dema_4h = align_htf_to_ltf(prices, df_4h, dema_4h_raw)
-        adx_4h = align_htf_to_ltf(prices, df_4h, adx_4h_raw)
+        # Align 4h indicators to 15m timeframe (auto shift for completed bars)
+        kama_4h = align_htf_to_ltf(prices, df_4h, kama_4h_raw)
+        bbw_4h = align_htf_to_ltf(prices, df_4h, bbw_4h_raw)
         atr_4h = align_htf_to_ltf(prices, df_4h, atr_4h_raw)
-        volume_sma_4h = align_htf_to_ltf(prices, df_4h, volume_sma_4h_raw)
     except Exception:
         # Fallback if mtf_data fails
-        dema_4h = np.zeros(n)
-        adx_4h = np.zeros(n)
+        kama_4h = np.zeros(n)
+        bbw_4h = np.zeros(n)
         atr_4h = np.zeros(n)
-        volume_sma_4h = np.zeros(n)
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
@@ -206,14 +191,15 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     SIZE_HALF = 0.175
     SIZE_DYNAMIC_MIN = 0.20
     
-    # Stochastic thresholds for entry
-    STOCH_LONG_MIN = 20
-    STOCH_LONG_MAX = 50
-    STOCH_SHORT_MIN = 50
-    STOCH_SHORT_MAX = 80
+    # RSI thresholds for entry
+    RSI_LONG_MIN = 35
+    RSI_LONG_MAX = 50
+    RSI_SHORT_MIN = 50
+    RSI_SHORT_MAX = 65
     
-    # ADX threshold for trend strength (4h)
-    ADX_MIN = 20
+    # BB Width regime thresholds (percentile-based)
+    BBW_LOW_PERCENTILE = 30  # Squeeze regime
+    BBW_HIGH_PERCENTILE = 70  # Expansion regime
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.0
@@ -221,12 +207,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Volume confirmation threshold
     VOLUME_MULT = 1.2
     
-    # ATR-based dynamic sizing
-    ATR_BASELINE = np.percentile(atr_1h[100:], 50) if len(atr_1h) > 100 else np.mean(atr_1h[100:])
+    # Calculate BBW percentile for regime detection
+    bbw_valid = bbw_4h[100:] if len(bbw_4h) > 100 else bbw_4h
+    bbw_valid = bbw_valid[bbw_valid > 0]
+    bbw_low_thresh = np.percentile(bbw_valid, BBW_LOW_PERCENTILE) if len(bbw_valid) > 0 else 0.01
+    bbw_high_thresh = np.percentile(bbw_valid, BBW_HIGH_PERCENTILE) if len(bbw_valid) > 0 else 0.05
+    
+    # ATR-based dynamic sizing baseline
+    atr_valid = atr_15m[100:] if len(atr_15m) > 100 else atr_15m
+    ATR_BASELINE = np.percentile(atr_valid, 50) if len(atr_valid) > 0 else np.mean(atr_valid)
     
     first_valid = max(200, 14 * 2, 20, 28)
     
-    # Track position state
+    # Track position state (use lists to avoid read-only issues)
     position_side = np.zeros(n)
     entry_price = np.zeros(n)
     tp_triggered = np.zeros(n)
@@ -234,50 +227,36 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_1h[i]) or np.isnan(stoch_k_1h[i]) or np.isnan(adx_1h[i]) or atr_1h[i] == 0:
+        # Check for invalid data
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
+            position_side[i] = 0
             continue
         
-        # 4h trend filter
+        # 4h trend filter using KAMA
         trend_4h = 0
-        if dema_4h[i] > 0 and close[i] > dema_4h[i]:
+        if kama_4h[i] > 0 and close[i] > kama_4h[i]:
             trend_4h = 1
-        elif dema_4h[i] > 0 and close[i] < dema_4h[i]:
+        elif kama_4h[i] > 0 and close[i] < kama_4h[i]:
             trend_4h = -1
         
-        adx_4h_val = adx_4h[i]
-        atr_4h_val = atr_4h[i]
+        # BB Width regime filter (4h)
+        bbw_4h_val = bbw_4h[i]
+        bbw_4h_val = max(bbw_4h_val, 0.001)  # Avoid division by zero
         
-        # 1h indicators
-        stoch_k = stoch_k_1h[i]
-        stoch_d = stoch_d_1h[i]
-        adx_1h_val = adx_1h[i]
-        atr = atr_1h[i]
-        price = close[i]
+        # Volume confirmation
         vol = volume[i]
-        vol_sma = volume_sma_1h[i]
+        vol_sma = volume_sma_15m[i]
+        volume_ok = vol_sma > 0 and vol >= vol_sma * 0.8
         
-        # ADX filter (4h) - only trade when trend is strong enough
-        if adx_4h_val < ADX_MIN:
-            signals[i] = 0.0
-            position_side[i] = 0
-            continue
-        
-        # Volume confirmation - avoid low volume periods
-        if vol_sma > 0 and vol < vol_sma * 0.8:
-            signals[i] = 0.0
-            position_side[i] = 0
-            continue
-        
-        # Trend filter - 4h DEMA must agree with price direction
-        if trend_4h == 0:
-            signals[i] = 0.0
-            position_side[i] = 0
-            continue
+        # ATR for this bar
+        atr = atr_15m[i]
+        price = close[i]
+        rsi = rsi_15m[i]
         
         # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
-            prev_side = position_side[i - 1]
+            prev_side = int(position_side[i - 1])
             prev_entry = entry_price[i - 1] if entry_price[i - 1] > 0 else close[i - 1]
             prev_tp = tp_triggered[i - 1]
             prev_high = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else prev_entry
@@ -295,16 +274,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = current_low
             
             # Stoploss check (2.0*ATR)
+            exit_signal = False
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    continue
+                    exit_signal = True
                 
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
@@ -313,30 +287,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
+                    highest_since_entry[i] = current_high
+                    lowest_since_entry[i] = current_low
                     continue
                 
                 # Trail stop at 1R profit
                 if prev_tp:
                     trail_stop = current_high - ATR_STOP_MULT * atr
                     if price < trail_stop:
-                        signals[i] = 0.0
-                        position_side[i] = 0
-                        entry_price[i] = 0
-                        tp_triggered[i] = 0
-                        highest_since_entry[i] = 0
-                        lowest_since_entry[i] = 0
-                        continue
+                        exit_signal = True
                     
             elif prev_side == -1:
                 stoploss_price = prev_entry + ATR_STOP_MULT * atr
                 if price > stoploss_price:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = 0
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    continue
+                    exit_signal = True
                 
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
@@ -345,19 +309,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
+                    highest_since_entry[i] = current_high
+                    lowest_since_entry[i] = current_low
                     continue
                 
                 # Trail stop at 1R profit
                 if prev_tp:
                     trail_stop = current_low + ATR_STOP_MULT * atr
                     if price > trail_stop:
-                        signals[i] = 0.0
-                        position_side[i] = 0
-                        entry_price[i] = 0
-                        tp_triggered[i] = 0
-                        highest_since_entry[i] = 0
-                        lowest_since_entry[i] = 0
-                        continue
+                        exit_signal = True
+            
+            if exit_signal:
+                signals[i] = 0.0
+                position_side[i] = 0
+                entry_price[i] = 0
+                tp_triggered[i] = 0
+                highest_since_entry[i] = 0
+                lowest_since_entry[i] = 0
+                continue
             
             # Hold position if no exit triggered
             signals[i] = signals[i - 1]
@@ -369,17 +338,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             continue
         
         # Dynamic position sizing based on ATR volatility
-        if ATR_BASELINE > 0:
+        if ATR_BASELINE > 0 and atr > 0:
             atr_ratio = ATR_BASELINE / atr
             position_size = SIZE_FULL * min(max(atr_ratio, 0.5), 1.5)
             position_size = max(SIZE_DYNAMIC_MIN, min(0.40, position_size))
         else:
             position_size = SIZE_FULL
         
-        # Entry logic: 4h DEMA trend + 1h Stochastic entry + Volume confirmation
+        # Entry logic: 4h KAMA trend + 15m RSI pullback + Volume + BBW regime
+        # Only enter when BBW is in expansion regime (not squeeze)
+        bbw_regime_ok = bbw_4h_val >= bbw_low_thresh
+        
+        if not bbw_regime_ok or not volume_ok or trend_4h == 0:
+            signals[i] = 0.0
+            position_side[i] = 0
+            continue
+        
         if trend_4h == 1:  # Bullish trend on 4h
-            if (STOCH_LONG_MIN <= stoch_k <= STOCH_LONG_MAX and 
-                stoch_k > stoch_d):  # Stochastic bullish cross in oversold zone
+            if RSI_LONG_MIN <= rsi <= RSI_LONG_MAX:  # RSI pullback in bullish trend
                 signals[i] = position_size
                 position_side[i] = 1
                 entry_price[i] = price
@@ -388,8 +364,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 lowest_since_entry[i] = price
                 
         elif trend_4h == -1:  # Bearish trend on 4h
-            if (STOCH_SHORT_MIN <= stoch_k <= STOCH_SHORT_MAX and 
-                stoch_k < stoch_d):  # Stochastic bearish cross in overbought zone
+            if RSI_SHORT_MIN <= rsi <= RSI_SHORT_MAX:  # RSI pullback in bearish trend
                 signals[i] = -position_size
                 position_side[i] = -1
                 entry_price[i] = price
