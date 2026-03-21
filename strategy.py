@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #135: 1h Multi-Timeframe Pullback Strategy with Volume Filter
-Hypothesis: 1h timeframe needs strong HTF trend filter (12h HMA) to avoid
-whipsaws. Only enter on deep pullbacks (RSI<35/>65) with volume confirmation.
-This reduces trade count while maintaining quality entries. Stoploss at 3*ATR
-for wider breathing room. Position size 0.25 max to control drawdown.
-Key insight from failures: simpler is better, fewer trades = less fee drag.
+Experiment #136: 4h Donchian Breakout with Dual HTF Trend Filter + Volume Confirmation
+Hypothesis: 4h timeframe captures medium-term trends better than 1h but with more
+signals than 1d. Donchian breakouts (20-period) are proven on longer timeframes.
+Key innovations: (1) Dual HTF filter - 1d HMA for intermediate trend, 1w HMA for
+major trend direction. (2) Volume confirmation - breakout must have 1.5x avg volume.
+(3) RSI pullback entry - wait for pullback after breakout confirmation, not chase.
+(4) Conservative sizing 0.25 with 2.5*ATR stoploss. This should work in both bull
+(2021) and bear (2022, 2025) markets by following the major trend direction.
+Timeframe: 4h | HTF: 1d, 1w | Expected: 30-50 trades/year, Sharpe > 0.5
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_12h_rsi_volume_pullback_v1"
-timeframe = "1h"
+name = "mtf_4h_donchian_volume_1d_1w_hma_rsi_pullback_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -51,6 +54,18 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_donchian_channels(high, low, period=20):
+    """Calculate Donchian Channels (highest high / lowest low over period)."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    middle = (upper + lower) / 2
+    return upper, lower, middle
+
+def calculate_volume_sma(volume, period=20):
+    """Calculate SMA of volume for volume confirmation."""
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_sma
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -59,101 +74,141 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_12h = calculate_hma(df_12h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    hma_fast = calculate_hma(close, 8)
-    hma_slow = calculate_hma(close, 21)
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    donchian_upper, donchian_lower, donchian_middle = calculate_donchian_channels(high, low, 20)
+    vol_sma = calculate_volume_sma(volume, 20)
+    
+    # HMA for trend confirmation on 4h
+    hma_4h_fast = calculate_hma(close, 10)
+    hma_4h_slow = calculate_hma(close, 30)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.12
+    SIZE_ENTRY = 0.28
+    SIZE_HALF = 0.14
     
     # Track positions for stoploss
     position_side = 0
     entry_price = 0.0
     trailing_stop = 0.0
     position_reduced = False
-    highest_price = 0.0
-    lowest_price = 0.0
+    highest_close = 0.0
+    lowest_close = 0.0
+    
+    # Track breakout confirmation
+    breakout_confirmed_long = False
+    breakout_confirmed_short = False
+    breakout_bar_long = -100
+    breakout_bar_short = -100
     
     for i in range(100, n):
-        # 12h trend filter (major trend direction)
-        trend_12h_bullish = close[i] > hma_12h_aligned[i]
-        trend_12h_bearish = close[i] < hma_12h_aligned[i]
+        # HTF trend filters
+        daily_bullish = close[i] > hma_1d_aligned[i]
+        daily_bearish = close[i] < hma_1d_aligned[i]
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # 1h HMA crossover trend
-        hma_trend_long = hma_fast[i] > hma_slow[i]
-        hma_trend_short = hma_fast[i] < hma_slow[i]
+        # 4h HMA trend
+        hma_trend_long = hma_4h_fast[i] > hma_4h_slow[i]
+        hma_trend_short = hma_4h_fast[i] < hma_4h_slow[i]
         
-        # HMA slope confirmation (5 bars back)
-        hma_slope_long = hma_fast[i] > hma_fast[i-5] if i > 5 else True
-        hma_slope_short = hma_fast[i] < hma_fast[i-5] if i > 5 else True
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.5 * vol_sma[i] if vol_sma[i] > 0 else False
         
-        # Volume confirmation (spike > 1.2x average)
-        vol_spike = volume[i] > 1.2 * vol_sma[i] if vol_sma[i] > 0 else True
+        # Donchian breakout signals
+        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
+        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
         
-        # RSI conditions (looser for more trades)
-        rsi_oversold = rsi[i] < 38
-        rsi_overbought = rsi[i] > 62
+        # RSI pullback conditions (wait for pullback after breakout)
+        rsi_pullback_long = 40 <= rsi[i] <= 55  # Pullback in uptrend
+        rsi_pullback_short = 45 <= rsi[i] <= 60  # Pullback in downtrend
+        
+        # RSI momentum confirmation
+        rsi_momentum_long = rsi[i] > 50
+        rsi_momentum_short = rsi[i] < 50
         
         new_signal = 0.0
         
-        # LONG: 12h bullish + 1h trend + pullback + volume
-        if trend_12h_bullish and hma_trend_long and hma_slope_long and rsi_oversold:
+        # LONG ENTRY: Donchian breakout + Volume + HTF trend + RSI confirmation
+        if breakout_long and volume_confirmed:
+            breakout_confirmed_long = True
+            breakout_bar_long = i
+        
+        if breakout_confirmed_long and (i - breakout_bar_long) <= 10:
+            # Wait for pullback entry after breakout confirmation
+            if rsi_pullback_long and daily_bullish and weekly_bullish and hma_trend_long:
+                new_signal = SIZE_ENTRY
+                breakout_confirmed_long = False  # Reset after entry
+        
+        # Also enter on strong momentum breakout if all filters align
+        if breakout_long and volume_confirmed and rsi_momentum_long and daily_bullish and weekly_bullish:
             new_signal = SIZE_ENTRY
         
-        # SHORT: 12h bearish + 1h trend + pullback + volume
-        elif trend_12h_bearish and hma_trend_short and hma_slope_short and rsi_overbought:
+        # SHORT ENTRY: Donchian breakdown + Volume + HTF trend + RSI confirmation
+        if breakout_short and volume_confirmed:
+            breakout_confirmed_short = True
+            breakout_bar_short = i
+        
+        if breakout_confirmed_short and (i - breakout_bar_short) <= 10:
+            # Wait for pullback entry after breakdown confirmation
+            if rsi_pullback_short and daily_bearish and weekly_bearish and hma_trend_short:
+                new_signal = -SIZE_ENTRY
+                breakout_confirmed_short = False  # Reset after entry
+        
+        # Also enter on strong momentum breakdown if all filters align
+        if breakout_short and volume_confirmed and rsi_momentum_short and daily_bearish and weekly_bearish:
             new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
-            # Update highest price for trailing
-            if high[i] > highest_price:
-                highest_price = high[i]
+            # Update highest close for trailing
+            if close[i] > highest_close:
+                highest_close = close[i]
             
-            # Calculate trailing stop (3*ATR from highest)
-            current_stop = highest_price - 3.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR from highest)
+            current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
             # Check stoploss hit
-            if low[i] < trailing_stop:
+            if close[i] < trailing_stop:
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 3.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
                     position_reduced = True
         
         if position_side < 0 and entry_price > 0:
-            # Update lowest price for trailing
-            if lowest_price == 0.0 or low[i] < lowest_price:
-                lowest_price = low[i]
+            # Update lowest close for trailing
+            if close[i] < lowest_close or lowest_close == 0.0:
+                lowest_close = close[i]
             
-            # Calculate trailing stop (3*ATR from lowest)
-            current_stop = lowest_price + 3.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR from lowest)
+            current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
             # Check stoploss hit
-            if high[i] > trailing_stop:
+            if close[i] > trailing_stop:
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 3.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
@@ -166,18 +221,18 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 3.0 * atr[i] if position_side > 0 else close[i] + 3.0 * atr[i]
-            highest_price = high[i] if position_side > 0 else 0.0
-            lowest_price = low[i] if position_side < 0 else 0.0
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            highest_close = close[i] if position_side > 0 else 0.0
+            lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
         
         # Position reversed
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 3.0 * atr[i] if position_side > 0 else close[i] + 3.0 * atr[i]
-            highest_price = high[i] if position_side > 0 else 0.0
-            lowest_price = low[i] if position_side < 0 else 0.0
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            highest_close = close[i] if position_side > 0 else 0.0
+            lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
         
         # Position reduced (take profit)
@@ -189,8 +244,8 @@ def generate_signals(prices):
             position_side = 0
             entry_price = 0.0
             trailing_stop = 0.0
-            highest_price = 0.0
-            lowest_price = 0.0
+            highest_close = 0.0
+            lowest_close = 0.0
             position_reduced = False
         
         signals[i] = new_signal
