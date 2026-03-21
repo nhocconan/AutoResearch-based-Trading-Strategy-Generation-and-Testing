@@ -1,48 +1,21 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 30m primary with 4h HMA trend filter + KAMA adaptive trend following
-- 4h HMA(21/50) provides stable trend bias (bull/bear/neutral)
-- 30m KAMA(10,2,30) adapts to volatility - faster in trends, slower in chop
-- KAMA crossover signals entries in direction of HTF trend
-- ATR(14) trailing stop for risk management
-- Simpler entry logic to ensure sufficient trades (learned from 30m failures)
-- Discrete position sizing: 0.0, ±0.20, ±0.30 to minimize fee churn
-Timeframe: 30m (primary), 4h (HTF trend filter)
+Hypothesis: 1h primary with 4h HMA trend + MACD momentum + Bollinger entry timing
+- 4h HMA provides stable trend direction (reduces 1h noise)
+- MACD histogram confirms momentum in trend direction
+- Bollinger Band position for entry timing (buy near lower band in uptrend)
+- Volume spike confirms breakout validity
+- ATR trailing stop for risk management
+- Discrete position sizing to minimize fee churn
+Timeframe: 1h (primary), 4h (HTF trend filter)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_kama_hma_trend_30m_v1"
-timeframe = "30m"
+name = "mtf_hma_macd_bb_entry_1h_v1"
+timeframe = "1h"
 leverage = 1.0
-
-def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
-    """Kaufman Adaptive Moving Average - adapts to market noise"""
-    n = len(close)
-    kama = np.zeros(n)
-    
-    # Efficiency Ratio
-    change = np.abs(close - np.roll(close, er_period))
-    change[:er_period] = np.abs(close[:er_period] - close[0])
-    volatility = np.zeros(n)
-    for i in range(er_period, n):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-er_period:i+1])))
-    volatility[:er_period] = change[:er_period]
-    
-    er = np.zeros(n)
-    er[er_period:] = change[er_period:] / (volatility[er_period:] + 1e-10)
-    er[:er_period] = 1.0
-    
-    # Smoothing Constant
-    sc = (er * (fast_sc - slow_sc) / (fast_sc + slow_sc) + slow_sc / (fast_sc + slow_sc)) ** 2
-    
-    # KAMA calculation
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while maintaining smoothness"""
@@ -69,6 +42,25 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """MACD with histogram"""
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean().values
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean().values
+    macd_line = ema_fast - ema_slow
+    signal_line = pd.Series(macd_line).ewm(span=signal, min_periods=signal, adjust=False).mean().values
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+def calculate_bollinger(close, period=20, std_dev=2.0):
+    """Bollinger Bands"""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    bb_pct = (close - lower) / (upper - lower + 1e-10)  # Position within bands (0-1)
+    return sma, upper, lower, bb_pct
+
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     delta = np.diff(close, prepend=close[0])
@@ -80,13 +72,20 @@ def calculate_rsi(close, period=14):
     rsi = 100 - 100 / (1 + rs)
     return rsi
 
+def calculate_volume_ratio(volume, period=20):
+    """Volume ratio vs rolling average"""
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    ratio = volume / (vol_sma + 1e-10)
+    return ratio
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop (CRITICAL - Rule 1)
+    # Load HTF data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
     
     # 4h HMA for trend direction
@@ -95,27 +94,25 @@ def generate_signals(prices):
     hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
     hma_4h_50_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_50)
     
-    # 30m indicators
-    kama_30m = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
-    kama_fast = calculate_kama(close, er_period=5, fast_sc=2, slow_sc=20)
+    # 1h indicators
+    hma_1h_16 = calculate_hma(close, 16)
+    hma_1h_48 = calculate_hma(close, 48)
     atr = calculate_atr(high, low, close, period=14)
-    rsi_30m = calculate_rsi(close, 14)
-    
-    # Price momentum
-    mom_5 = close / np.roll(close, 5) - 1
-    mom_5[:5] = 0.0
+    macd_line, macd_signal, macd_hist = calculate_macd(close)
+    bb_sma, bb_upper, bb_lower, bb_pct = calculate_bollinger(close)
+    rsi_1h = calculate_rsi(close, 14)
+    vol_ratio = calculate_volume_ratio(volume, 20)
     
     signals = np.zeros(n)
-    SIZE_LONG = 0.30   # 30% for longs in bull trend
-    SIZE_SHORT = 0.20  # 20% for shorts (asymmetric - bear trends are sharper)
-    SIZE_NEUTRAL = 0.15  # Reduced size in neutral
+    SIZE_LONG = 0.30   # Long position size 30%
+    SIZE_SHORT = 0.25  # Short position size 25% (asymmetric)
+    SIZE_HALF = 0.15   # Half position for scaling
     
     prev_signal = 0.0
-    position_side = 0  # 0=flat, 1=long, -1=short
     entry_price = 0.0
+    position_side = 0  # 0=flat, 1=long, -1=short
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    last_entry_idx = -100
     
     for i in range(100, n):
         # HTF trend regime (4h HMA crossover)
@@ -123,38 +120,38 @@ def generate_signals(prices):
         htf_bear = hma_4h_21_aligned[i] < hma_4h_50_aligned[i]
         
         # 4h trend strength (slope)
-        if i >= 8:
-            hma_slope = (hma_4h_21_aligned[i] - hma_4h_21_aligned[i-8]) / (hma_4h_21_aligned[i-8] + 1e-10)
+        if i >= 4:
+            hma_slope_4h = (hma_4h_21_aligned[i] - hma_4h_21_aligned[i-4]) / (hma_4h_21_aligned[i-4] + 1e-10)
         else:
-            hma_slope = 0.0
-        trend_strength = min(abs(hma_slope) * 50, 1.5)
+            hma_slope_4h = 0.0
         
-        # 30m KAMA crossover signals
-        kama_cross_long = kama_fast[i] > kama_30m[i] and kama_fast[i-1] <= kama_30m[i-1]
-        kama_cross_short = kama_fast[i] < kama_30m[i] and kama_fast[i-1] >= kama_30m[i-1]
+        # 1h trend
+        trend_1h = 1.0 if hma_1h_16[i] > hma_1h_48[i] else -1.0
         
-        # KAMA position (above/below)
-        kama_above = kama_fast[i] > kama_30m[i]
-        kama_below = kama_fast[i] < kama_30m[i]
+        # MACD momentum
+        macd_bull = macd_hist[i] > 0 and macd_hist[i] > macd_hist[i-1] if i > 0 else False
+        macd_bear = macd_hist[i] < 0 and macd_hist[i] < macd_hist[i-1] if i > 0 else False
+        macd_cross_up = macd_hist[i] > 0 and macd_hist[i-1] <= 0 if i > 0 else False
+        macd_cross_down = macd_hist[i] < 0 and macd_hist[i-1] >= 0 if i > 0 else False
         
-        # Price vs KAMA
-        price_above_kama = close[i] > kama_30m[i]
-        price_below_kama = close[i] < kama_30m[i]
+        # Bollinger Band position
+        bb_low = bb_pct[i] < 0.3  # Near lower band
+        bb_high = bb_pct[i] > 0.7  # Near upper band
+        bb_middle = bb_pct[i] > 0.4 and bb_pct[i] < 0.6  # Near middle
         
-        # RSI filter (avoid extreme entries)
-        rsi_ok_long = rsi_30m[i] < 70
-        rsi_ok_short = rsi_30m[i] > 30
+        # Volume confirmation
+        vol_confirmed = vol_ratio[i] > 1.3
         
-        # Momentum confirmation
-        mom_positive = mom_5[i] > 0.005
-        mom_negative = mom_5[i] < -0.005
+        # RSI filter
+        rsi_oversold = rsi_1h[i] < 40
+        rsi_overbought = rsi_1h[i] > 60
+        rsi_neutral = rsi_1h[i] > 45 and rsi_1h[i] < 55
         
         # ATR stoploss level
-        atr_stop_mult = 2.5
-        atr_stop = atr_stop_mult * atr[i]
+        atr_stop = 2.5 * atr[i]
         
-        # Check stoploss first (CRITICAL - Rule 6)
-        if position_side == 1 and i - last_entry_idx > 5:
+        # Check stoploss first (trailing stop)
+        if position_side == 1:
             highest_since_entry = max(highest_since_entry, high[i])
             trailing_stop = highest_since_entry - atr_stop
             if close[i] < trailing_stop or close[i] < entry_price - atr_stop:
@@ -162,7 +159,7 @@ def generate_signals(prices):
                 position_side = 0
                 prev_signal = 0.0
                 continue
-        elif position_side == -1 and i - last_entry_idx > 5:
+        elif position_side == -1:
             lowest_since_entry = min(lowest_since_entry, low[i])
             trailing_stop = lowest_since_entry + atr_stop
             if close[i] > trailing_stop or close[i] > entry_price + atr_stop:
@@ -171,110 +168,90 @@ def generate_signals(prices):
                 prev_signal = 0.0
                 continue
         
-        # Determine base size based on HTF regime
-        if htf_bull:
-            base_size = SIZE_LONG
-        elif htf_bear:
-            base_size = SIZE_SHORT
-        else:
-            base_size = SIZE_NEUTRAL
-        
-        # Scale size by trend strength
-        size = base_size * (0.7 + 0.3 * trend_strength)
-        size = min(max(size, 0.15), 0.35)  # Clamp to valid range
-        
-        # Entry logic - simpler to ensure trades are generated
+        # Entry logic - asymmetric based on HTF regime
         if htf_bull:  # Bull regime - prefer longs
-            # KAMA crossover long entry
-            if kama_cross_long and rsi_ok_long and price_above_kama:
-                signals[i] = size
-                if prev_signal <= 0:
+            # Primary long entry: trend + MACD + BB pullback
+            if trend_1h > 0 and macd_bull and bb_low:
+                signals[i] = SIZE_LONG
+                if prev_signal == 0:
                     position_side = 1
                     entry_price = close[i]
                     highest_since_entry = close[i]
-                    last_entry_idx = i
-            # KAMA above + momentum continuation
-            elif kama_above and price_above_kama and mom_positive and prev_signal <= 0:
-                signals[i] = size * 0.8
-                position_side = 1
-                entry_price = close[i]
-                highest_since_entry = close[i]
-                last_entry_idx = i
-            # RSI oversold in uptrend - buy dip
-            elif rsi_30m[i] < 40 and kama_above and htf_bull:
-                signals[i] = size
-                if prev_signal <= 0:
+            # MACD cross up confirmation
+            elif trend_1h > 0 and macd_cross_up and vol_confirmed:
+                signals[i] = SIZE_LONG
+                if prev_signal == 0:
                     position_side = 1
                     entry_price = close[i]
                     highest_since_entry = close[i]
-                    last_entry_idx = i
-            # RSI overbought - reduce or exit
-            elif rsi_30m[i] > 75 and position_side == 1:
-                signals[i] = size * 0.3
-            else:
-                signals[i] = prev_signal if position_side == 1 else 0.0
-                
-        elif htf_bear:  # Bear regime - prefer shorts
-            # KAMA crossover short entry
-            if kama_cross_short and rsi_ok_short and price_below_kama:
-                signals[i] = -size
-                if prev_signal >= 0:
-                    position_side = -1
-                    entry_price = close[i]
-                    lowest_since_entry = close[i]
-                    last_entry_idx = i
-            # KAMA below + momentum continuation
-            elif kama_below and price_below_kama and mom_negative and prev_signal >= 0:
-                signals[i] = -size * 0.8
-                position_side = -1
-                entry_price = close[i]
-                lowest_since_entry = close[i]
-                last_entry_idx = i
-            # RSI overbought in downtrend - sell rip
-            elif rsi_30m[i] > 60 and kama_below and htf_bear:
-                signals[i] = -size
-                if prev_signal >= 0:
-                    position_side = -1
-                    entry_price = close[i]
-                    lowest_since_entry = close[i]
-                    last_entry_idx = i
-            # RSI oversold - reduce or exit
-            elif rsi_30m[i] < 25 and position_side == -1:
-                signals[i] = -size * 0.3
-            else:
-                signals[i] = prev_signal if position_side == -1 else 0.0
-                
-        else:  # Neutral regime - smaller positions, mean reversion
-            if kama_cross_long and rsi_30m[i] < 50:
-                signals[i] = SIZE_NEUTRAL
-                if prev_signal <= 0:
+            # RSI pullback in uptrend
+            elif trend_1h > 0 and rsi_oversold and bb_middle:
+                signals[i] = SIZE_LONG * 0.8
+                if prev_signal == 0:
                     position_side = 1
                     entry_price = close[i]
                     highest_since_entry = close[i]
-                    last_entry_idx = i
-            elif kama_cross_short and rsi_30m[i] > 50:
-                signals[i] = -SIZE_NEUTRAL
-                if prev_signal >= 0:
-                    position_side = -1
-                    entry_price = close[i]
-                    lowest_since_entry = close[i]
-                    last_entry_idx = i
-            elif abs(rsi_30m[i] - 50) < 10:
+            # Exit on overbought
+            elif rsi_overbought and bb_high:
                 signals[i] = 0.0
                 position_side = 0
             else:
                 signals[i] = prev_signal
+                
+        elif htf_bear:  # Bear regime - prefer shorts
+            # Primary short entry: trend + MACD + BB rally
+            if trend_1h < 0 and macd_bear and bb_high:
+                signals[i] = -SIZE_SHORT
+                if prev_signal == 0:
+                    position_side = -1
+                    entry_price = close[i]
+                    lowest_since_entry = close[i]
+            # MACD cross down confirmation
+            elif trend_1h < 0 and macd_cross_down and vol_confirmed:
+                signals[i] = -SIZE_SHORT
+                if prev_signal == 0:
+                    position_side = -1
+                    entry_price = close[i]
+                    lowest_since_entry = close[i]
+            # RSI rally in downtrend
+            elif trend_1h < 0 and rsi_overbought and bb_middle:
+                signals[i] = -SIZE_SHORT * 0.8
+                if prev_signal == 0:
+                    position_side = -1
+                    entry_price = close[i]
+                    lowest_since_entry = close[i]
+            # Exit on oversold
+            elif rsi_oversold and bb_low:
+                signals[i] = 0.0
+                position_side = 0
+            else:
+                signals[i] = prev_signal
+                
+        else:  # Neutral regime - reduce positions or flat
+            if position_side == 1:
+                signals[i] = SIZE_HALF  # Reduce long
+            elif position_side == -1:
+                signals[i] = -SIZE_HALF  # Reduce short
+            else:
+                signals[i] = 0.0  # Stay flat
         
-        # Discretize signal to reduce churn (CRITICAL - Rule 4)
+        # Discretize signal to reduce churn
         if abs(signals[i]) < 0.10:
             signals[i] = 0.0
         elif signals[i] > 0:
-            # Round to discrete levels: 0.15, 0.20, 0.25, 0.30, 0.35
-            signals[i] = round(signals[i] / 0.05) * 0.05
-            signals[i] = min(max(signals[i], 0.15), 0.35)
+            if signals[i] >= 0.25:
+                signals[i] = SIZE_LONG
+            elif signals[i] >= 0.15:
+                signals[i] = SIZE_HALF
+            else:
+                signals[i] = 0.0
         else:
-            signals[i] = round(signals[i] / 0.05) * 0.05
-            signals[i] = max(min(signals[i], -0.15), -0.35)
+            if signals[i] <= -0.20:
+                signals[i] = -SIZE_SHORT
+            elif signals[i] <= -0.10:
+                signals[i] = -SIZE_HALF
+            else:
+                signals[i] = 0.0
         
         prev_signal = signals[i]
     
