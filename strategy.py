@@ -1,34 +1,35 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #010 - 4h Primary with 1d HMA Trend Filter + RSI/MACD Entries
+EXPERIMENT #011 - Donchian Breakout + 1d HMA Trend + RSI Confirmation (12h primary)
 =====================================================================================
-Hypothesis: 4h timeframe captures meaningful swings without excessive noise.
-Using 1d HMA(21) as major trend filter ensures we trade with the macro direction.
-4h RSI(14) pullbacks + MACD histogram confirmation provide entry timing.
-Conservative 0.25 position sizing with 2.5*ATR stoploss controls drawdown.
+Hypothesis: 12h Donchian breakouts capture sustained moves, but generate false signals in chop.
+Adding 1d HMA(21) trend filter ensures we only trade breakouts in the major trend direction.
+RSI(14) confirmation (RSI > 50 for longs, RSI < 50 for shorts) filters weak breakouts.
+Loose entry conditions ensure ≥10 trades per symbol across BTC/ETH/SOL.
 
 Key features:
-- Primary TF: 4h (required for this experiment)
-- HTF filter: 1d HMA(21) for major trend
-- Entry: RSI pullback (RSI < 45 long, > 55 short) + MACD histogram confirmation
-- Stoploss: 2.5*ATR(14) trailing
-- Position sizing: 0.25 base, max 0.35
-- Take profit: Half position at 2R, trail remainder
+- Primary TF: 12h
+- HTF filter: 1d HMA(21) for major trend direction
+- Entry: Donchian(20) breakout + RSI confirmation
+- Stoploss: 2.0*ATR(14) trailing
+- Position sizing: 0.25-0.30 discrete levels
+- Take profit: Reduce to half at 2R profit, trail stop
 
 Why this should work:
-- 4h captures 2-5 day swings (good for crypto)
-- 1d HMA filter removes counter-trend trades
-- RSI thresholds (45/55) are achievable (not too strict)
-- MACD histogram adds momentum confirmation
-- Conservative sizing prevents blowup during 2022 crash
+- 12h captures multi-day breakouts without 15m noise
+- Donchian breakout = clear, objective entry signal
+- 1d HMA ensures we trade with major trend (critical for crypto)
+- RSI confirmation filters false breakouts
+- Conservative sizing (0.25-0.30) controls drawdown during crashes
+- Loose conditions ensure sufficient trade count
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "hma1d_rsi_macd_4h_v1"
-timeframe = "4h"
+name = "donchian_1dhma_rsi_12h_v1"
+timeframe = "12h"
 leverage = 1.0
 
 
@@ -43,6 +44,21 @@ def calculate_atr(high, low, close, period=14):
                     abs(low[i] - close[i - 1]))
     atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
     return atr
+
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high, lowest low over period)"""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
 
 
 def calculate_rsi(close, period=14):
@@ -71,17 +87,6 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD indicator"""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, adjust=False, min_periods=fast).mean()
-    ema_slow = close_s.ewm(span=slow, adjust=False, min_periods=slow).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
-
-
 def calculate_hma(close, period):
     """Calculate Hull Moving Average"""
     close_s = pd.Series(close)
@@ -107,19 +112,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    macd_line, signal_line, histogram = calculate_macd(close, fast=12, slow=26, signal=9)
+    
+    # Also calculate 12h HMA for additional trend confirmation
+    hma_12h = calculate_hma(close, 21)
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.25  # Base position size (25% of capital)
+    BASE_SIZE = 0.28  # Base position size (28% of capital)
     MAX_SIZE = 0.35   # Max position size
-    MIN_SIZE = 0.15   # Min position size
+    MIN_SIZE = 0.20   # Min position size
     HALF_SIZE = BASE_SIZE / 2
     
-    # Track position state
+    # Track position state for stoploss and take profit
     position_side = 0  # 0=flat, 1=long, -1=short
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
@@ -127,13 +135,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_atr = 0.0
     profit_target_hit = False
     
-    min_period = 100  # Wait for indicators to stabilize
+    min_period = 50  # Wait for indicators to stabilize (shorter for more trades)
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1d_aligned[i]) or np.isnan(rsi[i]) or
-            np.isnan(atr[i]) or np.isnan(histogram[i]) or
-            atr[i] == 0):
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]) or
+            np.isnan(hma_12h[i]) or atr[i] == 0):
             signals[i] = 0.0
             continue
         
@@ -141,52 +149,62 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         price_above_1d_hma = close[i] > hma_1d_aligned[i]
         hma_trend = 1 if price_above_1d_hma else -1
         
-        # RSI pullback conditions (achievable thresholds)
-        rsi_pullback_long = rsi[i] < 45  # Pullback in uptrend
-        rsi_pullback_short = rsi[i] > 55  # Pullback in downtrend
+        # 12h HMA for additional confirmation
+        price_above_12h_hma = close[i] > hma_12h[i]
+        hma_12h_trend = 1 if price_above_12h_hma else -1
         
-        # MACD histogram confirmation
-        macd_bullish = histogram[i] > 0
-        macd_bearish = histogram[i] < 0
+        # Donchian breakout signals
+        breakout_long = close[i] > donchian_upper[i - 1] if i > 0 else False
+        breakout_short = close[i] < donchian_lower[i - 1] if i > 0 else False
         
-        # Calculate position size
+        # RSI confirmation (LOOSE conditions for more trades)
+        rsi_bullish = rsi[i] > 45  # Not too strict
+        rsi_bearish = rsi[i] < 55  # Not too strict
+        
+        # Calculate position size (discrete levels)
         position_size = BASE_SIZE
         
-        # Determine target signal
+        # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: 1d HMA bullish + RSI pullback + MACD bullish
-        if hma_trend == 1 and rsi_pullback_long and macd_bullish:
+        # Long entry: Donchian breakout + 1d HMA bullish + 12h HMA bullish + RSI confirmation
+        if breakout_long and hma_trend == 1 and hma_12h_trend == 1 and rsi_bullish:
             target_signal = position_size
         
-        # Short entry: 1d HMA bearish + RSI pullback + MACD bearish
-        elif hma_trend == -1 and rsi_pullback_short and macd_bearish:
+        # Short entry: Donchian breakout + 1d HMA bearish + 12h HMA bearish + RSI confirmation
+        elif breakout_short and hma_trend == -1 and hma_12h_trend == -1 and rsi_bearish:
             target_signal = -position_size
         
-        # Stoploss and take profit logic
+        # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
         take_profit_triggered = False
         
         if position_side != 0:
             if position_side == 1:
+                # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.5 * atr[i]
+                trailing_stop = highest_since_entry - 2.0 * atr[i]
                 
+                # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
+                # Check take profit (2R from entry, where R = 2*ATR at entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 5.0 * entry_atr:  # 2R = 5*ATR (since stop is 2.5*ATR)
+                    if close[i] >= entry_price + 4.0 * entry_atr:  # 2R = 4*ATR
                         take_profit_triggered = True
             else:
+                # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.5 * atr[i]
+                trailing_stop = lowest_since_entry + 2.0 * atr[i]
                 
+                # Check stoploss
                 if close[i] > trailing_stop:
                     stoploss_triggered = True
                 
+                # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 5.0 * entry_atr:
+                    if close[i] <= entry_price - 4.0 * entry_atr:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -198,10 +216,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             entry_atr = 0.0
             profit_target_hit = False
         elif take_profit_triggered:
+            # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
+            # Apply signal change
             if target_signal != 0.0 and position_side == 0:
+                # New entry
                 signals[i] = target_signal
                 position_side = 1 if target_signal > 0 else -1
                 highest_since_entry = close[i]
@@ -210,11 +231,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 entry_atr = atr[i]
                 profit_target_hit = False
             elif position_side != 0:
-                # Exit if trend reverses
-                trend_reversal = (position_side == 1 and hma_trend == -1) or \
-                                 (position_side == -1 and hma_trend == 1)
+                # Maintain existing position (check if trend reversed)
+                # Exit if 1d HMA alignment breaks OR 12h HMA breaks
+                hma_1d_broken = (position_side == 1 and hma_trend == -1) or \
+                                (position_side == -1 and hma_trend == 1)
+                hma_12h_broken = (position_side == 1 and hma_12h_trend == -1) or \
+                                 (position_side == -1 and hma_12h_trend == 1)
                 
-                if trend_reversal:
+                if hma_1d_broken or hma_12h_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
@@ -223,6 +247,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     entry_atr = 0.0
                     profit_target_hit = False
                 else:
+                    # Maintain position
                     signals[i] = position_size * position_side if not profit_target_hit else HALF_SIZE * position_side
             else:
                 signals[i] = 0.0
