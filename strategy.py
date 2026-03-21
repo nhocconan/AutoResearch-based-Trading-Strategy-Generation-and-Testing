@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #022 - Supertrend + RSI Pullback + Regime Filter (4h primary, 1d HTF)
-================================================================================
-Hypothesis: 4h Supertrend identifies trend direction, but entries on pullbacks 
-(RSI 40-60 zone) reduce false breakouts. Bollinger Band Width regime filter 
-ensures we only trade in trending markets (BW > 50th percentile), avoiding chop.
-1d HMA(50) provides major trend alignment filter. This differs from previous 
-supertrend attempts by adding regime detection and RSI pullback timing.
+EXPERIMENT #023 - Donchian Breakout + ADX Trend Strength + Volume Filter (12h primary, 1d HTF)
+==============================================================================================
+Hypothesis: 12h Donchian breakouts capture major trend moves, but need strong filters to avoid
+false breakouts in choppy markets. Daily HMA(50) provides major trend alignment. ADX(14)>25
+ensures we only trade in trending markets (not ranging). Volume confirmation filters low-liquidity
+breakouts. This differs from previous strategies by using pure breakout logic instead of pullback
+entries, which should work better on 12h timeframe where trends persist longer.
 
 Key features:
-- Primary TF: 4h (daily candles for this experiment)
+- Primary TF: 12h (this experiment's requirement)
 - HTF filter: 1d HMA(50) for major trend direction
-- Trend: Supertrend(10, 3) on 4h
-- Entry: RSI(14) pullback to 40-60 zone in trend direction
-- Regime: Bollinger Band Width > 50th percentile (trending market only)
+- Entry: Donchian(20) breakout in trend direction
+- Trend strength: ADX(14) > 25 (trending market only)
+- Volume: > 20-period average (confirms breakout)
 - Stoploss: 2.5*ATR(14) trailing
 - Position sizing: 0.25-0.30 discrete levels
 - Take profit: Reduce to half at 2R profit, trail stop at 1R
@@ -23,8 +23,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "supertrend_rsi_regime_4h_1d_v1"
-timeframe = "4h"
+name = "donchian_adx_volume_12h_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 
@@ -51,35 +51,68 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3):
-    """Calculate Supertrend indicator"""
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
     n = len(close)
-    atr = calculate_atr(high, low, close, period)
     
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 = bullish, -1 = bearish
-    
-    supertrend[0] = upper_band[0]
+    # Calculate +DM and -DM
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
     
     for i in range(1, n):
-        if close[i - 1] <= supertrend[i - 1]:
-            # Previous close was below supertrend (bearish)
-            supertrend[i] = min(upper_band[i], supertrend[i - 1])
-            if close[i] > supertrend[i]:
-                direction[i] = 1
-                supertrend[i] = lower_band[i]
-        else:
-            # Previous close was above supertrend (bullish)
-            supertrend[i] = max(lower_band[i], supertrend[i - 1])
-            if close[i] < supertrend[i]:
-                direction[i] = -1
-                supertrend[i] = upper_band[i]
+        high_diff = high[i] - high[i - 1]
+        low_diff = low[i - 1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
     
-    return supertrend, direction
+    # Calculate TR
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i - 1]),
+                    abs(low[i] - close[i - 1]))
+    
+    # Smooth TR, +DM, -DM using Wilder's method (EMA with span=period)
+    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    # Calculate +DI and -DI
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    for i in range(period, n):
+        if tr_smooth[i] > 0:
+            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
+            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
+    
+    # Calculate DX and ADX
+    dx = np.zeros(n)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return adx
+
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (upper and lower bands)"""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
 
 
 def calculate_rsi(close, period=14):
@@ -95,33 +128,6 @@ def calculate_rsi(close, period=14):
     return rsi.values
 
 
-def calculate_bollinger_bands(close, period=20, std_dev=2):
-    """Calculate Bollinger Bands and Band Width"""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    band_width = (upper - lower) / sma
-    return upper.values, lower.values, band_width.values
-
-
-def calculate_percentile_rank(series, window=100):
-    """Calculate rolling percentile rank"""
-    n = len(series)
-    pr = np.zeros(n)
-    pr[:] = np.nan
-    
-    for i in range(window - 1, n):
-        if not np.isnan(series[i]):
-            window_data = series[i - window + 1:i + 1]
-            window_data = window_data[~np.isnan(window_data)]
-            if len(window_data) > 0:
-                pr[i] = np.sum(window_data <= series[i]) / len(window_data)
-    
-    return pr
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
@@ -134,14 +140,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     hma_1d = calculate_hma(df_1d['close'].values, 50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3)
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2)
+    adx = calculate_adx(high, low, close, 14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
-    # Calculate Bollinger Band Width percentile rank (regime filter)
-    bb_width_pr = calculate_percentile_rank(bb_width, 100)
+    # Volume moving average for confirmation
+    volume_s = pd.Series(volume)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    
+    # RSI for overbought/oversold filter
+    rsi = calculate_rsi(close, 14)
     
     # Generate signals
     signals = np.zeros(n)
@@ -154,39 +163,48 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = float('inf')
     entry_price = 0.0
     profit_target_hit = False
+    prev_position_side = 0
     
-    min_period = 120  # Wait for all indicators to stabilize
+    min_period = 100  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1d_aligned[i]) or np.isnan(supertrend[i]) or 
-            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_width_pr[i]) or 
-            atr[i] == 0):
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(adx[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]) or
+            np.isnan(rsi[i]) or atr[i] == 0):
             signals[i] = 0.0
+            position_side = 0
             continue
         
-        # Daily trend filter (HTF)
+        # Daily trend filter (HTF) - only trade in direction of daily trend
         daily_trend = 1 if close[i] > hma_1d_aligned[i] else -1
         
-        # 4h Supertrend direction
-        st_trend = int(st_direction[i])
+        # ADX trend strength filter - only trade when ADX > 25 (trending market)
+        trend_strong = adx[i] > 25
         
-        # Regime filter: only trade when BB Width is in top 50% (trending market)
-        regime_valid = bb_width_pr[i] > 0.50
+        # Volume confirmation - volume above 20-period average
+        volume_confirmed = volume[i] > volume_ma[i]
         
-        # RSI pullback zone (40-60 for entry timing)
-        rsi_pullback_long = 40 <= rsi[i] <= 60
-        rsi_pullback_short = 40 <= rsi[i] <= 60
+        # Donchian breakout signals
+        breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
+        breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
+        
+        # RSI filter - avoid extreme overbought/oversold for entries
+        rsi_valid_long = rsi[i] < 70  # Not overbought
+        rsi_valid_short = rsi[i] > 30  # Not oversold
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: Supertrend bullish + Daily trend bullish + RSI pullback + Regime valid
-        if st_trend == 1 and daily_trend == 1 and rsi_pullback_long and regime_valid:
+        # Long entry: Daily trend bullish + ADX strong + Volume confirmed + Donchian breakout + RSI valid
+        if (daily_trend == 1 and trend_strong and volume_confirmed and 
+            breakout_long and rsi_valid_long):
             target_signal = SIZE
         
-        # Short entry: Supertrend bearish + Daily trend bearish + RSI pullback + Regime valid
-        elif st_trend == -1 and daily_trend == -1 and rsi_pullback_short and regime_valid:
+        # Short entry: Daily trend bearish + ADX strong + Volume confirmed + Donchian breakout + RSI valid
+        elif (daily_trend == -1 and trend_strong and volume_confirmed and 
+              breakout_short and rsi_valid_short):
             target_signal = -SIZE
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -224,6 +242,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if stoploss_triggered:
             signals[i] = 0.0
             position_side = 0
+            prev_position_side = 0
             highest_since_entry = 0.0
             lowest_since_entry = float('inf')
             entry_price = 0.0
@@ -238,24 +257,28 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # New entry
                 signals[i] = target_signal
                 position_side = 1 if target_signal > 0 else -1
+                prev_position_side = position_side
                 highest_since_entry = close[i]
                 lowest_since_entry = close[i]
                 entry_price = close[i]
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                if position_side == 1 and st_trend == -1:
-                    # Trend reversed, exit long
+                # Exit if daily trend reverses against position
+                if position_side == 1 and daily_trend == -1:
+                    # Daily trend reversed, exit long
                     signals[i] = 0.0
                     position_side = 0
+                    prev_position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
                     profit_target_hit = False
-                elif position_side == -1 and st_trend == 1:
-                    # Trend reversed, exit short
+                elif position_side == -1 and daily_trend == 1:
+                    # Daily trend reversed, exit short
                     signals[i] = 0.0
                     position_side = 0
+                    prev_position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
