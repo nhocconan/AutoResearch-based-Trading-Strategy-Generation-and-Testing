@@ -260,6 +260,7 @@ def render_html() -> str:
 <head>
 <meta charset="utf-8">
 <meta http-equiv="refresh" content="600">
+<!-- Manual refresh: press F5 or click button below -->
 <title>LLM Trading Research Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>

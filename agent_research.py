@@ -63,7 +63,9 @@ def _run_single_backtest(queue, strategy_path, symbol, period):
 
 class EarlyDiscardError(Exception):
     """Raised when first symbol already fails — skip remaining symbols."""
-    pass
+    def __init__(self, msg, partial_results=None):
+        super().__init__(msg)
+        self.partial_results = partial_results or []
 
 
 def run_backtest_all(symbols: list[str], strategy_path: str, period: str = "train",
@@ -98,7 +100,8 @@ def run_backtest_all(symbols: list[str], strategy_path: str, period: str = "trai
             dd = data.get("max_drawdown_pct", 0)
             if sharpe < 0 or trades < 5 or dd < -50:
                 raise EarlyDiscardError(
-                    f"{symbol} Sharpe={sharpe:.3f} trades={trades} DD={dd:.1f}% — skip remaining"
+                    f"{symbol} Sharpe={sharpe:.3f} trades={trades} DD={dd:.1f}% — skip remaining",
+                    partial_results=results
                 )
 
     return results
@@ -532,6 +535,9 @@ def main():
             print(f"  [EARLY DISCARD] {e}")
             git_revert_strategy()
             STRATEGY_FILE.write_text(best_strategy_code)
+            description = f"exp#{experiment_num:03d} {strategy_name} early:{str(e)[:40]}"
+            # Log partial results to results.tsv so dashboard shows activity
+            append_results(e.partial_results, "discard", description, period="train")
             history.append({
                 "num": experiment_num, "name": strategy_name, "status": "discard",
                 "avg_sharpe": -999, "avg_return": 0, "description": f"early: {str(e)[:50]}",
