@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #390: 1d Connors RSI + Weekly HMA Trend + Choppiness Regime + ATR Stop
-Hypothesis: Connors RSI (CRSI) is a proven mean-reversion indicator with ~75% win rate
-on daily timeframes. Combined with weekly HMA for trend bias and Choppiness Index to
-filter ranging markets, this should capture pullbacks in established trends. Daily
-timeframe naturally reduces trade frequency and fee drag. Weekly HMA (via mtf_data)
-provides robust trend filter without look-ahead. ATR(14) stoploss at 2.5x protects
-capital. Position size 0.25-0.30 discrete to minimize churn. Target: Beat Sharpe=0.499.
-Key insight: CRSI extremes ( <15 long, >85 short) + weekly trend filter = high-probability
-entries with fewer whipsaws than pure trend-following on daily.
-Timeframe: 1d (REQUIRED), HTF: 1w for trend bias via mtf_data helper.
+Experiment #391: 15m Mean Reversion + 4h HMA Trend + 1h RSI Pullback + Volume Filter
+Hypothesis: 15m is too noisy for pure trend-following (see #379, #385 failures with Sharpe=-4 to -6).
+Instead, use 15m for mean-reversion entries (RSI extremes) but ONLY when aligned with 4h trend.
+4h HMA provides strong trend bias. 1h RSI confirms pullback within trend. Volume filter avoids
+false breakouts. ATR(14) stoploss at 2.5x protects capital. Position size 0.25 discrete.
+Timeframe: 15m (REQUIRED), HTF: 4h for trend, 1h for RSI confirmation via mtf_data helper.
+Key insight: Mean-reversion entries WITHIN trend direction = higher win rate than pure trend-follow on 15m.
+Multiple OR conditions ensure minimum trade frequency (critical - many 15m strategies got 0 trades).
+Target: Beat Sharpe=0.499 (current best mtf_12h_supertrend_daily_hma_rsi_pullback_v2).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_crsi_weekly_hma_chop_regime_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_rsi_mr_4h_hma_1h_rsi_vol_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -28,6 +27,16 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average for faster trend response with less lag."""
+    close_s = pd.Series(close)
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -41,114 +50,51 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
-    """
-    Calculate Connors RSI (CRSI).
-    CRSI = (RSI(close, 3) + RSI(streak, 2) + PercentRank(close, 100)) / 3
-    Proven mean-reversion indicator with ~75% win rate on daily timeframe.
-    """
-    n = len(close)
-    crsi = np.zeros(n)
-    
-    # RSI(3) on close
-    rsi_close = calculate_rsi(close, rsi_period)
-    
-    # RSI on streak (consecutive up/down days)
-    streak = np.zeros(n)
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif close[i] < close[i-1]:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = 0
-    
-    # Convert streak to RSI-like value
-    streak_gain = np.where(streak > 0, streak, 0.0)
-    streak_loss = np.where(streak < 0, -streak, 0.0)
-    avg_streak_g = pd.Series(streak_gain).ewm(span=streak_period, min_periods=streak_period, adjust=False).mean().values
-    avg_streak_l = pd.Series(streak_loss).ewm(span=streak_period, min_periods=streak_period, adjust=False).mean().values
-    rs_streak = np.where(avg_streak_l > 0, avg_streak_g / avg_streak_l, 100.0)
-    rsi_streak = 100 - 100 / (1 + rs_streak)
-    rsi_streak = np.clip(rsi_streak, 0, 100)
-    
-    # PercentRank: percentage of closes in lookback that are below current close
-    for i in range(rank_period, n):
-        lookback = close[i-rank_period+1:i+1]
-        count_below = np.sum(lookback[:-1] < close[i])  # exclude current
-        percent_rank = count_below / (rank_period - 1) * 100
-        crsi[i] = (rsi_close[i] + rsi_streak[i] + percent_rank) / 3
-    
-    crsi[:rank_period] = 50.0  # neutral before enough data
-    return crsi
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs moving average."""
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
+    return vol_ratio
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for faster trend response with less lag."""
-    close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
-
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market (use mean-reversion)
-    CHOP < 38.2 = trending market (use trend-following)
-    """
-    n = len(close)
-    chop = np.zeros(n)
-    
-    for i in range(period, n):
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        tr_sum = 0.0
-        for j in range(i-period+1, i+1):
-            tr1 = high[j] - low[j]
-            tr2 = np.abs(high[j] - close[j-1]) if j > 0 else tr1
-            tr3 = np.abs(low[j] - close[j-1]) if j > 0 else tr1
-            tr = max(tr1, tr2, tr3)
-            tr_sum += tr
-        
-        if highest_high - lowest_low > 0:
-            chop[i] = 100 * np.log10(tr_sum / (highest_high - lowest_low)) / np.log10(period)
-        else:
-            chop[i] = 50.0
-    
-    chop[:period] = 50.0
-    return chop
-
-def calculate_sma(close, period=200):
-    """Calculate Simple Moving Average."""
-    close_s = pd.Series(close)
-    return close_s.rolling(window=period, min_periods=period).mean().values
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion signals."""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    zscore = np.where(std > 0, (close - sma) / std, 0.0)
+    return zscore
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1h = get_htf_data(prices, '1h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
-    chop = calculate_choppiness(high, low, close, 14)
-    sma_200 = calculate_sma(close, 200)
+    rsi_15m = calculate_rsi(close, 14)
+    zscore_15m = calculate_zscore(close, 20)
+    vol_ratio = calculate_volume_ratio(volume, 20)
+    
+    # 15m HMA for short-term trend
+    hma_15m_fast = calculate_hma(close, 8)
+    hma_15m_slow = calculate_hma(close, 21)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -158,72 +104,85 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(250, n):  # Start after 250 bars for SMA200 + CRSI warmup
+    for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(crsi[i]) or np.isnan(chop[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi_15m[i]) or np.isnan(zscore_15m[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_200[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_15m_fast[i]) or np.isnan(hma_15m_slow[i]):
             signals[i] = 0.0
             continue
         
-        # Weekly trend bias
-        weekly_bullish = close[i] > hma_1w_aligned[i]
-        weekly_bearish = close[i] < hma_1w_aligned[i]
+        # 4h trend bias (STRONG filter)
+        hma_4h_valid = not np.isnan(hma_4h_aligned[i])
+        trend_4h_bullish = hma_4h_valid and close[i] > hma_4h_aligned[i]
+        trend_4h_bearish = hma_4h_valid and close[i] < hma_4h_aligned[i]
         
-        # Choppiness regime
-        is_ranging = chop[i] > 55  # Mean-reversion favorable
-        is_trending = chop[i] <= 55  # Trend-following favorable
+        # 1h RSI confirmation (pullback within trend)
+        rsi_1h_valid = not np.isnan(rsi_1h_aligned[i])
+        rsi_1h_bullish_pullback = rsi_1h_valid and rsi_1h_aligned[i] > 40 and rsi_1h_aligned[i] < 65
+        rsi_1h_bearish_pullback = rsi_1h_valid and rsi_1h_aligned[i] > 35 and rsi_1h_aligned[i] < 60
         
-        # SMA200 filter for long-term trend
-        above_sma200 = close[i] > sma_200[i]
-        below_sma200 = close[i] < sma_200[i]
+        # 15m RSI mean reversion signals
+        rsi_15m_oversold = rsi_15m[i] < 35
+        rsi_15m_overbought = rsi_15m[i] > 65
+        rsi_15m_extreme_oversold = rsi_15m[i] < 25
+        rsi_15m_extreme_overbought = rsi_15m[i] > 75
         
-        # CRSI extremes for mean-reversion entries
-        crsi_oversold = crsi[i] < 20  # Very oversold
-        crsi_overbought = crsi[i] > 80  # Very overbought
-        crsi_extreme_oversold = crsi[i] < 15  # Extremely oversold
-        crsi_extreme_overbought = crsi[i] > 85  # Extremely overbought
+        # Z-score mean reversion
+        zscore_extreme_low = zscore_15m[i] < -1.5
+        zscore_extreme_high = zscore_15m[i] > 1.5
         
-        # CRSI momentum (rising from oversold / falling from overbought)
-        crsi_rising = crsi[i] > crsi[i-1] if i > 0 else False
-        crsi_falling = crsi[i] < crsi[i-1] if i > 0 else False
+        # Volume confirmation
+        volume_ok = vol_ratio[i] > 0.8  # Not extremely low volume
+        
+        # HMA crossover on 15m
+        hma_cross_long = hma_15m_fast[i] > hma_15m_slow[i] and hma_15m_fast[i-1] <= hma_15m_slow[i-1]
+        hma_cross_short = hma_15m_fast[i] < hma_15m_slow[i] and hma_15m_fast[i-1] >= hma_15m_slow[i-1]
+        hma_15m_bullish = hma_15m_fast[i] > hma_15m_slow[i]
+        hma_15m_bearish = hma_15m_fast[i] < hma_15m_slow[i]
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (CRSI mean-reversion with trend filter) ===
-        # Primary: CRSI extreme oversold + Weekly bullish + Above SMA200
-        if crsi_extreme_oversold and weekly_bullish and above_sma200:
+        # === LONG ENTRIES (multiple OR conditions to ensure trade frequency) ===
+        # Primary: 4h bullish + 15m RSI oversold + 1h RSI pullback OK + volume OK
+        if trend_4h_bullish and rsi_15m_oversold and rsi_1h_bullish_pullback and volume_ok:
             new_signal = SIZE_ENTRY
-        # Secondary: CRSI oversold + Weekly bullish + Ranging market (mean-reversion)
-        elif crsi_oversold and weekly_bullish and is_ranging:
+        # Secondary: 4h bullish + 15m RSI extreme oversold (stronger signal)
+        elif trend_4h_bullish and rsi_15m_extreme_oversold:
             new_signal = SIZE_ENTRY
-        # Tertiary: CRSI oversold + Above SMA200 + CRSI rising (momentum confirmation)
-        elif crsi_oversold and above_sma200 and crsi_rising:
+        # Tertiary: 4h bullish + Z-score extreme low + volume OK
+        elif trend_4h_bullish and zscore_extreme_low and volume_ok:
             new_signal = SIZE_ENTRY
-        # Quaternary: CRSI extreme oversold alone (ensures trade frequency)
-        elif crsi_extreme_oversold and crsi_rising:
+        # Quaternary: 4h bullish + 15m HMA cross long + RSI OK
+        elif trend_4h_bullish and hma_cross_long and rsi_15m[i] > 35 and rsi_15m[i] < 70:
             new_signal = SIZE_ENTRY
-        # Quintenary: CRSI oversold + Weekly bullish (loose filter)
-        elif crsi_oversold and weekly_bullish:
+        # Quintenary: 4h bullish + 15m HMA bullish + RSI momentum (no cross needed)
+        elif trend_4h_bullish and hma_15m_bullish and rsi_15m[i] > 40 and rsi_15m[i] < 70:
+            new_signal = SIZE_ENTRY
+        # Sextenary: 4h neutral/valid + 15m RSI extreme + Z-score extreme (strong MR)
+        elif hma_4h_valid and rsi_15m_extreme_oversold and zscore_extreme_low:
             new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRIES (CRSI mean-reversion with trend filter) ===
-        # Primary: CRSI extreme overbought + Weekly bearish + Below SMA200
-        if crsi_extreme_overbought and weekly_bearish and below_sma200:
+        # === SHORT ENTRIES (multiple OR conditions to ensure trade frequency) ===
+        # Primary: 4h bearish + 15m RSI overbought + 1h RSI pullback OK + volume OK
+        if trend_4h_bearish and rsi_15m_overbought and rsi_1h_bearish_pullback and volume_ok:
             new_signal = -SIZE_ENTRY
-        # Secondary: CRSI overbought + Weekly bearish + Ranging market (mean-reversion)
-        elif crsi_overbought and weekly_bearish and is_ranging:
+        # Secondary: 4h bearish + 15m RSI extreme overbought (stronger signal)
+        elif trend_4h_bearish and rsi_15m_extreme_overbought:
             new_signal = -SIZE_ENTRY
-        # Tertiary: CRSI overbought + Below SMA200 + CRSI falling (momentum confirmation)
-        elif crsi_overbought and below_sma200 and crsi_falling:
+        # Tertiary: 4h bearish + Z-score extreme high + volume OK
+        elif trend_4h_bearish and zscore_extreme_high and volume_ok:
             new_signal = -SIZE_ENTRY
-        # Quaternary: CRSI extreme overbought alone (ensures trade frequency)
-        elif crsi_extreme_overbought and crsi_falling:
+        # Quaternary: 4h bearish + 15m HMA cross short + RSI OK
+        elif trend_4h_bearish and hma_cross_short and rsi_15m[i] > 30 and rsi_15m[i] < 65:
             new_signal = -SIZE_ENTRY
-        # Quintenary: CRSI overbought + Weekly bearish (loose filter)
-        elif crsi_overbought and weekly_bearish:
+        # Quintenary: 4h bearish + 15m HMA bearish + RSI momentum (no cross needed)
+        elif trend_4h_bearish and hma_15m_bearish and rsi_15m[i] > 30 and rsi_15m[i] < 60:
+            new_signal = -SIZE_ENTRY
+        # Sextenary: 4h neutral/valid + 15m RSI extreme + Z-score extreme (strong MR)
+        elif hma_4h_valid and rsi_15m_extreme_overbought and zscore_extreme_high:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
