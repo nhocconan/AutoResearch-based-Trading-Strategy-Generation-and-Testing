@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #425: 12h Donchian Breakout + Daily HMA Trend + RSI Momentum + ATR Stop
-Hypothesis: Donchian channel breakouts (20-period) generate more frequent signals than Fisher
-Transform while still capturing trend moves. Combined with 1d HMA for trend bias and relaxed
-RSI filter, this should generate >=10 trades/symbol while maintaining positive Sharpe.
-Key insight from failures: Need multiple entry paths with relaxed filters to ensure trades.
-Donchian breakouts occur more often than oscillator crosses, especially on 12h timeframe.
-Timeframe: 12h (REQUIRED), HTF: 1d for trend bias via mtf_data helper.
-Position size: 0.25 discrete, stoploss 2.5*ATR for 12h timeframe.
+Experiment #426: 1d Weekly HMA Trend + Daily RSI/MACD Ensemble + ATR Stop
+Hypothesis: Daily timeframe with weekly trend bias provides cleaner signals with less noise.
+Using ensemble of RSI + MACD + price position reduces false signals while maintaining
+trade frequency. Weekly HMA provides strong trend filter without whipsaw.
+Key insight: 1d strategies need wider stops (3*ATR) and relaxed RSI thresholds to ensure trades.
+Multiple entry paths ensure >=10 trades/symbol while weekly HMA keeps Sharpe positive.
+Timeframe: 1d (REQUIRED), HTF: 1w for trend bias via mtf_data helper.
+Position size: 0.30 discrete, stoploss 3.0*ATR for daily timeframe.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_daily_hma_rsi_momentum_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_weekly_hma_rsi_macd_ensemble_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -39,6 +39,16 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD histogram."""
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -49,23 +59,16 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_donchian_channels(high, low, period=20):
-    """Calculate Donchian Channel upper and lower bands."""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
 def calculate_sma(close, period=50):
     """Calculate Simple Moving Average."""
     return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion signals."""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean()
+    std = pd.Series(close).rolling(window=period, min_periods=period).std()
+    zscore = (close - sma.values) / std.values
+    return zscore
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -74,26 +77,24 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
     sma50 = calculate_sma(close, 50)
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, 20)
-    
-    # Donchian middle line
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    zscore = calculate_zscore(close, 20)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.125
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -105,80 +106,82 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(sma50[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(sma50[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(macd_hist[i]) or np.isnan(zscore[i]):
             signals[i] = 0.0
             continue
         
-        # Daily trend bias (long-term direction)
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        # Weekly trend bias (long-term direction)
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # 12h trend filter
+        # Daily trend filter
         above_sma50 = close[i] > sma50[i]
         below_sma50 = close[i] < sma50[i]
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donchian_upper[i - 1] if i > 0 else False
-        breakout_short = close[i] < donchian_lower[i - 1] if i > 0 else False
+        # MACD signals
+        macd_bullish = macd_hist[i] > 0 and macd_line[i] > macd_signal[i]
+        macd_bearish = macd_hist[i] < 0 and macd_line[i] < macd_signal[i]
+        macd_cross_up = macd_hist[i] > 0 and macd_hist[i-1] <= 0 if i > 0 else False
+        macd_cross_down = macd_hist[i] < 0 and macd_hist[i-1] >= 0 if i > 0 else False
         
-        # Donchian position (price relative to channel)
-        in_upper_half = close[i] > donchian_mid[i]
-        in_lower_half = close[i] < donchian_mid[i]
+        # RSI signals (relaxed for daily timeframe)
+        rsi_bullish = rsi[i] > 40 and rsi[i] < 70
+        rsi_bearish = rsi[i] > 30 and rsi[i] < 60
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
         
-        # RSI momentum (RELAXED thresholds to ensure trades)
-        rsi_ok_long = rsi[i] > 35 and rsi[i] < 85
-        rsi_ok_short = rsi[i] > 15 and rsi[i] < 65
-        
-        # RSI momentum confirmation
-        rsi_momentum_long = rsi[i] > 45
-        rsi_momentum_short = rsi[i] < 55
-        
-        # RSI not extreme (avoid buying top/selling bottom)
-        rsi_not_overbought = rsi[i] < 75
-        rsi_not_oversold = rsi[i] > 25
+        # Z-score mean reversion
+        zscore_low = zscore[i] < -1.0
+        zscore_high = zscore[i] > 1.0
         
         new_signal = 0.0
         
         # === LONG ENTRIES (multiple paths to ensure >=10 trades) ===
-        # Path 1: Donchian breakout + Daily bullish + RSI ok (primary)
-        if breakout_long and daily_bullish and rsi_ok_long:
+        # Path 1: Weekly bullish + MACD bullish + RSI ok (primary ensemble)
+        if weekly_bullish and macd_bullish and rsi_bullish:
             new_signal = SIZE_ENTRY
-        # Path 2: Donchian breakout + Above SMA50 + RSI momentum
-        elif breakout_long and above_sma50 and rsi_momentum_long:
+        # Path 2: Weekly bullish + MACD cross up + above SMA50
+        elif weekly_bullish and macd_cross_up and above_sma50:
             new_signal = SIZE_ENTRY
-        # Path 3: Price in upper Donchian + Daily bullish + RSI not overbought
-        elif in_upper_half and daily_bullish and rsi_not_overbought and rsi[i] > 40:
+        # Path 3: Weekly bullish + RSI oversold bounce + MACD improving
+        elif weekly_bullish and rsi_oversold and macd_hist[i] > macd_hist[i-1] if i > 0 else False:
             new_signal = SIZE_ENTRY
-        # Path 4: Donchian breakout + RSI > 50 (momentum confirmation)
-        elif breakout_long and rsi[i] > 50 and daily_bullish:
+        # Path 4: Weekly bullish + Z-score low (mean reversion) + RSI > 30
+        elif weekly_bullish and zscore_low and rsi[i] > 30:
             new_signal = SIZE_ENTRY
-        # Path 5: Simple trend - price > SMA50 + Daily bullish + RSI > 45
-        elif above_sma50 and daily_bullish and rsi[i] > 45 and rsi[i] < 80:
+        # Path 5: Simple trend - Weekly bullish + above SMA50 + RSI > 45
+        elif weekly_bullish and above_sma50 and rsi[i] > 45 and rsi[i] < 75:
+            new_signal = SIZE_ENTRY
+        # Path 6: MACD cross up + RSI > 40 (momentum entry)
+        elif macd_cross_up and rsi[i] > 40 and rsi[i] < 70:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES (multiple paths to ensure >=10 trades) ===
-        # Path 1: Donchian breakout + Daily bearish + RSI ok (primary)
-        if breakout_short and daily_bearish and rsi_ok_short:
+        # Path 1: Weekly bearish + MACD bearish + RSI ok (primary ensemble)
+        if weekly_bearish and macd_bearish and rsi_bearish:
             new_signal = -SIZE_ENTRY
-        # Path 2: Donchian breakout + Below SMA50 + RSI momentum
-        elif breakout_short and below_sma50 and rsi_momentum_short:
+        # Path 2: Weekly bearish + MACD cross down + below SMA50
+        elif weekly_bearish and macd_cross_down and below_sma50:
             new_signal = -SIZE_ENTRY
-        # Path 3: Price in lower Donchian + Daily bearish + RSI not oversold
-        elif in_lower_half and daily_bearish and rsi_not_oversold and rsi[i] < 60:
+        # Path 3: Weekly bearish + RSI overbought rejection + MACD worsening
+        elif weekly_bearish and rsi_overbought and macd_hist[i] < macd_hist[i-1] if i > 0 else False:
             new_signal = -SIZE_ENTRY
-        # Path 4: Donchian breakout + RSI < 50 (momentum confirmation)
-        elif breakout_short and rsi[i] < 50 and daily_bearish:
+        # Path 4: Weekly bearish + Z-score high (mean reversion) + RSI < 70
+        elif weekly_bearish and zscore_high and rsi[i] < 70:
             new_signal = -SIZE_ENTRY
-        # Path 5: Simple trend - price < SMA50 + Daily bearish + RSI < 55
-        elif below_sma50 and daily_bearish and rsi[i] < 55 and rsi[i] > 20:
+        # Path 5: Simple trend - Weekly bearish + below SMA50 + RSI < 55
+        elif weekly_bearish and below_sma50 and rsi[i] < 55 and rsi[i] > 25:
+            new_signal = -SIZE_ENTRY
+        # Path 6: MACD cross down + RSI < 60 (momentum entry)
+        elif macd_cross_down and rsi[i] < 60 and rsi[i] > 30:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -187,8 +190,8 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR from highest for 12h timeframe)
-            current_stop = highest_close - 2.5 * atr[i]
+            # Calculate trailing stop (3.0*ATR from highest for daily timeframe)
+            current_stop = highest_close - 3.0 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -197,7 +200,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.5 * atr[i]
+                risk = 3.0 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
@@ -208,8 +211,8 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR from lowest for 12h timeframe)
-            current_stop = lowest_close + 2.5 * atr[i]
+            # Calculate trailing stop (3.0*ATR from lowest for daily timeframe)
+            current_stop = lowest_close + 3.0 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -218,7 +221,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.5 * atr[i]
+                risk = 3.0 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
@@ -231,7 +234,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 3.0 * atr[i] if position_side > 0 else close[i] + 3.0 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
@@ -240,7 +243,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 3.0 * atr[i] if position_side > 0 else close[i] + 3.0 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
