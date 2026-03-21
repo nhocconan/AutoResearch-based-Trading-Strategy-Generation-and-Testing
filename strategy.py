@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #053: 12h Fisher Transform with Daily HMA + Choppiness Regime Filter
-Hypothesis: Fisher Transform excels at catching reversals in bear/range markets (2022 crash, 2025 bear).
-Combine with Daily HMA(21) for trend bias and Choppiness Index(14) to avoid mean-reversion in strong trends.
-12h timeframe balances trade frequency vs noise. Entry on Fisher extremes (-1.5/+1.5) aligned with HTF trend.
-Position sizing: 0.30 entry, 0.15 at 2R profit, stoploss at 2.5*ATR. Fewer but higher quality trades.
-This differs from #047 by using Fisher instead of Supertrend for entry timing + Choppiness regime filter.
+Experiment #054: 1d Supertrend with Weekly HMA + Choppiness Regime Filter
+Hypothesis: Daily timeframe needs regime detection to avoid whipsaws in 2022 crash.
+Use Weekly HMA for major trend bias, Daily Supertrend for entry signals,
+and Choppiness Index to distinguish trending vs ranging markets.
+In trending regimes (CHOP<38.2): follow Supertrend direction with Weekly HMA confirmation.
+In ranging regimes (CHOP>61.8): mean revert using RSI extremes with SMA200 filter.
+This adapts to market conditions instead of forcing one style.
+Position sizing: 0.25 entry, 0.125 at 2R profit, 2*ATR trailing stop.
+Timeframe: 1d (required for this experiment), HTF: 1w for trend bias.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_fisher_daily_hma_chop_regime_v1"
-timeframe = "12h"
+name = "mtf_1d_supertrend_weekly_hma_chop_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -39,53 +42,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_fisher_transform(high, low, close, period=9):
-    """
-    Ehlers Fisher Transform - normalizes price to Gaussian distribution.
-    Excellent for catching reversals at extremes.
-    Long when Fisher crosses above -1.5 from below.
-    Short when Fisher crosses below +1.5 from above.
-    """
-    hl2 = (high + low) / 2
-    # Normalize price to -1 to +1 range
-    highest = pd.Series(hl2).rolling(window=period, min_periods=period).max().values
-    lowest = pd.Series(hl2).rolling(window=period, min_periods=period).min().values
-    
-    # Avoid division by zero
-    range_val = highest - lowest
-    range_val = np.where(range_val < 1e-10, 1e-10, range_val)
-    
-    normalized = (hl2 - lowest) / range_val
-    normalized = np.clip(normalized, 0.001, 0.999)  # Avoid log(0) or log(1)
-    
-    # Fisher transform
-    fisher_input = 0.5 * np.log((1 + normalized) / (1 - normalized))
-    fisher = pd.Series(fisher_input).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return fisher
-
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP) - measures market choppiness vs trending.
-    CHOP > 61.8 = range-bound (mean reversion favorable)
-    CHOP < 38.2 = trending (trend following favorable)
-    """
-    atr = calculate_atr(high, low, close, period)
-    
-    highest = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    range_val = highest - lowest
-    range_val = np.where(range_val < 1e-10, 1e-10, range_val)
-    
-    atr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
-    
-    chop = 100 * np.log10(atr_sum / range_val) / np.log10(period)
-    chop = np.nan_to_num(chop, nan=50.0)
-    chop = np.clip(chop, 0, 100)
-    
-    return chop
-
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -98,6 +54,62 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator."""
+    atr = calculate_atr(high, low, close, period)
+    hl2 = (high + low) / 2
+    upper = hl2 + multiplier * atr
+    lower = hl2 - multiplier * atr
+    
+    supertrend = np.zeros(len(close))
+    direction = np.ones(len(close))
+    
+    supertrend[0] = lower[0]
+    direction[0] = 1
+    for i in range(1, len(close)):
+        if close[i] > supertrend[i-1]:
+            supertrend[i] = lower[i]
+            direction[i] = 1
+        elif close[i] < supertrend[i-1]:
+            supertrend[i] = upper[i]
+            direction[i] = -1
+        else:
+            supertrend[i] = supertrend[i-1]
+            direction[i] = direction[i-1]
+    
+    return supertrend, direction
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = ranging market (mean reversion)
+    CHOP < 38.2 = trending market (trend following)
+    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    """
+    atr = calculate_atr(high, low, close, period)
+    
+    # Rolling sum of ATR
+    atr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
+    
+    # Highest high and lowest low over period
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    # Price range
+    price_range = highest_high - lowest_low
+    
+    # Choppiness calculation
+    chop = np.zeros(len(close))
+    mask = (price_range > 0) & (atr_sum > 0)
+    chop[mask] = 100 * np.log10(atr_sum[mask] / price_range[mask]) / np.log10(period)
+    chop = np.clip(chop, 0, 100)
+    
+    return chop
+
+def calculate_sma(close, period=200):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -105,27 +117,26 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    fisher = calculate_fisher_transform(high, low, close, 9)
-    chop = calculate_choppiness_index(high, low, close, 14)
-    
-    # 12h HMA for local trend confirmation
+    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
+    chop = calculate_choppiness(high, low, close, 14)
+    sma_200 = calculate_sma(close, 200)
     hma_21 = calculate_hma(close, 21)
     hma_50 = calculate_hma(close, 50)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -133,65 +144,74 @@ def generate_signals(prices):
     trailing_stop = 0.0
     position_reduced = False
     
-    for i in range(100, n):
-        # Daily trend filter (HTF) - use HMA slope and price position
-        daily_trend_bullish = hma_1d_aligned[i] > 0 and close[i] > hma_1d_aligned[i]
-        daily_trend_bearish = hma_1d_aligned[i] > 0 and close[i] < hma_1d_aligned[i]
+    for i in range(250, n):  # Start after 250 bars for SMA200 warmup
+        # Weekly trend filter (HTF)
+        weekly_bullish = hma_1w_aligned[i] > 0 and close[i] > hma_1w_aligned[i]
+        weekly_bearish = hma_1w_aligned[i] > 0 and close[i] < hma_1w_aligned[i]
         
-        # Choppiness regime filter
-        # CHOP < 45 = trending (favor trend-following entries)
-        # CHOP > 55 = ranging (favor mean-reversion entries)
-        is_trending = chop[i] < 45
-        is_ranging = chop[i] > 55
+        # Daily Supertrend direction
+        st_long = st_direction[i] == 1
+        st_short = st_direction[i] == -1
         
-        # 12h HMA trend confirmation
+        # Supertrend flip signals
+        st_flip_long = (i > 0) and (st_direction[i] == 1) and (st_direction[i-1] == -1)
+        st_flip_short = (i > 0) and (st_direction[i] == -1) and (st_direction[i-1] == 1)
+        
+        # Daily HMA trend
         hma_trend_long = hma_21[i] > hma_50[i]
         hma_trend_short = hma_21[i] < hma_50[i]
         
-        # Fisher Transform signals
-        # Long: Fisher crosses above -1.5 (oversold reversal)
-        # Short: Fisher crosses below +1.5 (overbought reversal)
-        fisher_long_signal = (i > 0) and (fisher[i] > -1.5) and (fisher[i-1] <= -1.5)
-        fisher_short_signal = (i > 0) and (fisher[i] < 1.5) and (fisher[i-1] >= 1.5)
+        # Price vs SMA200
+        above_sma200 = sma_200[i] > 0 and close[i] > sma_200[i]
+        below_sma200 = sma_200[i] > 0 and close[i] < sma_200[i]
         
-        # Fisher extreme levels (stronger signal)
-        fisher_extreme_long = fisher[i] < -1.8
-        fisher_extreme_short = fisher[i] > 1.8
+        # Regime detection via Choppiness
+        trending_regime = chop[i] < 38.2
+        ranging_regime = chop[i] > 61.8
         
-        # RSI confirmation
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
+        # RSI signals for mean reversion
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         rsi_rising = (i > 2) and (rsi[i] > rsi[i-2])
         rsi_falling = (i > 2) and (rsi[i] < rsi[i-2])
         
         new_signal = 0.0
         
-        # LONG ENTRY conditions (multiple pathways for flexibility)
-        # Path 1: Fisher reversal + Daily bullish trend + Trending regime
-        if fisher_long_signal and daily_trend_bullish and is_trending:
-            new_signal = SIZE_ENTRY
-        # Path 2: Fisher extreme + Daily bullish + RSI oversold (stronger signal)
-        elif fisher_extreme_long and daily_trend_bullish and rsi_oversold:
-            new_signal = SIZE_ENTRY
-        # Path 3: HMA crossover + Daily bullish + RSI rising (trend continuation)
-        elif hma_trend_long and daily_trend_bullish and rsi_rising and not fisher_short_signal:
-            new_signal = SIZE_ENTRY
+        # TRENDING REGIME: Follow Supertrend with Weekly HMA confirmation
+        if trending_regime:
+            # Long: Supertrend flip + Weekly bullish + Daily HMA bullish
+            if st_flip_long and weekly_bullish and hma_trend_long:
+                new_signal = SIZE_ENTRY
+            # Short: Supertrend flip + Weekly bearish + Daily HMA bearish
+            elif st_flip_short and weekly_bearish and hma_trend_short:
+                new_signal = -SIZE_ENTRY
+            # Continuation entries in strong trend
+            elif st_long and weekly_bullish and above_sma200 and rsi_rising and rsi[i] < 60:
+                new_signal = SIZE_ENTRY
+            elif st_short and weekly_bearish and below_sma200 and rsi_falling and rsi[i] > 40:
+                new_signal = -SIZE_ENTRY
         
-        # SHORT ENTRY conditions
-        # Path 1: Fisher reversal + Daily bearish trend + Trending regime
-        if fisher_short_signal and daily_trend_bearish and is_trending:
-            new_signal = -SIZE_ENTRY
-        # Path 2: Fisher extreme + Daily bearish + RSI overbought (stronger signal)
-        elif fisher_extreme_short and daily_trend_bearish and rsi_overbought:
-            new_signal = -SIZE_ENTRY
-        # Path 3: HMA crossover + Daily bearish + RSI falling (trend continuation)
-        elif hma_trend_short and daily_trend_bearish and rsi_falling and not fisher_long_signal:
-            new_signal = -SIZE_ENTRY
+        # RANGING REGIME: Mean reversion with RSI extremes
+        elif ranging_regime:
+            # Long: RSI oversold + Price above SMA200 (bullish range)
+            if rsi_oversold and above_sma200 and rsi_rising:
+                new_signal = SIZE_ENTRY
+            # Short: RSI overbought + Price below SMA200 (bearish range)
+            elif rsi_overbought and below_sma200 and rsi_falling:
+                new_signal = -SIZE_ENTRY
+        
+        # NEUTRAL REGIME (38.2 <= CHOP <= 61.8): Conservative trend following
+        else:
+            # Only enter on clear Supertrend flips with Weekly confirmation
+            if st_flip_long and weekly_bullish:
+                new_signal = SIZE_ENTRY
+            elif st_flip_short and weekly_bearish:
+                new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
-            # Calculate trailing stop (2.5*ATR for 12h timeframe)
-            current_stop = close[i] - 2.5 * atr[i]
+            # Calculate trailing stop
+            current_stop = close[i] - 2.0 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -202,14 +222,14 @@ def generate_signals(prices):
                 # Check take profit (reduce position at 2R)
                 if not position_reduced:
                     profit = close[i] - entry_price
-                    risk = 2.5 * atr[i]  # Initial risk at entry
-                    if risk > 0 and profit >= 2.0 * risk:
+                    risk = 2.0 * atr[i]  # Initial risk at entry
+                    if profit >= 2.0 * risk:
                         new_signal = SIZE_HALF
                         position_reduced = True
         
         if position_side < 0 and entry_price > 0:
             # Calculate trailing stop
-            current_stop = close[i] + 2.5 * atr[i]
+            current_stop = close[i] + 2.0 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -220,8 +240,8 @@ def generate_signals(prices):
                 # Check take profit (reduce position at 2R)
                 if not position_reduced:
                     profit = entry_price - close[i]
-                    risk = 2.5 * atr[i]  # Initial risk at entry
-                    if risk > 0 and profit >= 2.0 * risk:
+                    risk = 2.0 * atr[i]  # Initial risk at entry
+                    if profit >= 2.0 * risk:
                         new_signal = -SIZE_HALF
                         position_reduced = True
         
@@ -232,14 +252,14 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             position_reduced = False
         
         # Position reversed
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             position_reduced = False
         
         # Position reduced (take profit)
