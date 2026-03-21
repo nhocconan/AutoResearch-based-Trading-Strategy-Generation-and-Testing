@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #006 - MTF KAMA+Donchian Trend + RSI Pullback + ADX Filter (4h+1h v1)
+EXPERIMENT #007 - MTF HMA Trend + Stochastic Entry + Volume + ATR Regime (4h+1h v1)
 ==================================================================================================
-Hypothesis: Current best uses 4h DEMA+Supertrend. Let's try KAMA (Kaufman Adaptive) which adjusts
-to market volatility - slower in choppy markets, faster in trending markets. Combine with Donchian
-breakout confirmation on 4h, RSI pullback entries on 1h, and ADX filter to only trade strong trends.
+Hypothesis: Current best uses 4h DEMA+Supertrend+MACD. Let's try HMA (Hull MA) which is faster
+and smoother than EMA, combined with Stochastic oscillator for entry timing (different from RSI/MACD).
+Add volume confirmation to filter false breakouts and ATR regime filter to avoid extreme volatility.
 
-Key changes from #005:
+Key changes from #006:
 - Timeframe: 1h entries + 4h trend (proven MTF combo)
-- Trend: KAMA(10,2,30) + Donchian(20) breakout on 4h
-- Entry: RSI(14) pullback to 40-60 zone on 1h (proven entry method)
-- Filter: ADX(14) > 25 for trend strength + Z-score(20) < 2.0
+- Trend: HMA(16) vs HMA(48) crossover on 4h (faster than KAMA, smoother than EMA)
+- Entry: Stochastic(14,3,3) cross on 1h (different from RSI/MACD - catches momentum shifts)
+- Filter: Volume > 1.5x 20-period average + ATR regime (not extreme)
 - Position size: 0.30 (discrete levels: 0.0, ±0.20, ±0.30)
 - Stoploss: 2.0*ATR trailing, TP at 2R reduce to half
 
 Why this should work:
-- KAMA adapts to regime - reduces whipsaws in ranging markets
-- Donchian breakout confirms trend direction
-- RSI pullback entries catch retracements in trends (better than MACD for entries)
-- ADX filter ensures we only trade when trend is strong (>25)
+- HMA reduces lag significantly vs EMA while staying smooth
+- Stochastic catches momentum shifts better than RSI in ranging markets
+- Volume confirmation filters false breakouts (institutional participation)
+- ATR regime filter avoids trading during extreme volatility (reduces whipsaws)
 - 4h trend filter reduces false signals vs 1h-only strategies
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_kama_donchian_rsi_adx_zscore_4h_1h_v1"
+name = "mtf_hma_stoch_volume_atr_regime_4h_1h_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -53,166 +53,103 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average"""
+def calculate_hma(close, period=16):
+    """Calculate Hull Moving Average"""
     n = len(close)
-    if n < period + slow_period:
+    if n < period * 2:
         return np.zeros(n)
     
-    kama = np.zeros(n)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
     
-    # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(period - 1, n):
-        if i >= slow_period - 1:
-            change = abs(close[i] - close[i - slow_period + 1])
-            volatility = np.sum(np.abs(np.diff(close[i - slow_period + 1:i + 1])))
-            if volatility > 0:
-                er[i] = change / volatility
-            else:
-                er[i] = 0
+    # Calculate WMA for period, period/2, and sqrt(period)
+    def wma(data, wma_period):
+        n_data = len(data)
+        result = np.zeros(n_data)
+        weights = np.arange(1, wma_period + 1)
+        weight_sum = np.sum(weights)
+        
+        for i in range(wma_period - 1, n_data):
+            window = data[i - wma_period + 1:i + 1]
+            result[i] = np.sum(window * weights) / weight_sum
+        
+        return result
     
-    # Calculate smoothing constant
-    sc = np.zeros(n)
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
+    wma_period = wma(close, period)
+    wma_half = wma(close, half_period)
     
-    for i in range(period - 1, n):
-        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Raw HMA = 2*WMA(period/2) - WMA(period)
+    raw_hma = 2 * wma_half - wma_period
     
-    # Initialize KAMA
-    kama[period - 1] = close[period - 1]
+    # Final HMA = WMA of Raw HMA with sqrt(period)
+    hma = wma(raw_hma, sqrt_period)
     
-    for i in range(period, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama
+    return hma
 
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (upper and lower bands)"""
-    n = len(high)
-    if n < period:
+def calculate_stochastic(high, low, close, k_period=14, d_period=3):
+    """Calculate Stochastic Oscillator (%K and %D)"""
+    n = len(close)
+    if n < k_period + d_period:
         return np.zeros(n), np.zeros(n)
     
-    upper = np.zeros(n)
-    lower = np.zeros(n)
+    k = np.zeros(n)
+    d = np.zeros(n)
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
-
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
-        return np.zeros(n)
-    
-    rsi = np.zeros(n)
-    gains = np.zeros(n)
-    losses = np.zeros(n)
-    
-    for i in range(1, n):
-        diff = close[i] - close[i - 1]
-        gains[i] = max(0, diff)
-        losses[i] = max(0, -diff)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    
-    avg_gain[period] = np.mean(gains[1:period + 1])
-    avg_loss[period] = np.mean(losses[1:period + 1])
-    
-    for i in range(period + 1, n):
-        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gains[i]) / period
-        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + losses[i]) / period
-    
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-    
-    return rsi
-
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate Average Directional Index"""
-    n = len(close)
-    if n < period * 3:
-        return np.zeros(n)
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
+    for i in range(k_period - 1, n):
+        lowest_low = np.min(low[i - k_period + 1:i + 1])
+        highest_high = np.max(high[i - k_period + 1:i + 1])
         
-        if high[i] - high[i - 1] > low[i - 1] - low[i]:
-            plus_dm[i] = max(0, high[i] - high[i - 1])
+        if highest_high > lowest_low:
+            k[i] = 100 * (close[i] - lowest_low) / (highest_high - lowest_low)
         else:
-            plus_dm[i] = 0
-        
-        if low[i - 1] - low[i] > high[i] - high[i - 1]:
-            minus_dm[i] = max(0, low[i - 1] - low[i])
-        else:
-            minus_dm[i] = 0
+            k[i] = 50
     
-    atr = np.zeros(n)
-    atr[period - 1] = np.mean(tr[1:period])
-    for i in range(period, n):
-        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    # %D is SMA of %K
+    for i in range(k_period + d_period - 2, n):
+        d[i] = np.mean(k[i - d_period + 1:i + 1])
     
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period, n):
-        if atr[i] > 0:
-            plus_di[i] = 100 * plus_dm[i] / atr[i]
-            minus_di[i] = 100 * minus_dm[i] / atr[i]
-    
-    dx = np.zeros(n)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = np.zeros(n)
-    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
-    for i in range(period * 2, n):
-        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
-    
-    return adx
+    return k, d
 
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized deviation from mean)"""
-    n = len(close)
+def calculate_volume_sma(volume, period=20):
+    """Calculate SMA of volume"""
+    n = len(volume)
     if n < period:
         return np.zeros(n)
     
-    zscore = np.zeros(n)
+    volume_sma = np.zeros(n)
     
     for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        mean = np.mean(window)
-        std = np.std(window)
-        
-        if std > 0:
-            zscore[i] = (close[i] - mean) / std
-        else:
-            zscore[i] = 0
+        volume_sma[i] = np.mean(volume[i - period + 1:i + 1])
     
-    return zscore
+    return volume_sma
+
+
+def calculate_atr_regime(atr, period=50):
+    """Calculate ATR regime (percentile of recent ATR values)"""
+    n = len(atr)
+    if n < period:
+        return np.zeros(n)
+    
+    regime = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        window = atr[i - period + 1:i + 1]
+        current_atr = atr[i]
+        
+        # Calculate percentile rank
+        percentile = np.sum(window <= current_atr) / period
+        
+        # Regime: 0=low vol, 1=normal, 2=high vol
+        if percentile < 0.2:
+            regime[i] = 0  # Low volatility
+        elif percentile > 0.8:
+            regime[i] = 2  # High volatility
+        else:
+            regime[i] = 1  # Normal volatility
+    
+    return regime
 
 
 def resample_to_higher_tf(prices, tf='4h'):
@@ -234,6 +171,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     signals = np.zeros(n)
@@ -256,66 +194,50 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         c_4h = np.array([close[i * bars_per_4h + bars_per_4h - 1] for i in range(n_4h)])
         h_4h = np.array([np.max(high[i * bars_per_4h:i * bars_per_4h + bars_per_4h]) for i in range(n_4h)])
         l_4h = np.array([np.min(low[i * bars_per_4h:i * bars_per_4h + bars_per_4h]) for i in range(n_4h)])
+        v_4h = np.array([np.sum(volume[i * bars_per_4h:i * bars_per_4h + bars_per_4h]) for i in range(n_4h)])
         
         df_4h = pd.DataFrame({
             'open': c_4h,
             'high': h_4h,
             'low': l_4h,
             'close': c_4h,
-            'volume': np.ones(n_4h)
+            'volume': v_4h
         })
     
     # 1h indicators for entry timing
     atr_1h = calculate_atr(high, low, close, period=14)
-    rsi_1h = calculate_rsi(close, period=14)
-    zscore_1h = calculate_zscore(close, period=20)
+    stoch_k_1h, stoch_d_1h = calculate_stochastic(high, low, close, k_period=14, d_period=3)
+    volume_sma_1h = calculate_volume_sma(volume, period=20)
+    atr_regime_1h = calculate_atr_regime(atr_1h, period=50)
     
     # 4h indicators for trend
     c_4h = df_4h['close'].values
-    h_4h = df_4h['high'].values
-    l_4h = df_4h['low'].values
     n_4h = len(c_4h)
     
-    kama_4h = calculate_kama(c_4h, period=10, fast_period=2, slow_period=30)
-    donchian_upper_4h, donchian_lower_4h = calculate_donchian(h_4h, l_4h, period=20)
-    adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
+    hma_fast_4h = calculate_hma(c_4h, period=16)
+    hma_slow_4h = calculate_hma(c_4h, period=48)
     
     # Map 4h indicators back to 1h timeframe using ffill
-    kama_trend_4h = np.zeros(n)
-    donchian_trend_4h = np.zeros(n)
-    adx_strength_4h = np.zeros(n)
+    hma_trend_4h = np.zeros(n)
     
     for i in range(n):
         # Find which 4h bar this 1h bar belongs to
         idx_4h = min(i // 4, n_4h - 1)
-        if idx_4h >= 40:  # Need enough data for KAMA+ADX
-            # KAMA trend: price above/below KAMA
-            if c_4h[idx_4h] > kama_4h[idx_4h]:
-                kama_trend_4h[i] = 1
-            elif c_4h[idx_4h] < kama_4h[idx_4h]:
-                kama_trend_4h[i] = -1
-            
-            # Donchian trend: price near upper/lower band
-            price_range = donchian_upper_4h[idx_4h] - donchian_lower_4h[idx_4h]
-            if price_range > 0:
-                price_position = (c_4h[idx_4h] - donchian_lower_4h[idx_4h]) / price_range
-                if price_position > 0.7:
-                    donchian_trend_4h[i] = 1
-                elif price_position < 0.3:
-                    donchian_trend_4h[i] = -1
-            
-            adx_strength_4h[i] = adx_4h[idx_4h]
+        if idx_4h >= 48:  # Need enough data for HMA(48)
+            # HMA trend: fast HMA above/below slow HMA
+            if hma_fast_4h[idx_4h] > hma_slow_4h[idx_4h]:
+                hma_trend_4h[i] = 1
+            elif hma_fast_4h[idx_4h] < hma_slow_4h[idx_4h]:
+                hma_trend_4h[i] = -1
     
     # Entry thresholds
-    RSI_LONG_MIN = 40
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 60
-    ZSCORE_MAX = 2.0
-    ADX_MIN = 25
+    STOCH_LONG_CROSS = 20  # %K crosses above %D below 20
+    STOCH_SHORT_CROSS = 80  # %K crosses below %D above 80
+    VOLUME_MULT = 1.5
+    ATR_REGIME_OK = [0, 1]  # Only trade in low/normal volatility
     ATR_STOP_MULT = 2.0
     
-    first_valid = max(100, 40 * 4, 14 + 1, 20)
+    first_valid = max(100, 48 * 4, 14 + 3, 20, 50)
     
     # Track position state
     position_side = np.zeros(n)
@@ -325,15 +247,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_1h[i]) or np.isnan(rsi_1h[i]) or np.isnan(zscore_1h[i]) or atr_1h[i] == 0:
+        if np.isnan(atr_1h[i]) or np.isnan(stoch_k_1h[i]) or np.isnan(stoch_d_1h[i]) or atr_1h[i] == 0:
             signals[i] = 0.0
             continue
         
-        kama_trend = kama_trend_4h[i]
-        donchian_trend = donchian_trend_4h[i]
-        adx_val = adx_strength_4h[i]
-        rsi_val = rsi_1h[i]
-        zscore_val = zscore_1h[i]
+        hma_trend = hma_trend_4h[i]
+        stoch_k = stoch_k_1h[i]
+        stoch_d = stoch_d_1h[i]
+        stoch_k_prev = stoch_k_1h[i - 1] if i > 0 else stoch_k
+        stoch_d_prev = stoch_d_1h[i - 1] if i > 0 else stoch_d
+        vol_ratio = volume[i] / volume_sma_1h[i] if volume_sma_1h[i] > 0 else 0
+        atr_regime = atr_regime_1h[i]
         atr = atr_1h[i]
         price = close[i]
         
@@ -430,10 +354,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h KAMA + Donchian trend + ADX filter + 1h RSI pullback + Z-score
-        if kama_trend == 1 and donchian_trend == 1 and adx_val > ADX_MIN:  # Bullish trend confirmed
-            if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and
-                abs(zscore_val) < ZSCORE_MAX):  # RSI pullback + not extreme
+        # Entry logic: 4h HMA trend + 1h Stochastic cross + Volume + ATR regime
+        # Long entry: HMA bullish + Stochastic cross up from oversold + Volume confirmation + Normal ATR
+        if hma_trend == 1 and atr_regime in ATR_REGIME_OK:
+            stoch_cross_up = (stoch_k_prev <= stoch_d_prev and stoch_k > stoch_d and stoch_k < STOCH_LONG_CROSS)
+            volume_confirmed = vol_ratio >= VOLUME_MULT
+            
+            if stoch_cross_up and volume_confirmed:
                 signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = price
@@ -441,9 +368,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
                 
-        elif kama_trend == -1 and donchian_trend == -1 and adx_val > ADX_MIN:  # Bearish trend confirmed
-            if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and
-                abs(zscore_val) < ZSCORE_MAX):  # RSI pullback + not extreme
+        # Short entry: HMA bearish + Stochastic cross down from overbought + Volume confirmation + Normal ATR
+        elif hma_trend == -1 and atr_regime in ATR_REGIME_OK:
+            stoch_cross_down = (stoch_k_prev >= stoch_d_prev and stoch_k < stoch_d and stoch_k > STOCH_SHORT_CROSS)
+            volume_confirmed = vol_ratio >= VOLUME_MULT
+            
+            if stoch_cross_down and volume_confirmed:
                 signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = price
