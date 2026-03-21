@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #224: 30m Donchian Breakout with 4h HMA Trend Filter
-Hypothesis: 30m timeframe captures intraday momentum swings well. Donchian 
-breakouts (20-period) provide clear entry signals. 4h HMA filters trend direction 
-(only long when price > 4h HMA, only short when <). RSI filter avoids extremes 
-(30-70 range). This is simpler than previous multi-HMA approaches and should 
-generate more trades with better risk/reward. Position sizing: 0.25 entry, 0.125 
-half at 2R profit. Stoploss: 2.5*ATR trailing stop. Target: Beat Sharpe=0.499.
+Experiment #225: 1h Multi-Signal Ensemble with 4h/12h HMA Trend Filter
+Hypothesis: Combining multiple weak signals (RSI pullback + MACD momentum + Volume spike)
+with strong HTF trend filter produces better risk-adjusted returns than single-indicator
+strategies. 4h HMA defines macro trend, 12h HMA confirms direction. Entry on 1h RSI
+pullback (30-50 for long, 50-70 for short) when MACD histogram confirms momentum.
+Volume spike (>1.5x average) confirms institutional participation. Stoploss at 2.5*ATR.
+Position sizing: 0.25 entry, 0.15 at 2R profit. Designed to work in both trending
+(2021) and ranging/bear (2022, 2025) markets by requiring HTF confirmation.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_donchian_4h_hma_rsi_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_ensemble_rsi_macd_vol_4h_12h_hma_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -48,42 +49,49 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (upper/lower bounds)."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    mid = (upper + lower) / 2
-    return upper, lower, mid
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD indicator."""
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = (ema_fast - ema_slow).values
+    signal_line = pd.Series(macd_line).ewm(span=signal, min_periods=signal, adjust=False).mean().values
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average."""
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_12h = calculate_hma(df_12h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, 20)
-    
-    # Track previous Donchian values for breakout detection
-    prev_donchian_upper = np.roll(donchian_upper, 1)
-    prev_donchian_lower = np.roll(donchian_lower, 1)
-    prev_donchian_upper[0] = donchian_upper[0]
-    prev_donchian_lower[0] = donchian_lower[0]
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
+    vol_ma = calculate_volume_ma(volume, 20)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.125
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -94,45 +102,71 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filter
-        hma_4h_bullish = close[i] > hma_4h_aligned[i]
-        hma_4h_bearish = close[i] < hma_4h_aligned[i]
+        # HTF trend filters (both 4h and 12h must agree for strong signal)
+        htf_strong_bull = close[i] > hma_4h_aligned[i] and close[i] > hma_12h_aligned[i]
+        htf_strong_bear = close[i] < hma_4h_aligned[i] and close[i] < hma_12h_aligned[i]
+        htf_weak_bull = close[i] > hma_4h_aligned[i]
+        htf_weak_bear = close[i] < hma_4h_aligned[i]
         
-        # RSI filter (avoid extremes, allow entries in 30-70 range)
-        rsi_ok_long = rsi[i] > 35 and rsi[i] < 75
-        rsi_ok_short = rsi[i] > 25 and rsi[i] < 65
+        # RSI pullback zones (not extreme, allowing mean reversion within trend)
+        rsi_long_zone = 30 <= rsi[i] <= 55
+        rsi_short_zone = 45 <= rsi[i] <= 70
         
-        # Donchian breakout detection
-        breakout_long = close[i] > prev_donchian_upper[i] and close[i-1] <= prev_donchian_upper[i-1]
-        breakout_short = close[i] < prev_donchian_lower[i] and close[i-1] >= prev_donchian_lower[i-1]
+        # MACD momentum confirmation
+        macd_bull = macd_hist[i] > 0 and (i < 1 or macd_hist[i] > macd_hist[i-1])
+        macd_bear = macd_hist[i] < 0 and (i < 1 or macd_hist[i] < macd_hist[i-1])
+        macd_cross_up = i > 0 and macd_hist[i-1] <= 0 and macd_hist[i] > 0
+        macd_cross_down = i > 0 and macd_hist[i-1] >= 0 and macd_hist[i] < 0
         
-        # Donchian continuation (price above/below mid)
-        above_mid = close[i] > donchian_mid[i]
-        below_mid = close[i] < donchian_mid[i]
+        # Volume confirmation (spike above average)
+        vol_spike = volume[i] > 1.3 * vol_ma[i] if vol_ma[i] > 0 else False
+        
+        # Count signals for ensemble approach
+        long_signals = 0
+        short_signals = 0
+        
+        # Long signal components
+        if htf_strong_bull:
+            long_signals += 2
+        elif htf_weak_bull:
+            long_signals += 1
+        
+        if rsi_long_zone:
+            long_signals += 1
+        
+        if macd_bull or macd_cross_up:
+            long_signals += 1
+        
+        if vol_spike:
+            long_signals += 1
+        
+        # Short signal components
+        if htf_strong_bear:
+            short_signals += 2
+        elif htf_weak_bear:
+            short_signals += 1
+        
+        if rsi_short_zone:
+            short_signals += 1
+        
+        if macd_bear or macd_cross_down:
+            short_signals += 1
+        
+        if vol_spike:
+            short_signals += 1
         
         new_signal = 0.0
         
-        # === LONG ENTRY ===
-        # Breakout long with trend confirmation
-        if breakout_long and hma_4h_bullish and rsi_ok_long:
+        # Entry logic: need at least 3 signals for long, 3 for short
+        if long_signals >= 3 and short_signals < 2:
             new_signal = SIZE_ENTRY
-        
-        # Continuation long (price above Donchian mid + trend)
-        elif above_mid and hma_4h_bullish and rsi_ok_long:
-            # Enter on pullback to mid
-            if close[i-1] < donchian_mid[i-1] and close[i] > donchian_mid[i]:
-                new_signal = SIZE_ENTRY
-        
-        # === SHORT ENTRY ===
-        # Breakout short with trend confirmation
-        if breakout_short and hma_4h_bearish and rsi_ok_short:
+        elif short_signals >= 3 and long_signals < 2:
             new_signal = -SIZE_ENTRY
-        
-        # Continuation short (price below Donchian mid + trend)
-        elif below_mid and hma_4h_bearish and rsi_ok_short:
-            # Enter on pullback to mid
-            if close[i-1] > donchian_mid[i-1] and close[i] < donchian_mid[i]:
-                new_signal = -SIZE_ENTRY
+        # Exit if signals weaken significantly
+        elif long_signals <= 1 and position_side > 0:
+            new_signal = 0.0
+        elif short_signals <= 1 and position_side < 0:
+            new_signal = 0.0
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
