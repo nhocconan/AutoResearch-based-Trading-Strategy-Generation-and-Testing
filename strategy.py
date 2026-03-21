@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #320: 30m EMA Crossover + 4h HMA Trend + RSI Momentum + ATR Stops
-Hypothesis: 30m EMA crossover (8/21) provides timely entry signals while 4h HMA(21) 
-gives reliable trend bias. RSI(14) > 50 confirms momentum for longs, < 50 for shorts.
-ATR(14) trailing stops at 2.5x protect capital. Simpler than regime-based approaches
-that failed repeatedly. Target: Generate 50-100 trades/year with Sharpe > 0.5.
-Timeframe: 30m (required), HTF: 4h for trend bias.
+Experiment #321: 1h Fisher Transform + 4h HMA Trend + Choppiness Regime Filter + ATR Stops
+Hypothesis: 1h Fisher Transform catches reversals better than RSI in bear/range markets (2025 test).
+4h HMA provides macro trend bias (proven in best strategies). Choppiness Index detects regime:
+CHOP>61.8 = range (use mean reversion), CHOP<38.2 = trend (use breakout). This adapts to market state.
+1h timeframe = more trades than 4h/12h/1d, but need regime filter to avoid whipsaws.
+Target: Beat Sharpe=0.499 with better reversal timing and regime adaptation.
+Timeframe: 1h (required for this experiment), HTF: 4h for trend bias.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_ema_crossover_4h_hma_rsi_momentum_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_fisher_4h_hma_chop_regime_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -35,11 +36,58 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average."""
-    close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
+def calculate_fisher_transform(high, low, period=9):
+    """
+    Ehlers Fisher Transform - catches reversals in bear/range markets.
+    Transform price to Gaussian distribution, crossings of ±1.5 signal reversals.
+    """
+    hl2 = (high + low) / 2
+    hl2_s = pd.Series(hl2)
+    
+    # Normalize price within period range
+    highest = hl2_s.rolling(window=period, min_periods=period).max().values
+    lowest = hl2_s.rolling(window=period, min_periods=period).min().values
+    range_val = highest - lowest
+    range_val = np.where(range_val < 1e-10, 1e-10, range_val)
+    
+    normalized = 0.66 * ((hl2 - lowest) / range_val) + 0.67
+    normalized = np.clip(normalized, 0.001, 0.999)
+    
+    # Fisher transform
+    fisher = np.log((1 + normalized) / (1 - normalized))
+    fisher_s = pd.Series(fisher)
+    fisher_smooth = fisher_s.ewm(span=3, min_periods=3, adjust=False).mean().values
+    
+    return fisher_smooth
+
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP) - detects ranging vs trending markets.
+    CHOP > 61.8 = choppy/range (mean reversion works)
+    CHOP < 38.2 = trending (trend following works)
+    """
+    n = len(close)
+    chop = np.zeros(n)
+    
+    for i in range(period, n):
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        price_range = highest_high - lowest_low
+        
+        if price_range < 1e-10:
+            chop[i] = 100
+            continue
+        
+        atr_sum = 0.0
+        for j in range(i-period+1, i+1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            atr_sum += tr
+        
+        atr_avg = atr_sum / period
+        chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    chop[:period] = 50  # Default value for warmup
+    return chop
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -68,26 +116,21 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    ema_fast = calculate_ema(close, 8)
-    ema_slow = calculate_ema(close, 21)
-    ema_50 = calculate_ema(close, 50)
+    fisher = calculate_fisher_transform(high, low, 9)
+    chop = calculate_choppiness_index(high, low, close, 14)
     
     # Track previous values
     prev_close = np.roll(close, 1)
     prev_close[0] = close[0]
-    prev_ema_fast = np.roll(ema_fast, 1)
-    prev_ema_fast[0] = ema_fast[0]
-    prev_ema_slow = np.roll(ema_slow, 1)
-    prev_ema_slow[0] = ema_slow[0]
-    prev_rsi = np.roll(rsi, 1)
-    prev_rsi[0] = rsi[0]
+    prev_fisher = np.roll(fisher, 1)
+    prev_fisher[0] = fisher[0]
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.28
-    SIZE_HALF = 0.14
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -99,61 +142,67 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or np.isnan(atr[i]) or np.isnan(rsi[i]):
+        if np.isnan(atr[i]) or np.isnan(fisher[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        # 4h trend bias
-        hma_valid = not np.isnan(hma_4h_aligned[i])
-        trend_bullish = hma_valid and close[i] > hma_4h_aligned[i]
-        trend_bearish = hma_valid and close[i] < hma_4h_aligned[i]
+        # 4h macro trend bias
+        trend_bullish = not np.isnan(hma_4h_aligned[i]) and close[i] > hma_4h_aligned[i]
+        trend_bearish = not np.isnan(hma_4h_aligned[i]) and close[i] < hma_4h_aligned[i]
         
-        # EMA crossover signals
-        ema_cross_long = ema_fast[i] > ema_slow[i] and prev_ema_fast[i] <= prev_ema_slow[i]
-        ema_cross_short = ema_fast[i] < ema_slow[i] and prev_ema_fast[i] >= prev_ema_slow[i]
+        # Regime detection via Choppiness Index
+        is_choppy = chop[i] > 55  # Range market (mean reversion)
+        is_trending = chop[i] < 45  # Trend market (breakout)
         
-        # EMA alignment (fast > slow > 50 for strong trend)
-        ema_aligned_long = ema_fast[i] > ema_slow[i] and ema_slow[i] > ema_50[i]
-        ema_aligned_short = ema_fast[i] < ema_slow[i] and ema_slow[i] < ema_50[i]
+        # Fisher Transform reversal signals
+        fisher_cross_up = fisher[i] > -1.5 and prev_fisher[i] <= -1.5  # Oversold reversal
+        fisher_cross_down = fisher[i] < 1.5 and prev_fisher[i] >= 1.5  # Overbought reversal
+        fisher_extreme_low = fisher[i] < -2.0  # Deep oversold
+        fisher_extreme_high = fisher[i] > 2.0  # Deep overbought
         
-        # RSI momentum
-        rsi_bullish = rsi[i] > 50 and prev_rsi[i] <= 50
-        rsi_bearish = rsi[i] < 50 and prev_rsi[i] >= 50
-        rsi_momentum_long = rsi[i] > 50
-        rsi_momentum_short = rsi[i] < 50
+        # RSI confirmation
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
+        rsi_neutral = 35 < rsi[i] < 65
         
-        # Price above/below 4h HMA
-        price_above_hma = hma_valid and close[i] > hma_4h_aligned[i]
-        price_below_hma = hma_valid and close[i] < hma_4h_aligned[i]
+        # Price momentum
+        price_up = close[i] > prev_close[i]
+        price_down = close[i] < prev_close[i]
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Primary: 4h bullish + EMA crossover + RSI momentum
-        if trend_bullish and ema_cross_long and rsi_momentum_long:
+        # Regime 1: Trending market + 4h bullish + Fisher reversal from oversold
+        if is_trending and trend_bullish and fisher_cross_up:
             new_signal = SIZE_ENTRY
-        # Secondary: 4h bullish + EMA aligned + RSI > 50
-        elif trend_bullish and ema_aligned_long and rsi_momentum_long:
+        # Regime 2: Choppy market + Fisher extreme low + RSI oversold (mean reversion)
+        elif is_choppy and fisher_extreme_low and rsi_oversold:
             new_signal = SIZE_ENTRY
-        # Tertiary: EMA crossover + RSI crosses 50 + price above 4h HMA
-        elif ema_cross_long and rsi_bullish and price_above_hma:
+        # Regime 3: 4h bullish + Fisher cross up + price momentum (simple trend entry)
+        elif trend_bullish and fisher_cross_up and price_up:
             new_signal = SIZE_ENTRY
-        # Quaternary: Simple trend following (EMA aligned + 4h bias)
-        elif ema_aligned_long and trend_bullish and rsi[i] > 45:
+        # Regime 4: Fisher cross up + RSI rising from oversold (reversal confirmation)
+        elif fisher_cross_up and rsi[i] > 30 and rsi_oversold:
+            new_signal = SIZE_ENTRY
+        # Regime 5: 4h bullish + RSI neutral + price up (momentum continuation)
+        elif trend_bullish and rsi_neutral and price_up and rsi[i] > 45:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Primary: 4h bearish + EMA crossover + RSI momentum
-        if trend_bearish and ema_cross_short and rsi_momentum_short:
+        # Regime 1: Trending market + 4h bearish + Fisher reversal from overbought
+        if is_trending and trend_bearish and fisher_cross_down:
             new_signal = -SIZE_ENTRY
-        # Secondary: 4h bearish + EMA aligned + RSI < 50
-        elif trend_bearish and ema_aligned_short and rsi_momentum_short:
+        # Regime 2: Choppy market + Fisher extreme high + RSI overbought (mean reversion)
+        elif is_choppy and fisher_extreme_high and rsi_overbought:
             new_signal = -SIZE_ENTRY
-        # Tertiary: EMA crossover + RSI crosses 50 + price below 4h HMA
-        elif ema_cross_short and rsi_bearish and price_below_hma:
+        # Regime 3: 4h bearish + Fisher cross down + price momentum (simple trend entry)
+        elif trend_bearish and fisher_cross_down and price_down:
             new_signal = -SIZE_ENTRY
-        # Quaternary: Simple trend following (EMA aligned + 4h bias)
-        elif ema_aligned_short and trend_bearish and rsi[i] < 55:
+        # Regime 4: Fisher cross down + RSI falling from overbought (reversal confirmation)
+        elif fisher_cross_down and rsi[i] < 70 and rsi_overbought:
+            new_signal = -SIZE_ENTRY
+        # Regime 5: 4h bearish + RSI neutral + price down (momentum continuation)
+        elif trend_bearish and rsi_neutral and price_down and rsi[i] < 55:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
