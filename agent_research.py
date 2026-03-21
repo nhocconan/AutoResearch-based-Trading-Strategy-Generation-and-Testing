@@ -42,19 +42,36 @@ def write_strategy(code: str):
     STRATEGY_FILE.write_text(code)
 
 
+BACKTEST_TIMEOUT_S = 120  # Kill backtest if it takes > 2 minutes per symbol
+
+
 def run_backtest_all(symbols: list[str], strategy_path: str, period: str = "train") -> list[dict]:
-    """Run backtest on all symbols and return metrics dicts."""
+    """Run backtest on all symbols and return metrics dicts. Timeout per symbol."""
+    import signal as _signal
+
+    class BacktestTimeout(Exception):
+        pass
+
+    def _timeout_handler(signum, frame):
+        raise BacktestTimeout(f"Backtest timed out after {BACKTEST_TIMEOUT_S}s")
+
     results = []
     for symbol in symbols:
-        result = run_strategy_backtest(
-            strategy_path=strategy_path,
-            symbol=symbol,
-            period=period,
-        )
-        m = compute_metrics(result)
-        m["symbol"] = symbol
-        m["strategy"] = result.strategy_name
-        results.append(m)
+        old_handler = _signal.signal(_signal.SIGALRM, _timeout_handler)
+        _signal.alarm(BACKTEST_TIMEOUT_S)
+        try:
+            result = run_strategy_backtest(
+                strategy_path=strategy_path,
+                symbol=symbol,
+                period=period,
+            )
+            m = compute_metrics(result)
+            m["symbol"] = symbol
+            m["strategy"] = result.strategy_name
+            results.append(m)
+        finally:
+            _signal.alarm(0)
+            _signal.signal(_signal.SIGALRM, old_handler)
     return results
 
 
