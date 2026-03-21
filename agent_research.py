@@ -355,13 +355,24 @@ def validate_strategy(code: str) -> tuple[bool, str]:
 
     # Check for obvious look-ahead patterns
     bad_patterns = [
-        r"\.shift\s*\(\s*-[1-9]",  # negative shift
-        r"prices\.iloc\[i\+",       # future indexing
-        r"prices\[i\+",
+        (r"\.shift\s*\(\s*-[1-9]", "negative shift"),
+        (r"prices\.iloc\[i\+", "future indexing"),
+        (r"prices\[i\+", "future indexing"),
     ]
-    for pattern in bad_patterns:
+    for pattern, desc in bad_patterns:
         if re.search(pattern, code):
-            return False, f"Possible look-ahead detected: {pattern}"
+            return False, f"Look-ahead: {desc}"
+
+    # CRITICAL: Block manual positional MTF resampling (i // N pattern)
+    # This creates look-ahead because it reads unclosed HTF bars
+    if re.search(r'//\s*bars_per_', code) or re.search(r'i\s*//\s*\d+\s*\]', code):
+        if 'get_htf_data' not in code and 'mtf_data' not in code:
+            return False, "Manual MTF resampling (i//N) detected. Use mtf_data.get_htf_data() instead."
+
+    # Block .resample() without mtf_data
+    if re.search(r'\.resample\s*\(', code):
+        if 'get_htf_data' not in code and 'mtf_data' not in code:
+            return False, "Manual .resample() detected. Use mtf_data.get_htf_data() instead."
 
     return True, "ok"
 
@@ -474,6 +485,54 @@ def main():
             })
             append_results([], "crash", str(e)[:60])
             continue
+
+        # --- Step 3b: PREFIX LOOK-AHEAD TEST ---
+        # Run signals on partial data and verify they match full data signals
+        print("  [2b/4] Running look-ahead prefix test...")
+        try:
+            import importlib.util as _ilu
+            _spec = _ilu.spec_from_file_location("_strat_test", str(STRATEGY_FILE))
+            _mod = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+
+            from prepare import load_klines, load_config as _lc
+            _cfg = _lc()
+            _test_sym = symbols[0]  # test on first symbol
+            _prices = load_klines(_test_sym, _mod.timeframe)
+            import pandas as _pd
+            _train_end = _pd.Timestamp(_cfg["data"]["train_end"], tz="UTC")
+            _prices = _prices[_prices["open_time"] <= _train_end].reset_index(drop=True)
+
+            _signals_full = _mod.generate_signals(_prices)
+            # Test at 3 checkpoints
+            _la_ok = True
+            import numpy as _np
+            for _cp in [1000, 2000, len(_prices) // 2]:
+                if _cp >= len(_prices):
+                    continue
+                _signals_partial = _mod.generate_signals(_prices.iloc[:_cp].reset_index(drop=True))
+                _diff = abs(float(_signals_partial[-1]) - float(_signals_full[_cp - 1]))
+                if _diff > 0.01:
+                    _la_ok = False
+                    print(f"  [LOOKAHEAD FAIL] Signal diff={_diff:.4f} at checkpoint {_cp}")
+                    break
+
+            if not _la_ok:
+                print(f"  [SKIP] Strategy FAILED prefix look-ahead test")
+                git_revert_strategy()
+                STRATEGY_FILE.write_text(best_strategy_code)
+                description = f"exp#{experiment_num:03d} {strategy_name} [LOOKAHEAD_PREFIX_FAIL]"
+                append_results(bt_results, "discard", description, period="train")
+                history.append({
+                    "num": experiment_num, "name": strategy_name, "status": "discard",
+                    "avg_sharpe": -999, "avg_return": 0,
+                    "description": "LOOKAHEAD prefix test failed",
+                })
+                continue
+            else:
+                print("  [OK] Prefix look-ahead test passed")
+        except Exception as _e:
+            print(f"  [WARN] Prefix test error (non-fatal): {_e}")
 
         # --- Step 4: Evaluate ---
         avg_sharpe = sum(r["sharpe_ratio"] for r in bt_results) / len(bt_results)

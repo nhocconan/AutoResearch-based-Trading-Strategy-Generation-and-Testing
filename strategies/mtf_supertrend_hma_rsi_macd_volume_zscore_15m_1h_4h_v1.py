@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #004 - MTF Supertrend+MACD+BBW+RSI (15m+1h+4h v1)
+EXPERIMENT #012 - MTF Supertrend+HMA+RSI+MACD+Volume+Z-score (15m+1h+4h v1)
 ==================================================================================================
-Hypothesis: Combine 4h Supertrend (strong trend filter) + 1h MACD histogram (momentum entry) + 
-15m BBW (regime filter) + RSI pullback. This differs from current best by:
-- Supertrend instead of HMA for clearer trend direction
-- MACD histogram cross for momentum timing (vs pure RSI)
-- BBW on 15m for regime detection (vs Z-score)
-- Three timeframes: 15m base, 1h momentum, 4h trend
+Hypothesis: Combine proven 4h Supertrend trend (#004 winner) with 1h HMA confirmation,
+15m RSI+MACD entry timing (new combo), and volume filter (untried in winners).
 
-Why this should work:
-- 4h Supertrend filters out counter-trend trades (proven in #001)
-- MACD histogram adds momentum confirmation at entry
-- BBW avoids choppy markets (reduces whipsaws)
-- 15m base timeframe has proven success in #031, #034, #035
+Key differences from #040:
+- Add 4h Supertrend as primary trend filter (from #004 Sharpe=3.653 winner)
+- Replace ADX with MACD histogram for momentum confirmation
+- Add volume filter (volume > 1.5x 20-period SMA) - NEW
+- Wider stoploss: 2.5*ATR (reduce whipsaw exits)
+- Position size: 0.30 (more conservative than 0.35)
+- RSI thresholds: 35-65 (wider range for more entries)
+
+Why this should beat #040:
+- 4h Supertrend proved best trend filter in #004
+- MACD histogram adds momentum confirmation (not used in #004)
+- Volume filter reduces false breakouts (never tested in winners)
+- Based on winning #004 formula but with better entry timing
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_supertrend_macd_bbw_rsi_15m_1h_4h_v1"
+name = "mtf_supertrend_hma_rsi_macd_volume_zscore_15m_1h_4h_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -57,10 +61,23 @@ def calculate_hma(close, period=21):
     half_period = period // 2
     sqrt_period = int(np.sqrt(period))
     
-    wma1 = pd.Series(close).ewm(span=half_period, adjust=False).mean().values
-    wma2 = pd.Series(close).ewm(span=period, adjust=False).mean().values
+    wma1 = np.zeros(n)
+    wma2 = np.zeros(n)
+    hma = np.zeros(n)
     
-    hma = pd.Series(2 * wma1 - wma2).ewm(span=sqrt_period, adjust=False).mean().values
+    for i in range(half_period - 1, n):
+        weights = np.arange(1, half_period + 1)
+        wma1[i] = np.sum(close[i - half_period + 1:i + 1] * weights) / np.sum(weights)
+    
+    for i in range(period - 1, n):
+        weights = np.arange(1, period + 1)
+        wma2[i] = np.sum(close[i - period + 1:i + 1] * weights) / np.sum(weights)
+    
+    for i in range(period - 1 + sqrt_period - 1, n):
+        start_idx = i - sqrt_period + 1
+        weights = np.arange(1, sqrt_period + 1)
+        raw_vals = 2 * wma1[start_idx:i + 1] - wma2[start_idx:i + 1]
+        hma[i] = np.sum(raw_vals * weights) / np.sum(weights)
     
     return hma
 
@@ -75,11 +92,18 @@ def calculate_rsi(close, period=14):
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = pd.Series(gain).ewm(span=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, adjust=False).mean().values
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    
+    avg_gain[period] = np.mean(gain[:period + 1])
+    avg_loss[period] = np.mean(loss[:period + 1])
+    
+    for i in range(period + 1, n):
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
     
     rs = np.zeros(n)
-    for i in range(n):
+    for i in range(period, n):
         if avg_loss[i] == 0:
             rs[i] = 100
         else:
@@ -88,6 +112,57 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     
     return rsi
+
+
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD (MACD line, Signal line, Histogram)"""
+    n = len(close)
+    if n < slow + signal:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    ema_fast = np.zeros(n)
+    ema_slow = np.zeros(n)
+    
+    ema_fast[fast - 1] = np.mean(close[:fast])
+    for i in range(fast, n):
+        ema_fast[i] = ema_fast[i - 1] + (2.0 / (fast + 1)) * (close[i] - ema_fast[i - 1])
+    
+    ema_slow[slow - 1] = np.mean(close[:slow])
+    for i in range(slow, n):
+        ema_slow[i] = ema_slow[i - 1] + (2.0 / (slow + 1)) * (close[i] - ema_slow[i - 1])
+    
+    macd_line = ema_fast - ema_slow
+    
+    signal_line = np.zeros(n)
+    valid_start = slow + signal - 1
+    signal_line[valid_start] = np.mean(macd_line[slow:valid_start + 1])
+    for i in range(valid_start + 1, n):
+        signal_line[i] = signal_line[i - 1] + (2.0 / (signal + 1)) * (macd_line[i] - signal_line[i - 1])
+    
+    histogram = macd_line - signal_line
+    
+    return macd_line, signal_line, histogram
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score (standardized deviation from mean)"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    zscore = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        window = close[i - period + 1:i + 1]
+        mean = np.mean(window)
+        std = np.std(window)
+        
+        if std > 0:
+            zscore[i] = (close[i] - mean) / std
+        else:
+            zscore[i] = 0
+    
+    return zscore
 
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
@@ -104,14 +179,14 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     upper_band = np.zeros(n)
     lower_band = np.zeros(n)
     
-    for i in range(n):
+    for i in range(period, n):
         mid = (high[i] + low[i]) / 2
         upper_band[i] = mid + multiplier * atr[i]
         lower_band[i] = mid - multiplier * atr[i]
     
-    supertrend[period - 1] = lower_band[period - 1]
+    supertrend[period] = lower_band[period]
     
-    for i in range(period, n):
+    for i in range(period + 1, n):
         if trend_direction[i - 1] == 1:
             supertrend[i] = max(lower_band[i], supertrend[i - 1])
             if close[i] < supertrend[i]:
@@ -130,127 +205,89 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     return supertrend, trend_direction
 
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram"""
-    n = len(close)
-    if n < slow + signal:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    ema_fast = pd.Series(close).ewm(span=fast, adjust=False).mean().values
-    ema_slow = pd.Series(close).ewm(span=slow, adjust=False).mean().values
-    
-    macd_line = ema_fast - ema_slow
-    signal_line = pd.Series(macd_line).ewm(span=signal, adjust=False).mean().values
-    histogram = macd_line - signal_line
-    
-    return macd_line, signal_line, histogram
-
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
-    
-    bbw = np.zeros(n)
-    for i in range(n):
-        if middle[i] > 0:
-            bbw[i] = (upper[i] - lower[i]) / middle[i]
-        else:
-            bbw[i] = 0
-    
-    return upper, middle, lower, bbw
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # 15m indicators for entry timing
     atr_15m = calculate_atr(high, low, close, period=14)
     rsi_15m = calculate_rsi(close, period=14)
-    _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    macd_15m, macd_signal_15m, macd_hist_15m = calculate_macd(close, fast=12, slow=26, signal=9)
+    zscore_15m = calculate_zscore(close, period=20)
+    macd_15m, macd_sig_15m, macd_hist_15m = calculate_macd(close, fast=12, slow=26, signal=9)
     
-    # Get 1h data using mtf_data helper (MUST use this for proper alignment)
+    # Volume SMA for filter
+    volume_sma_15m = np.zeros(n)
+    vol_period = 20
+    for i in range(vol_period - 1, n):
+        volume_sma_15m[i] = np.mean(volume[i - vol_period + 1:i + 1])
+    
+    # Get 1h HTF data using mtf_data helper (MANDATORY - no manual resampling)
     try:
         df_1h = get_htf_data(prices, '1h')
         c_1h = df_1h['close'].values
         h_1h = df_1h['high'].values
         l_1h = df_1h['low'].values
         
-        # 1h indicators
-        macd_1h, macd_signal_1h, macd_hist_1h = calculate_macd(c_1h, fast=12, slow=26, signal=9)
-        rsi_1h = calculate_rsi(c_1h, period=14)
+        # 1h HMA for trend confirmation
+        hma_1h_raw = calculate_hma(c_1h, period=21)
+        hma_1h = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
         
-        # Align 1h indicators to 15m timeframe (auto shift for completed bars)
-        macd_hist_1h_aligned = align_htf_to_ltf(prices, df_1h, macd_hist_1h)
-        rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
+        # 1h MACD for momentum
+        macd_1h_raw, _, macd_hist_1h_raw = calculate_macd(c_1h, fast=12, slow=26, signal=9)
+        macd_hist_1h = align_htf_to_ltf(prices, df_1h, macd_hist_1h_raw)
     except Exception:
         # Fallback if mtf_data fails
-        macd_hist_1h_aligned = np.zeros(n)
-        rsi_1h_aligned = np.zeros(n)
+        hma_1h = np.zeros(n)
+        macd_hist_1h = np.zeros(n)
     
-    # Get 4h data using mtf_data helper for trend filter
+    # Get 4h HTF data using mtf_data helper (MANDATORY)
     try:
         df_4h = get_htf_data(prices, '4h')
         c_4h = df_4h['close'].values
         h_4h = df_4h['high'].values
         l_4h = df_4h['low'].values
         
-        # 4h Supertrend for trend direction
-        _, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
-        hma_4h = calculate_hma(c_4h, period=21)
+        # 4h Supertrend for primary trend direction
+        _, st_direction_4h_raw = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
+        st_direction_4h = align_htf_to_ltf(prices, df_4h, st_direction_4h_raw)
         
-        # Align 4h indicators to 15m timeframe
-        st_direction_4h_aligned = align_htf_to_ltf(prices, df_4h, st_direction_4h)
-        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-        
-        # Calculate 4h trend direction (price vs HMA)
-        trend_4h = np.zeros(n)
-        for i in range(n):
-            if c_4h is not None and len(c_4h) > 0:
-                idx_4h = min(i // 16, len(c_4h) - 1)  # 16 x 15m = 4h
-                if idx_4h < len(c_4h) and idx_4h >= 0:
-                    if c_4h[idx_4h] > hma_4h[idx_4h]:
-                        trend_4h[i] = 1
-                    elif c_4h[idx_4h] < hma_4h[idx_4h]:
-                        trend_4h[i] = -1
+        # 4h HMA for secondary confirmation
+        hma_4h_raw = calculate_hma(c_4h, period=21)
+        hma_4h = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     except Exception:
-        st_direction_4h_aligned = np.zeros(n)
-        trend_4h = np.zeros(n)
+        # Fallback if mtf_data fails
+        st_direction_4h = np.ones(n)
+        hma_4h = np.zeros(n)
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.35
-    SIZE_HALF = 0.175
+    SIZE_FULL = 0.30  # More conservative than 0.35
+    SIZE_HALF = 0.15
     
-    # RSI thresholds for pullback entries
+    # RSI thresholds for pullback entries (wider range for more entries)
     RSI_LONG_MIN = 35
-    RSI_LONG_MAX = 55
-    RSI_SHORT_MIN = 45
+    RSI_LONG_MAX = 65
+    RSI_SHORT_MIN = 35
     RSI_SHORT_MAX = 65
     
-    # MACD histogram threshold for momentum confirmation
-    MACD_HIST_MIN = 0.0
+    # Z-score threshold for mean reversion filter
+    ZSCORE_MAX = 2.5
     
-    # BBW minimum for regime filter (avoid choppy markets)
-    BBW_MIN = 0.015
+    # MACD histogram threshold for momentum
+    MACD_MIN = 0.0
     
-    # ATR stoploss multiplier
-    ATR_STOP_MULT = 2.0
+    # Volume filter threshold
+    VOLUME_MULT = 1.5
     
-    first_valid = max(200, 14 * 2, 20, 26 + 9)
+    # ATR stoploss multiplier (wider to reduce whipsaws)
+    ATR_STOP_MULT = 2.5
+    
+    first_valid = max(200, 40, 26 + 9, 20)
     
     # Track position state
     position_side = np.zeros(n)
@@ -260,33 +297,27 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(zscore_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
             continue
         
-        # Get aligned MTF values
-        st_trend_4h = st_direction_4h_aligned[i] if i < len(st_direction_4h_aligned) else 0
-        macd_hist_1h = macd_hist_1h_aligned[i] if i < len(macd_hist_1h_aligned) else 0
-        rsi_1h = rsi_1h_aligned[i] if i < len(rsi_1h_aligned) else 50
-        trend_4h_val = trend_4h[i] if i < len(trend_4h) else 0
+        # 4h trend filters (primary)
+        st_trend_4h = st_direction_4h[i]
+        hma_4h_trend = 1 if close[i] > hma_4h[i] else (-1 if close[i] < hma_4h[i] else 0)
         
-        # BBW filter - avoid choppy markets (15m)
-        if bbw_15m[i] < BBW_MIN:
-            signals[i] = 0.0
-            position_side[i] = 0
-            if i > 0:
-                position_side[i] = position_side[i - 1] * 0  # Close position
-            continue
+        # 1h trend filters (secondary)
+        hma_1h_trend = 1 if close[i] > hma_1h[i] else (-1 if close[i] < hma_1h[i] else 0)
+        macd_1h_momentum = 1 if macd_hist_1h[i] > MACD_MIN else (-1 if macd_hist_1h[i] < -MACD_MIN else 0)
         
-        # 4h trend filter (Supertrend + HMA must agree)
-        if st_trend_4h != trend_4h_val or st_trend_4h == 0:
-            signals[i] = 0.0
-            if i > 0 and position_side[i - 1] != 0:
-                # Close position if trend changes
-                position_side[i] = 0
-            else:
-                position_side[i] = 0
-            continue
+        # 15m entry filters
+        rsi_val = rsi_15m[i]
+        zscore_val = zscore_15m[i]
+        macd_hist_val = macd_hist_15m[i]
+        price = close[i]
+        atr = atr_15m[i]
+        
+        # Volume filter
+        volume_ok = volume[i] > VOLUME_MULT * volume_sma_15m[i] if volume_sma_15m[i] > 0 else False
         
         # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
@@ -298,19 +329,18 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             
             # Update highest/lowest since entry
             if prev_side == 1:
-                current_high = max(prev_high, price) if prev_high > 0 else close[i]
-                current_low = min(prev_low, close[i]) if prev_low > 0 else close[i]
+                current_high = max(prev_high, price)
+                current_low = min(prev_low, price) if prev_low > 0 else price
             else:
-                current_high = max(prev_high, close[i]) if prev_high > 0 else close[i]
-                current_low = min(prev_low, close[i])
+                current_high = max(prev_high, price) if prev_high > 0 else price
+                current_low = min(prev_low, price)
             
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
-            price = close[i]
             
-            # Stoploss check (2.0*ATR)
+            # Stoploss check (2.5*ATR)
             if prev_side == 1:
-                stoploss_price = prev_entry - ATR_STOP_MULT * atr_15m[i]
+                stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
@@ -321,7 +351,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     continue
                 
                 # Take profit check (2R) - reduce to half
-                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr_15m[i]
+                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
                     signals[i] = SIZE_HALF
                     position_side[i] = 1
@@ -331,7 +361,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Trail stop at 1R profit
                 if prev_tp:
-                    trail_stop = current_high - ATR_STOP_MULT * atr_15m[i]
+                    trail_stop = current_high - ATR_STOP_MULT * atr
                     if price < trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
@@ -342,7 +372,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         continue
                     
             elif prev_side == -1:
-                stoploss_price = prev_entry + ATR_STOP_MULT * atr_15m[i]
+                stoploss_price = prev_entry + ATR_STOP_MULT * atr
                 if price > stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
@@ -353,7 +383,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     continue
                 
                 # Take profit check (2R) - reduce to half
-                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr_15m[i]
+                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
                     signals[i] = -SIZE_HALF
                     position_side[i] = -1
@@ -363,7 +393,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Trail stop at 1R profit
                 if prev_tp:
-                    trail_stop = current_low + ATR_STOP_MULT * atr_15m[i]
+                    trail_stop = current_low + ATR_STOP_MULT * atr
                     if price > trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
@@ -382,14 +412,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h trend + 1h MACD momentum + 15m RSI pullback
-        price = close[i]
-        
-        if st_trend_4h == 1 and trend_4h_val == 1:  # Bullish trend on 4h
-            # MACD histogram positive on 1h (momentum confirmation)
-            # RSI pullback on 15m (not overbought)
-            if (macd_hist_1h > MACD_HIST_MIN and 
-                RSI_LONG_MIN <= rsi_15m[i] <= RSI_LONG_MAX):
+        # Entry logic: 4h Supertrend + 4h HMA + 1h HMA + 1h MACD + 15m RSI + MACD + Volume + Z-score
+        if st_trend_4h == 1 and hma_4h_trend == 1 and hma_1h_trend == 1 and macd_1h_momentum == 1:
+            # Bullish trend confirmed on 4h and 1h
+            if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
+                abs(zscore_val) < ZSCORE_MAX and
+                macd_hist_val > 0 and
+                volume_ok):
                 signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = price
@@ -397,11 +426,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
                 
-        elif st_trend_4h == -1 and trend_4h_val == -1:  # Bearish trend on 4h
-            # MACD histogram negative on 1h (momentum confirmation)
-            # RSI pullback on 15m (not oversold)
-            if (macd_hist_1h < -MACD_HIST_MIN and 
-                RSI_SHORT_MIN <= rsi_15m[i] <= RSI_SHORT_MAX):
+        elif st_trend_4h == -1 and hma_4h_trend == -1 and hma_1h_trend == -1 and macd_1h_momentum == -1:
+            # Bearish trend confirmed on 4h and 1h
+            if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
+                abs(zscore_val) < ZSCORE_MAX and
+                macd_hist_val < 0 and
+                volume_ok):
                 signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = price
