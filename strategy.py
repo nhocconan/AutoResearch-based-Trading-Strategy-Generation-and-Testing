@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #409: 15m Mean Reversion + 4h HMA Trend Bias + Bollinger Regime + ATR Stop
-Hypothesis: 15m timeframe is too noisy for pure trend following (see #397-#405 failures).
-Mean reversion with HTF trend bias should work better: enter on RSI extremes when aligned
-with 4h trend direction. Bollinger Band squeeze detection filters low-volatility periods
-where mean reversion fails. Volume confirmation reduces false signals. Target: Beat Sharpe=0.499
-with >=10 trades/symbol by using multiple entry paths and relaxed RSI thresholds.
-Timeframe: 15m (REQUIRED), HTF: 4h for trend bias via mtf_data helper.
-Position size: 0.25 discrete, stoploss 2*ATR for 15m timeframe.
+Experiment #410: 30m HMA Trend + 4h Regime + RSI Pullback + ATR Stop
+Hypothesis: Previous 30m Supertrend strategies (#398, #404) failed due to whipsaw in choppy markets.
+Switch to HMA crossover (smoother than EMA) with 4h HMA as regime filter (not strict entry requirement).
+RSI pullback entries within trend direction reduce counter-trend losses. ADX filter avoids low-volatility chop.
+Multiple entry paths ensure >=10 trades per symbol (learned from 0-trade failures in #400, #402, #407, #409).
+Key difference: HMA crossover instead of Supertrend, ADX>20 filter to avoid chop, softer 4h bias.
+Position size: 0.28 discrete, stoploss 2*ATR for 30m timeframe.
+Timeframe: 30m (REQUIRED), HTF: 4h for regime bias via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_rsi_mr_4h_hma_bb_regime_volume_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_hma_trend_4h_regime_rsi_pullback_adx_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -49,58 +49,66 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bw = (upper - lower) / sma  # Bandwidth
-    pct_b = (close - lower) / (upper - lower)  # %B indicator
-    return upper, lower, bw, pct_b
-
-def calculate_volume_ma(volume, period=20):
-    """Calculate volume moving average."""
-    vol_s = pd.Series(volume)
-    return vol_s.rolling(window=period, min_periods=period).mean().values
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion signals."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    zscore = (close - sma) / std
-    return zscore
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    n = len(close)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        plus_diff = high[i] - high[i-1]
+        minus_diff = low[i-1] - low[i]
+        
+        if plus_diff > minus_diff and plus_diff > 0:
+            plus_dm[i] = plus_diff
+        elif minus_diff > plus_diff and minus_diff > 0:
+            minus_dm[i] = minus_diff
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.where(atr > 0, atr, 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.where(atr > 0, atr, 1e-10)
+    
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) > 0, (plus_di + minus_di), 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx, plus_di, minus_di
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_4h_fast = calculate_hma(df_4h['close'].values, 16)
+    hma_4h_slow = calculate_hma(df_4h['close'].values, 48)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_4h_fast_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_fast)
+    hma_4h_slow_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_slow)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_bw, bb_pct_b = calculate_bollinger_bands(close, 20, 2.0)
-    vol_ma = calculate_volume_ma(volume, 20)
-    zscore = calculate_zscore(close, 20)
-    sma50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
-    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
+    
+    # HMA crossover on 30m
+    hma_30m_fast = calculate_hma(close, 16)
+    hma_30m_slow = calculate_hma(close, 48)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.125
+    SIZE_ENTRY = 0.28
+    SIZE_HALF = 0.14
     
     # Track positions for stoploss
     position_side = 0
@@ -110,89 +118,77 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(200, n):  # Start after 200 bars for all indicators
+    for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_bw[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(sma50[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(hma_4h_fast_aligned[i]) or np.isnan(hma_30m_fast[i]):
             signals[i] = 0.0
             continue
         
-        if atr[i] == 0 or vol_ma[i] == 0:
-            signals[i] = 0.0
-            continue
+        # 4h trend regime (SOFT bias, not strict filter)
+        hma_4h_bullish = hma_4h_fast_aligned[i] > hma_4h_slow_aligned[i]
+        hma_4h_bearish = hma_4h_fast_aligned[i] < hma_4h_slow_aligned[i]
         
-        # 4h trend bias (HTF direction)
-        trend_bullish = close[i] > hma_4h_aligned[i]
-        trend_bearish = close[i] < hma_4h_aligned[i]
+        # 30m HMA crossover signals
+        hma_30m_bull_cross = hma_30m_fast[i] > hma_30m_slow[i] and hma_30m_fast[i-1] <= hma_30m_slow[i-1]
+        hma_30m_bear_cross = hma_30m_fast[i] < hma_30m_slow[i] and hma_30m_fast[i-1] >= hma_30m_slow[i-1]
         
-        # Bollinger Band regime (squeeze = low vol, expansion = high vol)
-        bb_squeeze = bb_bw[i] < np.nanpercentile(bb_bw[:i], 25) if i > 20 else False
-        bb_expansion = bb_bw[i] > np.nanpercentile(bb_bw[:i], 75) if i > 20 else False
+        # HMA trend direction (already crossed)
+        hma_30m_uptrend = hma_30m_fast[i] > hma_30m_slow[i]
+        hma_30m_downtrend = hma_30m_fast[i] < hma_30m_slow[i]
         
-        # Volume confirmation (above average = real move)
-        volume_confirmed = volume[i] > 1.2 * vol_ma[i]
+        # ADX trend strength filter (avoid chop when ADX < 20)
+        adx_strong = adx[i] > 20
         
-        # RSI mean reversion signals
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
-        rsi_extreme_oversold = rsi[i] < 25
-        rsi_extreme_overbought = rsi[i] > 75
+        # RSI pullback levels (enter on pullback within trend)
+        rsi_pullback_long = rsi[i] >= 35 and rsi[i] <= 55  # Pullback in uptrend
+        rsi_pullback_short = rsi[i] >= 45 and rsi[i] <= 65  # Pullback in downtrend
         
-        # Z-score mean reversion
-        zscore_oversold = zscore[i] < -1.5
-        zscore_overbought = zscore[i] > 1.5
+        # RSI momentum confirmation
+        rsi_momentum_long = rsi[i] > 45 and rsi[i] < 75
+        rsi_momentum_short = rsi[i] > 25 and rsi[i] < 55
         
-        # %B indicator (position within bands)
-        pct_b_low = bb_pct_b[i] < 0.1
-        pct_b_high = bb_pct_b[i] > 0.9
-        
-        # Price position relative to SMA50
-        above_sma50 = close[i] > sma50[i]
-        below_sma50 = close[i] < sma50[i]
+        # DI crossover confirmation
+        di_bullish = plus_di[i] > minus_di[i]
+        di_bearish = plus_di[i] < minus_di[i]
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (mean reversion with HTF trend bias) ===
-        # Path 1: RSI oversold + 4h bullish trend + volume confirmed
-        if rsi_oversold and trend_bullish and volume_confirmed:
+        # === LONG ENTRIES (multiple paths to ensure >=10 trades) ===
+        # Path 1: HMA bull cross + ADX strong + RSI momentum + 4h bullish bias
+        if hma_30m_bull_cross and adx_strong and rsi_momentum_long and hma_4h_bullish:
             new_signal = SIZE_ENTRY
-        # Path 2: RSI extreme oversold + 4h bullish (volume optional for extreme)
-        elif rsi_extreme_oversold and trend_bullish:
+        # Path 2: HMA uptrend + RSI pullback + DI bullish + ADX ok
+        elif hma_30m_uptrend and rsi_pullback_long and di_bullish and adx[i] > 15:
             new_signal = SIZE_ENTRY
-        # Path 3: Z-score oversold + RSI oversold + 4h bullish
-        elif zscore_oversold and rsi_oversold and trend_bullish:
+        # Path 3: HMA bull cross + DI bullish + 4h bullish (ADX neutral ok)
+        elif hma_30m_bull_cross and di_bullish and hma_4h_bullish:
             new_signal = SIZE_ENTRY
-        # Path 4: %B low + RSI oversold + above SMA50 (pullback in uptrend)
-        elif pct_b_low and rsi_oversold and above_sma50:
+        # Path 4: HMA uptrend + RSI > 50 + DI bullish + 4h bullish
+        elif hma_30m_uptrend and rsi[i] > 50 and di_bullish and hma_4h_bullish:
             new_signal = SIZE_ENTRY
-        # Path 5: BB squeeze breakout long + 4h bullish
-        elif bb_expansion and close[i] > bb_upper[i] and trend_bullish and volume_confirmed:
-            new_signal = SIZE_ENTRY
-        # Path 6: Simple RSI mean reversion + 4h bullish bias
-        elif rsi[i] < 40 and trend_bullish and above_sma50:
+        # Path 5: HMA bull cross + RSI > 45 (simpler entry for more trades)
+        elif hma_30m_bull_cross and rsi[i] > 45 and adx[i] > 18:
             new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRIES (mean reversion with HTF trend bias) ===
-        # Path 1: RSI overbought + 4h bearish trend + volume confirmed
-        if rsi_overbought and trend_bearish and volume_confirmed:
+        # === SHORT ENTRIES (multiple paths to ensure >=10 trades) ===
+        # Path 1: HMA bear cross + ADX strong + RSI momentum + 4h bearish bias
+        if hma_30m_bear_cross and adx_strong and rsi_momentum_short and hma_4h_bearish:
             new_signal = -SIZE_ENTRY
-        # Path 2: RSI extreme overbought + 4h bearish (volume optional for extreme)
-        elif rsi_extreme_overbought and trend_bearish:
+        # Path 2: HMA downtrend + RSI pullback + DI bearish + ADX ok
+        elif hma_30m_downtrend and rsi_pullback_short and di_bearish and adx[i] > 15:
             new_signal = -SIZE_ENTRY
-        # Path 3: Z-score overbought + RSI overbought + 4h bearish
-        elif zscore_overbought and rsi_overbought and trend_bearish:
+        # Path 3: HMA bear cross + DI bearish + 4h bearish (ADX neutral ok)
+        elif hma_30m_bear_cross and di_bearish and hma_4h_bearish:
             new_signal = -SIZE_ENTRY
-        # Path 4: %B high + RSI overbought + below SMA50 (rally in downtrend)
-        elif pct_b_high and rsi_overbought and below_sma50:
+        # Path 4: HMA downtrend + RSI < 50 + DI bearish + 4h bearish
+        elif hma_30m_downtrend and rsi[i] < 50 and di_bearish and hma_4h_bearish:
             new_signal = -SIZE_ENTRY
-        # Path 5: BB squeeze breakout short + 4h bearish
-        elif bb_expansion and close[i] < bb_lower[i] and trend_bearish and volume_confirmed:
-            new_signal = -SIZE_ENTRY
-        # Path 6: Simple RSI mean reversion + 4h bearish bias
-        elif rsi[i] > 60 and trend_bearish and below_sma50:
+        # Path 5: HMA bear cross + RSI < 55 (simpler entry for more trades)
+        elif hma_30m_bear_cross and rsi[i] < 55 and adx[i] > 18:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -201,7 +197,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2*ATR from highest for 15m timeframe)
+            # Calculate trailing stop (2*ATR)
             current_stop = highest_close - 2.0 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -222,7 +218,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2*ATR from lowest for 15m timeframe)
+            # Calculate trailing stop (2*ATR)
             current_stop = lowest_close + 2.0 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
