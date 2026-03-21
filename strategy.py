@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #215: 12h EMA Crossover with Daily/Weekly HMA Trend Filter and RSI Pullback
-Hypothesis: Simple EMA(8)/EMA(21) crossover on 12h provides clean entry signals. 
-Daily HMA(21) filters trend direction (only long when price > 1d HMA, only short when <).
-Weekly HMA(21) provides macro confirmation for short entries (avoid shorts in bull markets).
-RSI(14) pullback filter ensures we enter on dips (RSI 40-55 for longs, 45-60 for shorts).
-This is simpler than Donchian breakouts and should generate more consistent trades.
-Position sizing: 0.25 entry, 0.125 at 2R profit. Stoploss: 2.5*ATR trailing stop.
-Target: Beat Sharpe=0.499 from current best with cleaner trend following.
+Experiment #216: 1d Donchian Breakout with Weekly HMA Trend Filter
+Hypothesis: Daily Donchian breakouts (20-period) capture multi-week momentum moves.
+Weekly HMA provides macro trend bias (only long when price > 1w HMA, only short when <).
+RSI(14) filter avoids entering at extremes (>70 or <30). ATR(14) trailing stop at 2.5*ATR.
+Position sizing: 0.30 entry, reduce to 0.15 at 2R profit. This is simpler than regime-switching
+and should generate consistent trades on daily timeframe. Target: Beat Sharpe=0.499.
+Why 1d: Daily bars filter noise, capture sustained moves, fewer trades = less fee drag.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_ema_crossover_daily_weekly_hma_rsi_pullback_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_weekly_hma_rsi_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -37,12 +36,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average."""
-    close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
-
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -55,6 +48,13 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (upper/lower bounds)."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2
+    return upper, lower, mid
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -62,36 +62,28 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    ema_fast = calculate_ema(close, 8)
-    ema_slow = calculate_ema(close, 21)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, 20)
     
-    # EMA crossover detection
-    ema_cross_long = (ema_fast > ema_slow) & (np.roll(ema_fast, 1) <= np.roll(ema_slow, 1))
-    ema_cross_short = (ema_fast < ema_slow) & (np.roll(ema_fast, 1) >= np.roll(ema_slow, 1))
-    ema_cross_long[0] = False
-    ema_cross_short[0] = False
-    
-    # EMA trend state (not just crossover)
-    ema_bullish = ema_fast > ema_slow
-    ema_bearish = ema_fast < ema_slow
+    # Track previous Donchian values for breakout detection
+    prev_donchian_upper = np.roll(donchian_upper, 1)
+    prev_donchian_lower = np.roll(donchian_lower, 1)
+    prev_donchian_upper[0] = donchian_upper[0]
+    prev_donchian_lower[0] = donchian_lower[0]
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.125
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -102,44 +94,47 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filters
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
-        weekly_bullish = close[i] > hma_1w_aligned[i]
-        weekly_bearish = close[i] < hma_1w_aligned[i]
+        # Weekly trend filter
+        weekly_bullish = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else False
+        weekly_bearish = close[i] < hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else False
         
-        # RSI pullback filter (not extremes, but pullback zones)
-        rsi_pullback_long = 40 <= rsi[i] <= 55
-        rsi_pullback_short = 45 <= rsi[i] <= 60
-        rsi_neutral = 35 <= rsi[i] <= 65
+        # RSI filter (avoid extremes)
+        rsi_not_overbought = rsi[i] < 70
+        rsi_not_oversold = rsi[i] > 30
+        rsi_bullish = rsi[i] > 40
+        rsi_bearish = rsi[i] < 60
+        
+        # Donchian breakout detection
+        breakout_long = close[i] > prev_donchian_upper[i] and close[i-1] <= prev_donchian_upper[i-1]
+        breakout_short = close[i] < prev_donchian_lower[i] and close[i-1] >= prev_donchian_lower[i-1]
+        
+        # Donchian continuation (price above/below mid)
+        above_mid = close[i] > donchian_mid[i]
+        below_mid = close[i] < donchian_mid[i]
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # EMA crossover long with daily trend confirmation
-        if ema_cross_long[i]:
-            if daily_bullish and rsi_pullback_long:
-                new_signal = SIZE_ENTRY
-            elif daily_bullish and rsi_neutral:
-                new_signal = SIZE_ENTRY
+        # Breakout long with weekly trend confirmation
+        if breakout_long and weekly_bullish and rsi_not_overbought:
+            new_signal = SIZE_ENTRY
         
-        # EMA bullish continuation (already crossed, pullback entry)
-        elif ema_bullish[i] and daily_bullish:
-            if rsi_pullback_long and position_side <= 0:
+        # Continuation long (price above Donchian mid + weekly bullish)
+        elif above_mid and weekly_bullish and rsi_bullish and rsi_not_overbought:
+            # Enter on pullback to mid
+            if i > 1 and close[i-1] < donchian_mid[i-1] and close[i] > donchian_mid[i]:
                 new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # EMA crossover short with daily AND weekly trend confirmation
-        if ema_cross_short[i]:
-            if daily_bearish and weekly_bearish and rsi_pullback_short:
-                new_signal = -SIZE_ENTRY
-            elif daily_bearish and rsi_neutral:
-                new_signal = -SIZE_ENTRY * 0.7  # Smaller short position
+        # Breakout short with weekly trend confirmation
+        if breakout_short and weekly_bearish and rsi_not_oversold:
+            new_signal = -SIZE_ENTRY
         
-        # EMA bearish continuation (already crossed, pullback entry)
-        elif ema_bearish[i] and daily_bearish:
-            if weekly_bearish and rsi_pullback_short and position_side >= 0:
-                new_signal = -SIZE_ENTRY * 0.7
+        # Continuation short (price below Donchian mid + weekly bearish)
+        elif below_mid and weekly_bearish and rsi_bearish and rsi_not_oversold:
+            # Enter on pullback to mid
+            if i > 1 and close[i-1] > donchian_mid[i-1] and close[i] < donchian_mid[i]:
+                new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
