@@ -1,31 +1,30 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #007 - Supertrend + ADX Regime + RSI Filter (15m primary, 4h HTF)
-================================================================================
-Hypothesis: 15m Supertrend provides timely entry signals, but needs filtering to 
-avoid choppy market whipsaws. 4h HMA(50) establishes major trend direction. 
-ADX(14) > 25 ensures we only trade in trending markets (not ranging). RSI(14) 
-filter avoids entering at extremes (30-70 zone only). This differs from failed 
-strategies by: (1) stricter regime filter via ADX, (2) 15m TF for faster entries,
-(3) conservative position sizing (0.25), (4) proper MTF alignment via helper.
+EXPERIMENT #008 - MACD Momentum + RSI Filter + Volume Confirmation (30m primary, 4h HTF)
+========================================================================================
+Hypothesis: MACD histogram momentum combined with RSI filter and volume confirmation 
+provides cleaner entries than pure trend-following. 4h HMA(50) ensures we trade with 
+the major trend. This differs from failed strategies by focusing on momentum shifts 
+rather than breakouts (Donchian) or adaptive averages (KAMA).
 
 Key features:
-- Primary TF: 15m (required for this experiment)
+- Primary TF: 30m
 - HTF filter: 4h HMA(50) for major trend direction
-- Trend: Supertrend(10, 3) on 15m for entry timing
-- Regime: ADX(14) > 25 (trending market only, avoids chop)
-- Entry filter: RSI(14) between 30-70 (avoid extremes)
+- Momentum: MACD(12,26,9) histogram turning positive/negative
+- Filter: RSI(14) > 50 for long, < 50 for short (trend confirmation)
+- Volume: Volume > 20-period SMA (confirms move has participation)
+- Regime: ADX(14) > 25 (trending market, not chop)
 - Stoploss: 2.5*ATR(14) trailing
-- Position sizing: 0.25 discrete levels (conservative)
-- Take profit: Reduce to half at 2R profit
+- Position sizing: 0.25-0.30 discrete levels
+- Take profit: Reduce to half at 2R profit, trail stop at 1R
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "supertrend_adx_rsi_15m_4h_v1"
-timeframe = "15m"
+name = "macd_rsi_volume_30m_4h_v1"
+timeframe = "30m"
 leverage = 1.0
 
 
@@ -52,33 +51,15 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3):
-    """Calculate Supertrend indicator"""
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 = bullish, -1 = bearish
-    
-    supertrend[0] = upper_band[0]
-    
-    for i in range(1, n):
-        if close[i - 1] <= supertrend[i - 1]:
-            supertrend[i] = min(upper_band[i], supertrend[i - 1])
-            if close[i] > supertrend[i]:
-                direction[i] = 1
-                supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = max(lower_band[i], supertrend[i - 1])
-            if close[i] < supertrend[i]:
-                direction[i] = -1
-                supertrend[i] = upper_band[i]
-    
-    return supertrend, direction
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram"""
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=fast, adjust=False, min_periods=fast).mean()
+    ema_slow = close_s.ewm(span=slow, adjust=False, min_periods=slow).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
 
 
 def calculate_rsi(close, period=14):
@@ -97,41 +78,33 @@ def calculate_rsi(close, period=14):
 def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index)"""
     n = len(close)
-    
-    # Calculate +DM and -DM
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        high_diff = high[i] - high[i - 1]
-        low_diff = low[i - 1] - low[i]
-        
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
-    
-    # Calculate TR
     tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
+    
     for i in range(1, n):
         tr[i] = max(high[i] - low[i],
                     abs(high[i] - close[i - 1]),
                     abs(low[i] - close[i - 1]))
+        
+        if high[i] - high[i - 1] > low[i - 1] - low[i]:
+            plus_dm[i] = max(0, high[i] - high[i - 1])
+        else:
+            plus_dm[i] = 0
+            
+        if low[i - 1] - low[i] > high[i] - high[i - 1]:
+            minus_dm[i] = max(0, low[i - 1] - low[i])
+        else:
+            minus_dm[i] = 0
     
-    # Smooth using Wilder's method (EMA with span=period)
     tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
     plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
     minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
     
-    # Calculate +DI and -DI
-    plus_di = 100 * (plus_dm_smooth / (tr_smooth + 1e-10))
-    minus_di = 100 * (minus_dm_smooth / (tr_smooth + 1e-10))
+    plus_di = 100 * plus_dm_smooth / (tr_smooth + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (tr_smooth + 1e-10)
     
-    # Calculate DX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    
-    # Calculate ADX (smoothed DX)
     adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
     
     return adx
@@ -144,20 +117,23 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load 4h HTF data ONCE before loop (Rule 1 - CRITICAL)
+    # Load 4h HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
     hma_4h = calculate_hma(df_4h['close'].values, 50)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)  # auto shift(1)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3)
+    # Calculate 30m indicators
+    macd_line, signal_line, histogram = calculate_macd(close, 12, 26, 9)
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     adx = calculate_adx(high, low, close, 14)
     
+    # Volume SMA for confirmation
+    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     # Generate signals
     signals = np.zeros(n)
-    SIZE = 0.25  # Base position size (25% of capital - conservative)
+    SIZE = 0.28  # Base position size (28% of capital)
     HALF_SIZE = SIZE / 2  # For take profit reduction
     
     # Track position state for stoploss and take profit
@@ -171,35 +147,32 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(supertrend[i]) or 
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(histogram[i]) or 
             np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]) or 
-            atr[i] == 0 or adx[i] == 0):
+            np.isnan(volume_sma[i]) or atr[i] == 0 or volume_sma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # 4h trend filter (HTF) - major trend direction
-        hma_4h_trend = 1 if close[i] > hma_4h_aligned[i] else -1
+        # 4h trend filter (HTF)
+        htf_trend = 1 if close[i] > hma_4h_aligned[i] else -1
         
-        # 15m Supertrend direction
-        st_trend = int(st_direction[i])
+        # MACD momentum signal
+        macd_bullish = histogram[i] > 0 and histogram[i - 1] <= 0  # Histogram crossing above zero
+        macd_bearish = histogram[i] < 0 and histogram[i - 1] >= 0  # Histogram crossing below zero
         
-        # Regime filter: ADX > 25 (trending market only)
+        # Also check MACD line vs signal line for stronger signal
+        macd_line_bullish = macd_line[i] > signal_line[i]
+        macd_line_bearish = macd_line[i] < signal_line[i]
+        
+        # RSI filter
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
+        
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.2 * volume_sma[i]  # 20% above average
+        
+        # ADX regime filter (trending market)
         regime_valid = adx[i] > 25
-        
-        # RSI filter: avoid extremes (30-70 zone only)
-        rsi_valid_long = 30 <= rsi[i] <= 70
-        rsi_valid_short = 30 <= rsi[i] <= 70
-        
-        # Determine target signal based on all filters
-        target_signal = 0.0
-        
-        # Long entry: Supertrend bullish + 4h trend bullish + ADX valid + RSI valid
-        if st_trend == 1 and hma_4h_trend == 1 and regime_valid and rsi_valid_long:
-            target_signal = SIZE
-        
-        # Short entry: Supertrend bearish + 4h trend bearish + ADX valid + RSI valid
-        elif st_trend == -1 and hma_4h_trend == -1 and regime_valid and rsi_valid_short:
-            target_signal = -SIZE
         
         # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
@@ -208,29 +181,29 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if position_side != 0:
             if position_side == 1:
                 # Long position - update highest
-                highest_since_entry = max(highest_since_entry, close[i])
+                highest_since_entry = max(highest_since_entry, high[i])
                 trailing_stop = highest_since_entry - 2.5 * atr[i]
                 
                 # Check stoploss
-                if close[i] < trailing_stop:
+                if low[i] < trailing_stop:
                     stoploss_triggered = True
                 
                 # Check take profit (2R from entry, where R = 2.5*ATR)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 5.0 * atr[entry_idx if 'entry_idx' in locals() else i]:
+                    if high[i] >= entry_price + 5.0 * atr[i]:  # 2R = 5*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
-                lowest_since_entry = min(lowest_since_entry, close[i])
+                lowest_since_entry = min(lowest_since_entry, low[i])
                 trailing_stop = lowest_since_entry + 2.5 * atr[i]
                 
                 # Check stoploss
-                if close[i] > trailing_stop:
+                if high[i] > trailing_stop:
                     stoploss_triggered = True
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 5.0 * atr[entry_idx if 'entry_idx' in locals() else i]:
+                    if low[i] <= entry_price - 5.0 * atr[i]:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -245,27 +218,48 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
+            # Determine target signal based on all filters
+            target_signal = 0.0
+            
+            # Long entry: HTF bullish + MACD bullish + RSI bullish + Volume confirmed + ADX valid
+            if (htf_trend == 1 and 
+                macd_line_bullish and 
+                rsi_bullish and 
+                volume_confirmed and 
+                regime_valid and
+                position_side == 0):
+                target_signal = SIZE
+            
+            # Short entry: HTF bearish + MACD bearish + RSI bearish + Volume confirmed + ADX valid
+            elif (htf_trend == -1 and 
+                  macd_line_bearish and 
+                  rsi_bearish and 
+                  volume_confirmed and 
+                  regime_valid and
+                  position_side == 0):
+                target_signal = -SIZE
+            
             # Apply signal change
             if target_signal != 0.0 and position_side == 0:
                 # New entry
                 signals[i] = target_signal
                 position_side = 1 if target_signal > 0 else -1
-                highest_since_entry = close[i]
-                lowest_since_entry = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 entry_price = close[i]
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                if position_side == 1 and st_trend == -1:
-                    # Trend reversed, exit long
+                if position_side == 1 and htf_trend == -1:
+                    # HTF trend reversed, exit long
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
                     profit_target_hit = False
-                elif position_side == -1 and st_trend == 1:
-                    # Trend reversed, exit short
+                elif position_side == -1 and htf_trend == 1:
+                    # HTF trend reversed, exit short
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
