@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #011: 12h Donchian Breakout + Daily ADX Trend Filter
-Hypothesis: Donchian channel breakouts (20-period) capture momentum moves on 12h timeframe.
-Daily ADX > 25 filters for trending regimes, avoiding choppy whipsaws that destroyed previous strategies.
-Volume spike (1.5x 20-bar avg) confirms breakout validity, reducing false signals.
-ATR-based stoploss (2.5x) with trailing protects against reversals like 2022 crash.
-Position sizing at 0.25 discrete levels minimizes fee churn while capturing trends.
-Relaxed entry conditions ensure ≥10 trades/symbol - Donchian breakouts occur frequently enough.
-This differs from failed HMA/RSI strategies by using pure price breakout + trend strength filter.
+Experiment #012: 1d KAMA Trend + Weekly Regime + RSI Pullback
+Hypothesis: Daily timeframe reduces noise significantly vs intraday.
+KAMA (Kaufman Adaptive MA) adapts to market efficiency - slower in chop, faster in trends.
+Weekly KAMA provides major regime filter (bull/bear market identification).
+RSI pullback entries within trend direction reduce whipsaw.
+ATR-based stoploss (2.5x) protects against crashes.
+Position sizing at 0.25-0.30 with discrete levels to minimize fee churn.
+Relaxed entry conditions to ensure ≥10 trades/symbol on train data.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_daily_adx_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_weekly_rsi_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -27,46 +27,24 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average."""
     close_s = pd.Series(close)
+    direction = np.abs(close_s - close_s.shift(period))
+    volatility = close_s.rolling(window=period, min_periods=period).apply(
+        lambda x: np.sum(np.abs(x - x.shift(1)))
+    )
+    er = direction / volatility.replace(0, np.nan)
+    er = er.fillna(0)
     
-    # True Range
-    tr1 = high_s - low_s
-    tr2 = (high_s - close_s.shift(1)).abs()
-    tr3 = (low_s - close_s.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    kama = np.zeros(len(close))
+    kama[0] = close[0]
     
-    # Directional Movement
-    plus_dm = high_s.diff()
-    minus_dm = -low_s.diff()
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
     
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-    
-    # Smoothed DM and TR
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean()
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean()
-    tr_s = tr.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    # DI and DX
-    plus_di = 100 * (plus_dm_s / tr_s)
-    minus_di = 100 * (minus_dm_s / tr_s)
-    
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    
-    # ADX
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return adx.values
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (upper/lower bounds)."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+    return kama
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -80,6 +58,17 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_sma(close, period=20):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2
+    return upper, lower, mid
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -87,159 +76,137 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load daily HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Load weekly HTF data ONCE before loop (Rule 1)
+    df_1w = get_htf_data(prices, '1w')
+    kama_1w = calculate_kama(df_1w['close'].values, 10)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Also get daily close for trend direction
-    close_1d = df_1d['close'].values
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-    
-    # Calculate 12h indicators
+    # Calculate daily indicators
     atr = calculate_atr(high, low, close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    kama_fast = calculate_kama(close, 5)
+    kama_slow = calculate_kama(close, 20)
     rsi = calculate_rsi(close, 14)
+    sma_200 = calculate_sma(close, 200)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, 20)
     
     # Volume SMA for confirmation
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_sma = np.nan_to_num(vol_sma, nan=1.0)
-    
-    # Price momentum (ROC)
-    roc = np.zeros(n)
-    roc[10:] = 100 * (close[10:] - close[:-10]) / (close[:-10] + 1e-10)
     
     signals = np.zeros(n)
     SIZE = 0.25
     HALF_SIZE = 0.12
     
     # Track positions for stoploss
+    entry_price = np.zeros(n)
     position_side = 0
-    entry_price = 0.0
-    trailing_stop = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 999999.0
+    trailing_stop = np.zeros(n)
     
-    for i in range(50, n):
-        # Skip if indicators not ready
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            signals[i] = 0.0
-            continue
+    for i in range(200, n):
+        # Weekly trend filter (major regime)
+        weekly_bullish = kama_1w_aligned[i] > 0 and close[i] > kama_1w_aligned[i]
+        weekly_bearish = kama_1w_aligned[i] > 0 and close[i] < kama_1w_aligned[i]
         
-        # Daily trend filter
-        daily_trending = adx_1d_aligned[i] > 20  # Relaxed from 25 for more trades
-        daily_bullish = close_1d_aligned[i] > close_1d_aligned[i-1] if i > 0 else True
-        daily_bearish = close_1d_aligned[i] < close_1d_aligned[i-1] if i > 0 else True
+        # Daily KAMA trend
+        kama_trend_long = kama_fast[i] > kama_slow[i]
+        kama_trend_short = kama_fast[i] < kama_slow[i]
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
+        # KAMA crossover signals
+        kama_cross_long = kama_fast[i] > kama_slow[i] and kama_fast[i-1] <= kama_slow[i-1]
+        kama_cross_short = kama_fast[i] < kama_slow[i] and kama_fast[i-1] >= kama_slow[i-1]
         
-        # Volume confirmation (relaxed)
-        vol_spike = volume[i] > vol_sma[i] * 1.2  # 20% above average
+        # Price vs SMA200 filter
+        above_sma200 = close[i] > sma_200[i] if not np.isnan(sma_200[i]) else False
+        below_sma200 = close[i] < sma_200[i] if not np.isnan(sma_200[i]) else False
         
-        # RSI filter (avoid extreme overbought/oversold for entries)
-        rsi_ok_long = rsi[i] < 75  # Not extremely overbought
-        rsi_ok_short = rsi[i] > 25  # Not extremely oversold
+        # RSI pullback entries (relaxed for more trades)
+        rsi_pullback_long = rsi[i] > 35 and rsi[i] < 60
+        rsi_pullback_short = rsi[i] > 40 and rsi[i] < 65
+        rsi_rising = rsi[i] > rsi[i-3] if i > 3 else True
+        rsi_falling = rsi[i] < rsi[i-3] if i > 3 else True
         
-        # Momentum confirmation
-        momentum_long = roc[i] > 0
-        momentum_short = roc[i] < 0
+        # Donchian breakout
+        donchian_breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
+        donchian_breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
         
-        # Entry logic - multiple pathways to ensure trades
+        # Volume confirmation
+        vol_confirm = volume[i] > vol_sma[i] * 0.8 if vol_sma[i] > 0 else True
+        
+        # Entry logic - multiple entry paths to ensure trades
         new_signal = 0.0
         
-        # Long entry: trending market + breakout + volume + RSI ok
-        if daily_trending and daily_bullish and breakout_long and vol_spike and rsi_ok_long:
+        # Long entry path 1: Weekly bullish + KAMA trend + RSI pullback
+        if weekly_bullish and kama_trend_long and rsi_pullback_long and above_sma200:
             new_signal = SIZE
-        # Long on breakout with momentum (relaxed)
-        elif breakout_long and momentum_long and rsi[i] > 40:
+        # Long entry path 2: KAMA crossover with weekly support
+        elif weekly_bullish and kama_cross_long and rsi[i] > 30:
             new_signal = SIZE
-        # Long on strong breakout (very high volume)
-        elif breakout_long and volume[i] > vol_sma[i] * 2.0:
+        # Long entry path 3: Donchian breakout with trend
+        elif weekly_bullish and donchian_breakout_long and kama_trend_long:
+            new_signal = SIZE
+        # Long entry path 4: RSI oversold bounce in uptrend
+        elif weekly_bullish and rsi[i] < 35 and rsi_rising and kama_trend_long:
             new_signal = SIZE
         
-        # Short entry: trending market + breakout + volume + RSI ok
-        elif daily_trending and daily_bearish and breakout_short and vol_spike and rsi_ok_short:
+        # Short entry path 1: Weekly bearish + KAMA trend + RSI pullback
+        elif weekly_bearish and kama_trend_short and rsi_pullback_short and below_sma200:
             new_signal = -SIZE
-        # Short on breakout with momentum (relaxed)
-        elif breakout_short and momentum_short and rsi[i] < 60:
+        # Short entry path 2: KAMA crossover with weekly resistance
+        elif weekly_bearish and kama_cross_short and rsi[i] < 70:
             new_signal = -SIZE
-        # Short on strong breakout (very high volume)
-        elif breakout_short and volume[i] > vol_sma[i] * 2.0:
+        # Short entry path 3: Donchian breakdown with trend
+        elif weekly_bearish and donchian_breakout_short and kama_trend_short:
+            new_signal = -SIZE
+        # Short entry path 4: RSI overbought drop in downtrend
+        elif weekly_bearish and rsi[i] > 65 and rsi_falling and kama_trend_short:
             new_signal = -SIZE
         
-        # Stoploss and profit taking logic
-        if position_side > 0 and entry_price > 0:
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, high[i])
-            
-            # Initial stoploss
-            stop_loss = entry_price - 2.5 * atr[i]
-            
-            # Trailing stop (lock in profits)
-            trail_stop = highest_since_entry - 2.5 * atr[i]
-            effective_stop = max(stop_loss, trail_stop)
-            
-            # Check stoploss hit
-            if low[i] < effective_stop:
-                new_signal = 0.0  # Stoploss triggered
-            
-            # Take partial profit at 3R
-            elif close[i] > entry_price + 3.0 * atr[i] and new_signal == SIZE:
-                new_signal = HALF_SIZE
+        # Stoploss logic (Rule 6) - ATR based
+        if position_side > 0 and entry_price[i-1] > 0:
+            stop_loss = entry_price[i-1] - 2.5 * atr[i]
+            if close[i] < stop_loss:
+                new_signal = 0.0  # Stoploss hit
+            # Trail stop for longs
+            else:
+                prev_trail = trailing_stop[i-1] if i > 0 else 0
+                trailing_stop[i] = max(prev_trail, close[i] - 2.5 * atr[i])
+                if close[i] < trailing_stop[i] and trailing_stop[i] > 0:
+                    new_signal = 0.0
+                # Take partial profit at 3R
+                elif close[i] > entry_price[i-1] + 3.0 * atr[i] and signals[i-1] == SIZE:
+                    new_signal = HALF_SIZE
         
-        if position_side < 0 and entry_price > 0:
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, low[i])
-            
-            # Initial stoploss
-            stop_loss = entry_price + 2.5 * atr[i]
-            
-            # Trailing stop (lock in profits)
-            trail_stop = lowest_since_entry + 2.5 * atr[i]
-            effective_stop = min(stop_loss, trail_stop)
-            
-            # Check stoploss hit
-            if high[i] > effective_stop:
-                new_signal = 0.0  # Stoploss triggered
-            
-            # Take partial profit at 3R
-            elif close[i] < entry_price - 3.0 * atr[i] and new_signal == -SIZE:
-                new_signal = -HALF_SIZE
+        if position_side < 0 and entry_price[i-1] > 0:
+            stop_loss = entry_price[i-1] + 2.5 * atr[i]
+            if close[i] > stop_loss:
+                new_signal = 0.0  # Stoploss hit
+            # Trail stop for shorts
+            else:
+                prev_trail = trailing_stop[i-1] if i > 0 else 999999
+                trailing_stop[i] = min(prev_trail, close[i] + 2.5 * atr[i])
+                if close[i] > trailing_stop[i] and trailing_stop[i] < 999999:
+                    new_signal = 0.0
+                # Take partial profit at 3R
+                elif close[i] < entry_price[i-1] - 3.0 * atr[i] and signals[i-1] == -SIZE:
+                    new_signal = -HALF_SIZE
         
         # Update position tracking
-        prev_side = position_side
-        
         if new_signal != 0 and position_side == 0:
-            # New position
-            entry_price = close[i]
+            entry_price[i] = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = entry_price - 2.5 * atr[i] if position_side > 0 else entry_price + 2.5 * atr[i]
-            highest_since_entry = high[i] if position_side > 0 else 0
-            lowest_since_entry = low[i] if position_side < 0 else 999999.0
+            trailing_stop[i] = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
         elif new_signal != 0 and position_side != 0:
             if np.sign(new_signal) != position_side:
-                # Reversal
-                entry_price = close[i]
+                entry_price[i] = close[i]
                 position_side = np.sign(new_signal)
-                trailing_stop = entry_price - 2.5 * atr[i] if position_side > 0 else entry_price + 2.5 * atr[i]
-                highest_since_entry = high[i] if position_side > 0 else 0
-                lowest_since_entry = low[i] if position_side < 0 else 999999.0
-            elif new_signal == HALF_SIZE and position_side > 0:
-                # Partial profit taken, keep tracking
-                pass
-            elif new_signal == -HALF_SIZE and position_side < 0:
-                # Partial profit taken, keep tracking
-                pass
+                trailing_stop[i] = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            else:
+                trailing_stop[i] = trailing_stop[i-1] if i > 0 else trailing_stop[i]
         else:
-            # Position closed
+            entry_price[i] = entry_price[i-1] if i > 0 else 0
+            trailing_stop[i] = trailing_stop[i-1] if i > 0 else 0
             if position_side != 0 and new_signal == 0:
-                position_side = 0
-                entry_price = 0.0
-                trailing_stop = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 999999.0
+                position_side = 0  # Position closed
         
         signals[i] = new_signal
     
