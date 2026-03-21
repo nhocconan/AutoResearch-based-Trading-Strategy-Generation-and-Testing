@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #027 - MTF HMA+KAMA+Stoch+RSI+Volume (4h+15m v2)
+EXPERIMENT #028 - MTF HMA Slope + 15m Pullback (4h+15m v3)
 ==================================================================================================
-Hypothesis: #021 achieved Sharpe=4.629 on 15m timeframe. #026 (4h+1h) only got Sharpe=2.382.
-The issue is 1h entries are too coarse - missing optimal entry points that 15m captures.
+Hypothesis: #027 failed (Sharpe=0.266) because the 4h trend filter was too restrictive
+(price vs HMA creates choppy signals). #021 succeeded (Sharpe=4.629) with pure 15m.
 
-Key changes vs #026:
-- Timeframe: 15m base with 4h trend (matching #021's successful setup)
-- Simplify trend filter: Just 4h HMA (not HMA+KAMA agreement which was too restrictive)
-- RSI range: 45-55 (tighter than #026's 40-60, matching #021)
-- Stoploss: 2.0*ATR (tighter than #026's 2.5*ATR for better risk control)
-- Remove BBW percentile filter (was causing missed entries in #026)
-- Keep: Volume confirmation, Stochastic timing, Z-score filter
-- Position size: 0.35 (proven in #021)
+Key changes vs #027:
+- 4h trend: Use HMA slope direction (not price vs HMA) - smoother, less whipsaw
+- RSI range: 30-70 (wider than #027's 45-55, matching #021's flexibility)
+- Remove volume filter (was filtering good entries in #027)
+- Remove BBW filter (simplify entry logic)
+- Keep: 15m HMA+KAMA agreement, Stochastic timing, Z-score filter
+- Stoploss: 2.5*ATR (slightly looser than #027's 2.0*ATR)
+- Position size: 0.30 (slightly more conservative than #027's 0.35)
 
-Why 15m+4h should beat 1h+4h:
-- 15m captures 4x more entry opportunities than 1h
-- Better entry timing within 4h trend bars
-- #021 proved 15m works exceptionally well (Sharpe=4.629)
-- Adding 4h trend filter should reduce whipsaws vs pure 15m
+Why this should work:
+- 4h HMA slope is smoother than price vs HMA (less false trend changes)
+- 15m entries capture optimal timing within 4h trend
+- Wider RSI range allows more entries during strong trends
+- Simpler logic = fewer filters rejecting good setups
 
 Expected outcome: Sharpe > 4.6 (beat #021), DD < -15%, Trades > 100
 """
@@ -26,7 +26,7 @@ Expected outcome: Sharpe > 4.6 (beat #021), DD < -15%, Trades > 100
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_kama_stoch_rsi_volume_4h_15m_v2"
+name = "mtf_hma_slope_stoch_rsi_zscore_4h_15m_v3"
 timeframe = "15m"
 leverage = 1.0
 
@@ -185,50 +185,6 @@ def calculate_zscore(close, period=20):
     return zscore
 
 
-def calculate_volume_sma_ratio(volume, period=20):
-    """Calculate volume ratio vs SMA"""
-    n = len(volume)
-    if n < period:
-        return np.zeros(n)
-    
-    ratio = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        avg_volume = np.mean(volume[i - period + 1:i + 1])
-        if avg_volume > 0:
-            ratio[i] = volume[i] / avg_volume
-        else:
-            ratio[i] = 1.0
-    
-    return ratio
-
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    middle = np.zeros(n)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    bbw = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        middle[i] = np.mean(window)
-        std = np.std(window)
-        upper[i] = middle[i] + std_mult * std
-        lower[i] = middle[i] - std_mult * std
-        
-        if middle[i] > 0:
-            bbw[i] = (upper[i] - lower[i]) / middle[i]
-        else:
-            bbw[i] = 0
-    
-    return upper, middle, lower, bbw
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
@@ -243,7 +199,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     hma_15m = calculate_hma(close, period=16)
     kama_15m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     stoch_k_15m, stoch_d_15m = calculate_stochastic(high, low, close, k_period=14, d_period=3)
-    volume_ratio_15m = calculate_volume_sma_ratio(volume, period=20)
     
     # Resample to 4h for trend filters using proper method
     try:
@@ -258,21 +213,17 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         # Calculate 4h indicators
         c_4h = df_4h['close'].values
-        h_4h = df_4h['high'].values
-        l_4h = df_4h['low'].values
-        
         hma_4h = calculate_hma(c_4h, period=48)
-        kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
         
-        # Calculate 4h trend (simplified: just HMA, not HMA+KAMA agreement)
+        # Calculate 4h HMA slope (direction) - smoother than price vs HMA
         trend_4h = np.zeros(len(c_4h))
+        lookback_slope = 3
         
-        for i in range(len(c_4h)):
-            if i >= 48:
-                if c_4h[i] > hma_4h[i]:
-                    trend_4h[i] = 1
-                elif c_4h[i] < hma_4h[i]:
-                    trend_4h[i] = -1
+        for i in range(lookback_slope, len(c_4h)):
+            if hma_4h[i] > hma_4h[i - lookback_slope]:
+                trend_4h[i] = 1
+            elif hma_4h[i] < hma_4h[i - lookback_slope]:
+                trend_4h[i] = -1
         
         # Create 4h index for reindexing
         df_4h['trend'] = trend_4h
@@ -296,40 +247,38 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         hma_4h = calculate_hma(c_4h, period=48)
         
         trend_4h_mapped = np.zeros(n)
+        lookback_slope = 3
         
         for i in range(n):
             idx_4h = i // bars_per_4h
-            if idx_4h < n_4h and idx_4h >= 48:
-                if c_4h[idx_4h] > hma_4h[idx_4h]:
+            if idx_4h >= lookback_slope and idx_4h < n_4h:
+                if hma_4h[idx_4h] > hma_4h[idx_4h - lookback_slope]:
                     trend_4h_mapped[i] = 1
-                elif c_4h[idx_4h] < hma_4h[idx_4h]:
+                elif hma_4h[idx_4h] < hma_4h[idx_4h - lookback_slope]:
                     trend_4h_mapped[i] = -1
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    BASE_SIZE = 0.35
-    SIZE_HALF = 0.175
+    BASE_SIZE = 0.30
+    SIZE_HALF = 0.15
     
-    # RSI thresholds for pullback entries (matching #021's successful range)
-    RSI_LONG_MIN = 45
-    RSI_LONG_MAX = 55
-    RSI_SHORT_MIN = 45
-    RSI_SHORT_MAX = 55
+    # RSI thresholds for pullback entries (wider range than #027)
+    RSI_LONG_MIN = 30
+    RSI_LONG_MAX = 70
+    RSI_SHORT_MIN = 30
+    RSI_SHORT_MAX = 70
     
     # Stochastic thresholds
-    STOCH_LONG_MAX = 70
-    STOCH_SHORT_MIN = 30
+    STOCH_LONG_MAX = 80
+    STOCH_SHORT_MIN = 20
     
     # Z-score threshold for mean reversion filter
-    ZSCORE_MAX = 2.0
+    ZSCORE_MAX = 2.5
     
-    # Volume ratio threshold
-    VOLUME_RATIO_MIN = 1.2
-    
-    # ATR stoploss multiplier (tighter than #026 for better risk control)
-    ATR_STOP_MULT = 2.0
+    # ATR stoploss multiplier (slightly looser than #027)
+    ATR_STOP_MULT = 2.5
     
     first_valid = max(200, 48 * 16, 14 * 2, 20)
     
@@ -339,6 +288,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     tp_triggered = np.zeros(n)
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
+    atr_at_entry = np.zeros(n)
     
     for i in range(first_valid, n):
         if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(zscore_15m[i]) or atr_15m[i] == 0:
@@ -352,13 +302,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         price = close[i]
         stoch_k = stoch_k_15m[i]
         stoch_d = stoch_d_15m[i]
-        vol_ratio = volume_ratio_15m[i]
         
-        # Trend filter (4h HMA)
-        if trend == 0:
-            signals[i] = 0.0
-            position_side[i] = 0
-            continue
+        # 15m trend confirmation (HMA > KAMA for long, HMA < KAMA for short)
+        hma_kama_bullish = hma_15m[i] > kama_15m[i] if hma_15m[i] > 0 and kama_15m[i] > 0 else False
+        hma_kama_bearish = hma_15m[i] < kama_15m[i] if hma_15m[i] > 0 and kama_15m[i] > 0 else False
         
         # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
@@ -367,6 +314,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             prev_tp = tp_triggered[i - 1]
             prev_high = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else prev_entry
             prev_low = lowest_since_entry[i - 1] if lowest_since_entry[i - 1] > 0 else prev_entry
+            prev_atr = atr_at_entry[i - 1] if atr_at_entry[i - 1] > 0 else atr
             
             # Update highest/lowest since entry
             if prev_side == 1:
@@ -379,9 +327,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.0*ATR)
+            # Stoploss check (2.5*ATR)
             if prev_side == 1:
-                stoploss_price = prev_entry - ATR_STOP_MULT * atr
+                stoploss_price = prev_entry - ATR_STOP_MULT * prev_atr
                 if price < stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
@@ -389,20 +337,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     tp_triggered[i] = 0
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
+                    atr_at_entry[i] = 0
                     continue
                 
                 # Take profit check (2R) - reduce to half
-                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
+                tp_price = prev_entry + 2 * ATR_STOP_MULT * prev_atr
                 if not prev_tp and price >= tp_price:
                     signals[i] = SIZE_HALF
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
+                    highest_since_entry[i] = current_high
+                    lowest_since_entry[i] = current_low
+                    atr_at_entry[i] = prev_atr
                     continue
                 
                 # Trail stop at 1R profit
                 if prev_tp:
-                    trail_stop = current_high - ATR_STOP_MULT * atr
+                    trail_stop = current_high - ATR_STOP_MULT * prev_atr
                     if price < trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
@@ -410,10 +362,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         tp_triggered[i] = 0
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
+                        atr_at_entry[i] = 0
                         continue
                     
             elif prev_side == -1:
-                stoploss_price = prev_entry + ATR_STOP_MULT * atr
+                stoploss_price = prev_entry + ATR_STOP_MULT * prev_atr
                 if price > stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
@@ -421,20 +374,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     tp_triggered[i] = 0
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
+                    atr_at_entry[i] = 0
                     continue
                 
                 # Take profit check (2R) - reduce to half
-                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
+                tp_price = prev_entry - 2 * ATR_STOP_MULT * prev_atr
                 if not prev_tp and price <= tp_price:
                     signals[i] = -SIZE_HALF
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = 1
+                    highest_since_entry[i] = current_high
+                    lowest_since_entry[i] = current_low
+                    atr_at_entry[i] = prev_atr
                     continue
                 
                 # Trail stop at 1R profit
                 if prev_tp:
-                    trail_stop = current_low + ATR_STOP_MULT * atr
+                    trail_stop = current_low + ATR_STOP_MULT * prev_atr
                     if price > trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
@@ -442,6 +399,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         tp_triggered[i] = 0
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
+                        atr_at_entry[i] = 0
                         continue
             
             # Hold position if no exit triggered
@@ -451,32 +409,33 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             tp_triggered[i] = tp_triggered[i - 1]
             highest_since_entry[i] = highest_since_entry[i - 1]
             lowest_since_entry[i] = lowest_since_entry[i - 1]
+            atr_at_entry[i] = atr_at_entry[i - 1]
             continue
         
-        # Entry logic: 4h trend + 15m RSI pullback + Stoch + Volume + Z-score
-        if trend == 1:  # Bullish trend on 4h
+        # Entry logic: 4h trend + 15m HMA/KAMA + RSI pullback + Stoch + Z-score
+        if trend == 1 and hma_kama_bullish:  # Bullish trend on 4h + 15m confirmation
             if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
                 stoch_k < STOCH_LONG_MAX and
-                abs(zscore_val) < ZSCORE_MAX and
-                vol_ratio >= VOLUME_RATIO_MIN):
+                abs(zscore_val) < ZSCORE_MAX):
                 signals[i] = BASE_SIZE
                 position_side[i] = 1
                 entry_price[i] = price
                 tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
+                atr_at_entry[i] = atr
                 
-        elif trend == -1:  # Bearish trend on 4h
+        elif trend == -1 and hma_kama_bearish:  # Bearish trend on 4h + 15m confirmation
             if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
                 stoch_k > STOCH_SHORT_MIN and
-                abs(zscore_val) < ZSCORE_MAX and
-                vol_ratio >= VOLUME_RATIO_MIN):
+                abs(zscore_val) < ZSCORE_MAX):
                 signals[i] = -BASE_SIZE
                 position_side[i] = -1
                 entry_price[i] = price
                 tp_triggered[i] = 0
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
+                atr_at_entry[i] = atr
         
         else:
             signals[i] = 0.0
