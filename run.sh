@@ -82,6 +82,49 @@ case "${1:-run}" in
         echo "=== Stopping all processes ==="
         pkill -f "agent_research.py" 2>/dev/null && echo "Stopped research loop" || echo "Research loop not running"
         pkill -f "dashboard.py" 2>/dev/null && echo "Stopped dashboard" || echo "Dashboard not running"
+        pkill -f "watchdog_loop" 2>/dev/null && echo "Stopped watchdog" || true
+        ;;
+
+    --watchdog|-w)
+        echo "=== Starting watchdog (auto-restarts loop if stuck/dead) ==="
+        # Start dashboard if not running
+        if ! pgrep -f "dashboard.py" > /dev/null 2>&1; then
+            $PYTHON dashboard.py &
+            echo "Dashboard: http://127.0.0.1:8888"
+        fi
+        # Watchdog loop: check every 5 min, restart if dead or stuck
+        WATCHDOG_INTERVAL=300  # 5 minutes
+        MAX_SILENT_S=600       # 10 min without log = stuck
+        echo "Watchdog: checking every ${WATCHDOG_INTERVAL}s, restart if silent > ${MAX_SILENT_S}s"
+        while true; do
+            if ! pgrep -f "agent_research.py" > /dev/null 2>&1; then
+                echo "[$(date '+%H:%M:%S')] Loop DEAD — restarting..."
+                nohup $PYTHON -u agent_research.py >> research_loop.log 2>&1 &
+                echo "[$(date '+%H:%M:%S')] Restarted PID: $!"
+            else
+                # Check if log was updated recently
+                if [ -f research_loop.log ]; then
+                    LAST_MOD=$(stat -f %m research_loop.log 2>/dev/null || stat -c %Y research_loop.log 2>/dev/null)
+                    NOW=$(date +%s)
+                    SILENT=$((NOW - LAST_MOD))
+                    if [ "$SILENT" -gt "$MAX_SILENT_S" ]; then
+                        echo "[$(date '+%H:%M:%S')] Loop STUCK (no output for ${SILENT}s) — killing & restarting..."
+                        pkill -9 -f "agent_research.py" 2>/dev/null
+                        sleep 2
+                        nohup $PYTHON -u agent_research.py >> research_loop.log 2>&1 &
+                        echo "[$(date '+%H:%M:%S')] Restarted PID: $!"
+                    else
+                        echo "[$(date '+%H:%M:%S')] OK (last output ${SILENT}s ago)"
+                    fi
+                fi
+            fi
+            # Also keep caffeinate alive
+            if ! pgrep -f "caffeinate" > /dev/null 2>&1; then
+                caffeinate -d -i -s &
+                echo "[$(date '+%H:%M:%S')] Restarted caffeinate"
+            fi
+            sleep $WATCHDOG_INTERVAL
+        done
         ;;
 
     --all|-a)
@@ -128,8 +171,9 @@ case "${1:-run}" in
         echo "Usage: ./run.sh [command] [options]"
         echo ""
         echo "Commands:"
-        echo "  (default)       Start research loop (200 experiments)"
+        echo "  (default)       Start research loop"
         echo "  --all, -a       Full setup: prepare data + dashboard + research"
+        echo "  --watchdog, -w  Start with auto-restart watchdog (recommended)"
         echo "  --prepare, -p   Download/update market data"
         echo "  --dashboard, -d Start web dashboard only"
         echo "  --status, -s    Check running processes and results"
