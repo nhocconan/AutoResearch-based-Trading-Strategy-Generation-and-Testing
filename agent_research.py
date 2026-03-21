@@ -251,64 +251,36 @@ def build_experiment_prompt(
     # Determine which phase and what to try next
     phase_hint = ""
     n = experiment_num
-    # Cycle through timeframe-focused phases
-    phase_cycle = n % 60  # repeat every 60 experiments
-    if phase_cycle <= 10:
-        phase_hint = """
-PHASE A — HIGHER TIMEFRAMES: 4h, 6h, 12h, 1d (experiments 1-10)
-Higher TF = less noise, less fee impact, cleaner trends. Focus here FIRST.
-Lower TF strategies have mostly failed test period (overfit).
+    # Rotate through ALL timeframes equally — 6 TF groups, cycle every 36 experiments
+    tf_groups = [
+        ("15m", "1h/4h"),
+        ("30m", "4h/1d"),
+        ("1h", "4h/12h/1d"),
+        ("4h", "1d/1w"),
+        ("12h", "1d/1w"),
+        ("1d", "single TF"),
+    ]
+    group_idx = (n - 1) % len(tf_groups)
+    primary_tf, htf_options = tf_groups[group_idx]
 
-Try these SPECIFIC setups:
-1. Primary=4h, single TF: Supertrend(10,3) + RSI(14) pullback + ADX(14)>20 filter
-2. Primary=4h, HTF=1d: Daily EMA(21/55) trend + 4h RSI entry on pullback
-3. Primary=1d, single TF: MACD(12,26,9) crossover + ATR trailing stop
-4. Primary=12h, single TF: HMA(16/48) crossover + BBW regime filter
-5. Primary=6h, HTF=1d: Daily trend direction + 6h MACD histogram entry
-6. Primary=12h, HTF=1w: Weekly SMA(10) trend + 12h RSI momentum
-7. Primary=4h, single TF: Donchian(20) breakout + volume confirm + ATR stop
-8. Primary=1d, single TF: KAMA(10) trend + RSI(14) < 40 pullback entry
-9. Primary=6h, single TF: EMA(21/55) cross + Supertrend confirmation
-10. Primary=4h, HTF=12h: 12h trend + 4h stochastic entry
+    phase_hint = f"""
+THIS EXPERIMENT: Primary timeframe = {primary_tf}, HTF options = {htf_options}
+You MUST use timeframe = "{primary_tf}" for this experiment.
 
-WHY higher TF: 0.10% round-trip cost is ~2 daily candles of noise.
-On 15m that's 192 bars/day of noise. On 4h that's 1.5 bars. On 1d nearly zero."""
-    elif phase_cycle <= 25:
-        phase_hint = """
-PHASE B — 1h WITH HIGHER TF TREND (experiments 11-25)
-Primary=1h with proper MTF trend from 4h/6h/12h/1d.
-Use mtf_data.get_htf_data() ONCE before loop, aligned arrays inside loop.
+Timeframe rotation: each experiment uses a DIFFERENT primary TF.
+Available data: 15m, 30m, 1h, 4h, 6h, 12h, 1d (all real Binance data).
+For MTF: use mtf_data.get_htf_data(prices, '{htf_options.split("/")[0]}') ONCE before loop.
 
-Examples:
-1. Primary=1h, HTF=4h: 4h Supertrend trend + 1h RSI pullback
-2. Primary=1h, HTF=1d: Daily KAMA direction + 1h MACD histogram entry
-3. Primary=1h, HTF=12h: 12h HMA trend + 1h Z-score mean reversion
-4. Primary=1h, HTF=6h: 6h EMA crossover + 1h Bollinger squeeze breakout
-5. Primary=1h, HTF=4h: 4h Donchian trend + 1h RSI + volume spike entry"""
-    elif phase_cycle <= 40:
-        phase_hint = """
-PHASE C — 30m AND LOWER WITH HTF FILTER (experiments 26-40)
-Only try lower TF if you have strong HTF filter (4h/1d trend).
-Lower TF has more trades but higher fee impact — need high win rate.
+Strategy ideas for {primary_tf}:
+- Supertrend + RSI pullback + ADX filter
+- HMA/KAMA crossover + Bollinger BW regime
+- MACD histogram + volume confirmation + ATR stop
+- Donchian breakout + trend filter from HTF ({htf_options})
+- EMA crossover + Z-score mean reversion filter
+- Ensemble: 2-3 indicators vote, majority wins
 
-1. Primary=30m, HTF=4h: 4h Supertrend + 30m RSI pullback + tight ATR stop
-2. Primary=15m, HTF=1h: 1h trend + 15m momentum entry (high frequency)
-3. Primary=30m, HTF=1d: Daily trend + 30m MACD + volume confirmation"""
-    elif phase_cycle <= 50:
-        phase_hint = """
-PHASE D — ENSEMBLE & REGIME (experiments 41-50)
-Combine 2-3 signals with regime detection:
-- Bollinger BW percentile: low vol → breakout, high vol → mean revert
-- Signal voting: 2 of 3 indicators agree → trade
-- Dynamic sizing: higher confidence → larger position (0.30 vs 0.15)"""
-    else:
-        phase_hint = """
-PHASE E — OPTIMIZE BEST (experiments 51-60)
-Take the current best strategy and try:
-- Different parameters (ATR period, EMA lengths, RSI thresholds)
-- Tighter/wider stoploss (1.5 vs 2.0 vs 3.0 ATR)
-- Different position sizes (0.20 vs 0.25 vs 0.30)
-- Add/remove one signal component"""
+Position sizing: 0.20-0.30, discrete levels, stoploss at 2*ATR.
+REMEMBER: call get_htf_data() ONCE before loop, use aligned arrays inside."""
     # Gather failed approaches to avoid repeating
     failed_approaches = set()
     if history:
