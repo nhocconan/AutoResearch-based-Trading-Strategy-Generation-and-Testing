@@ -1,38 +1,36 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #002 - Donchian Breakout + 4h HMA Trend + ADX Filter (30m primary)
+EXPERIMENT #003 - Supertrend + RSI Pullback + 4h HMA Trend (1h primary)
 =====================================================================================
-Hypothesis: 30m Donchian(20) breakouts capture sustained momentum moves with fewer
-false signals than Supertrend. Combining with 4h HMA(21) trend filter ensures we
-only trade breakouts in the direction of the higher timeframe trend. ADX(14) > 20
-filters choppy/ranging markets where breakouts fail. Volume confirmation adds
-extra conviction on breakout bars.
+Hypothesis: 1h Supertrend(10,3) identifies the primary trend direction, while RSI(14)
+pullbacks to 40-60 range provide optimal entry points within that trend. 4h HMA(21)
+filter ensures we only trade with the higher timeframe trend. This combination
+should generate more trades than pure breakout strategies while maintaining good
+risk/reward ratios.
 
 Key features:
-- Primary TF: 30m (this experiment)
+- Primary TF: 1h (this experiment)
 - HTF filter: 4h HMA(21) for major trend direction
-- Entry: Donchian(20) breakout (20-bar high/low)
-- Strength: ADX(14) > 20 filter (lower threshold = more trades than ADX>25)
-- Volume: breakout bar volume > 1.5x 20-bar avg volume
-- Stoploss: 2.5*ATR(14) trailing (wider than Supertrend to avoid whipsaws)
+- Trend: Supertrend(10, 3.0) for direction
+- Entry: RSI(14) pullback to 40-60 zone within trend
+- Stoploss: 2.0*ATR(14) trailing
 - Position sizing: 0.25-0.30 discrete levels
-- Take profit: Reduce to half at 2.5R profit, trail stop at 1.5R
+- Take profit: Reduce to half at 2R profit
 
-Why this should beat previous attempts:
-- 30m captures more opportunities than 1h/4h but fewer false signals than 15m
-- Donchian breakout = fewer signals than Supertrend (less fee churn)
-- 4h HMA filter removes counter-trend breakouts
-- Volume confirmation filters false breakouts
-- Conservative sizing (0.25-0.30) controls drawdown during crypto crashes
-- Wider stoploss (2.5*ATR) reduces premature exits in volatile crypto
+Why this should work:
+- 1h captures more opportunities than 4h but fewer false signals than 15m/30m
+- Supertrend = clear trend direction with built-in stop
+- RSI pullback = enter on dips within trend (better than chasing breakouts)
+- 4h HMA filter = removes counter-trend trades
+- Conservative sizing controls drawdown during crypto crashes
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "donchian_4hhma_adx_30m_v1"
-timeframe = "30m"
+name = "supertrend_rsi_4hhma_1h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
@@ -49,69 +47,71 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (20-bar high/low)"""
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
     n = len(close)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
+    atr = calculate_atr(high, low, close, period)
+    
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    supertrend = np.zeros(n)
+    trend = np.ones(n)  # 1 = bullish, -1 = bearish
     
     for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    # Fill NaN for early bars
-    upper[:period - 1] = np.nan
-    lower[:period - 1] = np.nan
-    
-    return upper, lower
-
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    n = len(close)
-    
-    tr = np.zeros(n)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    tr[0] = high[0] - low[0]
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i],
-                    abs(high[i] - close[i - 1]),
-                    abs(low[i] - close[i - 1]))
+        if atr[i] == 0:
+            upper_band[i] = high[i]
+            lower_band[i] = low[i]
+        else:
+            upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
+            lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
         
-        if high[i] - high[i - 1] > low[i - 1] - low[i]:
-            plus_dm[i] = max(high[i] - high[i - 1], 0)
+        if i == period - 1:
+            supertrend[i] = upper_band[i]
+            trend[i] = -1
         else:
-            plus_dm[i] = 0
-            
-        if low[i - 1] - low[i] > high[i] - high[i - 1]:
-            minus_dm[i] = max(low[i - 1] - low[i], 0)
+            if trend[i - 1] == 1:
+                if close[i] < lower_band[i]:
+                    supertrend[i] = upper_band[i]
+                    trend[i] = -1
+                else:
+                    supertrend[i] = max(lower_band[i], supertrend[i - 1])
+                    trend[i] = 1
+            else:
+                if close[i] > upper_band[i]:
+                    supertrend[i] = lower_band[i]
+                    trend[i] = 1
+                else:
+                    supertrend[i] = min(upper_band[i], supertrend[i - 1])
+                    trend[i] = -1
+    
+    # Fill early bars
+    supertrend[:period - 1] = np.nan
+    trend[:period - 1] = 0
+    
+    return supertrend, trend
+
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI"""
+    n = len(close)
+    delta = np.diff(close, prepend=close[0])
+    
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    rsi = np.zeros(n)
+    for i in range(n):
+        if avg_loss[i] == 0:
+            rsi[i] = 100
         else:
-            minus_dm[i] = 0
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
     
-    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        if tr_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
-    
-    dx = np.zeros(n)
-    for i in range(period - 1, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    return adx, plus_di, minus_di
+    rsi[:period] = np.nan
+    return rsi
 
 
 def calculate_hma(close, period):
@@ -124,18 +124,10 @@ def calculate_hma(close, period):
     return hma.values
 
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate SMA of volume"""
-    vol_s = pd.Series(volume)
-    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_sma
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
-    volume = prices["volume"].values.copy()
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
@@ -147,17 +139,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
-    vol_sma = calculate_volume_sma(volume, period=20)
+    supertrend, st_trend = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    rsi = calculate_rsi(close, period=14)
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.27  # Base position size (27% of capital)
-    MAX_SIZE = 0.32   # Max position size with strong ADX
-    MIN_SIZE = 0.22   # Min position size
+    BASE_SIZE = 0.28  # Base position size (28% of capital)
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -172,9 +161,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(donchian_upper[i]) or
-            np.isnan(donchian_lower[i]) or np.isnan(atr[i]) or np.isnan(adx[i]) or
-            np.isnan(vol_sma[i]) or atr[i] == 0 or adx[i] == 0 or vol_sma[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(supertrend[i]) or
+            np.isnan(rsi[i]) or np.isnan(atr[i]) or atr[i] == 0):
             signals[i] = 0.0
             continue
         
@@ -182,35 +170,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         price_above_4h_hma = close[i] > hma_4h_aligned[i]
         hma_trend = 1 if price_above_4h_hma else -1
         
-        # ADX strength filter (only trade when ADX > 20)
-        adx_strong = adx[i] > 20
+        # Supertrend direction
+        st_direction = st_trend[i]  # 1 = bullish, -1 = bearish
         
-        # Volume confirmation (breakout volume > 1.5x average)
-        volume_confirmed = volume[i] > 1.5 * vol_sma[i]
+        # RSI pullback zone (40-60 for entries within trend)
+        rsi_in_zone = 40 <= rsi[i] <= 60
+        rsi_oversold = rsi[i] < 40  # Strong long signal
+        rsi_overbought = rsi[i] > 60  # Strong short signal
         
-        # DI+ vs DI- for trend confirmation
-        di_bullish = plus_di[i] > minus_di[i]
-        di_bearish = minus_di[i] > plus_di[i]
-        
-        # Donchian breakout detection
-        breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
-        
-        # Calculate position size based on ADX strength (dynamic sizing)
-        adx_multiplier = min(1.0 + (adx[i] - 20) / 60, 1.18)  # Max 1.18x
-        position_size = min(MAX_SIZE, max(MIN_SIZE, BASE_SIZE * adx_multiplier))
+        # Calculate position size
+        position_size = BASE_SIZE
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: Donchian breakout + 4h HMA bullish + ADX strong + volume + DI+ > DI-
-        if (breakout_long and hma_trend == 1 and adx_strong and 
-            volume_confirmed and di_bullish):
+        # Long entry: Supertrend bullish + 4h HMA bullish + RSI pullback or oversold
+        if (st_direction == 1 and hma_trend == 1 and (rsi_in_zone or rsi_oversold)):
             target_signal = position_size
         
-        # Short entry: Donchian breakout + 4h HMA bearish + ADX strong + volume + DI- > DI+
-        elif (breakout_short and hma_trend == -1 and adx_strong and 
-              volume_confirmed and di_bearish):
+        # Short entry: Supertrend bearish + 4h HMA bearish + RSI pullback or overbought
+        elif (st_direction == -1 and hma_trend == -1 and (rsi_in_zone or rsi_overbought)):
             target_signal = -position_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -221,20 +200,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.5 * atr[i]
+                trailing_stop = highest_since_entry - 2.0 * atr[i]
                 
                 # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2.5R from entry, where R = 2.5*ATR at entry)
+                # Check take profit (2R from entry, where R = 2.0*ATR at entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 6.25 * entry_atr:  # 2.5R = 6.25*ATR
+                    if close[i] >= entry_price + 4.0 * entry_atr:  # 2R = 4.0*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.5 * atr[i]
+                trailing_stop = lowest_since_entry + 2.0 * atr[i]
                 
                 # Check stoploss
                 if close[i] > trailing_stop:
@@ -242,7 +221,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 6.25 * entry_atr:  # 2.5R profit
+                    if close[i] <= entry_price - 4.0 * entry_atr:  # 2R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -254,7 +233,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             entry_atr = 0.0
             profit_target_hit = False
         elif take_profit_triggered:
-            # Reduce position to half at 2.5R profit
+            # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
@@ -270,13 +249,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if Donchian channel reverses OR 4h HMA alignment breaks
-                donchian_reversal_long = close[i] < donchian_lower[i]
-                donchian_reversal_short = close[i] > donchian_upper[i]
+                # Exit if Supertrend reverses OR 4h HMA alignment breaks
+                st_reversal = (position_side == 1 and st_direction == -1) or \
+                              (position_side == -1 and st_direction == 1)
                 hma_alignment_broken = (position_side == 1 and hma_trend == -1) or \
                                        (position_side == -1 and hma_trend == 1)
                 
-                if donchian_reversal_long or donchian_reversal_short or hma_alignment_broken:
+                if st_reversal or hma_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
