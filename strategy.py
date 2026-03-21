@@ -1,264 +1,252 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #102 - OPTIMIZED CHANDELIER ENSEMBLE WITH VECTORIZED INDICATORS (15m+4h v3)
+EXPERIMENT #103 - CLEAN MTF ENSEMBLE WITH CHANDELIER EXIT (15m+4h v4)
 ==================================================================================================
-Hypothesis: Experiment #101 timed out due to excessive Python loops in indicator calculations.
-This version uses vectorized pandas/numpy operations for 10x speedup while keeping proven logic.
+Hypothesis: Experiment #102 failed due to read-only array assignment issues. This version fixes
+all array mutability problems while keeping the proven ensemble logic that achieved Sharpe=16+.
 
-Key optimizations for #102:
-1. Vectorized indicator calculations (pandas rolling instead of Python loops)
-2. Simplified 4h resampling using integer division (no array copying)
-3. Reduced ensemble signals to top 4 performers (HMA, Supertrend, RSI, BBW)
-4. Pre-compute all indicators before signal loop
-5. Simplified position management with fewer state variables
-6. Maintain Chandelier exit (3*ATR) for proven stop management
-7. Keep volatility-adjusted sizing (target ATR% = 1.2%)
-
-Why this should beat Sharpe=16.016:
-- Same core logic as best performer but 10x faster (no timeout)
-- Cleaner signal generation with less churn
-- Better risk management with proper stop tracking
-- Discrete position levels reduce fee drag
+Key fixes for #103:
+1. All indicator arrays created as writable numpy arrays (no views)
+2. Simplified 4h resampling with proper array initialization
+3. Cleaner state management with fewer variables
+4. Maintain proven components: HMA trend, Supertrend, ADX filter, Chandelier exit
+5. Volatility-adjusted position sizing with discrete levels (0.20, 0.35)
+6. Reduced signal churn with vote streak hysteresis
 
 Risk controls:
 - Max position size: 0.35 (35% of capital)
 - Chandelier stop: 3*ATR(22) from highest high (long) / lowest low (short)
 - Volatility-adjusted sizing: base_size * (target_ATR% / current_ATR%)
 - ADX filter: only trade when 4h ADX > 20 (trend strength)
+- Take profit: reduce to half at 2R, trail stop
 """
 
 import numpy as np
 import pandas as pd
 
-name = "optimized_chandelier_ensemble_vectorized_15m_4h_v3"
+name = "clean_mtf_ensemble_chandelier_15m_4h_v4"
 timeframe = "15m"
 leverage = 1.0
 
 
-def calculate_atr_vectorized(high, low, close, period=14):
-    """Vectorized ATR calculation using pandas"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    tr[0] = high[0] - low[0]  # Fix first bar
+def calculate_atr(high, low, close, period=14):
+    """ATR calculation with proper warmup"""
+    n = len(close)
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    atr[:period] = 0
+    atr = np.zeros(n)
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, n):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+    
     return atr
 
 
-def calculate_hma_vectorized(close, period=16):
-    """Vectorized Hull Moving Average"""
-    close_series = pd.Series(close)
+def calculate_hma(close, period=16):
+    """Hull Moving Average"""
+    n = len(close)
+    close_s = pd.Series(close)
     
     half = period // 2
     sqrt_period = int(np.sqrt(period))
     
-    # WMA using rolling apply with weights
-    def wma_roll(series, wma_period):
-        weights = np.arange(1, wma_period + 1)
-        return series.rolling(window=wma_period, min_periods=wma_period).apply(
-            lambda x: np.dot(x, weights) / weights.sum(), raw=True
-        )
+    def wma(series, w):
+        weights = np.arange(1, w + 1)
+        return series.rolling(window=w, min_periods=w).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
     
-    wma_half = wma_roll(close_series, half)
-    wma_full = wma_roll(close_series, period)
-    
+    wma_half = wma(close_s, half)
+    wma_full = wma(close_s, period)
     hma_raw = 2 * wma_half - wma_full
-    hma = wma_roll(hma_raw, sqrt_period)
+    hma = wma(hma_raw, sqrt_period)
     
-    return hma.values
+    return hma.values.copy()
 
 
-def calculate_supertrend_vectorized(high, low, close, period=10, multiplier=3.0):
-    """Vectorized Supertrend calculation"""
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Supertrend with direction"""
     n = len(close)
-    atr = calculate_atr_vectorized(high, low, close, period)
+    atr = calculate_atr(high, low, close, period)
     
     hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
+    upper = hl2 + multiplier * atr
+    lower = hl2 - multiplier * atr
     
     supertrend = np.zeros(n)
-    st_dir = np.zeros(n)
+    direction = np.zeros(n)
     
-    # Initialize
-    supertrend[period] = upper_band[period]
-    st_dir[period] = -1
+    supertrend[period] = upper[period]
+    direction[period] = -1
     
     for i in range(period + 1, n):
-        if close[i - 1] <= supertrend[i - 1]:
-            supertrend[i] = upper_band[i] if upper_band[i] < supertrend[i - 1] else supertrend[i - 1]
-            st_dir[i] = -1
+        if close[i-1] <= supertrend[i-1]:
+            supertrend[i] = min(upper[i], supertrend[i-1])
+            direction[i] = -1
         else:
-            supertrend[i] = lower_band[i] if lower_band[i] > supertrend[i - 1] else supertrend[i - 1]
-            st_dir[i] = 1
+            supertrend[i] = max(lower[i], supertrend[i-1])
+            direction[i] = 1
     
-    return supertrend, st_dir, atr
+    return supertrend.copy(), direction.copy(), atr.copy()
 
 
-def calculate_rsi_vectorized(close, period=14):
-    """Vectorized RSI calculation"""
+def calculate_rsi(close, period=14):
+    """RSI calculation"""
     delta = np.diff(close)
     delta = np.insert(delta, 0, 0)
     
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    gain_series = pd.Series(gain)
-    loss_series = pd.Series(loss)
+    gain_s = pd.Series(gain)
+    loss_s = pd.Series(loss)
     
-    avg_gain = gain_series.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss_series.rolling(window=period, min_periods=period).mean()
+    avg_gain = gain_s.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss_s.rolling(window=period, min_periods=period).mean()
     
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
     
-    return rsi
+    return rsi.fillna(50).values.copy()
 
 
-def calculate_zscore_vectorized(close, period=20):
-    """Vectorized Z-score calculation"""
-    close_series = pd.Series(close)
-    rolling_mean = close_series.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_series.rolling(window=period, min_periods=period).std()
+def calculate_zscore(close, period=20):
+    """Z-score calculation"""
+    close_s = pd.Series(close)
+    mean = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
     
-    zscore = (close_series - rolling_mean) / rolling_std
-    zscore = zscore.fillna(0).values
-    
-    return zscore
+    zscore = (close_s - mean) / std
+    return zscore.fillna(0).values.copy()
 
 
-def calculate_bollinger_bands_vectorized(close, period=20, std_dev=2.0):
-    """Vectorized Bollinger Bands calculation"""
-    close_series = pd.Series(close)
-    
-    sma = close_series.rolling(window=period, min_periods=period).mean()
-    std = close_series.rolling(window=period, min_periods=period).std()
+def calculate_bbw(close, period=20, std_dev=2.0):
+    """Bollinger Band Width"""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
     
     upper = sma + std_dev * std
     lower = sma - std_dev * std
     bandwidth = (upper - lower) / sma
     
-    return upper.values, lower.values, bandwidth.fillna(0).values
+    return bandwidth.fillna(0).values.copy()
 
 
-def calculate_adx_vectorized(high, low, close, period=14):
-    """Vectorized ADX calculation"""
+def calculate_adx(high, low, close, period=14):
+    """ADX calculation"""
     n = len(close)
     
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
     
-    plus_move = high - np.roll(high, 1)
-    minus_move = np.roll(low, 1) - low
-    plus_move[0] = 0
-    minus_move[0] = 0
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        elif minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
     
-    plus_dm = np.where((plus_move > minus_move) & (plus_move > 0), plus_move, 0)
-    minus_dm = np.where((minus_move > plus_move) & (minus_move > 0), minus_move, 0)
-    
-    atr = calculate_atr_vectorized(high, low, close, period)
+    atr = calculate_atr(high, low, close, period)
     
     plus_di = np.zeros(n)
     minus_di = np.zeros(n)
     
-    mask = atr > 0
-    plus_di[mask] = 100 * plus_dm[mask] / atr[mask]
-    minus_di[mask] = 100 * minus_dm[mask] / atr[mask]
+    for i in range(period, n):
+        if atr[i] > 0:
+            plus_di[i] = 100 * plus_dm[i] / atr[i]
+            minus_di[i] = 100 * minus_dm[i] / atr[i]
     
     di_sum = plus_di + minus_di
     dx = np.zeros(n)
-    mask2 = di_sum > 0
-    dx[mask2] = 100 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
     
-    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
-    adx[:period*2] = 0
+    for i in range(period, n):
+        if di_sum[i] > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum[i]
     
-    return adx
+    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean()
+    
+    return adx.fillna(0).values.copy()
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
-    close = prices["close"].values
-    high = prices["high"].values
-    low = prices["low"].values
-    volume = prices.get("volume", np.ones(len(close))).values
+    close = prices["close"].values.copy()
+    high = prices["high"].values.copy()
+    low = prices["low"].values.copy()
     n = len(close)
     
     signals = np.zeros(n)
     
-    # ===== 15m indicators (vectorized) =====
-    atr_15m = calculate_atr_vectorized(high, low, close, period=14)
-    hma_16 = calculate_hma_vectorized(close, period=16)
-    hma_48 = calculate_hma_vectorized(close, period=48)
-    supertrend_15m, st_dir_15m, _ = calculate_supertrend_vectorized(high, low, close, period=10, multiplier=3.0)
-    rsi_15m = calculate_rsi_vectorized(close, period=14)
-    zscore_15m = calculate_zscore_vectorized(close, period=20)
-    bb_upper, bb_lower, bb_bw = calculate_bollinger_bands_vectorized(close, period=20, std_dev=2.0)
-    
-    # 200-SMA for RSI filter
-    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    # ===== 15m indicators =====
+    atr_15m = calculate_atr(high, low, close, period=14)
+    hma_16 = calculate_hma(close, period=16)
+    hma_48 = calculate_hma(close, period=48)
+    _, st_dir_15m, _ = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    rsi_15m = calculate_rsi(close, period=14)
+    zscore_15m = calculate_zscore(close, period=20)
+    bbw_15m = calculate_bbw(close, period=20, std_dev=2.0)
+    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values.copy()
     sma_200 = np.nan_to_num(sma_200, 0)
     
-    # ===== 4h indicators (resampled) =====
-    bars_per_4h = 16  # 15m bars per 4h
+    # ===== 4h resampling (16 bars per 4h on 15m) =====
+    bars_per_4h = 16
     n_4h = n // bars_per_4h
     
-    # Create 4h arrays
     c_4h = np.zeros(n_4h)
     h_4h = np.zeros(n_4h)
     l_4h = np.zeros(n_4h)
     
     for i in range(n_4h):
         start_idx = i * bars_per_4h
-        end_idx = start_idx + bars_per_4h
-        if end_idx <= n:
+        end_idx = min(start_idx + bars_per_4h, n)
+        if end_idx > start_idx:
             c_4h[i] = close[end_idx - 1]
             h_4h[i] = np.max(high[start_idx:end_idx])
             l_4h[i] = np.min(low[start_idx:end_idx])
     
-    # Calculate 4h indicators
-    hma_4h = calculate_hma_vectorized(c_4h, period=16)
-    _, st_dir_4h, atr_4h = calculate_supertrend_vectorized(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
-    adx_4h = calculate_adx_vectorized(h_4h, l_4h, c_4h, period=14)
-    bb_bw_4h = calculate_bollinger_bands_vectorized(c_4h, period=20, std_dev=2.0)[2]
+    # ===== 4h indicators =====
+    hma_4h = calculate_hma(c_4h, period=16)
+    _, st_dir_4h, atr_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
+    adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
+    bbw_4h = calculate_bbw(c_4h, period=20, std_dev=2.0)
     
-    # Map 4h indicators to 15m timeframe
+    # ===== Map 4h to 15m =====
     trend_4h = np.zeros(n)
-    adx_4h_mapped = np.zeros(n)
-    st_dir_4h_mapped = np.zeros(n)
-    bb_bw_4h_mapped = np.zeros(n)
-    atr_4h_mapped = np.zeros(n)
+    adx_4h_map = np.zeros(n)
+    st_dir_4h_map = np.zeros(n)
+    bbw_4h_map = np.zeros(n)
+    atr_4h_map = np.zeros(n)
     
     for i in range(n):
         idx_4h = min(i // bars_per_4h, n_4h - 1)
         if idx_4h >= 20:
             trend_4h[i] = 1 if c_4h[idx_4h] > hma_4h[idx_4h] else (-1 if c_4h[idx_4h] < hma_4h[idx_4h] else 0)
-            adx_4h_mapped[i] = adx_4h[idx_4h]
-            st_dir_4h_mapped[i] = st_dir_4h[idx_4h]
-            bb_bw_4h_mapped[i] = bb_bw_4h[idx_4h]
-            atr_4h_mapped[i] = atr_4h[idx_4h]
+            adx_4h_map[i] = adx_4h[idx_4h]
+            st_dir_4h_map[i] = st_dir_4h[idx_4h]
+            bbw_4h_map[i] = bbw_4h[idx_4h]
+            atr_4h_map[i] = atr_4h[idx_4h]
     
-    # Calculate BBW percentile for regime detection
+    # ===== BBW percentile for regime =====
     bbw_percentile = np.zeros(n)
-    valid_bbw = bb_bw_4h_mapped[320:]
-    valid_bbw = valid_bbw[valid_bbw > 0]
+    valid_bbw = bbw_4h_map[320:][bbw_4h_map[320:] > 0]
     if len(valid_bbw) > 0:
         bbw_sorted = np.sort(valid_bbw)
         for i in range(320, n):
-            if bb_bw_4h_mapped[i] > 0:
-                bbw_percentile[i] = np.searchsorted(bbw_sorted, bb_bw_4h_mapped[i]) / len(bbw_sorted)
+            if bbw_4h_map[i] > 0:
+                bbw_percentile[i] = np.searchsorted(bbw_sorted, bbw_4h_map[i]) / len(bbw_sorted)
     
-    # ===== Position sizing parameters =====
+    # ===== Parameters =====
     SIZE_LOW = 0.20
     SIZE_HIGH = 0.35
     ATR_TARGET_PCT = 0.012
     ADX_MIN = 20
     ZSCORE_EXTREME = 2.0
+    FIRST_VALID = 350
     
-    # ===== State tracking =====
+    # ===== State =====
     prev_signal = 0.0
     prev_vote = 0
     vote_streak = 0
@@ -268,19 +256,16 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_low = 0.0
     tp_triggered = False
     
-    first_valid = 350  # Warmup for all indicators
-    
-    for i in range(first_valid, n):
-        # Skip invalid data
-        if atr_15m[i] == 0 or np.isnan(atr_15m[i]):
+    for i in range(FIRST_VALID, n):
+        if atr_15m[i] == 0 or np.isnan(atr_15m[i]) or close[i] == 0:
             signals[i] = 0.0
             prev_signal = 0.0
             continue
         
-        # 4h trend filter
+        # 4h filters
         trend_4h_val = trend_4h[i]
-        adx_val = adx_4h_mapped[i]
-        st_dir_4h_val = st_dir_4h_mapped[i]
+        adx_val = adx_4h_map[i]
+        st_dir_4h_val = st_dir_4h_map[i]
         bbw_pct = bbw_percentile[i]
         
         # 15m signals
@@ -289,7 +274,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         rsi_val = rsi_15m[i]
         zscore_val = zscore_15m[i]
         
-        # Regime detection
+        # Regime
         trend_regime = bbw_pct < 0.5
         adx_filter = adx_val >= ADX_MIN
         
@@ -334,7 +319,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             elif zscore_val > ZSCORE_EXTREME:
                 vote_short += 0.5
         
-        # Determine vote direction
+        # Determine vote
         if vote_long > vote_short and vote_long >= 3.5:
             current_vote = 1
             total_votes = vote_long
@@ -345,7 +330,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             current_vote = 0
             total_votes = 0
         
-        # Vote streak for hysteresis
+        # Vote streak
         if current_vote != 0 and current_vote == prev_vote:
             vote_streak += 1
         elif current_vote != 0:
@@ -355,11 +340,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             vote_streak = 0
             prev_vote = 0
         
-        # Volatility-adjusted size
+        # Volatility adjustment
         atr_pct = atr_15m[i] / close[i] if close[i] > 0 else 0
-        vol_adjustment = min(1.5, max(0.5, ATR_TARGET_PCT / atr_pct)) if atr_pct > 0 else 1.0
+        vol_adj = min(1.5, max(0.5, ATR_TARGET_PCT / atr_pct)) if atr_pct > 0 else 1.0
         
-        # ===== Chandelier Exit stop management =====
+        # ===== Chandelier Exit management =====
         if prev_signal != 0.0 and entry_price > 0:
             chandelier_mult = 3.0
             atr_stop = atr_15m[i]
@@ -417,7 +402,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         elif vote_streak >= 2 and adx_filter:
             if current_vote == 1:
                 base_size = SIZE_HIGH if total_votes >= 5.0 else SIZE_LOW
-                signals[i] = np.clip(base_size * vol_adjustment, 0, SIZE_HIGH)
+                signals[i] = np.clip(base_size * vol_adj, 0, SIZE_HIGH)
                 entry_price = close[i]
                 entry_atr = atr_15m[i]
                 highest_high = high[i]
@@ -425,7 +410,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 tp_triggered = False
             else:
                 base_size = SIZE_HIGH if total_votes >= 5.0 else SIZE_LOW
-                signals[i] = -np.clip(base_size * vol_adjustment, 0, SIZE_HIGH)
+                signals[i] = -np.clip(base_size * vol_adj, 0, SIZE_HIGH)
                 entry_price = close[i]
                 entry_atr = atr_15m[i]
                 lowest_low = low[i]
