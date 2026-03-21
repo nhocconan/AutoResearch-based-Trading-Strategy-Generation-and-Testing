@@ -10,21 +10,23 @@ BTC/ETH/SOL USDT-margined perpetual futures using Binance historical data.
 ```
 1. LLM generates strategy.py
 2. Validator checks: no lookahead, no manual MTF, no get_htf_data in loop
-3. Train backtest: BTC → ETH → SOL (early stop on first Sharpe < 0)
-4. Prefix look-ahead test: run on partial data, verify signals match
-5. Quality gate: ALL symbols must have Sharpe > 0 AND trades >= 5
-6. Test backtest: BTC → ETH → SOL (early stop on first Sharpe < 0)
-7. Test gate: ALL symbols must have Sharpe > 0 AND trades >= 3
-8. ONLY if ALL above pass → status = "keep"
+3. PER-SYMBOL independent evaluation:
+   For each symbol (BTC, ETH, SOL):
+     a. Train backtest → Sharpe > 0 AND trades >= 5? → train PASS
+     b. If train FAIL → skip test for this symbol, try next symbol
+     c. If train PASS → run test → Sharpe > 0 AND trades >= 3? → KEEP for this symbol
+4. Prefix look-ahead test (if any symbol kept)
+5. Strategy is KEPT if at least 1 symbol passes BOTH train AND test
 ```
 
-**Early discard rule:** At ANY step, if ANY symbol has Sharpe < 0 or
-trades < 5 (train) / < 3 (test), STOP IMMEDIATELY. Do not run remaining
-symbols. Do not run test if train failed. This saves ~66% compute time.
+**Per-symbol evaluation:** Each symbol is independent. BTC can fail while
+ETH passes. A strategy is kept if it works on ANY symbol. This reflects
+reality: BTC, ETH, SOL have different market characteristics.
 
-**0-trade strategies are ALWAYS discarded.** A strategy that generates
-no trades is worthless regardless of Sharpe value (Sharpe=0.000 with
-0 trades is NOT a pass).
+**Early discard within symbol:** If train fails for a symbol, skip its test.
+But ALWAYS try all 3 symbols — don't stop at first failure.
+
+**0-trade strategies are ALWAYS discarded.** Sharpe=0.000 with 0 trades is NOT a pass.
 
 ## Data
 
