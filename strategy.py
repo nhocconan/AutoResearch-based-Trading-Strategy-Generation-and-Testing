@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #216: 1d Donchian Breakout with Weekly HMA Trend Filter
-Hypothesis: Daily Donchian breakouts (20-period) capture multi-week momentum moves.
-Weekly HMA provides macro trend bias (only long when price > 1w HMA, only short when <).
-RSI(14) filter avoids entering at extremes (>70 or <30). ATR(14) trailing stop at 2.5*ATR.
-Position sizing: 0.30 entry, reduce to 0.15 at 2R profit. This is simpler than regime-switching
-and should generate consistent trades on daily timeframe. Target: Beat Sharpe=0.499.
-Why 1d: Daily bars filter noise, capture sustained moves, fewer trades = less fee drag.
+Experiment #217: 15m Multi-Timeframe Trend Pullback with Volume Confirmation
+Hypothesis: 15m timeframe is noisy, so we need strong HTF filters. Use 4h HMA for 
+major trend direction, 1h RSI for pullback timing, and volume confirmation to reduce 
+false breakouts. Entry: Long when price > 4h HMA + 1h RSI pulls back to 40-50 + volume 
+> 1.5x average. Short when price < 4h HMA + 1h RSI rallies to 50-60 + volume spike. 
+Stoploss: 2.5*ATR trailing. Position sizing: 0.25 entry, 0.125 half at 2R profit.
+This should generate more trades than 12h/1d strategies while maintaining quality.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_weekly_hma_rsi_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_4h_hma_1h_rsi_volume_pullback_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -48,42 +48,43 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (upper/lower bounds)."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    mid = (upper + lower) / 2
-    return upper, lower, mid
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average."""
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1h = get_htf_data(prices, '1h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, 20)
+    rsi_15m = calculate_rsi(close, 14)
+    vol_ma = calculate_volume_ma(volume, 20)
     
-    # Track previous Donchian values for breakout detection
-    prev_donchian_upper = np.roll(donchian_upper, 1)
-    prev_donchian_lower = np.roll(donchian_lower, 1)
-    prev_donchian_upper[0] = donchian_upper[0]
-    prev_donchian_lower[0] = donchian_lower[0]
+    # Volume ratio (current vs average)
+    vol_ratio = volume / vol_ma
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    vol_ratio = np.clip(vol_ratio, 0.5, 5.0)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -94,46 +95,43 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # Weekly trend filter
-        weekly_bullish = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else False
-        weekly_bearish = close[i] < hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else False
+        # HTF trend filter (4h HMA)
+        trend_bullish = close[i] > hma_4h_aligned[i]
+        trend_bearish = close[i] < hma_4h_aligned[i]
         
-        # RSI filter (avoid extremes)
-        rsi_not_overbought = rsi[i] < 70
-        rsi_not_oversold = rsi[i] > 30
-        rsi_bullish = rsi[i] > 40
-        rsi_bearish = rsi[i] < 60
+        # 1h RSI pullback zones
+        rsi_pullback_long = 40 <= rsi_1h_aligned[i] <= 55
+        rsi_pullback_short = 45 <= rsi_1h_aligned[i] <= 60
         
-        # Donchian breakout detection
-        breakout_long = close[i] > prev_donchian_upper[i] and close[i-1] <= prev_donchian_upper[i-1]
-        breakout_short = close[i] < prev_donchian_lower[i] and close[i-1] >= prev_donchian_lower[i-1]
+        # 15m RSI confirmation (not overbought/oversold)
+        rsi_15m_ok_long = 35 <= rsi_15m[i] <= 65
+        rsi_15m_ok_short = 35 <= rsi_15m[i] <= 65
         
-        # Donchian continuation (price above/below mid)
-        above_mid = close[i] > donchian_mid[i]
-        below_mid = close[i] < donchian_mid[i]
+        # Volume confirmation (above average)
+        volume_confirmed = vol_ratio[i] > 1.2
+        
+        # Price momentum (close above/below previous)
+        momentum_long = close[i] > close[i-1]
+        momentum_short = close[i] < close[i-1]
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Breakout long with weekly trend confirmation
-        if breakout_long and weekly_bullish and rsi_not_overbought:
-            new_signal = SIZE_ENTRY
-        
-        # Continuation long (price above Donchian mid + weekly bullish)
-        elif above_mid and weekly_bullish and rsi_bullish and rsi_not_overbought:
-            # Enter on pullback to mid
-            if i > 1 and close[i-1] < donchian_mid[i-1] and close[i] > donchian_mid[i]:
+        # Trend bullish + RSI pullback + volume + momentum
+        if trend_bullish and rsi_pullback_long and rsi_15m_ok_long:
+            if volume_confirmed and momentum_long:
+                new_signal = SIZE_ENTRY
+            elif not volume_confirmed and momentum_long and rsi_15m[i] < 50:
+                # Enter on weaker volume if RSI is low enough
                 new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Breakout short with weekly trend confirmation
-        if breakout_short and weekly_bearish and rsi_not_oversold:
-            new_signal = -SIZE_ENTRY
-        
-        # Continuation short (price below Donchian mid + weekly bearish)
-        elif below_mid and weekly_bearish and rsi_bearish and rsi_not_oversold:
-            # Enter on pullback to mid
-            if i > 1 and close[i-1] > donchian_mid[i-1] and close[i] < donchian_mid[i]:
+        # Trend bearish + RSI pullback + volume + momentum
+        if trend_bearish and rsi_pullback_short and rsi_15m_ok_short:
+            if volume_confirmed and momentum_short:
+                new_signal = -SIZE_ENTRY
+            elif not volume_confirmed and momentum_short and rsi_15m[i] > 50:
+                # Enter on weaker volume if RSI is high enough
                 new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
