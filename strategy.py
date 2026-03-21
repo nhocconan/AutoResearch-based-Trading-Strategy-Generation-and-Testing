@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #040 - KAMA StochRSI Pullback with ADX Trend Filter (1h Primary)
+EXPERIMENT #041 - DEMA MACD Momentum with Daily Trend Filter (4h Primary)
 ==================================================================================================
-Hypothesis: Current best uses 4h+1d with HMA+RSI. This uses 1h+4h with KAMA+StochRSI+ADX.
+Hypothesis: Current best uses 1h+4h with KAMA+StochRSI. This uses 4h+1d with DEMA+MACD.
 
 Key innovations:
-1. 1h PRIMARY + 4h HTF: More trades than 4h, cleaner signals than 15m/30m
-2. KAMA for trend: Adaptive to volatility, performs better in ranging markets than HMA/EMA
-3. StochRSI for entries: More sensitive than regular RSI for precise pullback detection
-4. ADX trend strength filter: Only trade when ADX > 25 (strong trend), avoid choppy markets
+1. 4h PRIMARY + 1d HTF: Cleaner signals than 1h, more trades than daily-only
+2. DEMA for trend: Double EMA reduces lag vs single EMA, more responsive than HMA
+3. MACD histogram for momentum: Confirms trend strength before entry
+4. Daily trend as master filter: Only trade in direction of 1d trend (highest conviction)
 5. Conservative sizing: 0.25 base, 0.35 high conviction, 2.5 ATR stoploss
 
 Why this should beat hma_rsi_pullback_daily_trend_4h_v1 (Sharpe=0.537):
-- KAMA adapts to market regime better than static HMA
-- StochRSI catches pullbacks earlier than regular RSI
-- ADX filter eliminates low-quality trades in ranging markets
-- 1h timeframe captures more opportunities while 4h filter keeps quality high
+- 4h timeframe captures major moves without 1h noise
+- DEMA has less lag than HMA for faster trend detection
+- MACD histogram provides momentum confirmation RSI lacks
+- 1d trend filter is stronger than 4h trend filter
+- Fewer trades but higher quality = better Sharpe
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "kama_stochrsi_adx_pullback_1h_4h_v1"
-timeframe = "1h"
+name = "dema_macd_momentum_4h_daily_v1"
+timeframe = "4h"
 leverage = 1.0
 
 
@@ -50,165 +51,50 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+def calculate_dema(close, period=21):
     """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts to market volatility - smooth in trends, responsive in ranges
-    ER = |Close - Close(n)| / Sum(|Close(i) - Close(i-1)|)
-    SC = [ER * (fast - slow) + slow]^2
-    KAMA = KAMA(prev) + SC * (Close - KAMA(prev))
+    Double Exponential Moving Average (DEMA)
+    DEMA = 2*EMA - EMA(EMA)
+    Reduces lag compared to single EMA
     """
     n = len(close)
-    if n < period + slow_period:
+    if n < period * 2:
         return np.zeros(n)
     
-    kama = np.zeros(n)
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=period, adjust=False, min_periods=period).mean()
+    ema2 = ema1.ewm(span=period, adjust=False, min_periods=period).mean()
     
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(period, n):
-        price_change = abs(close[i] - close[i - period])
-        noise = 0.0
-        for j in range(i - period + 1, i + 1):
-            noise += abs(close[j] - close[j - 1])
-        if noise > 0:
-            er[i] = price_change / noise
-        else:
-            er[i] = 0
-    
-    # Calculate Smoothing Constant (SC)
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    sc = np.zeros(n)
-    for i in range(period, n):
-        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Initialize KAMA
-    first_valid = period + slow_period
-    kama[first_valid - 1] = close[first_valid - 1]
-    
-    # Calculate KAMA
-    for i in range(first_valid, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama
+    dema = (2 * ema1 - ema2).values
+    dema[:period * 2 - 1] = 0  # Mark invalid periods
+    return dema
 
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI"""
-    n = len(close)
-    if n < period + 1:
-        return np.zeros(n)
-    
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    rs = np.zeros(n)
-    mask = avg_loss > 0
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rs[~mask] = 100
-    
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-
-def calculate_stoch_rsi(close, rsi_period=14, stoch_period=14, k_period=3, d_period=3):
+def calculate_macd(close, fast_period=12, slow_period=26, signal_period=9):
     """
-    Stochastic RSI - more sensitive than regular RSI
-    StochRSI = (RSI - min(RSI)) / (max(RSI) - min(RSI))
+    MACD Indicator
+    Returns: macd_line, signal_line, histogram
     """
     n = len(close)
-    if n < rsi_period + stoch_period:
-        return np.zeros(n), np.zeros(n)
+    if n < slow_period + signal_period:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
     
-    rsi = calculate_rsi(close, rsi_period)
+    close_series = pd.Series(close)
+    ema_fast = close_series.ewm(span=fast_period, adjust=False, min_periods=fast_period).mean()
+    ema_slow = close_series.ewm(span=slow_period, adjust=False, min_periods=slow_period).mean()
     
-    stoch_k = np.zeros(n)
-    stoch_d = np.zeros(n)
+    macd_line = (ema_fast - ema_slow).values
+    macd_series = pd.Series(macd_line)
+    signal_line = macd_series.ewm(span=signal_period, adjust=False, min_periods=signal_period).mean().values
+    histogram = macd_line - signal_line
     
-    for i in range(rsi_period + stoch_period - 1, n):
-        rsi_window = rsi[i - stoch_period + 1:i + 1]
-        min_rsi = np.min(rsi_window)
-        max_rsi = np.max(rsi_window)
-        
-        if max_rsi - min_rsi > 0:
-            stoch_k[i] = 100 * (rsi[i] - min_rsi) / (max_rsi - min_rsi)
-        else:
-            stoch_k[i] = 50
+    # Mark invalid periods
+    invalid = slow_period + signal_period - 1
+    macd_line[:invalid] = 0
+    signal_line[:invalid] = 0
+    histogram[:invalid] = 0
     
-    # %D is SMA of %K
-    for i in range(rsi_period + stoch_period - 1 + d_period - 1, n):
-        stoch_d[i] = np.mean(stoch_k[i - d_period + 1:i + 1])
-    
-    return stoch_k, stoch_d
-
-
-def calculate_adx(high, low, close, period=14):
-    """
-    Average Directional Index (ADX) - measures trend strength
-    ADX > 25 = strong trend, ADX < 20 = ranging market
-    """
-    n = len(close)
-    if n < period * 3:
-        return np.zeros(n)
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
-        
-        plus_dm[i] = max(0, high[i] - high[i - 1]) if (high[i] - high[i - 1]) > (low[i - 1] - low[i]) else 0
-        minus_dm[i] = max(0, low[i - 1] - low[i]) if (low[i - 1] - low[i]) > (high[i] - high[i - 1]) else 0
-    
-    # Smooth with Wilder's method
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    dx = np.zeros(n)
-    adx = np.zeros(n)
-    
-    # Initialize sums
-    sum_tr = np.sum(tr[1:period + 1])
-    sum_plus_dm = np.sum(plus_dm[1:period + 1])
-    sum_minus_dm = np.sum(minus_dm[1:period + 1])
-    
-    for i in range(period, n):
-        if i == period:
-            sum_tr = np.sum(tr[1:i + 1])
-            sum_plus_dm = np.sum(plus_dm[1:i + 1])
-            sum_minus_dm = np.sum(minus_dm[1:i + 1])
-        else:
-            sum_tr = sum_tr - sum_tr / period + tr[i]
-            sum_plus_dm = sum_plus_dm - sum_plus_dm / period + plus_dm[i]
-            sum_minus_dm = sum_minus_dm - sum_minus_dm / period + minus_dm[i]
-        
-        if sum_tr > 0:
-            plus_di[i] = 100 * sum_plus_dm / sum_tr
-            minus_di[i] = 100 * sum_minus_dm / sum_tr
-        else:
-            plus_di[i] = 0
-            minus_di[i] = 0
-        
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-        else:
-            dx[i] = 0
-    
-    # ADX is SMA of DX
-    for i in range(period * 2, n):
-        adx[i] = np.mean(dx[i - period + 1:i + 1])
-    
-    return adx
+    return macd_line, signal_line, histogram
 
 
 def calculate_supertrend(high, low, close, atr, multiplier=3.0):
@@ -264,42 +150,64 @@ def calculate_supertrend(high, low, close, atr, multiplier=3.0):
     return supertrend, trend
 
 
+def calculate_rsi(close, period=14):
+    """Calculate RSI"""
+    n = len(close)
+    if n < period + 1:
+        return np.zeros(n)
+    
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    rs = np.zeros(n)
+    mask = avg_loss > 0
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    rs[~mask] = 100
+    
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     n = len(close)
     
-    # ========== 1h INDICATORS (PRIMARY TIMEFRAME) ==========
-    atr_1h = calculate_atr(high, low, close, period=14)
-    kama_1h = calculate_kama(close, period=10, fast_period=2, slow_period=30)
-    kama_fast_1h = calculate_kama(close, period=5, fast_period=2, slow_period=15)
-    stoch_k_1h, stoch_d_1h = calculate_stoch_rsi(close, rsi_period=14, stoch_period=14, k_period=3, d_period=3)
-    adx_1h = calculate_adx(high, low, close, period=14)
-    supertrend_1h, st_trend_1h = calculate_supertrend(high, low, close, atr_1h, multiplier=3.0)
+    # ========== 4h INDICATORS (PRIMARY TIMEFRAME) ==========
+    atr_4h = calculate_atr(high, low, close, period=14)
+    dema_4h = calculate_dema(close, period=21)
+    dema_fast_4h = calculate_dema(close, period=10)
+    macd_4h, macd_signal_4h, macd_hist_4h = calculate_macd(close, fast_period=12, slow_period=26, signal_period=9)
+    supertrend_4h, st_trend_4h = calculate_supertrend(high, low, close, atr_4h, multiplier=3.0)
+    rsi_4h = calculate_rsi(close, period=14)
     
-    # ========== 4h INDICATORS (TREND FILTER) - PROPER MTF ==========
+    # ========== 1d INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
-        df_4h = get_htf_data(prices, '4h')
-        close_4h = df_4h['close'].values
-        high_4h = df_4h['high'].values
-        low_4h = df_4h['low'].values
+        df_1d = get_htf_data(prices, '1d')
+        close_1d = df_1d['close'].values
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
         
-        # 4h KAMA for trend direction
-        kama_4h = calculate_kama(close_4h, period=10, fast_period=2, slow_period=30)
-        atr_4h = calculate_atr(high_4h, low_4h, close_4h, period=14)
-        _, st_trend_4h = calculate_supertrend(high_4h, low_4h, close_4h, atr_4h, multiplier=3.0)
-        adx_4h = calculate_adx(high_4h, low_4h, close_4h, period=14)
+        # 1d DEMA for master trend direction
+        dema_1d = calculate_dema(close_1d, period=21)
+        atr_1d = calculate_atr(high_1d, low_1d, close_1d, period=14)
+        _, st_trend_1d = calculate_supertrend(high_1d, low_1d, close_1d, atr_1d, multiplier=3.0)
+        macd_1d, _, macd_hist_1d = calculate_macd(close_1d, fast_period=12, slow_period=26, signal_period=9)
         
-        # Align to 1h timeframe (auto shift for completed bars)
-        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
-        st_trend_4h_aligned = align_htf_to_ltf(prices, df_4h, st_trend_4h)
-        adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+        # Align to 4h timeframe (auto shift for completed bars)
+        dema_1d_aligned = align_htf_to_ltf(prices, df_1d, dema_1d)
+        st_trend_1d_aligned = align_htf_to_ltf(prices, df_1d, st_trend_1d)
+        macd_hist_1d_aligned = align_htf_to_ltf(prices, df_1d, macd_hist_1d)
         
     except Exception:
-        kama_4h_aligned = np.zeros(n)
-        st_trend_4h_aligned = np.zeros(n)
-        adx_4h_aligned = np.zeros(n)
+        dema_1d_aligned = np.zeros(n)
+        st_trend_1d_aligned = np.zeros(n)
+        macd_hist_1d_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
@@ -308,19 +216,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     SIZE_BASE = 0.25    # Base position (25% of capital)
     SIZE_HIGH = 0.35    # High conviction (35% of capital)
     
-    # ATR stoploss - slightly wider to avoid premature exits
+    # ATR stoploss
     ATR_STOP_MULT = 2.5
     
-    # StochRSI pullback zones
-    STOCH_LONG_MIN = 20
-    STOCH_LONG_MAX = 50
-    STOCH_SHORT_MIN = 50
-    STOCH_SHORT_MAX = 80
+    # MACD histogram threshold for momentum confirmation
+    MACD_HIST_MIN = 0  # Must be positive for long, negative for short
     
-    # ADX trend strength threshold
-    ADX_MIN = 25  # Only trade when trend is strong
+    # RSI filter zones
+    RSI_LONG_MIN = 40
+    RSI_LONG_MAX = 70
+    RSI_SHORT_MIN = 30
+    RSI_SHORT_MAX = 60
     
-    first_valid = max(150, 100)
+    first_valid = 200  # Need enough data for 1d alignment
     
     # Track position state
     position_side = np.zeros(n, dtype=int)
@@ -331,35 +239,34 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_1h[i]) or atr_1h[i] == 0 or np.isnan(stoch_k_1h[i]):
+        if np.isnan(atr_4h[i]) or atr_4h[i] == 0 or np.isnan(dema_4h[i]) or dema_4h[i] == 0:
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_1h[i]
-        stoch_k = stoch_k_1h[i]
-        stoch_d = stoch_d_1h[i]
-        st_trend_val = st_trend_1h[i]
-        kama_val = kama_1h[i]
-        kama_fast_val = kama_fast_1h[i]
-        adx_val = adx_1h[i]
+        atr = atr_4h[i]
+        dema_val = dema_4h[i]
+        dema_fast_val = dema_fast_4h[i]
+        macd_hist = macd_hist_4h[i]
+        st_trend_val = st_trend_4h[i]
+        rsi_val = rsi_4h[i]
         
-        # 4h trend filters (MASTER FILTER)
-        kama_4h_val = kama_4h_aligned[i]
-        st_trend_4h_val = st_trend_4h_aligned[i]
-        adx_4h_val = adx_4h_aligned[i]
+        # 1d trend filters (MASTER FILTER)
+        dema_1d_val = dema_1d_aligned[i]
+        st_trend_1d_val = st_trend_1d_aligned[i]
+        macd_hist_1d = macd_hist_1d_aligned[i]
         
-        # Determine 4h trend direction
-        four_h_trend = 0
-        if kama_4h_val > 0 and price > kama_4h_val:
-            four_h_trend = 1
-        elif kama_4h_val > 0 and price < kama_4h_val:
-            four_h_trend = -1
+        # Determine 1d trend direction
+        one_d_trend = 0
+        if dema_1d_val > 0 and price > dema_1d_val:
+            one_d_trend = 1
+        elif dema_1d_val > 0 and price < dema_1d_val:
+            one_d_trend = -1
         
-        if st_trend_4h_val == 1:
-            four_h_trend = max(four_h_trend, 1)
-        elif st_trend_4h_val == -1:
-            four_h_trend = min(four_h_trend, -1)
+        if st_trend_1d_val == 1:
+            one_d_trend = max(one_d_trend, 1)
+        elif st_trend_1d_val == -1:
+            one_d_trend = min(one_d_trend, -1)
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -454,28 +361,36 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ========== ENTRY LOGIC - STOCHRSI PULLBACK IN TREND DIRECTION ==========
-        # LONG: 4h trend up + 1h Supertrend up + StochRSI pullback + ADX strong
+        # ========== ENTRY LOGIC - MACD MOMENTUM IN DAILY TREND DIRECTION ==========
+        # LONG: 1d trend up + 4h Supertrend up + MACD histogram positive + DEMA aligned
         long_condition = (
-            four_h_trend == 1 and
+            one_d_trend == 1 and
             st_trend_val == 1 and
-            stoch_k >= STOCH_LONG_MIN and stoch_k <= STOCH_LONG_MAX and
-            kama_fast_val > kama_val and
-            adx_val >= ADX_MIN
+            macd_hist > MACD_HIST_MIN and
+            dema_fast_val > dema_val and
+            rsi_val >= RSI_LONG_MIN and rsi_val <= RSI_LONG_MAX
         )
         
-        # SHORT: 4h trend down + 1h Supertrend down + StochRSI pullback + ADX strong
+        # SHORT: 1d trend down + 4h Supertrend down + MACD histogram negative + DEMA aligned
         short_condition = (
-            four_h_trend == -1 and
+            one_d_trend == -1 and
             st_trend_val == -1 and
-            stoch_k >= STOCH_SHORT_MIN and stoch_k <= STOCH_SHORT_MAX and
-            kama_fast_val < kama_val and
-            adx_val >= ADX_MIN
+            macd_hist < -MACD_HIST_MIN and
+            dema_fast_val < dema_val and
+            rsi_val >= RSI_SHORT_MIN and rsi_val <= RSI_SHORT_MAX
         )
         
-        # High conviction: 4h ADX also strong + 4h Supertrend confirms
-        high_conviction_long = long_condition and st_trend_4h_val == 1 and adx_4h_val >= ADX_MIN
-        high_conviction_short = short_condition and st_trend_4h_val == -1 and adx_4h_val >= ADX_MIN
+        # High conviction: 1d MACD also confirms + 1d Supertrend confirms
+        high_conviction_long = (
+            long_condition and 
+            st_trend_1d_val == 1 and 
+            macd_hist_1d > MACD_HIST_MIN
+        )
+        high_conviction_short = (
+            short_condition and 
+            st_trend_1d_val == -1 and 
+            macd_hist_1d < -MACD_HIST_MIN
+        )
         
         if long_condition:
             size = SIZE_HIGH if high_conviction_long else SIZE_BASE
