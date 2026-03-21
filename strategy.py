@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #143: 12h Donchian Breakout with Daily/Weekly HMA Trend Filter
-Hypothesis: 12h timeframe captures medium-term trends while avoiding noise.
-Donchian Channel (20-period) breakout provides clear trend entry signals.
-Daily HMA filters major trend direction, Weekly HMA confirms long-term bias.
-RSI pullback (40-60 range) ensures we enter on retracement, not exhaustion.
-This should work in both bull (2021) and bear (2022, 2025) markets by
-following the HTF trend direction. Position sizing: 0.25 entry, 0.125 at 2R.
-Stoploss: 2.5*ATR trailing stop. Target: Sharpe > 0.5, trades > 30/year.
+Experiment #144: 1d Supertrend + 4h HMA Trend Filter + RSI Pullback
+Hypothesis: Daily Supertrend provides clear trend signals with built-in ATR stop.
+4h HMA acts as major trend filter (bullish when price > 4h HMA). RSI pullback 
+entries improve timing and reduce false breakouts. This simplifies the complex 
+regime detection from #132 that blocked too many signals. Focus on fewer but 
+higher quality trades with proper MTF alignment.
+Position sizing: 0.25 entry, reduce to 0.125 at 2R profit, stoploss at 2.5*ATR.
+Timeframe: 1d with 4h HTF reference for trend filter.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_daily_weekly_hma_rsi_pullback_v1"
-timeframe = "12h"
+name = "mtf_1d_supertrend_4h_hma_rsi_pullback_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -26,6 +26,51 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """
+    Calculate Supertrend indicator.
+    Returns: supertrend_line, supertrend_direction (1=long, -1=short)
+    """
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    # Calculate basic upper and lower bands
+    hl2 = (high + low) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    # Initialize arrays
+    supertrend = np.zeros(n)
+    direction = np.zeros(n)
+    
+    # First value
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
+    
+    for i in range(1, n):
+        if direction[i-1] == 1:
+            # Previous trend was up
+            if close[i] > supertrend[i-1]:
+                # Continue uptrend
+                supertrend[i] = max(lower_band[i], supertrend[i-1])
+                direction[i] = 1
+            else:
+                # Trend reversal to down
+                supertrend[i] = upper_band[i]
+                direction[i] = -1
+        else:
+            # Previous trend was down
+            if close[i] < supertrend[i-1]:
+                # Continue downtrend
+                supertrend[i] = min(upper_band[i], supertrend[i-1])
+                direction[i] = -1
+            else:
+                # Trend reversal to up
+                supertrend[i] = lower_band[i]
+                direction[i] = 1
+    
+    return supertrend, direction
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -53,53 +98,9 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_donchian_channels(high, low, period=20):
-    """Calculate Donchian Channel upper and lower bands."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    middle = (upper + lower) / 2
-    return upper, lower, middle
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX for trend strength."""
-    n = len(close)
-    adx = np.zeros(n)
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Directional Movement
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
-    
-    # Smooth with Wilder's method
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # DI calculations
-    plus_di = np.where(tr_s > 0, 100 * plus_dm_s / tr_s, 0)
-    minus_di = np.where(tr_s > 0, 100 * minus_dm_s / tr_s, 0)
-    
-    # DX and ADX
-    di_sum = plus_di + minus_di
-    dx = np.where(di_sum > 0, 100 * np.abs(plus_di - minus_di) / di_sum, 0)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
+def calculate_sma(close, period=200):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -108,32 +109,25 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    adx = calculate_adx(high, low, close, 14)
-    donch_upper, donch_lower, donch_middle = calculate_donchian_channels(high, low, 20)
-    
-    # Additional trend filter - EMA crossover
-    ema_fast = pd.Series(close).ewm(span=12, min_periods=12, adjust=False).mean().values
-    ema_slow = pd.Series(close).ewm(span=26, min_periods=26, adjust=False).mean().values
+    supertrend_line, supertrend_dir = calculate_supertrend(high, low, close, 10, 3.0)
+    sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.28
     SIZE_HALF = 0.14
     
-    # Track positions for stoploss
+    # Track positions for stoploss and take profit
     position_side = 0
     entry_price = 0.0
     trailing_stop = 0.0
@@ -141,62 +135,53 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):
-        # Weekly trend filter (major trend direction)
-        weekly_bullish = close[i] > hma_1w_aligned[i]
-        weekly_bearish = close[i] < hma_1w_aligned[i]
+    for i in range(250, n):  # Start after 200-day SMA is valid
+        # 4h HMA trend filter (major trend direction)
+        trend_4h_bullish = close[i] > hma_4h_aligned[i]
+        trend_4h_bearish = close[i] < hma_4h_aligned[i]
         
-        # Daily trend filter
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        # 200-day SMA filter (long-term trend)
+        trend_sma_bullish = close[i] > sma_200[i]
+        trend_sma_bearish = close[i] < sma_200[i]
         
-        # EMA crossover trend
-        ema_trend_long = ema_fast[i] > ema_slow[i]
-        ema_trend_short = ema_fast[i] < ema_slow[i]
+        # Supertrend signals
+        supertrend_long = supertrend_dir[i] == 1
+        supertrend_short = supertrend_dir[i] == -1
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donch_upper[i-1] if i > 0 else False
-        breakout_short = close[i] < donch_lower[i-1] if i > 0 else False
+        # Supertrend flip detection (entry trigger)
+        supertrend_flip_long = supertrend_long and supertrend_dir[i-1] == -1
+        supertrend_flip_short = supertrend_short and supertrend_dir[i-1] == 1
         
-        # Pullback entry (price near Donchian middle after breakout)
-        pullback_long = close[i] < donch_middle[i] and close[i] > donch_lower[i]
-        pullback_short = close[i] > donch_middle[i] and close[i] < donch_upper[i]
-        
-        # RSI conditions for entry timing
-        rsi_bullish = rsi[i] > 45 and rsi[i] < 70
-        rsi_bearish = rsi[i] < 55 and rsi[i] > 30
-        
-        # ADX trend strength filter
-        trend_strong = adx[i] > 20
-        trend_weak = adx[i] < 25
+        # RSI pullback conditions (better entry timing)
+        rsi_pullback_long = 35 <= rsi[i] <= 55  # RSI pulled back in uptrend
+        rsi_pullback_short = 45 <= rsi[i] <= 65  # RSI pulled back in downtrend
+        rsi_extreme_long = rsi[i] < 40  # Oversold bounce
+        rsi_extreme_short = rsi[i] > 60  # Overbought fade
         
         new_signal = 0.0
         
-        # LONG ENTRY: Donchian breakout + HTF bullish + RSI confirmation
-        if weekly_bullish and daily_bullish:
-            # Breakout entry with strong trend
-            if breakout_long and trend_strong and rsi_bullish:
+        # LONG ENTRY: Supertrend flip + 4h HMA bullish + RSI confirmation
+        if supertrend_flip_long:
+            # Strong signal: 4h HMA bullish + SMA200 bullish
+            if trend_4h_bullish and trend_sma_bullish:
                 new_signal = SIZE_ENTRY
-            # Pullback entry in established uptrend
-            elif ema_trend_long and pullback_long and rsi[i] > 40 and rsi[i] < 60:
+            # Moderate signal: 4h HMA bullish only (with RSI pullback)
+            elif trend_4h_bullish and rsi_pullback_long:
+                new_signal = SIZE_ENTRY
+            # Weaker signal: 4h HMA bullish + RSI extreme
+            elif trend_4h_bullish and rsi_extreme_long:
                 new_signal = SIZE_ENTRY
         
-        # SHORT ENTRY: Donchian breakdown + HTF bearish + RSI confirmation
-        elif weekly_bearish and daily_bearish:
-            # Breakdown entry with strong trend
-            if breakout_short and trend_strong and rsi_bearish:
+        # SHORT ENTRY: Supertrend flip + 4h HMA bearish + RSI confirmation
+        elif supertrend_flip_short:
+            # Strong signal: 4h HMA bearish + SMA200 bearish
+            if trend_4h_bearish and trend_sma_bearish:
                 new_signal = -SIZE_ENTRY
-            # Pullback entry in established downtrend
-            elif ema_trend_short and pullback_short and rsi[i] > 40 and rsi[i] < 60:
+            # Moderate signal: 4h HMA bearish only (with RSI pullback)
+            elif trend_4h_bearish and rsi_pullback_short:
                 new_signal = -SIZE_ENTRY
-        
-        # NEUTRAL/TRANSITION: EMA crossover with ADX confirmation
-        else:
-            # Long on EMA cross up with momentum
-            if ema_trend_long and ema_fast[i-1] <= ema_slow[i-1] and adx[i] > 18 and rsi[i] > 50:
-                new_signal = SIZE_ENTRY
-            # Short on EMA cross down with momentum
-            elif ema_trend_short and ema_fast[i-1] >= ema_slow[i-1] and adx[i] > 18 and rsi[i] < 50:
+            # Weaker signal: 4h HMA bearish + RSI extreme
+            elif trend_4h_bearish and rsi_extreme_short:
                 new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
