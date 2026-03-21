@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #286: 4h HMA Trend with Daily Regime Filter and Donchian Breakout
-Hypothesis: 4h timeframe captures medium-term trends while avoiding 2022 whipsaw.
-Daily HMA provides regime filter (only trade with daily trend). Donchian(20) breakout
-captures momentum moves. RSI filter avoids extreme entries. Simple logic = more trades.
-Position sizing: 0.28 entry, 0.14 half at 2R. Stoploss: 2.5*ATR trailing.
-Key insight from failures: fewer filters = more trades. Looser RSI (25-75) ensures entries.
-Target: Beat Sharpe=0.499 from mtf_12h_supertrend_daily_hma_rsi_pullback_v2
+Experiment #287: 12h Donchian Breakout with Daily/Weekly HMA Trend Filter
+Hypothesis: Donchian breakouts capture momentum moves better than KAMA/EMA crossovers.
+Daily HMA provides trend bias (only trade breakouts in trend direction). Weekly HMA
+adds macro confirmation for stronger signals. RSI filter ensures we're not entering
+at extreme overbought/oversold levels. Simpler logic than #275 to ensure sufficient trades.
+Position sizing: 0.25 entry, 0.125 half at 2R profit. Stoploss: 2.5*ATR trailing.
+Target: Beat Sharpe=0.499 from current best (mtf_12h_supertrend_daily_hma_rsi_pullback_v2)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_daily_regime_donchian_rsi_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_daily_weekly_hma_rsi_atr_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -36,6 +36,12 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (upper/lower bounds)."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -48,12 +54,6 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel upper and lower bands."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -62,17 +62,19 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
     hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    hma_4h = calculate_hma(close, 21)
     donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     # Track previous values
@@ -80,8 +82,6 @@ def generate_signals(prices):
     prev_close[0] = close[0]
     prev_rsi = np.roll(rsi, 1)
     prev_rsi[0] = rsi[0]
-    prev_hma_4h = np.roll(hma_4h, 1)
-    prev_hma_4h[0] = hma_4h[0]
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.28
@@ -101,54 +101,50 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Daily regime filter (simple - only trade with daily trend)
+        # HTF trend filters
         daily_bullish = close[i] > hma_1d_aligned[i]
         daily_bearish = close[i] < hma_1d_aligned[i]
-        
-        # 4h HMA trend
-        hma_4h_bullish = hma_4h[i] > prev_hma_4h[i] and close[i] > hma_4h[i]
-        hma_4h_bearish = hma_4h[i] < prev_hma_4h[i] and close[i] < hma_4h[i]
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
         # Donchian breakout signals
-        donchian_breakout_long = close[i] > donchian_upper[i] and prev_close[i] <= donchian_upper[i]
-        donchian_breakout_short = close[i] < donchian_lower[i] and prev_close[i] >= donchian_lower[i]
+        breakout_long = close[i] > donchian_upper[i-1] and prev_close[i] <= donchian_upper[i-1]
+        breakout_short = close[i] < donchian_lower[i-1] and prev_close[i] >= donchian_lower[i-1]
         
-        # RSI filter (loose thresholds to ensure trades)
-        rsi_ok_long = rsi[i] < 75  # avoid overbought
-        rsi_ok_short = rsi[i] > 25  # avoid oversold
-        rsi_momentum_long = rsi[i] > 50 and prev_rsi[i] <= 50
-        rsi_momentum_short = rsi[i] < 50 and prev_rsi[i] >= 50
-        
-        # HMA crossover
-        hma_cross_up = prev_hma_4h[i] >= close[i] and hma_4h[i] < close[i]
-        hma_cross_down = prev_hma_4h[i] <= close[i] and hma_4h[i] > close[i]
+        # RSI filter (not too extreme)
+        rsi_ok_long = 30 < rsi[i] < 70
+        rsi_ok_short = 30 < rsi[i] < 70
+        rsi_pullback_long = 35 < rsi[i] < 55
+        rsi_pullback_short = 45 < rsi[i] < 65
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Donchian breakout with daily trend + RSI filter
-        if donchian_breakout_long and daily_bullish and rsi_ok_long:
+        # Donchian breakout + Daily HMA bullish + RSI ok
+        if breakout_long and daily_bullish and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        
-        # HMA crossover with daily trend
-        elif hma_cross_up and daily_bullish and rsi[i] > 45:
+        # Donchian breakout + Weekly bullish (stronger signal)
+        elif breakout_long and weekly_bullish and rsi[i] > 40:
             new_signal = SIZE_ENTRY
-        
-        # 4h trend continuation with RSI momentum
-        elif hma_4h_bullish and daily_bullish and rsi_momentum_long:
+        # Pullback entry in uptrend
+        elif daily_bullish and rsi_pullback_long and close[i] > hma_1d_aligned[i]:
+            new_signal = SIZE_ENTRY
+        # Strong trend (both HTF bullish)
+        elif daily_bullish and weekly_bullish and rsi[i] > 45 and close[i] > donchian_upper[i-1] * 0.98:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Donchian breakout with daily trend + RSI filter
-        if donchian_breakout_short and daily_bearish and rsi_ok_short:
+        # Donchian breakout + Daily HMA bearish + RSI ok
+        if breakout_short and daily_bearish and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        
-        # HMA crossover with daily trend
-        elif hma_cross_down and daily_bearish and rsi[i] < 55:
+        # Donchian breakout + Weekly bearish (stronger signal)
+        elif breakout_short and weekly_bearish and rsi[i] < 60:
             new_signal = -SIZE_ENTRY
-        
-        # 4h trend continuation with RSI momentum
-        elif hma_4h_bearish and daily_bearish and rsi_momentum_short:
+        # Pullback entry in downtrend
+        elif daily_bearish and rsi_pullback_short and close[i] < hma_1d_aligned[i]:
+            new_signal = -SIZE_ENTRY
+        # Strong trend (both HTF bearish)
+        elif daily_bearish and weekly_bearish and rsi[i] < 55 and close[i] < donchian_lower[i-1] * 1.02:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
