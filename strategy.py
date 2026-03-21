@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #218: 30m Supertrend with 4h HMA Trend Filter + Volume Confirmation
-Hypothesis: 30m Supertrend captures intraday momentum swings well. 4h HMA provides 
-trend bias to avoid counter-trend trades. Volume spike confirmation (>1.5x avg) filters 
-false breakouts. This is simpler than failed complex strategies but adds volume filter 
-which hasn't been tested much. RSI avoids extremes. Target: Beat Sharpe=0.499.
-Position sizing: 0.25 entry, 0.125 at 2R take profit. Stoploss: 2.5*ATR trailing.
+Experiment #219: 1h Momentum with 4h HMA Trend Filter
+Hypothesis: Simpler is better. Recent failures show over-filtered strategies generate 0 trades.
+This uses 4h HMA for trend direction + 1h ROC momentum for entries + ATR stoploss.
+Fewer conditions = more trades. ROC(10) captures short-term momentum on 1h.
+4h HMA ensures we trade with the higher timeframe trend. ATR trailing stop manages risk.
+Position sizing: 0.25 entry, reduce to 0.125 at 2R profit. Stoploss: 2.5*ATR.
+Target: Generate 50+ trades/year with Sharpe > 0.5 by avoiding over-filtering.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_supertrend_4h_hma_volume_rsi_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_roc_momentum_4h_hma_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -35,6 +36,14 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_roc(close, period=10):
+    """Calculate Rate of Change momentum indicator."""
+    roc = np.zeros(len(close))
+    for i in range(period, len(close)):
+        if close[i - period] > 0:
+            roc[i] = (close[i] - close[i - period]) / close[i - period] * 100
+    return roc
+
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -47,43 +56,10 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator."""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.zeros(len(close))
-    trend = np.ones(len(close))  # 1 = bullish, -1 = bearish
-    
-    supertrend[0] = upper_band[0]
-    trend[0] = 1
-    
-    for i in range(1, len(close)):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = lower_band[i]
-            trend[i] = 1
-        elif close[i] < supertrend[i-1]:
-            supertrend[i] = upper_band[i]
-            trend[i] = -1
-        else:
-            supertrend[i] = supertrend[i-1]
-            trend[i] = trend[i-1]
-    
-    return supertrend, trend
-
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume simple moving average."""
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
@@ -95,18 +71,18 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
+    roc = calculate_roc(close, 10)
     rsi = calculate_rsi(close, 14)
-    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
-    vol_sma = calculate_volume_sma(volume, 20)
-    
-    # Volume spike detection
-    volume_spike = volume > 1.5 * vol_sma
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
     SIZE_HALF = 0.125
+    
+    # ROC thresholds - tuned for 1h momentum
+    ROC_LONG_THRESHOLD = 1.5   # 1.5% momentum
+    ROC_SHORT_THRESHOLD = -1.5
     
     # Track positions for stoploss
     position_side = 0
@@ -117,59 +93,29 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filters
-        four_h_bullish = close[i] > hma_4h_aligned[i]
-        four_h_bearish = close[i] < hma_4h_aligned[i]
+        # HTF trend filter (4h HMA)
+        trend_bullish = close[i] > hma_4h_aligned[i]
+        trend_bearish = close[i] < hma_4h_aligned[i]
         
-        # RSI filter (avoid extremes)
-        rsi_neutral = 30 < rsi[i] < 70
-        rsi_bullish = rsi[i] > 40
-        rsi_bearish = rsi[i] < 60
+        # Momentum signals
+        momentum_long = roc[i] > ROC_LONG_THRESHOLD
+        momentum_short = roc[i] < ROC_SHORT_THRESHOLD
         
-        # Supertrend signals
-        st_bullish = st_trend[i] == 1
-        st_bearish = st_trend[i] == -1
-        
-        # Supertrend flip detection
-        st_flip_long = st_trend[i] == 1 and st_trend[i-1] == -1
-        st_flip_short = st_trend[i] == -1 and st_trend[i-1] == 1
-        
-        # Volume confirmation
-        vol_confirmed = volume_spike[i]
+        # RSI filter - very loose to ensure trades
+        rsi_ok_long = rsi[i] < 75  # not extremely overbought
+        rsi_ok_short = rsi[i] > 25  # not extremely oversold
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Supertrend flip long with trend confirmation
-        if st_flip_long:
-            if four_h_bullish and rsi_bullish:
-                if vol_confirmed or rsi[i] < 55:  # volume OR not overbought
-                    new_signal = SIZE_ENTRY
-            elif rsi_bullish and rsi_neutral:
-                if vol_confirmed:
-                    new_signal = SIZE_ENTRY
-        
-        # Supertrend continuation long
-        elif st_bullish and four_h_bullish and rsi_neutral:
-            # Enter on pullback to supertrend
-            if close[i-1] < supertrend[i-1] and close[i] > supertrend[i]:
-                new_signal = SIZE_ENTRY
+        # Momentum long with trend confirmation (simple, fewer filters)
+        if momentum_long and trend_bullish and rsi_ok_long:
+            new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Supertrend flip short with trend confirmation
-        if st_flip_short:
-            if four_h_bearish and rsi_bearish:
-                if vol_confirmed or rsi[i] > 45:  # volume OR not oversold
-                    new_signal = -SIZE_ENTRY
-            elif rsi_bearish and rsi_neutral:
-                if vol_confirmed:
-                    new_signal = -SIZE_ENTRY
-        
-        # Supertrend continuation short
-        elif st_bearish and four_h_bearish and rsi_neutral:
-            # Enter on pullback to supertrend
-            if close[i-1] > supertrend[i-1] and close[i] < supertrend[i]:
-                new_signal = -SIZE_ENTRY
+        # Momentum short with trend confirmation
+        if momentum_short and trend_bearish and rsi_ok_short:
+            new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
