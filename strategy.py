@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #372: 1d Donchian Breakout + Weekly HMA Trend + Choppiness Regime + ATR Stop
-Hypothesis: Donchian Channel breakouts (20-period) are proven trend-following signals that work
-well on daily timeframes for crypto. Weekly HMA provides higher-timeframe trend bias.
-Choppiness Index filters out ranging markets where breakouts fail. RSI confirms momentum.
-This combines Turtle Trading breakout logic with modern regime detection.
-Timeframe: 1d (REQUIRED), HTF: 1w for trend bias via mtf_data helper.
-Target: Beat Sharpe=0.499 with 20-50 trades total (daily = fewer but higher quality signals).
-Key insight: Daily breakouts with weekly trend filter should capture major moves while avoiding
-whipsaws in ranging markets. Loose RSI thresholds ensure minimum trade frequency.
-Position sizing: 0.25 entry, 0.125 half (take profit), stoploss at 2.5*ATR.
+Experiment #373: 15m Donchian Breakout + 4h HMA Trend + 1h RSI Momentum + Volume Filter + ATR Stop
+Hypothesis: 15m timeframe captures intraday breakouts while 4h HMA provides trend bias and 1h RSI
+filters momentum. Donchian breakout (20-period) catches volatility expansions. Volume confirmation
+(>1.5x 20-bar SMA) reduces false breakouts. This should generate MORE trades than 12h strategies
+while maintaining quality through multi-timeframe filters. ATR(14) stoploss at 2.5x protects capital.
+Timeframe: 15m (REQUIRED), HTF: 4h for trend, 1h for momentum via mtf_data helper.
+Target: Beat Sharpe=0.499 with 50-150 trades total, DD < -30%.
+Key insight: 15m breakouts with HTF confirmation should work in both trending and ranging markets.
+Build on #371 by moving to faster timeframe with Donchian breakout instead of KAMA crossover.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_weekly_hma_chop_regime_rsi_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_donchian_4h_hma_1h_rsi_volume_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -28,6 +27,16 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average for faster trend response."""
+    close_s = pd.Series(close)
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -41,45 +50,7 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for faster trend response."""
-    close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
-
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market (avoid breakouts)
-    CHOP < 38.2 = trending market (favor breakouts)
-    """
-    n = len(close)
-    chop = np.zeros(n)
-    
-    for i in range(period, n):
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        tr_sum = 0.0
-        for j in range(i-period+1, i+1):
-            tr1 = high[j] - low[j]
-            tr2 = np.abs(high[j] - close[j-1])
-            tr3 = np.abs(low[j] - close[j-1])
-            tr = max(tr1, tr2, tr3)
-            tr_sum += tr
-        
-        if highest_high - lowest_low > 0:
-            chop[i] = 100 * np.log10(tr_sum / (highest_high - lowest_low)) / np.log10(period)
-        else:
-            chop[i] = 50.0
-    
-    chop[:period] = 50.0
-    return chop
-
-def calculate_donchian(high, low, period=20):
+def calculate_donchian_channels(high, low, period=20):
     """Calculate Donchian Channel upper and lower bands."""
     n = len(high)
     upper = np.zeros(n)
@@ -89,34 +60,39 @@ def calculate_donchian(high, low, period=20):
         upper[i] = np.max(high[i-period+1:i+1])
         lower[i] = np.min(low[i-period+1:i+1])
     
-    upper[:period] = upper[period]
-    lower[:period] = lower[period]
-    
+    upper[:period] = np.nan
+    lower[:period] = np.nan
     return upper, lower
+
+def calculate_volume_sma(volume, period=20):
+    """Calculate SMA of volume."""
+    vol_s = pd.Series(volume)
+    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1h = get_htf_data(prices, '1h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    chop = calculate_choppiness(high, low, close, 14)
-    donch_upper, donch_lower = calculate_donchian(high, low, 20)
-    
-    # Donchian middle line
-    donch_mid = (donch_upper + donch_lower) / 2
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, 20)
+    vol_sma = calculate_volume_sma(volume, 20)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -132,72 +108,61 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
+        if np.isnan(atr[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+        if np.isnan(vol_sma[i]) or vol_sma[i] == 0:
             signals[i] = 0.0
             continue
         
-        # Weekly trend bias
-        weekly_bullish = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
-        weekly_bearish = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
+        # 4h trend bias
+        trend_bullish = not np.isnan(hma_4h_aligned[i]) and close[i] > hma_4h_aligned[i]
+        trend_bearish = not np.isnan(hma_4h_aligned[i]) and close[i] < hma_4h_aligned[i]
         
-        # Choppiness regime filter
-        is_trending = chop[i] < 55  # Loose filter to allow more trades
-        is_ranging = chop[i] >= 55
+        # 1h RSI momentum filter
+        rsi_ok_long = not np.isnan(rsi_1h_aligned[i]) and rsi_1h_aligned[i] > 40 and rsi_1h_aligned[i] < 75
+        rsi_ok_short = not np.isnan(rsi_1h_aligned[i]) and rsi_1h_aligned[i] > 25 and rsi_1h_aligned[i] < 60
+        
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.5 * vol_sma[i]
         
         # Donchian breakout signals
-        breakout_long = close[i] > donch_upper[i-1]  # Break above previous upper
-        breakout_short = close[i] < donch_lower[i-1]  # Break below previous lower
+        breakout_long = close[i] > donchian_upper[i-1] and close[i-1] <= donchian_upper[i-1]
+        breakout_short = close[i] < donchian_lower[i-1] and close[i-1] >= donchian_lower[i-1]
         
         # Donchian position (already broken out)
-        donch_bullish = close[i] > donch_mid[i]
-        donch_bearish = close[i] < donch_mid[i]
-        
-        # RSI filter (LOOSE to ensure trade frequency on daily)
-        rsi_ok_long = rsi[i] > 30  # Not deeply oversold
-        rsi_ok_short = rsi[i] < 70  # Not deeply overbought
-        
-        # RSI momentum confirmation
-        rsi_momentum_long = rsi[i] > 35 and rsi[i] < 80
-        rsi_momentum_short = rsi[i] > 20 and rsi[i] < 65
+        donchian_bullish = close[i] > (donchian_upper[i] + donchian_lower[i]) / 2
+        donchian_bearish = close[i] < (donchian_upper[i] + donchian_lower[i]) / 2
         
         new_signal = 0.0
         
         # === LONG ENTRIES ===
-        # Primary: Donchian breakout long + Weekly bullish + Trending + RSI ok
-        if breakout_long and weekly_bullish and is_trending and rsi_ok_long:
+        # Primary: Donchian breakout long + 4h bullish + 1h RSI ok + Volume confirmed
+        if breakout_long and trend_bullish and rsi_ok_long and volume_confirmed:
             new_signal = SIZE_ENTRY
-        # Secondary: Donchian bullish + Weekly bullish + RSI momentum (no breakout needed)
-        elif donch_bullish and weekly_bullish and rsi_momentum_long:
+        # Secondary: Donchian bullish + 4h bullish + 1h RSI ok (no breakout needed)
+        elif donchian_bullish and trend_bullish and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        # Tertiary: Donchian breakout long + RSI ok (weekly neutral ok in strong trend)
-        elif breakout_long and is_trending and rsi[i] > 35:
+        # Tertiary: Donchian breakout long + Volume confirmed (4h neutral ok)
+        elif breakout_long and volume_confirmed and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        # Quaternary: Donchian bullish alone (ensures minimum trade frequency)
-        elif donch_bullish and rsi[i] > 35 and rsi[i] < 75:
-            new_signal = SIZE_ENTRY
-        # Quintenary: Breakout without regime filter (catches strong moves)
-        elif breakout_long and rsi[i] > 40:
+        # Quaternary: Donchian bullish alone with volume (ensures minimum trade frequency)
+        elif donchian_bullish and volume[i] > 1.2 * vol_sma[i] and rsi_ok_long:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES ===
-        # Primary: Donchian breakout short + Weekly bearish + Trending + RSI ok
-        if breakout_short and weekly_bearish and is_trending and rsi_ok_short:
+        # Primary: Donchian breakout short + 4h bearish + 1h RSI ok + Volume confirmed
+        if breakout_short and trend_bearish and rsi_ok_short and volume_confirmed:
             new_signal = -SIZE_ENTRY
-        # Secondary: Donchian bearish + Weekly bearish + RSI momentum (no breakout needed)
-        elif donch_bearish and weekly_bearish and rsi_momentum_short:
+        # Secondary: Donchian bearish + 4h bearish + 1h RSI ok (no breakout needed)
+        elif donchian_bearish and trend_bearish and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        # Tertiary: Donchian breakout short + RSI ok (weekly neutral ok in strong trend)
-        elif breakout_short and is_trending and rsi[i] < 65:
+        # Tertiary: Donchian breakout short + Volume confirmed (4h neutral ok)
+        elif breakout_short and volume_confirmed and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        # Quaternary: Donchian bearish alone (ensures minimum trade frequency)
-        elif donch_bearish and rsi[i] > 25 and rsi[i] < 65:
-            new_signal = -SIZE_ENTRY
-        # Quintenary: Breakout without regime filter (catches strong moves)
-        elif breakout_short and rsi[i] < 60:
+        # Quaternary: Donchian bearish alone with volume (ensures minimum trade frequency)
+        elif donchian_bearish and volume[i] > 1.2 * vol_sma[i] and rsi_ok_short:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
