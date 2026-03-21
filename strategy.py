@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #071: 12h Connors RSI + Choppiness Regime + Daily HMA Trend
-Hypothesis: Connors RSI (CRSI) has 75% win rate for mean reversion entries.
-Combine with Choppiness Index to detect regime (range vs trend).
-In range markets (CHOP>61.8): use CRSI mean reversion.
-In trend markets (CHOP<38.2): use trend-following with Daily HMA filter.
-This adapts to 2025 bear/range conditions while capturing 2021-2024 trends.
-Position sizing: 0.30 entry, 0.15 at 1.5R profit, stoploss at 2.5*ATR trailing.
-12h timeframe ensures 10+ trades per symbol while minimizing fee drag.
+Experiment #072: 1d Connors RSI Mean Reversion with Weekly HMA Trend Filter
+Hypothesis: Daily timeframe needs fewer but higher-quality trades. Connors RSI (CRSI)
+has proven 75% win rate for mean reversion. Combine with Weekly HMA for trend bias
+to avoid counter-trend trades. CRSI<15 in uptrend = long, CRSI>85 in downtrend = short.
+This should generate 10+ trades on train (daily bars over 4 years) while maintaining
+positive Sharpe. Position sizing: 0.25 entry, 0.125 at 1.5R profit, stoploss 2.5*ATR.
+Timeframe: 1d (mandatory for this experiment), HTF: 1w for trend filter.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_crsi_chop_regime_daily_hma_v1"
-timeframe = "12h"
+name = "mtf_1d_crsi_weekly_hma_meanrevert_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -59,16 +58,17 @@ def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
     """
     Calculate Connors RSI (CRSI).
     CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    Proven mean reversion indicator with 75% win rate.
+    Proven 75% win rate for mean reversion entries.
     """
-    close_s = pd.Series(close)
     n = len(close)
+    close_s = pd.Series(close)
     
-    # RSI(3) - short period for sensitivity
+    # RSI(3) - very short term momentum
     rsi_short = calculate_rsi(close, rsi_period)
     
     # RSI Streak - consecutive up/down days
     streak = np.zeros(n)
+    streak_rsi = np.zeros(n)
     for i in range(1, n):
         if close[i] > close[i-1]:
             streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
@@ -77,71 +77,26 @@ def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
         else:
             streak[i] = streak[i-1]
     
-    # Convert streak to RSI-like value
-    streak_abs = np.abs(streak)
-    streak_rsi = np.zeros(n)
+    # Convert streak to RSI-like value (0-100)
+    # Positive streak = bullish, negative = bearish
     for i in range(streak_period, n):
-        up_streaks = np.sum(streak[max(0, i-streak_period):i] > 0)
-        total = streak_period
-        streak_rsi[i] = (up_streaks / total) * 100 if total > 0 else 50
+        streak_window = streak[i-streak_period+1:i+1]
+        up_streaks = np.sum(streak_window > 0)
+        streak_rsi[i] = (up_streaks / streak_period) * 100 if streak_period > 0 else 50
     
-    # Percent Rank - where current price ranks in last rank_period bars
+    # Percent Rank - where current price is in recent range
     percent_rank = np.zeros(n)
     for i in range(rank_period, n):
-        window = close[i-rank_period:i]
+        window = close[i-rank_period+1:i+1]
         current = close[i]
-        rank = np.sum(window < current) / rank_period * 100
-        percent_rank[i] = rank
+        rank = np.sum(window < current)
+        percent_rank[i] = (rank / rank_period) * 100 if rank_period > 0 else 50
     
-    # For early bars, use 50
-    percent_rank[:rank_period] = 50
-    streak_rsi[:streak_period] = 50
-    
-    # CRSI = average of three components
+    # Combine into CRSI
     crsi = (rsi_short + streak_rsi + percent_rank) / 3
     crsi = np.clip(crsi, 0, 100)
     
     return crsi
-
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = range market (mean reversion)
-    CHOP < 38.2 = trend market (trend following)
-    Formula: 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
-    """
-    n = len(close)
-    choppiness = np.zeros(n)
-    
-    for i in range(period, n):
-        # Calculate ATR for each bar in window
-        atr_sum = 0.0
-        for j in range(i-period+1, i+1):
-            tr1 = high[j] - low[j]
-            tr2 = abs(high[j] - close[j-1]) if j > 0 else tr1
-            tr3 = abs(low[j] - close[j-1]) if j > 0 else tr1
-            tr = max(tr1, tr2, tr3)
-            atr_sum += tr
-        
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 0 and atr_sum > 0:
-            choppiness[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-        else:
-            choppiness[i] = 50
-    
-    choppiness[:period] = 50
-    choppiness = np.clip(choppiness, 0, 100)
-    
-    return choppiness
-
-def calculate_sma(close, period):
-    """Calculate Simple Moving Average."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    return sma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -150,23 +105,25 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
-    chop = calculate_choppiness(high, low, close, 14)
-    sma_200 = calculate_sma(close, 200)
+    
+    # Additional filter - SMA200 for long-term trend
+    close_s = pd.Series(close)
+    sma_200 = close_s.rolling(window=200, min_periods=200).mean().values
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -176,48 +133,28 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(250, n):  # Start after 200 SMA + indicators warm up
-        # Daily trend filter (HTF) - price relative to Daily HMA
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+    for i in range(250, n):  # Start after 250 bars for SMA200 warmup
+        # Weekly trend filter (HTF) - price relative to Weekly HMA
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # Regime detection via Choppiness Index
-        is_range = chop[i] > 55  # Range market (mean reversion favored)
-        is_trend = chop[i] < 45  # Trend market (trend following favored)
+        # Long-term trend filter
+        longterm_bullish = close[i] > sma_200[i] if not np.isnan(sma_200[i]) else False
+        longterm_bearish = close[i] < sma_200[i] if not np.isnan(sma_200[i]) else False
         
-        # SMA200 filter for long-term bias
-        above_sma200 = close[i] > sma_200[i]
-        below_sma200 = close[i] < sma_200[i]
+        # CRSI mean reversion signals
+        crsi_oversold = crsi[i] < 20  # Entry threshold (slightly higher than 15 for more trades)
+        crsi_overbought = crsi[i] > 80  # Entry threshold (slightly lower than 85 for more trades)
         
         new_signal = 0.0
         
-        # === MEAN REVERSION ENTRIES (Range Market) ===
-        if is_range:
-            # Long: CRSI extremely oversold + above SMA200 or Daily HMA bullish
-            if crsi[i] < 15 and (above_sma200 or daily_bullish):
-                new_signal = SIZE_ENTRY
-            
-            # Short: CRSI extremely overbought + below SMA200 or Daily HMA bearish
-            elif crsi[i] > 85 and (below_sma200 or daily_bearish):
-                new_signal = -SIZE_ENTRY
+        # LONG ENTRY: CRSI oversold + Weekly bullish + Long-term bullish
+        if crsi_oversold and weekly_bullish and longterm_bullish:
+            new_signal = SIZE_ENTRY
         
-        # === TREND FOLLOWING ENTRIES (Trend Market) ===
-        elif is_trend:
-            # Long: Daily bullish + CRSI pullback (not oversold, just dipping)
-            if daily_bullish and 35 < crsi[i] < 55:
-                new_signal = SIZE_ENTRY
-            
-            # Short: Daily bearish + CRSI rally (not overbought, just rising)
-            elif daily_bearish and 45 < crsi[i] < 65:
-                new_signal = -SIZE_ENTRY
-        
-        # === HYBRID ENTRIES (Neutral regime) ===
-        else:
-            # Use CRSI extremes with SMA200 confirmation
-            if crsi[i] < 12 and above_sma200:
-                new_signal = SIZE_ENTRY
-            elif crsi[i] > 88 and below_sma200:
-                new_signal = -SIZE_ENTRY
+        # SHORT ENTRY: CRSI overbought + Weekly bearish + Long-term bearish
+        if crsi_overbought and weekly_bearish and longterm_bearish:
+            new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
