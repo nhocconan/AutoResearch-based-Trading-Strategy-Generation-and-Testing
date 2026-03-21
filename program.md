@@ -28,31 +28,41 @@ test, and improve trading strategies for BTC/ETH/SOL USDT-M perpetual futures.
 - **Train: 2021-01-01 to 2024-12-31** — optimize freely
 - **Test: 2025-01-01 to present** — NEVER optimize on test
 
-### Auto-Rejection Rules
-Strategies are automatically discarded if:
-- Max drawdown worse than -50% (averaged across symbols)
-- Fewer than 10 trades
-- Only works on 1 symbol (SOL had a massive rally 2021-2024, don't overfit to it)
-- Sharpe ≤ 0
+### Evaluation Flow (EVERY experiment must follow this EXACTLY)
+```
+1. Generate strategy.py
+2. Validate code (no lookahead, no manual MTF, no get_htf_data in loop)
+3. Train: BTC first → Sharpe<0 or trades<5? → STOP, discard, skip ETH/SOL/test
+         BTC pass → ETH → Sharpe<0? → STOP
+         BTC pass → ETH pass → SOL → all pass? → continue
+4. Prefix look-ahead test on partial data
+5. ALL train symbols: Sharpe > 0 AND trades ≥ 5? → continue to test
+6. Test: BTC first → Sharpe<0 or trades<3? → STOP, demote to discard
+        BTC pass → ETH → SOL → ALL pass? → KEEP
+7. ONLY strategies passing ALL above get status="keep"
+```
 
-### CRITICAL: Position Sizing (THE #1 LESSON LEARNED)
-The signal value IS the position size. signal=1.0 = 100% of capital in the trade.
-BTC crashed 77% in 2022 (69K→16K). With signal=1.0 long, you lose 77% of equity.
-With signal=0.35, you only lose 27%.
+### Auto-Rejection (immediate discard, no further compute)
+- ANY symbol Sharpe ≤ 0 on train → discard (early stop)
+- ANY symbol trades < 5 on train → discard
+- ANY symbol Sharpe ≤ 0 on test → discard (early stop)
+- ANY symbol trades < 3 on test → discard
+- **0 trades = ALWAYS discard** (Sharpe=0.000 with 0 trades is NOT a pass)
+- Max drawdown worse than -50% on any symbol → discard
+- DD worse than -50% → discard
 
-**RULES:**
-- MAX signal magnitude: **0.40** (40% of capital). NEVER use 1.0.
-- Normal range: **0.20 to 0.35**
-- Use **DISCRETE levels** (0.0, ±0.20, ±0.35) to minimize trading costs
-- Every signal change triggers a trade: you pay 0.10% fees on the CHANGE
-- Fewer signal changes per bar = fewer fees = better returns
-- Use **leverage = 1.0** (no leverage)
-
-**Proven baseline:** EMA(21/55) crossover, signal=0.35 → Sharpe=0.33, DD=-40%, Return=+106%
+### Position Sizing
+- Signal value = position size. MAX 0.40. Normal: 0.20-0.30.
+- DISCRETE levels: 0.0, ±0.15, ±0.30. Each change costs 0.10% fees.
+- leverage = 1.0 (no leverage)
 
 ### Timeframes
-Available: **5m, 15m, 1h, 4h, 1d** (1m excluded — too noisy)
-You MUST explore multiple timeframes, not just 1h.
+Available: **5m, 15m, 30m, 1h, 4h, 6h, 12h, 1d** (1m excluded — too noisy)
+ALL timeframes are real Binance data. Explore all equally.
+
+### MTF Rules (see STRATEGY_RULES.md)
+- MUST use `mtf_data.get_htf_data()` — call ONCE before loop
+- NEVER `i // N`, NEVER `.resample()`, NEVER `pd.date_range()`
 
 ## Experiment Loop
 
