@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #293: 12h Donchian Breakout with Daily HMA Trend + RSI Filter
-Hypothesis: 12h timeframe captures medium-term trends better than 4h. Donchian(20) breakouts
-provide clear entry signals. Daily HMA filters trend direction. RSI(14) avoids extreme entries.
-Simpler than previous attempts - fewer filters = more trades. ATR trailing stop controls DD.
-Target: Beat Sharpe=0.499 from mtf_12h_supertrend_daily_hma_rsi_pullback_v2 while ensuring >=10 trades.
-Key change: Loosen RSI filters (30-70 instead of narrow ranges), use Donchian(20) not (50) for more signals.
+Experiment #294: 1d HMA Trend + Weekly Macro Bias + RSI Pullback with ATR Stops
+Hypothesis: Daily timeframe captures major trend moves while weekly HMA provides macro bias.
+RSI pullback entries (35-55 for long, 45-65 for short) ensure we enter on dips in uptrends and rallies in downtrends.
+Simple entry logic ensures >=10 trades (learned from 0-trade failures in #282, #288).
+ATR-based trailing stops (2.5*ATR) control drawdown. Position size 0.30 balances returns vs risk.
+Target: Beat Sharpe=0.499 from current best while ensuring >=10 trades per symbol on 1d timeframe.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_daily_hma_rsi_atr_v4"
-timeframe = "12h"
+name = "mtf_1d_hma_weekly_bias_rsi_pullback_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -35,12 +35,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (upper/lower bounds)."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -54,7 +48,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_sma(close, period=200):
-    """Calculate Simple Moving Average."""
+    """Calculate Simple Moving Average for long-term trend filter."""
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     return sma
 
@@ -65,23 +59,28 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
+    hma_21 = calculate_hma(close, 21)
+    hma_50 = calculate_hma(close, 50)
     rsi = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    sma200 = calculate_sma(close, 200)
+    sma_200 = calculate_sma(close, 200)
     
-    # Track previous close for breakout detection
+    # Track previous values for crossover detection
     prev_close = np.roll(close, 1)
     prev_close[0] = close[0]
+    prev_hma_21 = np.roll(hma_21, 1)
+    prev_hma_21[0] = hma_21[0]
+    prev_rsi = np.roll(rsi, 1)
+    prev_rsi[0] = rsi[0]
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.30
@@ -95,54 +94,72 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(250, n):  # Start after SMA200 is ready
+    for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(atr[i]):
+        if np.isnan(hma_21[i]) or np.isnan(hma_50[i]) or np.isnan(sma_200[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            continue
+        # Weekly macro trend bias
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # HTF trend filter - Daily HMA
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        # Daily trend filter
+        daily_bullish = close[i] > hma_21[i] and hma_21[i] > hma_50[i]
+        daily_bearish = close[i] < hma_21[i] and hma_21[i] < hma_50[i]
         
-        # SMA200 filter for long-term trend
-        above_sma200 = close[i] > sma200[i]
-        below_sma200 = close[i] < sma200[i]
+        # Long-term trend filter (SMA200)
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
         
-        # RSI filter - avoid extremes but allow most entries
-        rsi_ok_long = rsi[i] < 70  # Not overbought
-        rsi_ok_short = rsi[i] > 30  # Not oversold
+        # RSI pullback zones (generous ranges to ensure trades)
+        rsi_pullback_long = 30 < rsi[i] < 55
+        rsi_pullback_short = 45 < rsi[i] < 70
+        rsi_not_extreme_long = rsi[i] < 75
+        rsi_not_extreme_short = rsi[i] > 25
         
-        # Donchian breakout signals - SIMPLIFIED for more trades
-        breakout_long = close[i] > donchian_upper[i-1] and prev_close[i] <= donchian_upper[i-1]
-        breakout_short = close[i] < donchian_lower[i-1] and prev_close[i] >= donchian_lower[i-1]
+        # HMA crossover signals
+        hma_cross_long = prev_close[i] <= prev_hma_21[i] and close[i] > hma_21[i]
+        hma_cross_short = prev_close[i] >= prev_hma_21[i] and close[i] < hma_21[i]
+        
+        # HMA slope (trend direction)
+        hma_slope_bullish = hma_21[i] > prev_hma_21[i]
+        hma_slope_bearish = hma_21[i] < prev_hma_21[i]
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Breakout + Daily bullish + RSI ok (main signal)
-        if breakout_long and daily_bullish and rsi_ok_long:
+        # Primary: Weekly bullish + Daily bullish + RSI pullback + HMA cross
+        if weekly_bullish and daily_bullish and rsi_pullback_long and hma_cross_long:
             new_signal = SIZE_ENTRY
-        # Breakout + Above SMA200 + RSI ok (alternative)
-        elif breakout_long and above_sma200 and rsi_ok_long:
+        # Secondary: Weekly bullish + Above SMA200 + RSI pullback + Price > HMA
+        elif weekly_bullish and above_sma200 and rsi_pullback_long and close[i] > hma_21[i] and hma_slope_bullish:
             new_signal = SIZE_ENTRY
-        # Price above both HMA and SMA200 + RSI moderate (trend continuation)
-        elif daily_bullish and above_sma200 and 40 < rsi[i] < 65:
+        # Tertiary: Daily bullish + RSI not extreme + HMA cross (simpler for more trades)
+        elif daily_bullish and rsi_not_extreme_long and hma_cross_long:
+            new_signal = SIZE_ENTRY
+        # Quaternary: Price > HMA21 > HMA50 + RSI 40-60 (trend continuation)
+        elif close[i] > hma_21[i] > hma_50[i] and 40 < rsi[i] < 60 and hma_slope_bullish:
+            new_signal = SIZE_ENTRY
+        # Simple: Weekly bullish + Price > HMA21 + RSI > 45
+        elif weekly_bullish and close[i] > hma_21[i] and rsi[i] > 45 and rsi_not_extreme_long:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Breakout + Daily bearish + RSI ok (main signal)
-        if breakout_short and daily_bearish and rsi_ok_short:
+        # Primary: Weekly bearish + Daily bearish + RSI pullback + HMA cross
+        if weekly_bearish and daily_bearish and rsi_pullback_short and hma_cross_short:
             new_signal = -SIZE_ENTRY
-        # Breakout + Below SMA200 + RSI ok (alternative)
-        elif breakout_short and below_sma200 and rsi_ok_short:
+        # Secondary: Weekly bearish + Below SMA200 + RSI pullback + Price < HMA
+        elif weekly_bearish and below_sma200 and rsi_pullback_short and close[i] < hma_21[i] and hma_slope_bearish:
             new_signal = -SIZE_ENTRY
-        # Price below both HMA and SMA200 + RSI moderate (trend continuation)
-        elif daily_bearish and below_sma200 and 35 < rsi[i] < 60:
+        # Tertiary: Daily bearish + RSI not extreme + HMA cross (simpler for more trades)
+        elif daily_bearish and rsi_not_extreme_short and hma_cross_short:
+            new_signal = -SIZE_ENTRY
+        # Quaternary: Price < HMA21 < HMA50 + RSI 40-60 (trend continuation)
+        elif close[i] < hma_21[i] < hma_50[i] and 40 < rsi[i] < 60 and hma_slope_bearish:
+            new_signal = -SIZE_ENTRY
+        # Simple: Weekly bearish + Price < HMA21 + RSI < 55
+        elif weekly_bearish and close[i] < hma_21[i] and rsi[i] < 55 and rsi_not_extreme_short:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
