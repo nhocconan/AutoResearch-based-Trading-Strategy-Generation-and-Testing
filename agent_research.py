@@ -136,8 +136,18 @@ def save_strategy(strategy_name: str):
 
 
 def build_system_prompt() -> str:
-    return """You are an expert quantitative trading researcher implementing strategies for
+    # Load strategy rules file for LLM to follow
+    rules_content = ""
+    rules_path = Path("STRATEGY_RULES.md")
+    if rules_path.exists():
+        rules_content = rules_path.read_text()
+
+    return f"""You are an expert quantitative trading researcher implementing strategies for
 BTC/ETH/SOL USDT-M perpetual futures on Binance.
+
+=== STRATEGY CODE RULES (READ CAREFULLY — violations = auto-reject) ===
+{rules_content}
+=== END RULES ===
 
 CRITICAL RULES:
 1. NO LOOK-AHEAD: At index i, ONLY use prices.iloc[:i+1]. NEVER .shift(-n).
