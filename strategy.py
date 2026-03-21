@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #030 - Simplified MTF HMA + Supertrend + ADX + RSI + Z-score (4h+1h)
+EXPERIMENT #031 - Optimized MTF HMA + Supertrend + ADX + RSI + Z-score + BBW (4h+15m)
 ==================================================================================================
 Hypothesis: #027 achieved Sharpe=10.894 with 15m entries but #029 dropped to 5.427 after adding MACD.
-The complexity hurt performance. This experiment tests:
-- Timeframe: 4h trend + 1h entries (middle ground between 15m noise and 1h lag)
-- Simplified indicator stack: Remove KAMA and MACD (proven to add noise in #029)
-- Position size: 0.35 (slightly more aggressive, still within safe 0.40 max)
-- Stoploss: 2.5*ATR (more room for 1h volatility vs 15m)
-- RSI thresholds: 30-45/55-70 (deeper pullbacks for better R:R)
-- Z-score: 1.0 (stricter to avoid extreme entries)
-- ADX: 25 (higher threshold for stronger trends only)
-- Dynamic sizing: ATR-based volatility adjustment
+#030 with 1h entries only got Sharpe=3.425. The key insight: 15m entries + simplified stack works best.
 
-Why this should work:
-- 1h entries = less noise than 15m, faster than 4h
-- Fewer filters = fewer false rejections, cleaner signals
-- Deeper RSI pullbacks = better entry prices in trends
-- 2.5*ATR stops = fewer premature exits
+This experiment tests:
+- Timeframe: 4h trend + 15m entries (proven in #027)
+- Simplified indicator stack: HMA + Supertrend + ADX + RSI + Z-score + BBW (no MACD/KAMA)
+- Position size: 0.30 (more conservative than #030's 0.35)
+- Stoploss: 2.0*ATR (tighter than #030's 2.5*ATR for better R:R)
+- RSI thresholds: 35-50/50-65 (adjusted for 15m volatility)
+- ADX threshold: 20 (lower for more trade opportunities)
+- BBW filter: Only trade when BBW > 20th percentile (avoid squeeze breakouts)
+- Dynamic sizing: ATR-based volatility adjustment with tighter bounds
+
+Why this should beat #027:
+- BBW regime filter avoids low-volatility chop
+- Tighter stops = better risk management
+- Lower position size = lower drawdown
+- Simpler stack = fewer false signals
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_supertrend_adx_rsi_zscore_1h_v1"
-timeframe = "1h"
+name = "mtf_hma_supertrend_adx_rsi_zscore_bbw_15m_v1"
+timeframe = "15m"
 leverage = 1.0
 
 
@@ -216,6 +218,45 @@ def calculate_zscore(close, period=20):
     return zscore
 
 
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    sma = np.zeros(n)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    bbw = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        window = close[i - period + 1:i + 1]
+        sma[i] = np.mean(window)
+        std = np.std(window)
+        upper[i] = sma[i] + std_mult * std
+        lower[i] = sma[i] - std_mult * std
+        
+        if sma[i] > 0:
+            bbw[i] = (upper[i] - lower[i]) / sma[i]
+        else:
+            bbw[i] = 0
+    
+    return upper, lower, bbw
+
+
+def calculate_bbw_percentile(bbw, lookback=100):
+    """Calculate BBW percentile rank over lookback period"""
+    n = len(bbw)
+    percentile = np.zeros(n)
+    
+    for i in range(lookback - 1, n):
+        window = bbw[i - lookback + 1:i + 1]
+        rank = np.sum(window <= bbw[i]) / len(window)
+        percentile[i] = rank
+    
+    return percentile
+
+
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
@@ -223,22 +264,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values if "volume" in prices.columns else np.ones(len(close))
     n = len(close)
     
-    # 1h indicators for entry timing
-    atr_1h = calculate_atr(high, low, close, period=14)
-    rsi_1h = calculate_rsi(close, period=14)
-    zscore_1h = calculate_zscore(close, period=20)
+    # 15m indicators for entry timing
+    atr_15m = calculate_atr(high, low, close, period=14)
+    rsi_15m = calculate_rsi(close, period=14)
+    zscore_15m = calculate_zscore(close, period=20)
+    _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    bbw_pct_15m = calculate_bbw_percentile(bbw_15m, lookback=100)
     
     # Resample to 4h for trend filters
-    df_1h = pd.DataFrame({
+    df_15m = pd.DataFrame({
         'open': close,
         'high': high,
         'low': low,
         'close': close,
         'volume': volume
     })
-    df_1h.index = pd.date_range(start='2021-01-01', periods=n, freq='1h')
+    df_15m.index = pd.date_range(start='2021-01-01', periods=n, freq='15min')
     
-    df_4h = df_1h.resample('4h').agg({
+    df_4h = df_15m.resample('4h').agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',
@@ -255,51 +298,54 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     supertrend_4h, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
     adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
     
-    # Map 4h indicators back to 1h timeframe (4 x 1h = 4h)
-    trend_1h = np.zeros(n)
-    st_trend_1h = np.zeros(n)
-    adx_1h = np.zeros(n)
+    # Map 4h indicators back to 15m timeframe (16 x 15m = 4h)
+    trend_15m = np.zeros(n)
+    st_trend_15m = np.zeros(n)
+    adx_15m = np.zeros(n)
     
     n_4h = len(c_4h)
-    idx_1h_to_4h = np.arange(n) // 4
+    idx_15m_to_4h = np.arange(n) // 16
     
     for i in range(n):
-        idx_4h = idx_1h_to_4h[i]
+        idx_4h = idx_15m_to_4h[i]
         if idx_4h < n_4h and idx_4h >= 40:
             if c_4h[idx_4h] > hma_4h[idx_4h]:
-                trend_1h[i] = 1
+                trend_15m[i] = 1
             elif c_4h[idx_4h] < hma_4h[idx_4h]:
-                trend_1h[i] = -1
+                trend_15m[i] = -1
             
-            st_trend_1h[i] = st_direction_4h[idx_4h]
-            adx_1h[i] = adx_4h[idx_4h]
+            st_trend_15m[i] = st_direction_4h[idx_4h]
+            adx_15m[i] = adx_4h[idx_4h]
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.35
-    SIZE_HALF = 0.175
+    SIZE_FULL = 0.30
+    SIZE_HALF = 0.15
     
-    # RSI thresholds for pullback entries (deeper pullbacks for better R:R)
-    RSI_LONG_MIN = 30
-    RSI_LONG_MAX = 45
-    RSI_SHORT_MIN = 55
-    RSI_SHORT_MAX = 70
+    # RSI thresholds for pullback entries (adjusted for 15m)
+    RSI_LONG_MIN = 35
+    RSI_LONG_MAX = 50
+    RSI_SHORT_MIN = 50
+    RSI_SHORT_MAX = 65
     
-    # Z-score threshold for mean reversion filter (stricter)
-    ZSCORE_MAX = 1.0
+    # Z-score threshold for mean reversion filter
+    ZSCORE_MAX = 1.2
     
-    # ADX threshold for trend strength (higher for stronger trends)
-    ADX_MIN = 25
+    # ADX threshold for trend strength (lower for more trades)
+    ADX_MIN = 20
     
-    # ATR stoploss multiplier (more room for 1h volatility)
-    ATR_STOP_MULT = 2.5
+    # ATR stoploss multiplier (tighter for better R:R)
+    ATR_STOP_MULT = 2.0
     
     # ATR volatility target for dynamic sizing
-    TARGET_ATR_PCT = 0.012
+    TARGET_ATR_PCT = 0.010
     
-    first_valid = max(100, 40 * 4, 14 * 2, 20)
+    # BBW percentile threshold (avoid low volatility squeezes)
+    BBW_PCT_MIN = 0.20
+    
+    first_valid = max(150, 40 * 16, 14 * 2, 20, 100)
     
     # Track position state
     entry_price = np.zeros(n)
@@ -309,17 +355,31 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_1h[i]) or np.isnan(rsi_1h[i]) or np.isnan(adx_1h[i]):
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(adx_15m[i]):
             signals[i] = 0.0
             continue
         
-        trend = trend_1h[i]
-        st_trend = st_trend_1h[i]
-        adx_val = adx_1h[i]
-        rsi_val = rsi_1h[i]
-        zscore_val = zscore_1h[i]
-        atr = atr_1h[i]
+        trend = trend_15m[i]
+        st_trend = st_trend_15m[i]
+        adx_val = adx_15m[i]
+        rsi_val = rsi_15m[i]
+        zscore_val = zscore_15m[i]
+        bbw_pct_val = bbw_pct_15m[i]
+        atr = atr_15m[i]
         price = close[i]
+        
+        # BBW regime filter - only trade when volatility is above 20th percentile
+        if bbw_pct_val < BBW_PCT_MIN:
+            if i > 0 and position_side[i - 1] != 0:
+                signals[i] = 0.0
+                position_side[i] = 0
+                entry_price[i] = 0
+                tp_triggered[i] = 0
+                highest_since_entry[i] = 0
+                lowest_since_entry[i] = 0
+            else:
+                signals[i] = 0.0
+            continue
         
         # ADX filter - only trade when trend is strong enough
         if adx_val < ADX_MIN:
@@ -366,7 +426,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.5*ATR)
+            # Stoploss check (2.0*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -448,7 +508,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         position_size = SIZE_FULL * size_multiplier
         position_size = min(SIZE_FULL, max(SIZE_HALF, position_size))
         
-        # Entry logic: HMA + Supertrend + ADX + RSI + Z-score (simplified stack)
+        # Entry logic: HMA + Supertrend + ADX + RSI + Z-score + BBW (simplified stack)
         if trend == 1 and st_trend == 1:  # Bullish trend confirmed
             if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
                 abs(zscore_val) < ZSCORE_MAX):  # Pullback + not extreme
