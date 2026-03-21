@@ -639,13 +639,19 @@ def main():
             else:
                 print(f"  [4/4] ✓ KEEP (Sharpe={avg_sharpe:.3f}, Return/DD={return_dd_ratio:.1f})")
 
-            # Also run test backtest for kept strategies
+            # Run test backtest — DISCARD if test Sharpe < 0 (overfit to train)
             test_results = []
             try:
                 test_results = run_backtest_all(symbols, str(STRATEGY_FILE), period="test")
                 test_sharpe = sum(r["sharpe_ratio"] for r in test_results) / len(test_results)
                 test_return = sum(r["total_return_pct"] for r in test_results) / len(test_results)
                 print(f"       Test: Sharpe={test_sharpe:.3f} | Return={test_return:+.1f}%")
+
+                if test_sharpe < 0:
+                    print(f"       DEMOTED: Test Sharpe < 0 → overfit, demoting to discard")
+                    status = "discard"
+                    git_revert_strategy()
+                    STRATEGY_FILE.write_text(best_strategy_code)
             except Exception as e:
                 print(f"       Test backtest failed: {e}")
 
