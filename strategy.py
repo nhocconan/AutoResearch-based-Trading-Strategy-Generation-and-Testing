@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #062 - VOLATILITY_CLUSTERING_CROSSASSET_ENSEMBLE_15M_4H_V1
+EXPERIMENT #063 - PHASE_ALIGNMENT_CORRELATION_ENSEMBLE_15M_4H_V1
 ==================================================================================================
-Hypothesis: Combining volatility clustering regime detection with cross-asset (BTC) trend filter
-will improve risk-adjusted returns. Using 15m entries with 4h trend + BTC 4h trend as master filter.
+Hypothesis: Using Hilbert Transform phase detection combined with signal correlation analysis
+will improve entry timing and reduce false signals. When multiple trend indicators align (high
+correlation), confidence is higher. Phase detection identifies cycle position for better entries.
 
 Key innovations:
-- VOLATILITY CLUSTERING REGIME: ATR ratio (current/20-avg) detects vol expansion/contraction
-- CROSS-ASSET FILTER: BTC 4h HMA trend direction filters ALL trades (trade with BTC trend)
-- ENSEMBLE VOTING: 5 signal types (HMA, ST, KAMA, RSI, Z-score) with confidence weighting
-- MARKET STRUCTURE: Higher highs/lows detection for trend confirmation
-- ADAPTIVE SIZING: Position size = base * (vote_count/5) * regime_confidence
-- HYSTERESIS BANDS: Require stronger signal to flip than to maintain (reduces churn)
+- HILBERT TRANSFORM PHASE: Detects cycle position (0-360°) for timing entries at phase extremes
+- SIGNAL CORRELATION MATRIX: Measures agreement between HMA, KAMA, Supertrend, DEMA trends
+- PHASE-TREND ALIGNMENT: Only enter when phase suggests continuation AND trend indicators align
+- CORRELATION-BASED SIZING: Higher correlation = larger position (more confidence)
+- MULTI-TF CONFIRMATION: 4h trend must agree with 15m phase signal
 
 Why this should beat current best (Sharpe=16.016):
-- Cross-asset filter reduces false signals during BTC-driven market moves
-- Volatility clustering adapts position sizing to market conditions
-- 5-signal ensemble provides robust signal agreement measurement
-- Market structure confirmation reduces whipsaw entries
+- Phase detection provides superior entry timing vs. simple indicator crossovers
+- Correlation analysis filters low-confidence setups where indicators disagree
+- Combines cycle timing with trend following for optimal risk/reward
+- Reduces whipsaw by requiring phase + trend + correlation alignment
 
 Position sizing rules (CRITICAL):
 - MAX signal: 0.35 (proven to control drawdown in 2022 crash)
 - MIN signal: 0.20 (avoid tiny positions eaten by fees)
 - Discrete levels: 0.0, 0.20, 0.28, 0.35 (reduces churn costs)
+- Correlation scaling: base_size * (correlation_score / 0.7) capped at 0.35
 - Stoploss: 2.5*ATR trailing with 1R trail after 2R profit
-- Volatility scaling: reduce size in high vol regime (ATR ratio > 1.5)
 """
 
 import numpy as np
 import pandas as pd
 
-name = "volatility_clustering_crossasset_ensemble_15m_4h_v1"
+name = "phase_alignment_correlation_ensemble_15m_4h_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -81,6 +81,29 @@ def calculate_hma(close, period=16):
     hma = calc_wma(raw_hma, sqrt_period)
     
     return hma
+
+
+def calculate_dema(close, period=21):
+    """Calculate Double Exponential Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    ema1 = np.zeros(n)
+    ema2 = np.zeros(n)
+    dema = np.zeros(n)
+    
+    ema1[period - 1] = np.mean(close[:period])
+    for i in range(period, n):
+        ema1[i] = ema1[i - 1] + (2 / (period + 1)) * (close[i] - ema1[i - 1])
+    
+    ema2[period - 1] = np.mean(ema1[:period])
+    for i in range(period, n):
+        ema2[i] = ema2[i - 1] + (2 / (period + 1)) * (ema1[i] - ema2[i - 1])
+    
+    dema = 2 * ema1 - ema2
+    
+    return dema
 
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
@@ -153,6 +176,88 @@ def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
     return kama
 
 
+def calculate_hilbert_phase(close, period=20):
+    """
+    Calculate Hilbert Transform phase for cycle detection.
+    Returns phase angle in degrees (0-360).
+    Based on John Ehlers' Hilbert Transform indicators.
+    """
+    n = len(close)
+    if n < period * 2:
+        return np.zeros(n), np.zeros(n)
+    
+    # Detrend the price
+    detrend = np.zeros(n)
+    for i in range(period, n):
+        detrend[i] = close[i] - close[i - period]
+    
+    # Hilbert Transform - Quadrature component
+    i1 = np.zeros(n)  # InPhase
+    q1 = np.zeros(n)  # Quadrature
+    
+    for i in range(6, n):
+        i1[i] = detrend[i]
+        q1[i] = 0.0962 * detrend[i] + 0.5769 * detrend[i - 2] - 0.5769 * detrend[i - 4] - 0.0962 * detrend[i - 6]
+    
+    # Smooth I and Q
+    i2 = np.zeros(n)
+    q2 = np.zeros(n)
+    
+    for i in range(3, n):
+        i2[i] = 0.2 * i1[i] + 0.8 * i2[i - 1] if i > 3 else i1[i]
+        q2[i] = 0.2 * q1[i] + 0.8 * q2[i - 1] if i > 3 else q1[i]
+    
+    # Calculate phase
+    phase = np.zeros(n)
+    phase_rate = np.zeros(n)
+    
+    for i in range(2, n):
+        if abs(q2[i]) > 0.001:
+            phase[i] = np.arctan2(q2[i], i2[i]) * 180 / np.pi
+        else:
+            phase[i] = phase[i - 1] if i > 2 else 0
+        
+        phase[i] = phase[i] % 360  # Keep in 0-360 range
+        
+        if i > 2:
+            phase_rate[i] = phase[i] - phase[i - 1]
+        else:
+            phase_rate[i] = 0
+    
+    return phase, phase_rate
+
+
+def calculate_signal_correlation(signals_list, window=20):
+    """
+    Calculate correlation between multiple signal series.
+    Returns average pairwise correlation.
+    """
+    n = len(signals_list[0])
+    correlation = np.zeros(n)
+    
+    for i in range(window, n):
+        corr_sum = 0
+        corr_count = 0
+        
+        for j in range(len(signals_list)):
+            for k in range(j + 1, len(signals_list)):
+                sig1 = signals_list[j][i - window:i + 1]
+                sig2 = signals_list[k][i - window:i + 1]
+                
+                if np.std(sig1) > 0.001 and np.std(sig2) > 0.001:
+                    corr = np.corrcoef(sig1, sig2)[0, 1]
+                    if not np.isnan(corr):
+                        corr_sum += corr
+                        corr_count += 1
+        
+        if corr_count > 0:
+            correlation[i] = corr_sum / corr_count
+        else:
+            correlation[i] = 0
+    
+    return correlation
+
+
 def calculate_rsi(close, period=14):
     """Calculate RSI"""
     n = len(close)
@@ -183,97 +288,6 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     
     return rsi
-
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized price deviation)"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    zscore = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        mean = np.mean(window)
-        std = np.std(window)
-        if std > 0:
-            zscore[i] = (close[i] - mean) / std
-    
-    return zscore
-
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    sma = np.zeros(n)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        sma[i] = np.mean(window)
-        std = np.std(window)
-        upper[i] = sma[i] + std_mult * std
-        lower[i] = sma[i] - std_mult * std
-    
-    return upper, sma, lower
-
-
-def calculate_bbw_percentile(close, period=20, lookback=100):
-    """Calculate Bollinger Band Width percentile"""
-    n = len(close)
-    if n < period + lookback:
-        return np.zeros(n)
-    
-    bbw = np.zeros(n)
-    bbw_pct = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        sma = np.mean(window)
-        std = np.std(window)
-        if sma > 0:
-            bbw[i] = 2 * std / sma
-        
-        if i >= period + lookback - 1:
-            bbw_window = bbw[i - lookback + 1:i + 1]
-            bbw_pct[i] = np.sum(bbw_window <= bbw[i]) / lookback
-    
-    return bbw_pct
-
-
-def calculate_market_structure(high, low, close, lookback=20):
-    """Detect market structure (higher highs/lows vs lower highs/lows)"""
-    n = len(close)
-    if n < lookback * 2:
-        return np.zeros(n)
-    
-    structure = np.zeros(n)
-    
-    for i in range(lookback * 2, n):
-        # Check last lookback bars for HH/HL or LH/LL
-        recent_highs = high[i - lookback:i]
-        recent_lows = low[i - lookback:i]
-        prev_highs = high[i - lookback * 2:i - lookback]
-        prev_lows = low[i - lookback * 2:i - lookback]
-        
-        curr_hh = np.max(recent_highs) > np.max(prev_highs)
-        curr_hl = np.min(recent_lows) > np.min(prev_lows)
-        curr_ll = np.min(recent_lows) < np.min(prev_lows)
-        curr_lh = np.max(recent_highs) < np.max(prev_highs)
-        
-        if curr_hh and curr_hl:
-            structure[i] = 1  # Uptrend
-        elif curr_ll and curr_lh:
-            structure[i] = -1  # Downtrend
-        else:
-            structure[i] = 0  # Neutral
-    
-    return structure
 
 
 def resample_to_higher_tf(close, high, low, volume, bars_per_tf=4):
@@ -310,22 +324,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # 15m indicators for entry timing
     atr_15m = calculate_atr(high, low, close, period=14)
-    atr_20_15m = calculate_atr(high, low, close, period=20)
     rsi_15m = calculate_rsi(close, period=14)
     hma_15m = calculate_hma(close, period=16)
+    dema_15m = calculate_dema(close, period=21)
     kama_15m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     st_15m, st_dir_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    zscore_15m = calculate_zscore(close, period=20)
-    bbw_pct_15m = calculate_bbw_percentile(close, period=20, lookback=100)
-    market_struct_15m = calculate_market_structure(high, low, close, lookback=20)
-    
-    # Volatility clustering: ATR ratio (current / 20-bar avg)
-    atr_ratio = np.zeros(n)
-    for i in range(20, n):
-        if atr_20_15m[i] > 0:
-            atr_ratio[i] = atr_15m[i] / atr_20_15m[i]
-        else:
-            atr_ratio[i] = 1.0
+    phase_15m, phase_rate_15m = calculate_hilbert_phase(close, period=20)
     
     # Resample to 4h for trend (16 x 15m = 4h)
     bars_per_4h = 16
@@ -336,13 +340,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     hma_4h = calculate_hma(c_4h, period=16)
     kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
     st_4h, st_dir_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
-    rsi_4h = calculate_rsi(c_4h, period=14)
+    phase_4h, phase_rate_4h = calculate_hilbert_phase(c_4h, period=20)
     
     # Map 4h indicators back to 15m timeframe
     trend_4h = np.zeros(n)
     st_trend_4h = np.zeros(n)
     kama_trend_4h = np.zeros(n)
-    rsi_trend_4h = np.zeros(n)
+    phase_4h_mapped = np.zeros(n)
     atr_4h_mapped = np.zeros(n)
     
     n_4h = len(c_4h)
@@ -365,41 +369,44 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             elif c_4h[idx_4h] < kama_4h[idx_4h]:
                 kama_trend_4h[i] = -1
             
-            # RSI trend
-            if rsi_4h[idx_4h] > 55:
-                rsi_trend_4h[i] = 1
-            elif rsi_4h[idx_4h] < 45:
-                rsi_trend_4h[i] = -1
-            
-            # ATR mapped
+            # Phase mapped
+            phase_4h_mapped[i] = phase_4h[idx_4h] if idx_4h < len(phase_4h) else 0
             atr_4h_mapped[i] = atr_4h[idx_4h] if idx_4h < len(atr_4h) else atr_15m[i]
     
-    # CROSS-ASSET FILTER: Simulate BTC 4h trend (use 4h HMA as proxy)
-    # In real implementation, this would be separate BTC data
-    # Here we use the same 4h trend as proxy for BTC correlation
-    btc_trend_4h = trend_4h.copy()  # Proxy: assume BTC trend matches general market trend
+    # Calculate 15m signal series for correlation
+    hma_signal_15m = np.where(close > hma_15m, 1, np.where(close < hma_15m, -1, 0))
+    dema_signal_15m = np.where(close > dema_15m, 1, np.where(close < dema_15m, -1, 0))
+    kama_signal_15m = np.where(close > kama_15m, 1, np.where(close < kama_15m, -1, 0))
+    st_signal_15m = st_dir_15m
     
-    # Position sizing parameters (DISCRETE levels based on signal agreement)
-    SIZE_LEVELS = {3: 0.20, 4: 0.28, 5: 0.35}
+    # Calculate signal correlation (rolling 20-bar window)
+    signal_corr = calculate_signal_correlation(
+        [hma_signal_15m, dema_signal_15m, kama_signal_15m, st_signal_15m],
+        window=20
+    )
+    
+    # Position sizing parameters (DISCRETE levels based on correlation)
+    SIZE_LEVELS = {0: 0.20, 1: 0.28, 2: 0.35}
     BASE_SIZE = 0.28
     
-    # Regime thresholds
-    VOL_LOW_THRESHOLD = 0.7  # ATR ratio < 0.7 = low vol (increase size)
-    VOL_HIGH_THRESHOLD = 1.5  # ATR ratio > 1.5 = high vol (decrease size)
-    BBW_LOW_THRESHOLD = 0.3  # BBW percentile < 0.3 = squeeze (expect expansion)
-    BBW_HIGH_THRESHOLD = 0.7  # BBW percentile > 0.7 = extended (expect contraction)
+    # Phase thresholds for entry timing
+    PHASE_LONG_ENTRY = 45  # Enter long when phase crosses up through 45°
+    PHASE_SHORT_ENTRY = 225  # Enter short when phase crosses down through 225°
+    PHASE_LONG_EXIT = 135  # Exit long when phase crosses above 135°
+    PHASE_SHORT_EXIT = 315  # Exit short when phase crosses below 315°
     
-    # Z-score thresholds for mean reversion
-    ZSCORE_ENTRY = 2.0
-    ZSCORE_EXIT = 0.5
+    # Correlation thresholds
+    CORR_HIGH = 0.7  # High correlation = high confidence
+    CORR_MEDIUM = 0.4  # Medium correlation = medium confidence
+    CORR_LOW = 0.2  # Low correlation = low confidence (reduce size)
     
-    # Stoploss multipliers (adaptive to regime)
+    # Stoploss multipliers
     ATR_STOP_NORMAL = 2.5
-    ATR_STOP_HIGH_VOL = 3.5  # Wider stops in high vol
+    ATR_STOP_HIGH_VOL = 3.5
     
     first_valid = max(200, 40 * bars_per_4h + 100)
     
-    # Generate signals with ensemble voting and cross-asset filter
+    # Generate signals with phase alignment and correlation confidence
     signals = np.zeros(n)
     
     # Track position state for stoploss/TP
@@ -409,86 +416,94 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     last_signal = np.zeros(n)
+    prev_phase = np.zeros(n)
     
     for i in range(first_valid, n):
         if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
             last_signal[i] = signals[i-1] if i > 0 else 0
+            prev_phase[i] = prev_phase[i-1] if i > 0 else 0
             continue
         
         # 4h regime signals
         hma_trend = trend_4h[i]
         st_trend = st_trend_4h[i]
         kama_trend = kama_trend_4h[i]
-        rsi_trend = rsi_trend_4h[i]
         atr_4h_val = atr_4h_mapped[i]
-        btc_trend = btc_trend_4h[i]
+        phase_4h_val = phase_4h_mapped[i]
         
         # 15m entry signals
         price = close[i]
         hma_15m_val = hma_15m[i]
+        dema_15m_val = dema_15m[i]
         kama_15m_val = kama_15m[i]
         st_dir = st_dir_15m[i]
         rsi_val = rsi_15m[i]
-        zscore_val = zscore_15m[i]
         atr_15m_val = atr_15m[i]
-        market_struct = market_struct_15m[i]
-        vol_ratio = atr_ratio[i]
-        bbw_percentile = bbw_pct_15m[i]
+        phase_15m_val = phase_15m[i]
+        phase_rate = phase_rate_15m[i]
+        corr_val = signal_corr[i]
+        
+        # Store previous phase for crossing detection
+        prev_phase[i] = prev_phase[i - 1] if i > 0 else phase_15m_val
         
         # Determine volatility regime and adaptive ATR stop
-        if vol_ratio > VOL_HIGH_THRESHOLD:
+        vol_ratio = atr_15m_val / max(atr_4h_val / 4, atr_15m_val * 0.5)
+        if vol_ratio > 1.5:
             vol_regime = "high"
             atr_stop_mult = ATR_STOP_HIGH_VOL
-            vol_size_mult = 0.7  # Reduce size in high vol
-        elif vol_ratio < VOL_LOW_THRESHOLD:
+            vol_size_mult = 0.7
+        elif vol_ratio < 0.7:
             vol_regime = "low"
             atr_stop_mult = ATR_STOP_NORMAL
-            vol_size_mult = 1.2  # Increase size in low vol
+            vol_size_mult = 1.2
         else:
             vol_regime = "normal"
             atr_stop_mult = ATR_STOP_NORMAL
             vol_size_mult = 1.0
         
-        # ENSEMBLE VOTING (5 signal types)
-        votes_long = 0
-        votes_short = 0
+        # PHASE-BASED ENTRY SIGNALS
+        # Phase 0-90: Accumulation (prepare long)
+        # Phase 90-180: Markup (hold long)
+        # Phase 180-270: Distribution (prepare short)
+        # Phase 270-360: Markdown (hold short)
         
-        # 1. HMA trend vote (4h)
-        if hma_trend == 1:
-            votes_long += 1
-        elif hma_trend == -1:
-            votes_short += 1
+        phase_signal = 0
+        phase_cross_up = phase_15m_val > PHASE_LONG_ENTRY and prev_phase[i] <= PHASE_LONG_ENTRY
+        phase_cross_down = phase_15m_val < PHASE_SHORT_ENTRY and prev_phase[i] >= PHASE_SHORT_EXIT
         
-        # 2. Supertrend vote (4h)
-        if st_trend == 1:
-            votes_long += 1
-        elif st_trend == -1:
-            votes_short += 1
+        # Phase momentum (positive = bullish, negative = bearish)
+        phase_momentum = phase_rate > 0
         
-        # 3. KAMA trend vote (4h)
-        if kama_trend == 1:
-            votes_long += 1
-        elif kama_trend == -1:
-            votes_short += 1
+        # Generate phase-based signal
+        if phase_cross_up and phase_momentum:
+            phase_signal = 1  # Long entry signal
+        elif phase_cross_down and not phase_momentum:
+            phase_signal = -1  # Short entry signal
+        elif phase_15m_val > PHASE_LONG_EXIT:
+            phase_signal = 0  # Exit long zone
+        elif phase_15m_val < 45 or phase_15m_val > 315:
+            phase_signal = 0  # Neutral zone
         
-        # 4. RSI trend vote (4h)
-        if rsi_trend == 1:
-            votes_long += 1
-        elif rsi_trend == -1:
-            votes_short += 1
+        # CORRELATION-BASED CONFIDENCE
+        if corr_val >= CORR_HIGH:
+            corr_level = 2  # High confidence
+            corr_size_mult = 1.0
+        elif corr_val >= CORR_MEDIUM:
+            corr_level = 1  # Medium confidence
+            corr_size_mult = 0.8
+        else:
+            corr_level = 0  # Low confidence
+            corr_size_mult = 0.6
         
-        # 5. Market structure vote (15m)
-        if market_struct == 1:
-            votes_long += 1
-        elif market_struct == -1:
-            votes_short += 1
-        
-        # CROSS-ASSET FILTER: Only trade in direction of BTC trend
-        if btc_trend == 1:
-            votes_short = 0  # Disable short signals when BTC is bullish
-        elif btc_trend == -1:
-            votes_long = 0  # Disable long signals when BTC is bearish
+        # TREND ALIGNMENT (4h must agree with 15m phase signal)
+        trend_aligned = False
+        if phase_signal == 1 and hma_trend >= 0 and st_trend >= 0:
+            trend_aligned = True
+        elif phase_signal == -1 and hma_trend <= 0 and st_trend <= 0:
+            trend_aligned = True
+        elif phase_signal == 0:
+            trend_aligned = True  # No position, alignment not needed
         
         # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
@@ -520,19 +535,21 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
                     last_signal[i] = 0.0
+                    prev_phase[i] = phase_15m_val
                     continue
                 
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * atr_stop_mult * atr_15m_val
                 if not prev_tp and price >= tp_price:
-                    prev_signal = signals[i - 1]
-                    signals[i] = prev_side * 0.5 * abs(prev_signal) if prev_signal != 0 else 0.0
+                    prev_signal_val = signals[i - 1]
+                    signals[i] = prev_side * 0.5 * abs(prev_signal_val) if prev_signal_val != 0 else 0.0
                     position_side[i] = prev_side
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
                     highest_since_entry[i] = current_high
                     lowest_since_entry[i] = current_low
                     last_signal[i] = signals[i]
+                    prev_phase[i] = phase_15m_val
                     continue
                 
                 # Trail stop at 1R profit
@@ -546,6 +563,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         last_signal[i] = 0.0
+                        prev_phase[i] = phase_15m_val
                         continue
                     
             elif prev_side == -1:
@@ -558,19 +576,21 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
                     last_signal[i] = 0.0
+                    prev_phase[i] = phase_15m_val
                     continue
                 
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * atr_stop_mult * atr_15m_val
                 if not prev_tp and price <= tp_price:
-                    prev_signal = signals[i - 1]
-                    signals[i] = prev_side * 0.5 * abs(prev_signal) if prev_signal != 0 else 0.0
+                    prev_signal_val = signals[i - 1]
+                    signals[i] = prev_side * 0.5 * abs(prev_signal_val) if prev_signal_val != 0 else 0.0
                     position_side[i] = prev_side
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
                     highest_since_entry[i] = current_high
                     lowest_since_entry[i] = current_low
                     last_signal[i] = signals[i]
+                    prev_phase[i] = phase_15m_val
                     continue
                 
                 # Trail stop at 1R profit
@@ -584,49 +604,31 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         last_signal[i] = 0.0
+                        prev_phase[i] = phase_15m_val
                         continue
             
-            # Maintain position if signal agrees (need at least 3 votes)
-            # HYSTERESIS: Require same or stronger signal to maintain
+            # Maintain position if phase and trend still agree
+            maintain_signal = False
             if prev_side == 1:
-                if votes_long >= 3:
-                    target_size = SIZE_LEVELS.get(votes_long, 0.20)
-                    target_size = max(min(target_size, 0.35), 0.20)
-                    target_size = target_size * vol_size_mult
-                    target_size = max(min(target_size, 0.35), 0.20)
-                    
-                    # Hysteresis: don't reduce size unless votes drop significantly
-                    prev_size = abs(signals[i - 1])
-                    if target_size < prev_size - 0.05 and votes_long < 4:
-                        target_size = prev_size
-                    
-                    signals[i] = target_size
-                    position_side[i] = 1
-                    entry_price[i] = prev_entry
-                    tp_triggered[i] = prev_tp
-                    highest_since_entry[i] = current_high
-                    lowest_since_entry[i] = current_low
-                else:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-                    entry_price[i] = 0
-                    tp_triggered[i] = False
-                    highest_since_entry[i] = 0
-                    lowest_since_entry[i] = 0
-                    
+                # Maintain long if phase in markup zone (90-180) and trend bullish
+                if 90 <= phase_15m_val <= 180 and hma_trend >= 0:
+                    maintain_signal = True
             elif prev_side == -1:
-                if votes_short >= 3:
-                    target_size = SIZE_LEVELS.get(votes_short, 0.20)
-                    target_size = max(min(target_size, 0.35), 0.20)
-                    target_size = target_size * vol_size_mult
-                    target_size = max(min(target_size, 0.35), 0.20)
-                    
-                    prev_size = abs(signals[i - 1])
-                    if target_size < prev_size - 0.05 and votes_short < 4:
-                        target_size = prev_size
-                    
-                    signals[i] = -target_size
-                    position_side[i] = -1
+                # Maintain short if phase in markdown zone (270-360) and trend bearish
+                if 270 <= phase_15m_val <= 360 and hma_trend <= 0:
+                    maintain_signal = True
+            
+            if maintain_signal and trend_aligned:
+                target_size = SIZE_LEVELS.get(corr_level, 0.20)
+                target_size = max(min(target_size, 0.35), 0.20)
+                target_size = target_size * vol_size_mult * corr_size_mult
+                target_size = max(min(target_size, 0.35), 0.20)
+                
+                prev_size = abs(signals[i - 1])
+                # Hysteresis: don't reduce size unless correlation drops significantly
+                if corr_level >= 1 or target_size >= prev_size - 0.05:
+                    signals[i] = prev_side * target_size
+                    position_side[i] = prev_side
                     entry_price[i] = prev_entry
                     tp_triggered[i] = prev_tp
                     highest_since_entry[i] = current_high
@@ -638,23 +640,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     tp_triggered[i] = False
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
+            else:
+                # Phase suggests exit
+                signals[i] = 0.0
+                position_side[i] = 0
+                entry_price[i] = 0
+                tp_triggered[i] = False
+                highest_since_entry[i] = 0
+                lowest_since_entry[i] = 0
+            prev_phase[i] = phase_15m_val
             continue
         
-        # Entry logic with cross-asset filter and volume confirmation
-        # HYSTERESIS: Require 4/5 votes for entry (higher threshold than maintain)
-        entry_threshold = 4
+        # Entry logic with phase alignment, trend confirmation, and correlation confidence
+        # Require: phase signal + trend alignment + minimum correlation
         
-        # Cross-asset filter: only enter in direction of BTC trend
-        btc_filter_pass = True
-        if btc_trend == 1 and votes_short > 0:
-            btc_filter_pass = False
-        elif btc_trend == -1 and votes_long > 0:
-            btc_filter_pass = False
+        entry_threshold_corr = 1  # At least medium correlation
         
-        if votes_long >= entry_threshold and btc_filter_pass:
-            target_size = SIZE_LEVELS.get(votes_long, 0.20)
+        if phase_signal == 1 and trend_aligned and corr_level >= entry_threshold_corr:
+            target_size = SIZE_LEVELS.get(corr_level, 0.20)
             target_size = max(min(target_size, 0.35), 0.20)
-            target_size = target_size * vol_size_mult
+            target_size = target_size * vol_size_mult * corr_size_mult
             target_size = max(min(target_size, 0.35), 0.20)
             
             signals[i] = target_size
@@ -664,10 +669,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = price
             lowest_since_entry[i] = price
             
-        elif votes_short >= entry_threshold and btc_filter_pass:
-            target_size = SIZE_LEVELS.get(votes_short, 0.20)
+        elif phase_signal == -1 and trend_aligned and corr_level >= entry_threshold_corr:
+            target_size = SIZE_LEVELS.get(corr_level, 0.20)
             target_size = max(min(target_size, 0.35), 0.20)
-            target_size = target_size * vol_size_mult
+            target_size = target_size * vol_size_mult * corr_size_mult
             target_size = max(min(target_size, 0.35), 0.20)
             
             signals[i] = -target_size
@@ -681,5 +686,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             position_side[i] = 0
         
         last_signal[i] = signals[i]
+        prev_phase[i] = phase_15m_val
     
     return signals
