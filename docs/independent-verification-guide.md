@@ -1,357 +1,213 @@
-# Independent Verification Guide
+# Independent Strategy Verification Guide
 
-This document enables a **separate AI or human analyst** to independently verify
-the strategies and results produced by the autoresearch system. No access to the
-research agent or its code is needed — only the data, strategies, and this guide.
+You are an independent auditor. Your job: read each strategy's code, load the raw OHLCV price data, write your OWN backtest from scratch, and report whether the claimed performance is real.
+
+Do NOT use the project's `backtest.py` — write your own to eliminate any engine bugs.
 
 ---
 
-## 1. Data Access
+## Step 1: Strategies to Verify
 
-### 1.1 Price Data (OHLCV)
+All strategy code is in **`strategies/`** directory. Each is a standalone Python file.
 
-**Location:** `data/processed/klines/{SYMBOL}/{TIMEFRAME}.parquet`
+**Top 10 strategies by Sharpe (train 2021-2024):**
 
-| Symbol | Timeframes | Rows (1h) | Date Range |
-|--------|-----------|-----------|------------|
-| BTCUSDT | 1m, 5m, 15m, 1h, 4h, 1d | 45,240 | 2021-01-01 → 2026-02-28 |
-| ETHUSDT | 1m, 5m, 15m, 1h, 4h, 1d | 45,240 | 2021-01-01 → 2026-02-28 |
-| SOLUSDT | 1m, 5m, 15m, 1h, 4h, 1d | 45,240 | 2021-01-01 → 2026-02-28 |
+| File | Sharpe | Max DD | Timeframe |
+|------|--------|--------|-----------|
+| `mtf_hma_supertrend_adx_kama_rsi_zscore_bbw_15m_v1.py` | 16.0 | -4.0% | 15m |
+| `mtf_hma_supertrend_adx_kama_rsi_zscore_bbw_15m_4h_v1.py` | 13.4 | -5.1% | 15m |
+| `adaptive_regime_ensemble_hma_st_rsi_adx_bbw_15m_4h_v1.py` | 13.0 | -4.1% | 15m |
+| `mtf_hma_rsi_atr_dynamic_tp_v1.py` | 11.5 | -3.3% | 15m |
+| `mtf_hma_supertrend_adx_kama_rsi_zscore_vol_15m_v1.py` | 10.9 | -3.8% | 15m |
+| `regime_ensemble_hma_st_rsi_bbw_1h_4h_v1.py` | 10.0 | -7.0% | 1h |
+| `mtf_hma_supertrend_rsi_adx_1h_4h_v1.py` | 9.6 | -5.2% | 1h |
+| `mtf_hma_supertrend_rsi_bbw_vol_15m_4h_v1.py` | 9.0 | -4.7% | 15m |
+| `mtf_hma_supertrend_adx_rsi_zscore_15m_v1.py` | 9.0 | -4.4% | 15m |
+| `mtf_donchian_rsi_volume_atr_v1.py` | 6.7 | -4.3% | 1h |
 
-**Format:** Apache Parquet (Snappy compression)
+Read the `timeframe` variable at the top of each file — it tells you which OHLCV data to load.
 
-**Schema:**
-```
-open_time                 datetime64[ms, UTC]   # Bar open timestamp
-open                      float64               # Open price (USDT)
-high                      float64               # High price
-low                       float64               # Low price
-close                     float64               # Close price
-volume                    float64               # Base asset volume (e.g., BTC)
-close_time                datetime64[ms, UTC]   # Bar close timestamp
-quote_volume              float64               # Quote volume (USDT)
-trades                    int64                 # Number of trades in bar
-taker_buy_volume          float64               # Taker buy volume (base)
-taker_buy_quote_volume    float64               # Taker buy volume (USDT)
-```
+---
 
-**How to load:**
+## Step 2: Load Price Data
+
+**OHLCV Parquet files:** `data/processed/klines/{SYMBOL}/{TIMEFRAME}.parquet`
+
+Symbols: `BTCUSDT`, `ETHUSDT`, `SOLUSDT`
+Timeframes: `1m`, `5m`, `15m`, `1h`, `4h`, `1d`
+
 ```python
 import pandas as pd
 
-# Load 1-hour BTCUSDT data
 df = pd.read_parquet("data/processed/klines/BTCUSDT/1h.parquet")
-
-# Split train/test
-train = df[df["open_time"] < "2025-01-01"]  # 2021-01-01 to 2024-12-31
-test = df[df["open_time"] >= "2025-01-01"]   # 2025-01-01 onwards
 ```
-
-**Data source:** [Binance Public Data](https://data.binance.vision/) — USDT-M Futures monthly klines. Downloaded and processed by `prepare.py` (no modifications to raw data, only format conversion).
-
-### 1.2 Funding Rate Data
-
-**Location:** `data/processed/funding/{SYMBOL}/funding_rate.parquet`
-
-**Schema:**
-```
-calc_time                 datetime64[ms, UTC]   # Funding calculation timestamp
-funding_interval_hours    int64                 # Interval (always 8)
-last_funding_rate         float64               # Rate (e.g., 0.0001 = 0.01%)
-```
-
-**Frequency:** Every 8 hours (00:00, 08:00, 16:00 UTC)
-
-**How to load:**
-```python
-funding = pd.read_parquet("data/processed/funding/BTCUSDT/funding_rate.parquet")
-```
-
-### 1.3 Strategy Code
-
-**Location:** `strategies/{strategy_name}.py`
-
-Each file is a standalone Python module with:
-```python
-name = "strategy_name"           # Identifier
-timeframe = "1h"                 # Primary timeframe
-leverage = 1.0                   # Leverage multiplier
-
-def generate_signals(prices: pd.DataFrame) -> np.ndarray:
-    """
-    Input: DataFrame with columns [open_time, open, high, low, close, volume, ...]
-    Output: numpy array of same length, values in [-1.0, 1.0]
-            Positive = long, negative = short, 0 = flat
-            The VALUE is the position size (0.35 = 35% of capital)
-    """
-```
-
-### 1.4 Experiment Results
-
-**Location:** `results.tsv` (tab-separated)
 
 **Columns:**
+| Column | Type | Description |
+|--------|------|-------------|
+| `open_time` | datetime64[ms, UTC] | Bar open timestamp |
+| `open` | float64 | Open price (USDT) |
+| `high` | float64 | High price |
+| `low` | float64 | Low price |
+| `close` | float64 | Close price |
+| `volume` | float64 | Base asset volume (e.g., BTC) |
+| `taker_buy_volume` | float64 | Taker buy volume |
+| `trades` | int64 | Number of trades in bar |
+
+**Train/test split:**
+```python
+train = df[df["open_time"] < "2025-01-01"].reset_index(drop=True)
+test  = df[df["open_time"] >= "2025-01-01"].reset_index(drop=True)
 ```
-commit      - Git commit hash
-strategy    - Strategy name
-symbol      - Trading pair (BTCUSDT/ETHUSDT/SOLUSDT)
-sharpe      - Annualized Sharpe ratio
-return_pct  - Total return %
-cagr_pct    - Compound annual growth rate %
-max_dd_pct  - Maximum drawdown % (negative)
-win_rate    - Win rate %
-profit_factor - Gross profit / gross loss
-trades      - Number of completed trades
-sortino     - Sortino ratio
-calmar      - Calmar ratio
-status      - "keep" or "discard"
-description - Experiment description
-period      - "train" or "test"
-```
+
+**Funding rates** (optional, for advanced verification):
+`data/processed/funding/{SYMBOL}/funding_rate.parquet`
+Columns: `calc_time`, `funding_interval_hours` (8), `last_funding_rate`
 
 ---
 
-## 2. How to Independently Verify a Strategy
+## Step 3: Run the Strategy
 
-### 2.1 Quick Verification (use existing engine)
-
-```python
-from backtest import run_strategy_backtest
-from evaluate import compute_metrics, print_metrics
-
-# Pick a strategy to verify
-strategy_path = "strategies/mtf_hma_rsi_atr_dynamic_tp_v1.py"
-
-for symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]:
-    for period in ["train", "test"]:
-        result = run_strategy_backtest(
-            strategy_path=strategy_path,
-            symbol=symbol,
-            period=period,
-        )
-        metrics = compute_metrics(result)
-        print_metrics(metrics, f"{symbol} {period}")
-
-        # Access individual trades:
-        for trade in result.trades[:5]:
-            print(f"  {trade.entry_time} → {trade.exit_time} | "
-                  f"{'LONG' if trade.direction == 1 else 'SHORT'} | "
-                  f"Entry=${trade.entry_price:.2f} Exit=${trade.exit_price:.2f} | "
-                  f"PnL=${trade.pnl:.2f} ({trade.pnl_pct*100:.3f}%) | "
-                  f"Fee=${trade.fee_cost:.2f}")
-
-        # Access equity curve:
-        # result.equity_curve  — numpy array, one value per bar
-        # result.returns       — numpy array, per-bar returns
-```
-
-### 2.2 Full Independent Verification (write your own backtest)
-
-If you don't trust the backtest engine, here's how to replicate from scratch:
+Each strategy file exposes `generate_signals(prices)` which takes the DataFrame and returns a numpy array.
 
 ```python
-import pandas as pd
-import numpy as np
 import importlib.util
+import numpy as np
 
-# 1. Load strategy
+# Load strategy
 spec = importlib.util.spec_from_file_location("strat", "strategies/mtf_hma_rsi_atr_dynamic_tp_v1.py")
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-# 2. Load price data
+print(f"Strategy: {mod.name}, Timeframe: {mod.timeframe}, Leverage: {mod.leverage}")
+
+# Load correct timeframe data
 prices = pd.read_parquet(f"data/processed/klines/BTCUSDT/{mod.timeframe}.parquet")
 train = prices[prices["open_time"] < "2025-01-01"].reset_index(drop=True)
 
-# 3. Generate signals
+# Generate signals
 signals = mod.generate_signals(train)
-
-# 4. YOUR OWN backtest logic:
-initial_capital = 10000.0
-taker_fee_pct = 0.04 / 100    # 0.04% per side
-slippage_pct = 0.01 / 100     # 0.01% per side
-cost_per_side = taker_fee_pct + slippage_pct  # 0.05% per side
-
-equity = initial_capital
-position = 0.0
-entry_price = 0.0
-
-# Signal at bar t → fill at bar t+1 open (CRITICAL: 1-bar delay)
-delayed_signals = np.zeros(len(signals))
-delayed_signals[1:] = signals[:-1]
-
-for i in range(1, len(train)):
-    bar_open = train["open"].iloc[i]
-    bar_close = train["close"].iloc[i]
-    target = delayed_signals[i]
-
-    # Position change
-    change = target - position
-    if abs(change) > 1e-8:
-        # Cost on the change amount
-        fee = abs(change) * cost_per_side * mod.leverage * equity
-        equity -= fee
-
-    # PnL on current position
-    if abs(position) > 1e-8:
-        price_return = (bar_close - bar_open) / bar_open
-        equity += equity * position * price_return * mod.leverage
-
-    position = target
-
-print(f"Final equity: ${equity:.2f}")
-print(f"Return: {(equity / initial_capital - 1) * 100:.1f}%")
-```
-
-### 2.3 Verify No Look-Ahead Bias
-
-**Critical check:** At bar index `i`, `generate_signals()` must only use `prices.iloc[:i+1]`.
-
-Method 1 — Incremental test:
-```python
-# Run signals on first N bars, then N+1 bars — signal[N-1] must not change
-signals_full = mod.generate_signals(train)
-for test_len in [1000, 2000, 5000, 10000]:
-    signals_partial = mod.generate_signals(train.iloc[:test_len])
-    # Signal at index test_len-1 should be identical
-    assert abs(signals_partial[-1] - signals_full[test_len - 1]) < 1e-8, \
-        f"Look-ahead detected at bar {test_len - 1}!"
-print("No look-ahead detected")
-```
-
-Method 2 — Code inspection:
-```python
-# Check for forbidden patterns
-import re
-code = open("strategies/mtf_hma_rsi_atr_dynamic_tp_v1.py").read()
-assert not re.search(r'\.shift\s*\(\s*-', code), "Negative shift = look-ahead!"
-assert not re.search(r'prices\.iloc\[.*i\s*\+', code), "Future index = look-ahead!"
-assert not re.search(r'prices\[.*i\s*\+', code), "Future index = look-ahead!"
-print("Code patterns OK")
-```
-
-### 2.4 Verify Fee Calculation
-
-The backtest charges fees on **BOTH sides** (entry AND exit):
-
-```
-Entry: position goes from 0 → 0.35
-  Fee = 0.35 × (0.04% + 0.01%) × leverage × equity = 0.35 × 0.05% × equity
-
-Exit: position goes from 0.35 → 0
-  Fee = 0.35 × (0.04% + 0.01%) × leverage × equity = 0.35 × 0.05% × equity
-
-Round trip cost = 2 × 0.35 × 0.05% × equity = 0.035% of equity per round trip
-```
-
-With $10,000 equity and position size 0.35: fee per side ≈ $1.75, round trip ≈ $3.50.
-
-Funding rate is applied every 8 hours to open positions:
-```
-funding_cost = position_size × funding_rate × leverage × equity
+# signals is numpy array, same length as train
+# Values: positive = long, negative = short, 0 = flat
+# The absolute value IS the position size (e.g., 0.35 = 35% of capital)
 ```
 
 ---
 
-## 3. What to Verify
+## Step 4: Write Your Own Backtest
 
-### 3.1 Checklist
+**Rules the original engine claims to follow (verify these yourself):**
 
-- [ ] **Signal generation produces valid output** — array of same length as prices, values in [-1, 1]
-- [ ] **No look-ahead bias** — signals at bar `i` don't change when adding more data after `i`
-- [ ] **Fill delay enforced** — signal at bar `t` fills at bar `t+1` open price
-- [ ] **Fees charged both sides** — entry AND exit each incur 0.05% cost
-- [ ] **Funding rates applied** — every 8h to open positions, from Binance historical data
-- [ ] **Train/test separation** — strategy was developed on 2021-2024 data, test on 2025+
-- [ ] **Results match** — your independent backtest matches reported Sharpe/Return/DD within 1%
-- [ ] **Consistent across symbols** — works on BTC, ETH, AND SOL (not just one)
-- [ ] **Drawdown acceptable** — max DD > -50% on all symbols
+1. Signal at bar `t` → position changes at bar `t+1` open price (1-bar delay)
+2. Fee: 0.04% taker per side + 0.01% slippage per side = 0.05% per side
+3. Fees charged on BOTH entry AND exit
+4. Position size = signal value × equity (e.g., signal=0.35 means 35% of current equity)
+5. Starting capital: $10,000
+6. Funding rate: applied every 8h on open positions (can skip for initial check)
 
-### 3.2 Red Flags to Watch For
-
-1. **Sharpe > 10 with very low DD** — may indicate strategy has very few trades in certain market regimes, or exploits a data artifact. Check trade distribution over time.
-2. **SOL-only performance** — SOL had 100x rally 2021-2024. A strategy that only works on SOL is unreliable.
-3. **Very short trade duration** — trades lasting only 1-2 bars on 15m timeframe may be noise-fitting.
-4. **Position size > 0.40** — violates risk rules. Check `max(abs(signals))`.
-5. **Trades clustered in one period** — all trades in 2021 bull market = not robust.
-6. **Strategy uses `open` column in signals** — if `prices["open"]` is used for signal generation, this could be subtle look-ahead since the signal fills at the same bar's open.
-
-### 3.3 Comparing Results
-
-Your independently computed metrics should match within small tolerance:
 ```python
-# Your result vs reported
-assert abs(your_sharpe - reported_sharpe) < 0.05, "Sharpe mismatch"
-assert abs(your_return - reported_return) / max(1, abs(reported_return)) < 0.02, "Return mismatch >2%"
-assert abs(your_dd - reported_dd) < 1.0, "Max DD mismatch"
-```
+def my_backtest(prices, signals, leverage=1.0, initial_capital=10000.0):
+    """
+    Write your own backtest. Do NOT copy the project's backtest.py.
+    """
+    n = len(prices)
+    cost_per_side = (0.04 + 0.01) / 100  # 0.05%
 
-Small differences are expected from:
-- Floating point precision
-- Funding rate interpolation method
-- Edge cases at period boundaries
+    # CRITICAL: 1-bar delay — signal[t] fills at bar[t+1] open
+    delayed = np.zeros(n)
+    delayed[1:] = signals[:-1]
+
+    equity = initial_capital
+    position = 0.0  # current position size as fraction
+    trades = []
+
+    for i in range(1, n):
+        bar_open = prices["open"].iloc[i]
+        bar_close = prices["close"].iloc[i]
+        target = delayed[i]
+
+        # Cost on position change
+        change = target - position
+        if abs(change) > 1e-8:
+            fee = abs(change) * cost_per_side * leverage * equity
+            equity -= fee
+
+        # PnL on held position (from open to close of this bar)
+        if abs(position) > 1e-8:
+            ret = (bar_close - bar_open) / bar_open
+            equity += equity * position * ret * leverage
+
+        # Track trades (position flips)
+        if abs(change) > 1e-8 and position * target <= 0 and abs(target) > 1e-8:
+            trades.append({
+                "time": str(prices["open_time"].iloc[i]),
+                "direction": "LONG" if target > 0 else "SHORT",
+                "price": bar_open,
+                "size": abs(target),
+            })
+
+        position = target
+
+        if equity <= 0:
+            break
+
+    total_return = (equity / initial_capital - 1) * 100
+    returns = np.diff(np.log(np.maximum(1, [initial_capital] + [equity])))  # simplified
+
+    return {
+        "final_equity": equity,
+        "return_pct": total_return,
+        "num_trades": len(trades),
+        "trades": trades,
+    }
+
+# Run it
+result = my_backtest(train, signals, leverage=mod.leverage)
+print(f"Return: {result['return_pct']:+.1f}%  Trades: {result['num_trades']}")
+```
 
 ---
 
-## 4. Environment Setup
+## Step 5: What to Check and Report
+
+### Must verify:
+1. **Does `generate_signals()` produce valid output?** — Same length as prices, values in [-1, 1]
+2. **No look-ahead?** — Signal at bar `i` should NOT change if you add more data after `i`:
+   ```python
+   sig_1000 = mod.generate_signals(train.iloc[:1000])
+   sig_full = mod.generate_signals(train)
+   assert abs(sig_1000[-1] - sig_full[999]) < 1e-8, "LOOK-AHEAD DETECTED!"
+   ```
+3. **Does your backtest return match the claimed return?** — Should be within ~5%
+4. **Drawdown** — Track peak equity, calculate max dropdown from peak
+5. **Works on all 3 symbols?** — Run on BTCUSDT, ETHUSDT, SOLUSDT separately
+
+### Red flags:
+- Return > 100,000% — extreme compounding, verify trade-by-trade
+- Sharpe > 10 — unusually high, check trade distribution over time
+- Most trades in one year only — may be overfitting to bull/bear market
+- Strategy uses `prices["open"]` in signal logic — potential subtle look-ahead since fills happen at open
+
+### Report format:
+```
+Strategy: [name]
+Symbol: [BTCUSDT/ETHUSDT/SOLUSDT]
+Period: [train/test]
+Your Return: [X%]  vs Claimed: [Y%]  Match: [yes/no]
+Look-ahead test: [pass/fail]
+Trades: [N]
+Concerns: [any issues found]
+```
+
+---
+
+## Environment
 
 ```bash
-# Python 3.10+
-python3 -m venv .venv && source .venv/bin/activate
-pip install pandas numpy pyarrow pyyaml
-
-# Verify data is present
-python3 -c "
-import pandas as pd
-for sym in ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']:
-    df = pd.read_parquet(f'data/processed/klines/{sym}/1h.parquet')
-    print(f'{sym}: {len(df)} rows, {df[\"open_time\"].min()} → {df[\"open_time\"].max()}')
-"
+pip install pandas numpy pyarrow
+# That's it. No API keys, no LLM, no special packages needed.
 ```
 
-No API keys or LLM access required for verification. All data is local.
-
----
-
-## 5. File Map for Auditor
-
-```
-data/processed/
-├── klines/
-│   ├── BTCUSDT/
-│   │   ├── 1m.parquet    (152MB, ~2.7M rows)
-│   │   ├── 5m.parquet    (33MB)
-│   │   ├── 15m.parquet   (13MB)
-│   │   ├── 1h.parquet    (3.7MB, 45K rows)
-│   │   ├── 4h.parquet    (936KB)
-│   │   └── 1d.parquet    (160KB)
-│   ├── ETHUSDT/           (same structure)
-│   └── SOLUSDT/           (same structure)
-└── funding/
-    ├── BTCUSDT/funding_rate.parquet  (5,655 rows, every 8h)
-    ├── ETHUSDT/funding_rate.parquet
-    └── SOLUSDT/funding_rate.parquet
-
-strategies/                     # 83 strategy .py files
-results.tsv                     # All experiment results
-backtest.py                     # Backtest engine (immutable, auditable)
-evaluate.py                     # Metrics computation (immutable, auditable)
-validator.py                    # Compliance checker
-config.yaml                     # Configuration (fee rates, date ranges)
-```
-
----
-
-## 6. Contact & Feedback
-
-After verification, report findings to the project owner. Key questions:
-
-1. Do your independent Sharpe/Return/DD numbers match the reported values?
-2. Did you find any look-ahead bias in the strategy code?
-3. Are the trades realistic (reasonable entry/exit prices, durations)?
-4. Is the fee model correct (0.04% taker + 0.01% slippage per side, both sides)?
-5. Any concerns about overfitting to train period?
-
----
+All data is already downloaded in `data/processed/`. Total ~571MB.
 
 *Last updated: 2026-03-21*
