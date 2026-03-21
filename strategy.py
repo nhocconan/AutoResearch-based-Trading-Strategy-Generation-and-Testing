@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #202: 4h Bollinger Mean Reversion with Daily HMA Trend Filter
-Hypothesis: Mean reversion works better than trend-following in 2025 bear/range markets.
-Entry when price CLOSES beyond BB bands WITH daily trend confirmation (counter-trend within trend).
-Long: close < BB_lower + daily_bullish + RSI < 45 (oversold bounce in uptrend)
-Short: close > BB_upper + daily_bearish + RSI > 55 (overbought drop in downtrend)
-This generates more trades than Fisher/Donchian while respecting macro trend direction.
-Position sizing: 0.30 entry, 0.15 half at 2R profit. Stoploss: 2.5*ATR trailing.
-Target: Beat Sharpe=0.499 from current best (mtf_12h_supertrend_daily_hma_rsi_pullback_v2).
+Experiment #203: 12h Supertrend + ROC Momentum + Daily HMA + RSI Pullback
+Hypothesis: Combining Supertrend (trend direction) with ROC momentum confirmation
+and RSI pullback entries will generate more consistent trades than pure breakout
+strategies. Daily HMA provides higher-timeframe bias. This simpler approach should
+avoid the 0-trade problem of experiments 196-197 while maintaining good risk/reward.
+Position sizing: 0.30 entry, stoploss at 2.5*ATR. Target: Beat Sharpe=0.499.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_bb_mean_reversion_daily_hma_rsi_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_supertrend_roc_daily_hma_rsi_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -27,8 +25,37 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator."""
+    atr = calculate_atr(high, low, close, period)
+    hl2 = (high + low) / 2
+    
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    supertrend = np.zeros(len(close))
+    direction = np.ones(len(close))  # 1 = bullish, -1 = bearish
+    
+    supertrend[0] = lower_band[0]
+    for i in range(1, len(close)):
+        if close[i] > supertrend[i-1]:
+            supertrend[i] = lower_band[i]
+            direction[i] = 1
+        elif close[i] < supertrend[i-1]:
+            supertrend[i] = upper_band[i]
+            direction[i] = -1
+        else:
+            supertrend[i] = supertrend[i-1]
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and close[i] < lower_band[i]:
+                supertrend[i] = lower_band[i]
+            elif direction[i] == -1 and close[i] > upper_band[i]:
+                supertrend[i] = upper_band[i]
+    
+    return supertrend, direction
+
 def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for faster trend response."""
+    """Calculate Hull Moving Average."""
     close_s = pd.Series(close)
     half = max(1, period // 2)
     sqrt_period = max(1, int(np.sqrt(period)))
@@ -49,14 +76,12 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands (SMA basis)."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma
+def calculate_roc(close, period=10):
+    """Calculate Rate of Change momentum indicator."""
+    roc = np.zeros(len(close))
+    for i in range(period, len(close)):
+        roc[i] = (close[i] - close[i-period]) / close[i-period] * 100
+    return roc
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -68,15 +93,16 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 50)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
+    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
     rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
+    roc = calculate_roc(close, 10)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.30
@@ -87,39 +113,64 @@ def generate_signals(prices):
     entry_price = 0.0
     trailing_stop = 0.0
     position_reduced = False
-    extreme_close = 0.0
+    highest_close = 0.0
+    lowest_close = 0.0
     
     for i in range(100, n):
-        # Daily trend filter
+        # HTF trend filter
         daily_bullish = close[i] > hma_1d_aligned[i]
         daily_bearish = close[i] < hma_1d_aligned[i]
         
-        # RSI filter (looser thresholds for more trades)
-        rsi_oversold = rsi[i] < 45
-        rsi_overbought = rsi[i] > 55
+        # Supertrend direction
+        st_bullish = st_direction[i] == 1
+        st_bearish = st_direction[i] == -1
         
-        # BB breakout detection (close BEYOND band = extreme)
-        break_lower = close[i] < bb_lower[i]
-        break_upper = close[i] > bb_upper[i]
+        # Momentum confirmation
+        roc_positive = roc[i] > 0
+        roc_negative = roc[i] < 0
+        
+        # RSI pullback levels (looser for more trades)
+        rsi_pullback_long = 35 < rsi[i] < 55
+        rsi_pullback_short = 45 < rsi[i] < 65
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
         
         new_signal = 0.0
         
-        # === LONG ENTRY (mean reversion: oversold bounce within uptrend) ===
-        if break_lower and daily_bullish and rsi_oversold:
-            new_signal = SIZE_ENTRY
+        # === LONG ENTRY ===
+        # Primary: Supertrend bullish + Daily HMA bullish + RSI pullback
+        if st_bullish and daily_bullish:
+            if rsi_pullback_long and roc_positive:
+                new_signal = SIZE_ENTRY
+            elif rsi_oversold and roc[i] > -2:
+                new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRY (mean reversion: overbought drop within downtrend) ===
-        if break_upper and daily_bearish and rsi_overbought:
-            new_signal = -SIZE_ENTRY
+        # Secondary: Supertrend just flipped bullish
+        if st_bullish and st_direction[i-1] == -1:
+            if daily_bullish or roc_positive:
+                new_signal = SIZE_ENTRY
+        
+        # === SHORT ENTRY ===
+        # Primary: Supertrend bearish + Daily HMA bearish + RSI pullback
+        if st_bearish and daily_bearish:
+            if rsi_pullback_short and roc_negative:
+                new_signal = -SIZE_ENTRY
+            elif rsi_overbought and roc[i] < 2:
+                new_signal = -SIZE_ENTRY
+        
+        # Secondary: Supertrend just flipped bearish
+        if st_bearish and st_direction[i-1] == 1:
+            if daily_bearish or roc_negative:
+                new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
-            # Update extreme for trailing (highest close for long)
-            if close[i] > extreme_close:
-                extreme_close = close[i]
+            # Update highest close for trailing
+            if close[i] > highest_close:
+                highest_close = close[i]
             
             # Calculate trailing stop (2.5*ATR from highest)
-            current_stop = extreme_close - 2.5 * atr[i]
+            current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -135,12 +186,12 @@ def generate_signals(prices):
                     position_reduced = True
         
         if position_side < 0 and entry_price > 0:
-            # Update extreme for trailing (lowest close for short)
-            if close[i] < extreme_close or extreme_close == 0.0:
-                extreme_close = close[i]
+            # Update lowest close for trailing
+            if close[i] < lowest_close or lowest_close == 0.0:
+                lowest_close = close[i]
             
             # Calculate trailing stop (2.5*ATR from lowest)
-            current_stop = extreme_close + 2.5 * atr[i]
+            current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -163,7 +214,8 @@ def generate_signals(prices):
             entry_price = close[i]
             position_side = np.sign(new_signal)
             trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
-            extreme_close = close[i]
+            highest_close = close[i] if position_side > 0 else 0.0
+            lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
         
         # Position reversed
@@ -171,7 +223,8 @@ def generate_signals(prices):
             entry_price = close[i]
             position_side = np.sign(new_signal)
             trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
-            extreme_close = close[i]
+            highest_close = close[i] if position_side > 0 else 0.0
+            lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
         
         # Position reduced (take profit)
@@ -183,7 +236,8 @@ def generate_signals(prices):
             position_side = 0
             entry_price = 0.0
             trailing_stop = 0.0
-            extreme_close = 0.0
+            highest_close = 0.0
+            lowest_close = 0.0
             position_reduced = False
         
         signals[i] = new_signal
