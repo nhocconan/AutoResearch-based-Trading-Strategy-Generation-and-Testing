@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #301: 15m Multi-Timeframe Trend Following with Generous Entries
-Hypothesis: 15m primary with 4h/1h trend filters captures intraday moves while avoiding whipsaw.
-Key insight from failures: Entry conditions MUST be generous to ensure >=10 trades (learned from #289, #295, #296).
-Using 4h HMA for macro bias + 1h RSI for timing + ADX to filter choppy markets.
-Position size 0.25 (conservative), ATR stoploss at 2.5x, discrete levels to minimize fee churn.
-Target: Beat Sharpe=0.499 while ensuring >=10 trades per symbol on 15m timeframe.
+Experiment #302: 30m Regime-Adaptive Strategy with 4h Trend Bias + RSI + Volume
+Hypothesis: 30m timeframe captures intraday swings while 4h HMA provides trend direction.
+Using WIDER RSI ranges (25-75) ensures >=10 trades (learned from 0-trade failures).
+Volume confirmation filters false breakouts. ATR stops at 2.5*ATR control drawdown.
+Position size 0.25 balances returns vs risk (learned from -90% DD failures).
+Target: Beat Sharpe=0.499 while ensuring >=10 trades per symbol on 30m timeframe.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_4h_hma_1h_rsi_adx_trend_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_regime_4h_hma_rsi_volume_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -47,89 +47,73 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs moving average."""
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)
+    return vol_ratio
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands for regime detection."""
     close_s = pd.Series(close)
-    
-    plus_dm = high_s.diff()
-    minus_dm = -low_s.diff()
-    
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-    
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return upper, lower, sma
+
+def calculate_choppiness_index(high, low, close, period=14):
+    """Calculate Choppiness Index for regime detection."""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean() / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean() / atr
+    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    hl_range = high - low
+    hl_sum = pd.Series(hl_range).rolling(window=period, min_periods=period).sum().values
     
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return adx.values, plus_di.values, minus_di.values
-
-def calculate_sma(close, period=50):
-    """Calculate Simple Moving Average."""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    return sma
+    chop = 100 * np.log10(atr_sum / (hl_sum + 1e-10)) / np.log10(period)
+    chop = np.clip(chop, 0, 100)
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
-    df_1h = get_htf_data(prices, '1h')
     
-    # Calculate 4h indicators (macro trend)
+    # Calculate HTF indicators
     hma_4h_21 = calculate_hma(df_4h['close'].values, 21)
     hma_4h_50 = calculate_hma(df_4h['close'].values, 50)
-    rsi_4h = calculate_rsi(df_4h['close'].values, 14)
-    
-    # Calculate 1h indicators (entry timing)
-    hma_1h_21 = calculate_hma(df_1h['close'].values, 21)
-    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
-    adx_1h, plus_di_1h, minus_di_1h = calculate_adx(
-        df_1h['high'].values, 
-        df_1h['low'].values, 
-        df_1h['close'].values, 
-        14
-    )
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
     hma_4h_50_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_50)
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    hma_1h_21_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_21)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
-    adx_1h_aligned = align_htf_to_ltf(prices, df_1h, adx_1h)
-    plus_di_1h_aligned = align_htf_to_ltf(prices, df_1h, plus_di_1h)
-    minus_di_1h_aligned = align_htf_to_ltf(prices, df_1h, minus_di_1h)
-    
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    hma_15m_21 = calculate_hma(close, 21)
-    hma_15m_50 = calculate_hma(close, 50)
-    rsi_15m = calculate_rsi(close, 14)
-    adx_15m, plus_di_15m, minus_di_15m = calculate_adx(high, low, close, 14)
-    sma_15m_50 = calculate_sma(close, 50)
+    hma_21 = calculate_hma(close, 21)
+    hma_50 = calculate_hma(close, 50)
+    rsi = calculate_rsi(close, 14)
+    vol_ratio = calculate_volume_ratio(volume, 20)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
+    chop = calculate_choppiness_index(high, low, close, 14)
     
     # Track previous values for crossover detection
     prev_close = np.roll(close, 1)
     prev_close[0] = close[0]
-    prev_hma_15m_21 = np.roll(hma_15m_21, 1)
-    prev_hma_15m_21[0] = hma_15m_21[0]
-    prev_rsi_15m = np.roll(rsi_15m, 1)
-    prev_rsi_15m[0] = rsi_15m[0]
+    prev_hma_21 = np.roll(hma_21, 1)
+    prev_hma_21[0] = hma_21[0]
+    prev_rsi = np.roll(rsi, 1)
+    prev_rsi[0] = rsi[0]
+    prev_hma_4h = np.roll(hma_4h_21_aligned, 1)
+    prev_hma_4h[0] = hma_4h_21_aligned[0]
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -145,94 +129,90 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(hma_15m_21[i]) or np.isnan(hma_15m_50[i]) or np.isnan(atr[i]):
-            signals[i] = 0.0
-            continue
-        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(rsi_4h_aligned[i]):
-            signals[i] = 0.0
-            continue
-        if np.isnan(rsi_1h_aligned[i]) or np.isnan(adx_1h_aligned[i]):
+        if np.isnan(hma_21[i]) or np.isnan(hma_50[i]) or np.isnan(atr[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        # === 4H MACRO TREND BIAS ===
-        # Bullish: Price > HMA21 > HMA50 on 4h
-        trend_4h_bullish = (close[i] > hma_4h_21_aligned[i] and 
-                           hma_4h_21_aligned[i] > hma_4h_50_aligned[i])
-        # Bearish: Price < HMA21 < HMA50 on 4h
-        trend_4h_bearish = (close[i] < hma_4h_21_aligned[i] and 
-                           hma_4h_21_aligned[i] < hma_4h_50_aligned[i])
+        # 4h macro trend bias
+        trend_4h_bullish = close[i] > hma_4h_21_aligned[i] and hma_4h_21_aligned[i] > hma_4h_50_aligned[i]
+        trend_4h_bearish = close[i] < hma_4h_21_aligned[i] and hma_4h_21_aligned[i] < hma_4h_50_aligned[i]
+        trend_4h_neutral = not trend_4h_bullish and not trend_4h_bearish
         
-        # 4h RSI confirmation (not extreme)
-        rsi_4h_ok_long = 35 < rsi_4h_aligned[i] < 75
-        rsi_4h_ok_short = 25 < rsi_4h_aligned[i] < 65
+        # 30m trend filter
+        trend_30m_bullish = close[i] > hma_21[i] and hma_21[i] > hma_50[i]
+        trend_30m_bearish = close[i] < hma_21[i] and hma_21[i] < hma_50[i]
         
-        # === 1H ENTRY TIMING ===
-        # 1h trend alignment
-        trend_1h_bullish = close[i] > hma_1h_21_aligned[i]
-        trend_1h_bearish = close[i] < hma_1h_21_aligned[i]
+        # HMA slope
+        hma_slope_bullish = hma_21[i] > prev_hma_21[i]
+        hma_slope_bearish = hma_21[i] < prev_hma_21[i]
         
-        # 1h RSI pullback (generous ranges for more trades)
-        rsi_1h_pullback_long = 30 < rsi_1h_aligned[i] < 60
-        rsi_1h_pullback_short = 40 < rsi_1h_aligned[i] < 70
+        # Regime detection via Choppiness Index
+        is_ranging = chop[i] > 50  # CHOP > 50 = ranging market
+        is_trending = chop[i] < 45  # CHOP < 45 = trending market
         
-        # 1h ADX filter (trend strength > 20 to avoid chop)
-        adx_1h_strong = adx_1h_aligned[i] > 18
+        # RSI zones (WIDER ranges to ensure trades)
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
+        rsi_neutral = 35 <= rsi[i] <= 65
+        rsi_not_extreme_long = rsi[i] < 75
+        rsi_not_extreme_short = rsi[i] > 25
         
-        # 1h DI crossover
-        di_bullish = plus_di_1h_aligned[i] > minus_di_1h_aligned[i]
-        di_bearish = plus_di_1h_aligned[i] < minus_di_1h_aligned[i]
+        # Volume confirmation
+        volume_confirmed = vol_ratio[i] > 1.0
         
-        # === 15M LOCAL SIGNALS ===
-        # 15m trend
-        trend_15m_bullish = close[i] > hma_15m_21[i] and hma_15m_21[i] > hma_15m_50[i]
-        trend_15m_bearish = close[i] < hma_15m_21[i] and hma_15m_21[i] < hma_15m_50[i]
+        # Bollinger position
+        near_bb_lower = close[i] < bb_lower[i] * 1.01
+        near_bb_upper = close[i] > bb_upper[i] * 0.99
+        bb_squeeze = (bb_upper[i] - bb_lower[i]) / bb_mid[i] < 0.05
         
-        # 15m RSI (not extreme)
-        rsi_15m_ok_long = 25 < rsi_15m[i] < 75
-        rsi_15m_ok_short = 25 < rsi_15m[i] < 75
+        # Price crossover signals
+        hma_cross_long = prev_close[i] <= prev_hma_21[i] and close[i] > hma_21[i]
+        hma_cross_short = prev_close[i] >= prev_hma_21[i] and close[i] < hma_21[i]
         
-        # 15m HMA crossover
-        hma_cross_long = prev_close[i] <= prev_hma_15m_21[i] and close[i] > hma_15m_21[i]
-        hma_cross_short = prev_close[i] >= prev_hma_15m_21[i] and close[i] < hma_15m_21[i]
-        
-        # 15m ADX
-        adx_15m_strong = adx_15m[i] > 15
+        # 4h HMA crossover
+        hma_4h_cross_long = prev_hma_4h[i] <= hma_4h_21_aligned[i] and close[i] > hma_4h_21_aligned[i]
+        hma_4h_cross_short = prev_hma_4h[i] >= hma_4h_21_aligned[i] and close[i] < hma_4h_21_aligned[i]
         
         new_signal = 0.0
         
-        # === LONG ENTRY (generous conditions for trades) ===
-        # Primary: 4h bullish + 1h bullish + 1h RSI pullback + 15m cross
-        if trend_4h_bullish and rsi_4h_ok_long and trend_1h_bullish and rsi_1h_pullback_long and hma_cross_long:
+        # === LONG ENTRY (multiple conditions to ensure trades) ===
+        # Primary: 4h bullish + 30m bullish + RSI pullback + volume
+        if trend_4h_bullish and trend_30m_bullish and rsi_neutral and volume_confirmed:
             new_signal = SIZE_ENTRY
-        # Secondary: 4h bullish + 1h ADX strong + 15m trend + RSI ok
-        elif trend_4h_bullish and rsi_4h_ok_long and adx_1h_strong and trend_15m_bullish and rsi_15m_ok_long:
+        # Secondary: 4h bullish + RSI oversold + price > HMA21 (pullback entry)
+        elif trend_4h_bullish and rsi_oversold and close[i] > hma_21[i]:
             new_signal = SIZE_ENTRY
-        # Tertiary: 4h bullish + 1h DI bullish + 15m cross (simpler for more trades)
-        elif trend_4h_bullish and rsi_4h_ok_long and di_bullish and hma_cross_long:
+        # Tertiary: 30m bullish + HMA cross + volume (momentum entry)
+        elif trend_30m_bullish and hma_cross_long and volume_confirmed:
             new_signal = SIZE_ENTRY
-        # Quaternary: 4h bullish + 15m above SMA50 + RSI 40-65
-        elif trend_4h_bullish and close[i] > sma_15m_50[i] and 40 < rsi_15m[i] < 65:
+        # Quaternary: Ranging market + RSI oversold + near BB lower (mean reversion)
+        elif is_ranging and rsi_oversold and near_bb_lower:
             new_signal = SIZE_ENTRY
-        # Simple: 4h bullish + 1h bullish + 15m price > HMA21
-        elif trend_4h_bullish and trend_1h_bullish and close[i] > hma_15m_21[i] and rsi_15m_ok_long:
+        # Quinternary: 4h bullish + HMA slope up + RSI 40-60 (trend continuation)
+        elif trend_4h_bullish and hma_slope_bullish and 40 < rsi[i] < 60:
+            new_signal = SIZE_ENTRY
+        # Simple fallback: 4h bullish + price > HMA21 + RSI > 40 (ensure trades)
+        elif trend_4h_bullish and close[i] > hma_21[i] and rsi[i] > 40 and rsi_not_extreme_long:
             new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRY (generous conditions for trades) ===
-        # Primary: 4h bearish + 1h bearish + 1h RSI pullback + 15m cross
-        if trend_4h_bearish and rsi_4h_ok_short and trend_1h_bearish and rsi_1h_pullback_short and hma_cross_short:
+        # === SHORT ENTRY (multiple conditions to ensure trades) ===
+        # Primary: 4h bearish + 30m bearish + RSI pullback + volume
+        if trend_4h_bearish and trend_30m_bearish and rsi_neutral and volume_confirmed:
             new_signal = -SIZE_ENTRY
-        # Secondary: 4h bearish + 1h ADX strong + 15m trend + RSI ok
-        elif trend_4h_bearish and rsi_4h_ok_short and adx_1h_strong and trend_15m_bearish and rsi_15m_ok_short:
+        # Secondary: 4h bearish + RSI overbought + price < HMA21 (pullback entry)
+        elif trend_4h_bearish and rsi_overbought and close[i] < hma_21[i]:
             new_signal = -SIZE_ENTRY
-        # Tertiary: 4h bearish + 1h DI bearish + 15m cross (simpler for more trades)
-        elif trend_4h_bearish and rsi_4h_ok_short and di_bearish and hma_cross_short:
+        # Tertiary: 30m bearish + HMA cross + volume (momentum entry)
+        elif trend_30m_bearish and hma_cross_short and volume_confirmed:
             new_signal = -SIZE_ENTRY
-        # Quaternary: 4h bearish + 15m below SMA50 + RSI 35-60
-        elif trend_4h_bearish and close[i] < sma_15m_50[i] and 35 < rsi_15m[i] < 60:
+        # Quaternary: Ranging market + RSI overbought + near BB upper (mean reversion)
+        elif is_ranging and rsi_overbought and near_bb_upper:
             new_signal = -SIZE_ENTRY
-        # Simple: 4h bearish + 1h bearish + 15m price < HMA21
-        elif trend_4h_bearish and trend_1h_bearish and close[i] < hma_15m_21[i] and rsi_15m_ok_short:
+        # Quinternary: 4h bearish + HMA slope down + RSI 40-60 (trend continuation)
+        elif trend_4h_bearish and hma_slope_bearish and 40 < rsi[i] < 60:
+            new_signal = -SIZE_ENTRY
+        # Simple fallback: 4h bearish + price < HMA21 + RSI < 60 (ensure trades)
+        elif trend_4h_bearish and close[i] < hma_21[i] and rsi[i] < 60 and rsi_not_extreme_short:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
