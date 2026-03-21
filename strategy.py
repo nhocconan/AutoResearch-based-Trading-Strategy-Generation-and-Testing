@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #138: 1d Donchian Breakout with Weekly HMA + RSI Filter
-Hypothesis: Daily Donchian breakouts (Turtle-style) work well in crypto's trending phases.
-Adding weekly HMA filter avoids counter-trend breakouts. RSI filter prevents entering
-at extremes. This should work in 2021 bull, survive 2022 crash (via stops), and capture
-2025 recovery. 1d timeframe = fewer trades, lower fee drag, better trend capture.
-Position sizing: 0.25 entry, 0.125 at 2R profit, stoploss at 2.5*ATR trailing.
+Experiment #139: 15m Supertrend + 4h HMA Trend Filter + RSI Pullback
+Hypothesis: 15m timeframe needs strong HTF filter to avoid whipsaws. 
+4h HMA provides major trend direction. Supertrend(10,3) gives clean entry signals.
+RSI pullback (40-60 range) confirms entry in trending market. 
+This combines proven 12h supertrend success with faster 15m entries.
+Position sizing: 0.28 entry, stoploss at 2.5*ATR, reduce at 2R profit.
+Timeframe: 15m for more trade opportunities while HTF filter prevents noise.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_weekly_hma_rsi_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_supertrend_4h_hma_rsi_pullback_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -24,6 +25,46 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator."""
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    hl2 = (high + low) / 2.0
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    supertrend = np.zeros(n)
+    trend = np.ones(n)  # 1 = bullish, -1 = bearish
+    
+    supertrend[0] = upper_band[0]
+    trend[0] = 1
+    
+    for i in range(1, n):
+        if close[i] > supertrend[i-1]:
+            supertrend[i] = lower_band[i]
+            trend[i] = 1
+        elif close[i] < supertrend[i-1]:
+            supertrend[i] = upper_band[i]
+            trend[i] = -1
+        else:
+            supertrend[i] = supertrend[i-1]
+            trend[i] = trend[i-1]
+    
+    return supertrend, trend
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI indicator."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
+    rsi = 100 - 100 / (1 + rs)
+    rsi = np.clip(rsi, 0, 100)
+    return rsi
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -39,24 +80,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI indicator."""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
-    rsi = 100 - 100 / (1 + rs)
-    rsi = np.clip(rsi, 0, 100)
-    return rsi
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel upper and lower bands."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -64,21 +87,21 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    donch_upper, donch_lower = calculate_donchian(high, low, 20)
+    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
     
-    # Donchian middle for additional filter
-    donch_mid = (donch_upper + donch_lower) / 2
+    # HMA for additional trend confirmation
+    hma_15m = calculate_hma(close, 21)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.28
@@ -93,30 +116,44 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # Weekly trend filter (major trend direction)
-        weekly_bullish = close[i] > hma_1w_aligned[i]
-        weekly_bearish = close[i] < hma_1w_aligned[i]
+        # 4h trend filter (major trend direction)
+        trend_4h_bullish = close[i] > hma_4h_aligned[i]
+        trend_4h_bearish = close[i] < hma_4h_aligned[i]
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donch_upper[i-1]  # Break above previous high
-        breakout_short = close[i] < donch_lower[i-1]  # Break below previous low
+        # Supertrend signals
+        st_long = st_trend[i] == 1
+        st_short = st_trend[i] == -1
         
-        # RSI filter - avoid extreme entries
-        rsi_valid_long = 35 < rsi[i] < 75  # Not overbought for long
-        rsi_valid_short = 25 < rsi[i] < 65  # Not oversold for short
+        # Supertrend flip detection (entry signal)
+        st_flip_long = st_trend[i] == 1 and st_trend[i-1] == -1
+        st_flip_short = st_trend[i] == -1 and st_trend[i-1] == 1
         
-        # Price relative to Donchian middle (momentum confirmation)
-        above_mid = close[i] > donch_mid[i]
-        below_mid = close[i] < donch_mid[i]
+        # 15m HMA trend
+        hma_15m_bullish = close[i] > hma_15m[i]
+        hma_15m_bearish = close[i] < hma_15m[i]
+        
+        # RSI pullback zones (not extreme, confirming trend)
+        rsi_pullback_long = 45 <= rsi[i] <= 65
+        rsi_pullback_short = 35 <= rsi[i] <= 55
+        
+        # RSI momentum confirmation
+        rsi_momentum_long = rsi[i] > rsi[i-3] if i > 3 else False
+        rsi_momentum_short = rsi[i] < rsi[i-3] if i > 3 else False
         
         new_signal = 0.0
         
-        # LONG: Donchian breakout + Weekly bullish + RSI valid + Above mid
-        if breakout_long and weekly_bullish and rsi_valid_long and above_mid:
+        # LONG entry: 4h bullish + Supertrend flip long + RSI confirmation
+        if trend_4h_bullish and st_flip_long and rsi_pullback_long:
+            new_signal = SIZE_ENTRY
+        # Alternative long: already in Supertrend long + 4h bullish + RSI rising
+        elif trend_4h_bullish and st_long and hma_15m_bullish and rsi_momentum_long and rsi[i] > 50:
             new_signal = SIZE_ENTRY
         
-        # SHORT: Donchian breakout + Weekly bearish + RSI valid + Below mid
-        elif breakout_short and weekly_bearish and rsi_valid_short and below_mid:
+        # SHORT entry: 4h bearish + Supertrend flip short + RSI confirmation
+        elif trend_4h_bearish and st_flip_short and rsi_pullback_short:
+            new_signal = -SIZE_ENTRY
+        # Alternative short: already in Supertrend short + 4h bearish + RSI falling
+        elif trend_4h_bearish and st_short and hma_15m_bearish and rsi_momentum_short and rsi[i] < 50:
             new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
