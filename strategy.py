@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #022 - Simplified MTF HMA+RSI (30m+4h v2)
+EXPERIMENT #023 - KAMA Adaptive Trend + RSI Pullback (1h+4h)
 ==================================================================================================
-Hypothesis: Simplify the MTF approach from 3 timeframes to 2 (30m base + 4h trend).
-The current best uses 15m+1h+4h but has complex state tracking that may cause bugs.
-This version:
-- Uses 30m base (cleaner signals than 15m, more trades than 1h)
-- 4h HMA trend filter only (remove 1h complexity)
-- RSI pullback entries on 30m
-- Simpler position management without complex state tracking
-- Discrete position sizes (0.0, ±0.25, ±0.35)
+Hypothesis: Replace HMA with KAMA (Kaufman Adaptive Moving Average) for better noise filtering.
+KAMA adapts to market volatility - moves fast in trends, slow in chop. This should reduce
+whipsaws compared to HMA while maintaining trend-following capability.
 
-Why this should work:
-- Fewer timeframes = fewer alignment issues
-- 30m has proven success in other experiments
-- Simpler logic = fewer bugs in signal generation
-- HMA trend filter is proven (current best uses it)
+Key changes from current best (#022):
+- Base timeframe: 1h (cleaner signals than 30m, more trades than 4h)
+- Trend indicator: KAMA instead of HMA (adaptive to volatility)
+- Position size: 0.30 max (more conservative than 0.35)
+- Stoploss: 2.0*ATR (slightly tighter for better risk control)
+- Remove complex state tracking - use simpler signal-based exits
+
+Why this should beat Sharpe=1.153:
+- KAMA reduces false signals in ranging markets (common in crypto)
+- 1h has proven success in other experiments with cleaner signals
+- Tighter stops should reduce max drawdown
+- Simpler logic = fewer bugs
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_hma_rsi_30m_4h_simplified_v2"
-timeframe = "30m"
+name = "mtf_kama_rsi_1h_4h_adaptive_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
@@ -50,21 +52,37 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average"""
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA)
+    KAMA adapts to market noise - fast in trends, slow in chop
+    """
     n = len(close)
-    if n < period:
+    if n < period + slow_period:
         return np.zeros(n)
     
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(period, n):
+        price_change = abs(close[i] - close[i - period])
+        volatility = np.sum(np.abs(np.diff(close[i - period:i + 1])))
+        if volatility > 0:
+            er[i] = price_change / volatility
+        else:
+            er[i] = 0
     
-    wma1 = pd.Series(close).ewm(span=half_period, adjust=False).mean().values
-    wma2 = pd.Series(close).ewm(span=period, adjust=False).mean().values
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
     
-    hma = pd.Series(2 * wma1 - wma2).ewm(span=sqrt_period, adjust=False).mean().values
+    kama = np.zeros(n)
+    kama[period] = close[period]  # Initialize
     
-    return hma
+    for i in range(period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 
 def calculate_rsi(close, period=14):
@@ -138,10 +156,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values
     n = len(close)
     
-    # 30m indicators for entry timing
-    atr_30m = calculate_atr(high, low, close, period=14)
-    rsi_30m = calculate_rsi(close, period=14)
-    hma_30m = calculate_hma(close, period=21)
+    # 1h indicators for entry timing
+    atr_1h = calculate_atr(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
+    kama_1h = calculate_kama(close, period=10, fast_period=2, slow_period=30)
     
     # Get 4h data using mtf_data helper for trend filter
     try:
@@ -150,27 +168,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         h_4h = df_4h['high'].values
         l_4h = df_4h['low'].values
         
-        # 4h HMA for trend direction
-        hma_4h = calculate_hma(c_4h, period=21)
+        # 4h KAMA for trend direction
+        kama_4h = calculate_kama(c_4h, period=10, fast_period=2, slow_period=30)
         
         # 4h Supertrend for trend confirmation
         _, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
         
-        # Align 4h indicators to 30m timeframe
-        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+        # Align 4h indicators to 1h timeframe
+        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
         st_direction_4h_aligned = align_htf_to_ltf(prices, df_4h, st_direction_4h)
         
     except Exception:
-        hma_4h_aligned = np.zeros(n)
+        kama_4h_aligned = np.zeros(n)
         st_direction_4h_aligned = np.zeros(n)
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.35
-    SIZE_HALF = 0.175
-    SIZE_QUARTER = 0.0875
+    SIZE_FULL = 0.30
+    SIZE_HALF = 0.15
     
     # RSI thresholds for pullback entries
     RSI_LONG_ENTRY = 45
@@ -178,10 +195,10 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     RSI_EXIT_LONG = 65
     RSI_EXIT_SHORT = 35
     
-    # ATR stoploss multiplier
-    ATR_STOP_MULT = 2.5
+    # ATR stoploss multiplier (tighter than previous)
+    ATR_STOP_MULT = 2.0
     
-    first_valid = max(200, 14 * 2, 21)
+    first_valid = max(200, 40)  # KAMA needs more warmup
     
     # Track position state
     position_side = np.zeros(n)
@@ -190,23 +207,26 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_30m[i]) or np.isnan(rsi_30m[i]) or atr_30m[i] == 0:
+        if np.isnan(atr_1h[i]) or np.isnan(rsi_1h[i]) or atr_1h[i] == 0:
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(kama_1h[i]) or kama_1h[i] == 0:
             signals[i] = 0.0
             continue
         
         # Get aligned 4h values
-        hma_4h_val = hma_4h_aligned[i] if i < len(hma_4h_aligned) else 0
+        kama_4h_val = kama_4h_aligned[i] if i < len(kama_4h_aligned) else 0
         st_4h_val = st_direction_4h_aligned[i] if i < len(st_direction_4h_aligned) else 0
         
-        # Determine 4h trend direction
+        # Determine 4h trend direction using KAMA slope
         trend_4h = 0
-        if hma_4h_val > 0 and i >= first_valid:
-            # Get corresponding 4h close for price vs HMA comparison
-            idx_4h = min(i // 8, len(hma_4h_aligned) - 1)  # 8 x 30m = 4h
-            if idx_4h >= 0 and idx_4h < len(c_4h):
-                if c_4h[idx_4h] > hma_4h[idx_4h]:
+        if i >= first_valid + 4 and kama_4h_val > 0:
+            idx_4h = min(i // 4, len(kama_4h_aligned) - 1)
+            if idx_4h >= 4 and idx_4h < len(kama_4h):
+                if kama_4h[idx_4h] > kama_4h[idx_4h - 4]:
                     trend_4h = 1
-                elif c_4h[idx_4h] < hma_4h[idx_4h]:
+                elif kama_4h[idx_4h] < kama_4h[idx_4h - 4]:
                     trend_4h = -1
         
         # Check existing positions first (stoploss and take profit)
@@ -229,9 +249,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.5*ATR)
+            # Stoploss check (2.0*ATR)
             if prev_side == 1:
-                stoploss_price = prev_entry - ATR_STOP_MULT * atr_30m[i]
+                stoploss_price = prev_entry - ATR_STOP_MULT * atr_1h[i]
                 if price < stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
@@ -241,7 +261,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     continue
                 
                 # Take profit at 2R - reduce to half
-                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr_30m[i]
+                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr_1h[i]
                 if price >= tp_price and signals[i - 1] == SIZE_FULL:
                     signals[i] = SIZE_HALF
                     position_side[i] = 1
@@ -252,7 +272,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Trail stop at 1R after TP
                 if signals[i - 1] == SIZE_HALF:
-                    trail_stop = current_high - ATR_STOP_MULT * atr_30m[i]
+                    trail_stop = current_high - ATR_STOP_MULT * atr_1h[i]
                     if price < trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
@@ -262,7 +282,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         continue
                 
                 # RSI exit signal
-                if rsi_30m[i] >= RSI_EXIT_LONG:
+                if rsi_1h[i] >= RSI_EXIT_LONG:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
@@ -271,7 +291,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     continue
                     
             elif prev_side == -1:
-                stoploss_price = prev_entry + ATR_STOP_MULT * atr_30m[i]
+                stoploss_price = prev_entry + ATR_STOP_MULT * atr_1h[i]
                 if price > stoploss_price:
                     signals[i] = 0.0
                     position_side[i] = 0
@@ -281,7 +301,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     continue
                 
                 # Take profit at 2R - reduce to half
-                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr_30m[i]
+                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr_1h[i]
                 if price <= tp_price and signals[i - 1] == -SIZE_FULL:
                     signals[i] = -SIZE_HALF
                     position_side[i] = -1
@@ -292,7 +312,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 
                 # Trail stop at 1R after TP
                 if signals[i - 1] == -SIZE_HALF:
-                    trail_stop = current_low + ATR_STOP_MULT * atr_30m[i]
+                    trail_stop = current_low + ATR_STOP_MULT * atr_1h[i]
                     if price > trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
@@ -302,7 +322,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         continue
                 
                 # RSI exit signal
-                if rsi_30m[i] <= RSI_EXIT_SHORT:
+                if rsi_1h[i] <= RSI_EXIT_SHORT:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
@@ -318,26 +338,28 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h trend + 30m RSI pullback
+        # Entry logic: 4h trend + 1h RSI pullback + 1h KAMA confirmation
         price = close[i]
         
-        # Long entry: 4h bullish + RSI pullback on 30m
+        # Long entry: 4h bullish + 1h RSI pullback + price above 1h KAMA
         if trend_4h == 1 and st_4h_val == 1:
-            if rsi_30m[i] <= RSI_LONG_ENTRY and rsi_30m[i] >= 30:
-                signals[i] = SIZE_FULL
-                position_side[i] = 1
-                entry_price[i] = price
-                highest_since_entry[i] = price
-                lowest_since_entry[i] = price
-                
-        # Short entry: 4h bearish + RSI pullback on 30m
+            if rsi_1h[i] <= RSI_LONG_ENTRY and rsi_1h[i] >= 30:
+                if price > kama_1h[i]:  # Price above KAMA confirms trend
+                    signals[i] = SIZE_FULL
+                    position_side[i] = 1
+                    entry_price[i] = price
+                    highest_since_entry[i] = price
+                    lowest_since_entry[i] = price
+                    
+        # Short entry: 4h bearish + 1h RSI pullback + price below 1h KAMA
         elif trend_4h == -1 and st_4h_val == -1:
-            if rsi_30m[i] >= RSI_SHORT_ENTRY and rsi_30m[i] <= 70:
-                signals[i] = -SIZE_FULL
-                position_side[i] = -1
-                entry_price[i] = price
-                highest_since_entry[i] = price
-                lowest_since_entry[i] = price
+            if rsi_1h[i] >= RSI_SHORT_ENTRY and rsi_1h[i] <= 70:
+                if price < kama_1h[i]:  # Price below KAMA confirms trend
+                    signals[i] = -SIZE_FULL
+                    position_side[i] = -1
+                    entry_price[i] = price
+                    highest_since_entry[i] = price
+                    lowest_since_entry[i] = price
         
         else:
             signals[i] = 0.0
