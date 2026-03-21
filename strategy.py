@@ -1,33 +1,27 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #006 - Donchian Breakout + HMA Trend Filter (1d)
-============================================================
-Hypothesis: Daily Donchian(20) breakouts capture major trend moves in crypto.
-HMA(50) on daily filters direction (only long breakouts above HMA, short below).
-ADX(14) confirms trending regime. ATR(14) trailing stop protects capital.
-1d timeframe reduces noise and fee churn vs lower TFs.
+EXPERIMENT #007 - Supertrend + RSI Pullback with 4h Trend Filter (15m)
+=======================================================================
+Hypothesis: 15m Supertrend captures short-term momentum while 4h HMA(21)
+ensures we trade with the major trend. RSI pullback entries (buy dips in
+uptrend, sell rallies in downtrend) improve entry quality. ADX filter
+avoids choppy markets. ATR trailing stop protects capital.
 
 Key features:
-- Primary TF: 1d (REQUIRED for this experiment)
-- HTF filter: 1d HMA(50) for trend direction (same TF, different indicator)
-- Entry: Donchian(20) breakout + HMA filter + ADX > 25
+- Primary TF: 15m (frequent signals, more trades than daily)
+- HTF filter: 4h HMA(21) for major trend direction
+- Entry: Supertrend(10,3) flip + RSI(14) pullback confirmation
+- Filter: ADX(14) > 20 for trend strength, volume > SMA(20)
 - Stoploss: 2.5*ATR(14) trailing
-- Position sizing: 0.25 discrete (25% of capital)
-- Regime filter: ADX(14) > 25 (strong trending market only)
-
-Why this should work on 1d:
-- Daily breakouts have higher follow-through than intraday
-- HMA(50) captures multi-week trend direction
-- ADX filter avoids choppy sideways markets
-- Lower trade frequency = less fee churn
+- Position sizing: 0.25-0.30 discrete levels with take-profit scaling
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "donchian_hma_adx_daily_v1"
-timeframe = "1d"
+name = "supertrend_rsi_4h_filter_15m_v2"
+timeframe = "15m"
 leverage = 1.0
 
 
@@ -42,7 +36,7 @@ def calculate_hma(close, period):
 
 
 def calculate_atr(high, low, close, period=14):
-    """Calculate Average True Range"""
+    """Calculate ATR using Wilder's smoothing"""
     n = len(close)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
@@ -50,12 +44,62 @@ def calculate_atr(high, low, close, period=14):
         tr[i] = max(high[i] - low[i],
                     abs(high[i] - close[i-1]),
                     abs(low[i] - close[i-1]))
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    atr = np.zeros(n)
+    atr[period-1] = tr[:period].mean()
+    for i in range(period, n):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
     return atr
 
 
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    hl2 = (high + low) / 2.0
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    supertrend = np.zeros(n)
+    trend = np.ones(n)  # 1 = bullish, -1 = bearish
+    
+    supertrend[0] = upper_band[0]
+    trend[0] = 1
+    
+    for i in range(1, n):
+        if trend[i-1] == 1:
+            if close[i] > lower_band[i]:
+                supertrend[i] = lower_band[i]
+                trend[i] = 1
+            else:
+                supertrend[i] = upper_band[i]
+                trend[i] = -1
+        else:
+            if close[i] < upper_band[i]:
+                supertrend[i] = upper_band[i]
+                trend[i] = -1
+            else:
+                supertrend[i] = lower_band[i]
+                trend[i] = 1
+    
+    return supertrend, trend
+
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI"""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
+
+
 def calculate_adx(high, low, close, period=14):
-    """Calculate Average Directional Index"""
+    """Calculate ADX (Average Directional Index)"""
     n = len(close)
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
@@ -65,135 +109,176 @@ def calculate_adx(high, low, close, period=14):
         tr[i] = max(high[i] - low[i],
                     abs(high[i] - close[i-1]),
                     abs(low[i] - close[i-1]))
-        
         if high[i] - high[i-1] > low[i-1] - low[i]:
-            plus_dm[i] = max(high[i] - high[i-1], 0)
+            plus_dm[i] = max(0, high[i] - high[i-1])
         else:
             plus_dm[i] = 0
-            
         if low[i-1] - low[i] > high[i] - high[i-1]:
-            minus_dm[i] = max(low[i-1] - low[i], 0)
+            minus_dm[i] = max(0, low[i-1] - low[i])
         else:
             minus_dm[i] = 0
     
-    tr_smooth = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=period, min_periods=period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=period, min_periods=period).mean().values
+    # Smooth with Wilder's method
+    atr = np.zeros(n)
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
     
-    plus_di = 100 * plus_dm_smooth / (tr_smooth + 1e-10)
-    minus_di = 100 * minus_dm_smooth / (tr_smooth + 1e-10)
+    atr[period-1] = tr[:period].mean()
+    plus_di[period-1] = 100 * plus_dm[:period].sum() / (atr[period-1] * period + 1e-10)
+    minus_di[period-1] = 100 * minus_dm[:period].sum() / (atr[period-1] * period + 1e-10)
     
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    for i in range(period, n):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+        plus_di[i] = 100 * (plus_dm[i] + (period - 1) * plus_di[i-1] / 100 * atr[i-1]) / (atr[i] * period + 1e-10)
+        minus_di[i] = 100 * (minus_dm[i] + (period - 1) * minus_di[i-1] / 100 * atr[i-1]) / (atr[i] * period + 1e-10)
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
     
     return adx
-
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (upper and lower bands)"""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    
-    for i in range(period-1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    # Fill initial values
-    for i in range(period-1):
-        upper[i] = np.max(high[:i+1])
-        lower[i] = np.min(low[:i+1])
-    
-    return upper, lower
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
+    volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Calculate all indicators ONCE before loop
-    hma = calculate_hma(close, 50)
+    # Load 4h HTF data ONCE before loop (Rule 1)
+    df_4h = get_htf_data(prices, '4h')
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    
+    # Calculate 15m indicators
+    rsi = calculate_rsi(close, 14)
     atr = calculate_atr(high, low, close, 14)
+    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
     adx = calculate_adx(high, low, close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Generate signals
     signals = np.zeros(n)
-    SIZE = 0.25  # Base position size (25% of capital - conservative for daily)
+    BASE_SIZE = 0.28  # Base position size (28% of capital)
+    HALF_SIZE = 0.14  # Half position for take-profit
     
-    # Track position state for stoploss
+    # Track position state for stoploss and take-profit
     position_side = 0  # 0=flat, 1=long, -1=short
+    entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
-    entry_price = 0.0
+    take_profit_hit = False
     
-    min_period = 70  # Wait for HMA(50), ATR(14), ADX(14), Donchian(20) to stabilize
+    min_period = 50  # Wait for indicators to stabilize
     
     for i in range(min_period, n):
-        # Check for NaN or zero in any indicator
-        if (np.isnan(hma[i]) or np.isnan(atr[i]) or np.isnan(adx[i]) or
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            atr[i] == 0 or hma[i] == 0):
+        # Check for NaN in any indicator
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(atr[i]) or np.isnan(supertrend[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_sma[i]) or atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price vs HMA(50)
-        price_above_hma = close[i] > hma[i]
-        price_below_hma = close[i] < hma[i]
+        # 4h trend filter
+        hma_trend = 1 if close[i] > hma_4h_aligned[i] else -1
         
-        # ADX filter: only trade in trending markets (ADX > 25)
-        trending_market = adx[i] > 25
+        # ADX filter - only trade when trend is strong enough
+        adx_valid = adx[i] > 20
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
+        # Volume filter - avoid low volume periods
+        volume_valid = volume[i] > vol_sma[i] * 0.8
+        
+        # Supertrend signal
+        st_signal = st_trend[i]  # 1 = bullish, -1 = bearish
+        
+        # RSI pullback logic
+        rsi_pullback_valid = False
+        if hma_trend == 1 and st_signal == 1:
+            # Uptrend: buy on RSI pullback (RSI dipped but still > 40)
+            rsi_pullback_valid = 40 < rsi[i] < 60
+        elif hma_trend == -1 and st_signal == -1:
+            # Downtrend: sell on RSI rally (RSI rose but still < 60)
+            rsi_pullback_valid = 40 < rsi[i] < 60
         
         # Determine target signal
         target_signal = 0.0
+        if adx_valid and volume_valid and rsi_pullback_valid:
+            if hma_trend == 1 and st_signal == 1:
+                target_signal = BASE_SIZE  # Long
+            elif hma_trend == -1 and st_signal == -1:
+                target_signal = -BASE_SIZE  # Short
         
-        if trending_market:
-            if price_above_hma and breakout_long:
-                target_signal = SIZE  # Long entry
-            elif price_below_hma and breakout_short:
-                target_signal = -SIZE  # Short entry
-        
-        # Stoploss logic - check BEFORE setting new signal
+        # Stoploss and take-profit logic - check BEFORE setting new signal
         stoploss_triggered = False
+        take_profit_triggered = False
+        
         if position_side != 0:
             if position_side == 1:
-                # Long position - update highest since entry
+                # Long position
                 highest_since_entry = max(highest_since_entry, close[i])
                 trailing_stop = highest_since_entry - 2.5 * atr[i]
+                
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
+                
+                # Take profit at 2R
+                if not take_profit_hit:
+                    profit_target = entry_price + 2.0 * 2.5 * atr[i]  # 2R = 2 * stop distance
+                    if close[i] >= profit_target:
+                        take_profit_triggered = True
             else:
-                # Short position - update lowest since entry
+                # Short position
                 lowest_since_entry = min(lowest_since_entry, close[i])
                 trailing_stop = lowest_since_entry + 2.5 * atr[i]
+                
                 if close[i] > trailing_stop:
                     stoploss_triggered = True
+                
+                # Take profit at 2R
+                if not take_profit_hit:
+                    profit_target = entry_price - 2.0 * 2.5 * atr[i]
+                    if close[i] <= profit_target:
+                        take_profit_triggered = True
         
         if stoploss_triggered:
             signals[i] = 0.0
             position_side = 0
+            entry_price = 0.0
             highest_since_entry = 0.0
             lowest_since_entry = float('inf')
-            entry_price = 0.0
+            take_profit_hit = False
+        elif take_profit_triggered:
+            # Reduce to half position
+            signals[i] = HALF_SIZE * position_side
+            take_profit_hit = True
         else:
             # Apply signal change
             if target_signal != 0.0:
-                signals[i] = target_signal
                 if position_side == 0:
                     # New entry
+                    signals[i] = target_signal
                     position_side = 1 if target_signal > 0 else -1
+                    entry_price = close[i]
                     highest_since_entry = close[i]
                     lowest_since_entry = close[i]
+                    take_profit_hit = False
+                elif np.sign(target_signal) == position_side:
+                    # Same direction - maintain or increase
+                    signals[i] = BASE_SIZE * position_side
+                else:
+                    # Reversal - close and open new
+                    signals[i] = target_signal
+                    position_side = 1 if target_signal > 0 else -1
                     entry_price = close[i]
+                    highest_since_entry = close[i]
+                    lowest_since_entry = close[i]
+                    take_profit_hit = False
             elif position_side != 0:
                 # Maintain existing position
-                signals[i] = SIZE * position_side
+                if take_profit_hit:
+                    signals[i] = HALF_SIZE * position_side
+                else:
+                    signals[i] = BASE_SIZE * position_side
             else:
                 signals[i] = 0.0
     
