@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #418: 4h Fisher Transform + Daily HMA Bias + Choppiness Regime + RSI Momentum
-Hypothesis: 4h timeframe captures medium-term swings better than 1d while avoiding 1h noise.
-Fisher Transform identifies reversal points, Daily HMA provides trend bias, Choppiness Index
-filters regime (avoid trend entries in choppy markets). Multiple entry paths ensure >=10 trades.
-Key changes from #408: Faster 4h timeframe for more trades, Choppiness regime filter to avoid
-whipsaws, relaxed entry conditions with 5+ paths for longs and shorts. Target: Beat Sharpe=0.499.
-Timeframe: 4h (REQUIRED), HTF: 1d for trend bias via mtf_data helper.
-Position size: 0.25 discrete, stoploss 2.5*ATR for 4h timeframe.
+Experiment #419: 12h KAMA Adaptive Trend + Daily HMA Bias + RSI Momentum + ATR Stop
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility better than
+fixed EMA/HMA, reducing whipsaw in ranging markets while capturing trends. Combined with
+daily HMA for soft trend bias and wide RSI thresholds (25-75), this should generate
+sufficient trades on 12h timeframe while maintaining positive Sharpe. Key difference from
+failed #407/#413: KAMA instead of Donchian/Supertrend, multiple entry paths, softer filters.
+Timeframe: 12h (REQUIRED), HTF: 1d for trend bias via mtf_data helper.
+Position size: 0.25 discrete, stoploss 2.5*ATR for 12h timeframe.
+Target: Beat Sharpe=0.499 with >=10 trades/symbol on train, >=3 on test.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_fisher_daily_hma_chop_regime_rsi_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_kama_daily_hma_rsi_momentum_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -27,42 +28,43 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_fisher(close, high, low, period=9):
-    """Calculate Ehlers Fisher Transform using high/low for better normalization."""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average.
+    KAMA adapts smoothing based on market efficiency ratio.
+    Fast SC = 2/(fast+1), Slow SC = 2/(slow+1)
+    ER = |close - close[n]| / sum(|close[i] - close[i-1]|)
+    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    """
     n = len(close)
-    fisher = np.zeros(n)
-    fisher[:] = np.nan
-    trigger = np.zeros(n)
-    trigger[:] = np.nan
+    kama = np.zeros(n)
+    kama[:] = np.nan
     
-    smoothed_prev = 0.0
+    # Calculate Efficiency Ratio
+    er = np.zeros(n)
+    er[:] = np.nan
     
-    for i in range(period, n):
-        highest = np.max(high[i-period+1:i+1])
-        lowest = np.min(low[i-period+1:i+1])
-        
-        if highest == lowest:
-            fisher[i] = 0.0
-            if i > period:
-                trigger[i] = fisher[i-1]
-            continue
-        
-        normalized = 2.0 * (close[i] - lowest) / (highest - lowest) - 1.0
-        normalized = np.clip(normalized, -0.99, 0.99)
-        
-        if i == period:
-            smoothed = normalized
+    for i in range(er_period, n):
+        signal = np.abs(close[i] - close[i - er_period])
+        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        if noise > 0:
+            er[i] = signal / noise
         else:
-            smoothed = 0.67 * normalized + 0.33 * smoothed_prev
-        
-        smoothed_prev = smoothed
-        
-        fisher[i] = 0.5 * np.log((1.0 + smoothed) / (1.0 - smoothed))
-        
-        if i > period:
-            trigger[i] = fisher[i-1]
+            er[i] = 0
     
-    return fisher, trigger
+    # Calculate KAMA
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA with SMA of first er_period bars
+    kama[er_period] = np.mean(close[:er_period + 1])
+    
+    for i in range(er_period + 1, n):
+        if np.isnan(er[i]):
+            continue
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -86,37 +88,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_choppiness(high, low, close, period=14):
-    """Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = range/choppy market (mean reversion preferred)
-    CHOP < 38.2 = trending market (trend following preferred)
-    """
-    n = len(close)
-    chop = np.zeros(n)
-    chop[:] = np.nan
-    
-    for i in range(period, n):
-        highest = np.max(high[i-period+1:i+1])
-        lowest = np.min(low[i-period+1:i+1])
-        
-        if highest == lowest:
-            chop[i] = 50.0
-            continue
-        
-        tr_sum = 0.0
-        for j in range(i-period+1, i+1):
-            tr1 = high[j] - low[j]
-            tr2 = abs(high[j] - close[j-1]) if j > 0 else tr1
-            tr3 = abs(low[j] - close[j-1]) if j > 0 else tr1
-            tr_sum += max(tr1, tr2, tr3)
-        
-        if tr_sum > 0:
-            chop[i] = 100 * np.log10((highest - lowest) / tr_sum) / np.log10(period)
-        else:
-            chop[i] = 50.0
-    
-    return chop
-
 def calculate_sma(close, period=50):
     """Calculate Simple Moving Average."""
     return pd.Series(close).rolling(window=period, min_periods=period).mean().values
@@ -136,11 +107,10 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    fisher, trigger = calculate_fisher(close, high, low, 9)
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     rsi = calculate_rsi(close, 14)
-    chop = calculate_choppiness(high, low, close, 14)
     sma50 = calculate_sma(close, 50)
     sma200 = calculate_sma(close, 200)
     
@@ -156,13 +126,13 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):
+    for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(fisher[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(kama[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(sma50[i]) or np.isnan(chop[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(sma50[i]):
             signals[i] = 0.0
             continue
         
@@ -170,86 +140,82 @@ def generate_signals(prices):
         daily_bullish = close[i] > hma_1d_aligned[i]
         daily_bearish = close[i] < hma_1d_aligned[i]
         
-        # Choppiness regime filter
-        choppy_market = chop[i] > 55.0  # Range-bound
-        trending_market = chop[i] < 45.0  # Trending
+        # KAMA trend direction
+        kama_bullish = close[i] > kama[i]
+        kama_bearish = close[i] < kama[i]
         
-        # Fisher Transform signals (reversal detection)
-        fisher_bull_cross = fisher[i] > -1.5 and trigger[i] <= -1.5
-        fisher_bear_cross = fisher[i] < 1.5 and trigger[i] >= 1.5
+        # KAMA slope (momentum)
+        kama_slope_up = kama[i] > kama[i-1] if i > 0 else False
+        kama_slope_down = kama[i] < kama[i-1] if i > 0 else False
         
-        # Fisher extreme levels
-        fisher_oversold = fisher[i] < -1.0
-        fisher_overbought = fisher[i] > 1.0
-        
-        # Fisher turning
-        fisher_turning_up = fisher[i] > fisher[i-1] if i > 0 else False
-        fisher_turning_down = fisher[i] < fisher[i-1] if i > 0 else False
-        
-        # RSI momentum (RELAXED to ensure trades)
-        rsi_ok_long = rsi[i] > 25 and rsi[i] < 85
-        rsi_ok_short = rsi[i] > 15 and rsi[i] < 75
-        
-        # Price position
+        # SMA50 trend filter
         above_sma50 = close[i] > sma50[i]
         below_sma50 = close[i] < sma50[i]
-        above_sma200 = close[i] > sma200[i] if not np.isnan(sma200[i]) else False
-        below_sma200 = close[i] < sma200[i] if not np.isnan(sma200[i]) else False
+        
+        # RSI momentum (WIDE thresholds to ensure trades)
+        rsi_ok_long = rsi[i] > 25 and rsi[i] < 80
+        rsi_ok_short = rsi[i] > 20 and rsi[i] < 75
+        
+        # RSI momentum confirmation
+        rsi_momentum_long = rsi[i] > 40
+        rsi_momentum_short = rsi[i] < 60
+        
+        # RSI turning
+        rsi_turning_up = rsi[i] > rsi[i-1] if i > 0 else False
+        rsi_turning_down = rsi[i] < rsi[i-1] if i > 0 else False
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (5+ paths to ensure >=10 trades) ===
-        # Path 1: Fisher cross + Daily bullish + RSI ok (primary trend follow)
-        if fisher_bull_cross and daily_bullish and rsi_ok_long:
+        # === LONG ENTRIES (multiple paths to ensure >=10 trades) ===
+        # Path 1: KAMA bullish + Daily bullish + RSI ok (primary)
+        if kama_bullish and daily_bullish and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        # Path 2: Fisher oversold + turning up + above SMA50 (pullback entry)
-        elif fisher_oversold and fisher_turning_up and above_sma50 and rsi[i] > 30:
+        # Path 2: KAMA bullish + KAMA slope up + RSI momentum
+        elif kama_bullish and kama_slope_up and rsi_momentum_long and above_sma50:
             new_signal = SIZE_ENTRY
-        # Path 3: Daily bullish + Fisher turning up + RSI momentum
-        elif daily_bullish and fisher_turning_up and rsi[i] > 40:
+        # Path 3: Daily bullish + RSI turning up + above SMA50
+        elif daily_bullish and rsi_turning_up and above_sma50 and rsi[i] > 35:
             new_signal = SIZE_ENTRY
-        # Path 4: Fisher cross + above SMA50 (trend confirmation)
-        elif fisher_bull_cross and above_sma50 and rsi[i] > 35:
+        # Path 4: KAMA slope up + RSI ok (daily neutral ok)
+        elif kama_slope_up and rsi_ok_long and above_sma50:
             new_signal = SIZE_ENTRY
-        # Path 5: Choppy market + Fisher oversold (mean reversion)
-        elif choppy_market and fisher_oversold and rsi[i] > 25:
-            new_signal = SIZE_ENTRY
-        # Path 6: Trending market + Daily bullish + Fisher > -1 (trend continuation)
-        elif trending_market and daily_bullish and fisher[i] > -1.0 and rsi[i] > 45:
+        # Path 5: Simple momentum - price > SMA50 + KAMA > SMA50 + RSI > 45
+        elif above_sma50 and kama[i] > sma50[i] and rsi[i] > 45:
             new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRIES (5+ paths to ensure >=10 trades) ===
-        # Path 1: Fisher cross + Daily bearish + RSI ok (primary trend follow)
-        if fisher_bear_cross and daily_bearish and rsi_ok_short:
+        # === SHORT ENTRIES (multiple paths to ensure >=10 trades) ===
+        # Path 1: KAMA bearish + Daily bearish + RSI ok (primary)
+        if kama_bearish and daily_bearish and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        # Path 2: Fisher overbought + turning down + below SMA50 (pullback entry)
-        elif fisher_overbought and fisher_turning_down and below_sma50 and rsi[i] < 70:
+        # Path 2: KAMA bearish + KAMA slope down + RSI momentum
+        elif kama_bearish and kama_slope_down and rsi_momentum_short and below_sma50:
             new_signal = -SIZE_ENTRY
-        # Path 3: Daily bearish + Fisher turning down + RSI momentum
-        elif daily_bearish and fisher_turning_down and rsi[i] < 60:
+        # Path 3: Daily bearish + RSI turning down + below SMA50
+        elif daily_bearish and rsi_turning_down and below_sma50 and rsi[i] < 65:
             new_signal = -SIZE_ENTRY
-        # Path 4: Fisher cross + below SMA50 (trend confirmation)
-        elif fisher_bear_cross and below_sma50 and rsi[i] < 65:
+        # Path 4: KAMA slope down + RSI ok (daily neutral ok)
+        elif kama_slope_down and rsi_ok_short and below_sma50:
             new_signal = -SIZE_ENTRY
-        # Path 5: Choppy market + Fisher overbought (mean reversion)
-        elif choppy_market and fisher_overbought and rsi[i] < 75:
-            new_signal = -SIZE_ENTRY
-        # Path 6: Trending market + Daily bearish + Fisher < 1 (trend continuation)
-        elif trending_market and daily_bearish and fisher[i] < 1.0 and rsi[i] < 55:
+        # Path 5: Simple momentum - price < SMA50 + KAMA < SMA50 + RSI < 55
+        elif below_sma50 and kama[i] < sma50[i] and rsi[i] < 55:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
+            # Update highest close for trailing
             if close[i] > highest_close:
                 highest_close = close[i]
             
+            # Calculate trailing stop (2.5*ATR from highest for 12h timeframe)
             current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
+            # Check stoploss hit
             if close[i] < trailing_stop:
                 new_signal = 0.0
             elif not position_reduced:
+                # Take profit at 2R
                 risk = 2.5 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
@@ -257,16 +223,20 @@ def generate_signals(prices):
                     position_reduced = True
         
         if position_side < 0 and entry_price > 0:
+            # Update lowest close for trailing
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
+            # Calculate trailing stop (2.5*ATR from lowest for 12h timeframe)
             current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
+            # Check stoploss hit
             if close[i] > trailing_stop:
                 new_signal = 0.0
             elif not position_reduced:
+                # Take profit at 2R
                 risk = 2.5 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
@@ -276,6 +246,7 @@ def generate_signals(prices):
         # Update position tracking AFTER signal calculation
         prev_signal = signals[i-1] if i > 0 else 0.0
         
+        # New position opened
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
@@ -284,6 +255,7 @@ def generate_signals(prices):
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
         
+        # Position reversed
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
@@ -292,9 +264,11 @@ def generate_signals(prices):
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
         
+        # Position reduced (take profit)
         elif new_signal != 0.0 and prev_signal != 0.0 and np.abs(new_signal) < np.abs(prev_signal):
             position_reduced = True
         
+        # Position closed
         elif new_signal == 0.0 and prev_signal != 0.0:
             position_side = 0
             entry_price = 0.0
