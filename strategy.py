@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #267: 1h Trend Pullback with 4h HMA Filter + ROC Momentum
-Hypothesis: 1h timeframe with 4h HMA trend filter captures intermediate trends better than 
-daily filters. ROC(10) momentum confirms direction, RSI(14) pullback entries reduce whipsaw.
-Simple logic: enter on pullback in direction of 4h trend, exit on momentum reversal or ATR stop.
-This differs from failed experiments by using fewer filters (no ADX, no CHOP, no complex regime).
-Position sizing: 0.25 entry, 0.12 half at 2R profit. Stoploss: 2.5*ATR trailing.
-Target: Beat Sharpe=0.499 with simpler, more robust logic that generates 20+ trades/year.
+Experiment #268: 4h Fisher Transform + Daily HMA Trend + ADX Momentum Filter
+Hypothesis: Fisher Transform excels at identifying reversal points in bear/range markets
+(2022 crash, 2025 sideways). Combined with Daily HMA for trend bias and ADX to filter
+low-momentum periods, this should generate trades during both trending and ranging phases.
+Unlike previous failed 4h strategies, this uses simpler entry conditions to ensure
+sufficient trade frequency. Fisher crosses -1.5 for long, +1.5 for short. Position
+sizing: 0.25 entry, 0.125 half at 2R. Stoploss: 2.5*ATR trailing. Target: Beat Sharpe=0.499.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_trend_pullback_4h_hma_roc_rsi_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_fisher_daily_hma_adx_momentum_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -36,12 +36,54 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_roc(close, period=10):
-    """Calculate Rate of Change momentum indicator."""
+def calculate_fisher(close, period=9):
+    """
+    Ehlers Fisher Transform - identifies turning points.
+    Formula: Fisher = 0.5 * ln((1+X)/(1-X)) where X = 0.67 * (price - lowest)/(highest - lowest) + 0.33
+    """
     close_s = pd.Series(close)
-    roc = close_s.pct_change(periods=period) * 100
-    roc = roc.fillna(0).values
-    return roc
+    highest = close_s.rolling(window=period, min_periods=period).max().values
+    lowest = close_s.rolling(window=period, min_periods=period).min().values
+    
+    # Normalize price to -1 to +1 range
+    range_val = highest - lowest
+    range_val = np.where(range_val == 0, 1e-10, range_val)  # avoid division by zero
+    x = 0.67 * (close - lowest) / range_val + 0.33
+    x = np.clip(x, -0.999, 0.999)  # ensure valid ln input
+    
+    fisher = 0.5 * np.log((1 + x) / (1 - x))
+    fisher = pd.Series(fisher).ewm(span=3, min_periods=3, adjust=False).mean().values
+    
+    return fisher
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    # True Range
+    tr1 = high_s - low_s
+    tr2 = (high_s - close_s.shift(1)).abs()
+    tr3 = (low_s - close_s.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    
+    # Smoothed values
+    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean() / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-10)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx, plus_di.values, minus_di.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -55,12 +97,6 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_ema(close, period=21):
-    """Calculate Exponential Moving Average."""
-    close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    return ema.values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -68,30 +104,34 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
+    fisher = calculate_fisher(close, 9)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    roc = calculate_roc(close, 10)
-    ema_21 = calculate_ema(close, 21)
-    ema_50 = calculate_ema(close, 50)
     
-    # Track previous values for momentum detection
-    prev_roc = np.roll(roc, 1)
-    prev_roc[0] = roc[0]
-    prev_rsi = np.roll(rsi, 1)
-    prev_rsi[0] = rsi[0]
+    # Track previous values for crossover detection
+    prev_fisher = np.roll(fisher, 1)
+    prev_fisher[0] = fisher[0]
+    prev_plus_di = np.roll(plus_di, 1)
+    prev_plus_di[0] = plus_di[0]
+    prev_minus_di = np.roll(minus_di, 1)
+    prev_minus_di[0] = minus_di[0]
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.12
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -102,55 +142,63 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # 4h trend filter (primary bias)
-        trend_bullish = close[i] > hma_4h_aligned[i]
-        trend_bearish = close[i] < hma_4h_aligned[i]
+        # HTF trend filters
+        daily_bullish = close[i] > hma_1d_aligned[i]
+        daily_bearish = close[i] < hma_1d_aligned[i]
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # ROC momentum (simplified - just sign and magnitude)
-        roc_positive = roc[i] > 0.5
-        roc_negative = roc[i] < -0.5
-        roc_strong_long = roc[i] > 2.0
-        roc_strong_short = roc[i] < -2.0
+        # Fisher Transform signals (reversal detection)
+        fisher_cross_up = prev_fisher[i] <= -1.5 and fisher[i] > -1.5
+        fisher_cross_down = prev_fisher[i] >= 1.5 and fisher[i] < 1.5
+        fisher_oversold = fisher[i] < -1.0
+        fisher_overbought = fisher[i] > 1.0
         
-        # RSI pullback zones (wider ranges to ensure trades)
-        rsi_oversold = rsi[i] < 45
-        rsi_overbought = rsi[i] > 55
-        rsi_neutral = 35 < rsi[i] < 65
+        # ADX momentum filter (only trade when trend exists)
+        adx_strong = adx[i] > 20  # minimum trend strength
+        di_bullish = plus_di[i] > minus_di[i]
+        di_bearish = minus_di[i] > plus_di[i]
         
-        # EMA trend confirmation
-        ema_bullish = ema_21[i] > ema_50[i]
-        ema_bearish = ema_21[i] < ema_50[i]
-        
-        # RSI momentum shift
-        rsi_rising = rsi[i] > prev_rsi[i]
-        rsi_falling = rsi[i] < prev_rsi[i]
+        # RSI confirmation (loose filter to ensure trades)
+        rsi_bullish = rsi[i] > 35
+        rsi_bearish = rsi[i] < 65
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Pullback entry in uptrend (primary signal)
-        if trend_bullish and ema_bullish:
-            # RSI pullback with ROC confirmation
-            if rsi_oversold and roc_positive:
+        # Fisher cross up from oversold with trend confirmation
+        if fisher_cross_up:
+            if daily_bullish and adx_strong and rsi_bullish:
                 new_signal = SIZE_ENTRY
-            # ROC momentum surge in uptrend
-            elif roc_strong_long and rsi_neutral:
+            elif weekly_bullish and di_bullish:
                 new_signal = SIZE_ENTRY
-            # RSI turning up from oversold
-            elif rsi[i] < 40 and rsi_rising and trend_bullish:
+        
+        # Fisher oversold bounce in uptrend
+        elif fisher_oversold and daily_bullish:
+            if fisher[i] > prev_fisher[i] and adx_strong:
+                new_signal = SIZE_ENTRY
+        
+        # DI crossover with Fisher confirmation
+        elif di_bullish and prev_plus_di[i] <= prev_minus_di[i]:
+            if daily_bullish and fisher[i] > -1.0:
                 new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Pullback entry in downtrend (primary signal)
-        if trend_bearish and ema_bearish:
-            # RSI pullback with ROC confirmation
-            if rsi_overbought and roc_negative:
+        # Fisher cross down from overbought with trend confirmation
+        if fisher_cross_down:
+            if daily_bearish and adx_strong and rsi_bearish:
                 new_signal = -SIZE_ENTRY
-            # ROC momentum surge in downtrend
-            elif roc_strong_short and rsi_neutral:
+            elif weekly_bearish and di_bearish:
                 new_signal = -SIZE_ENTRY
-            # RSI turning down from overbought
-            elif rsi[i] > 60 and rsi_falling and trend_bearish:
+        
+        # Fisher overbought rejection in downtrend
+        elif fisher_overbought and daily_bearish:
+            if fisher[i] < prev_fisher[i] and adx_strong:
+                new_signal = -SIZE_ENTRY
+        
+        # DI crossover with Fisher confirmation
+        elif di_bearish and prev_minus_di[i] <= prev_plus_di[i]:
+            if daily_bearish and fisher[i] < 1.0:
                 new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
