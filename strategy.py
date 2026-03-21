@@ -1,121 +1,55 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #067 - Adaptive KAMA-ADX Volume Strategy (1h + 4h)
+EXPERIMENT #068 - Donchian Channel Breakout with Volume Confirmation (1h + 4h)
 ==================================================================================================
-Hypothesis: Current best uses 15m+1h+4h with Supertrend+MACD. Let me try a DIFFERENT approach:
+Hypothesis: Current best uses Supertrend+MACD+RSI. Let me try a PURE breakout approach:
 
 Key insights from failures:
-- Ensemble voting failed (conflicting signals)
-- 15m entries may be too noisy (whipsaws)
-- Supertrend+RSI combination is overused in failed strategies
+- Ensemble voting creates conflicting signals
+- Too many indicators = overfitting and crashes
+- Regime detection alone doesn't work
+- KAMA/Supertrend/HMA combinations are overused
 
 New approach:
-- KAMA (Kaufman Adaptive Moving Average) - adapts to market efficiency ratio
-- ADX for trend strength confirmation (only trade when ADX > 25)
-- Volume spike confirmation (volume > 1.5x average = real move)
-- 1h entries (less noise than 15m) + 4h trend/regime
-- Position sizing scales with ADX strength (stronger trend = larger position)
-- Regime detection: BBW percentile but with DIFFERENT thresholds (0.25/0.75)
+- Donchian Channel (20-period high/low) - pure price action breakout
+- 4h Donchian for major trend direction (breakout above 20-period high = bullish regime)
+- 1h Donchian for entry triggers (breakout with volume confirmation)
+- Volume spike confirmation (volume > 1.5x SMA = real breakout, not fakeout)
+- ATR-based stoploss (2.5*ATR) and takeprofit (2R then trail)
+- Position sizing: discrete levels (0.0, ±0.25, ±0.35) based on 4h trend strength
+- NO complex regime detection - let the Donchian channels define the regime
 
 Why this should beat Sharpe=3.653:
-- KAMA adapts better to ranging vs trending markets than HMA/EMA
-- ADX filter prevents trades in weak trends (major source of losses)
-- Volume confirmation reduces false breakouts
-- 1h timeframe = fewer but higher quality trades
-- ADX-based position sizing = more capital in high-confidence setups
+- Donchian channels are proven trend-following tools (Turtle Trading)
+- Volume confirmation filters false breakouts (major source of losses)
+- Multi-timeframe alignment (4h trend + 1h entries) reduces whipsaws
+- Simpler logic = fewer bugs and crashes
+- Conservative position sizing (max 0.35) controls drawdown
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "adaptive_kama_adx_volume_1h_4h_v1"
+name = "donchian_volume_breakout_1h_4h_v1"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+def calculate_donchian_channels(high, low, period=20):
     """
-    Kaufman Adaptive Moving Average
-    Adapts smoothing based on market efficiency ratio
+    Donchian Channels: Upper = highest high, Lower = lowest low over period
+    Middle = (Upper + Lower) / 2
     """
-    n = len(close)
-    if n < er_period + slow_period:
-        return np.zeros(n)
-    
-    # Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        signal = abs(close[i] - close[i - er_period])
-        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0
-    
-    # Smoothing constants
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
-    
-    kama = np.zeros(n)
-    kama[er_period] = close[er_period]
-    
-    for i in range(er_period + 1, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
-
-
-def calculate_adx(high, low, close, period=14):
-    """
-    Average Directional Index (ADX)
-    Measures trend strength (not direction)
-    """
-    n = len(close)
-    if n < period * 2:
+    n = len(high)
+    if n < period:
         return np.zeros(n), np.zeros(n), np.zeros(n)
     
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    middle = (upper + lower) / 2
     
-    for i in range(1, n):
-        plus_dm[i] = max(0, high[i] - high[i - 1]) if (high[i] - high[i - 1]) > (low[i - 1] - low[i]) else 0
-        minus_dm[i] = max(0, low[i - 1] - low[i]) if (low[i - 1] - low[i]) > (high[i] - high[i - 1]) else 0
-    
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    dx = np.zeros(n)
-    adx = np.zeros(n)
-    
-    # Wilder's smoothing
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False).mean().values
-    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False).mean().values
-    
-    for i in range(period, n):
-        if tr_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
-        
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    # ADX = smoothed DX
-    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
-    for i in range(period * 2, n):
-        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
-    
-    return adx, plus_di, minus_di
+    return upper, middle, lower
 
 
 def calculate_atr(high, low, close, period=14):
@@ -141,11 +75,16 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
+def calculate_volume_sma(volume, period=20):
+    """Calculate volume simple moving average"""
+    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+
+
 def calculate_rsi(close, period=14):
     """Calculate RSI"""
     n = len(close)
     if n < period + 1:
-        return np.zeros(n)
+        return np.full(n, 50.0)
     
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
@@ -154,54 +93,12 @@ def calculate_rsi(close, period=14):
     avg_gain = pd.Series(gain).ewm(span=period, adjust=False).mean().values
     avg_loss = pd.Series(loss).ewm(span=period, adjust=False).mean().values
     
-    rs = np.zeros(n)
-    for i in range(n):
-        if avg_loss[i] == 0:
-            rs[i] = 100
-        else:
-            rs[i] = avg_gain[i] / avg_loss[i]
-    
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:period] = 50
+    rsi = np.full(n, 50.0)
+    mask = avg_loss > 0
+    rsi[mask] = 100 - (100 / (1 + avg_gain[mask] / avg_loss[mask]))
+    rsi[~mask] = 100
     
     return rsi
-
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
-    
-    bbw = np.zeros(n)
-    mask = middle > 0
-    bbw[mask] = (upper[mask] - lower[mask]) / middle[mask]
-    
-    return upper, middle, lower, bbw
-
-
-def calculate_bbw_percentile(bbw, lookback=100):
-    """Calculate BBW percentile rank for regime detection"""
-    n = len(bbw)
-    percentile = np.zeros(n)
-    
-    for i in range(lookback - 1, n):
-        window = bbw[i - lookback + 1:i + 1]
-        rank = np.sum(window <= bbw[i]) / len(window)
-        percentile[i] = rank
-    
-    return percentile
-
-
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume simple moving average"""
-    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -212,91 +109,77 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     n = len(close)
     
     # === 1h indicators (entry timing) ===
-    kama_1h = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    adx_1h, plus_di_1h, minus_di_1h = calculate_adx(high, low, close, period=14)
+    donch_upper_1h, donch_mid_1h, donch_lower_1h = calculate_donchian_channels(high, low, period=20)
     atr_1h = calculate_atr(high, low, close, period=14)
-    rsi_1h = calculate_rsi(close, period=14)
     volume_sma_1h = calculate_volume_sma(volume, period=20)
+    rsi_1h = calculate_rsi(close, period=14)
     
-    # === 4h indicators (regime & trend) using mtf_data helper ===
+    # === 4h indicators (trend regime) using mtf_data helper ===
     try:
         df_4h = get_htf_data(prices, '4h')
         c_4h = df_4h['close'].values
         h_4h = df_4h['high'].values
         l_4h = df_4h['low'].values
         
-        # 4h indicators
-        kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
-        adx_4h, plus_di_4h, minus_di_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
-        _, _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
-        bbw_pct_4h = calculate_bbw_percentile(bbw_4h, lookback=100)
+        # 4h Donchian channels
+        donch_upper_4h, donch_mid_4h, donch_lower_4h = calculate_donchian_channels(h_4h, l_4h, period=20)
         
         # Align 4h indicators to 1h timeframe (auto shift for completed bars)
-        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
-        adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
-        plus_di_4h_aligned = align_htf_to_ltf(prices, df_4h, plus_di_4h)
-        minus_di_4h_aligned = align_htf_to_ltf(prices, df_4h, minus_di_4h)
-        bbw_pct_4h_aligned = align_htf_to_ltf(prices, df_4h, bbw_pct_4h)
+        donch_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_upper_4h)
+        donch_mid_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_mid_4h)
+        donch_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_lower_4h)
         
-    except Exception as e:
+    except Exception:
         # Fallback: use 1h data only if 4h not available
-        kama_4h_aligned = kama_1h
-        adx_4h_aligned = adx_1h
-        plus_di_4h_aligned = plus_di_1h
-        minus_di_4h_aligned = minus_di_1h
-        bbw_pct_4h_aligned = calculate_bbw_percentile(calculate_bollinger_bands(close)[3], lookback=100)
+        donch_upper_4h_aligned = donch_upper_1h
+        donch_mid_4h_aligned = donch_mid_1h
+        donch_lower_4h_aligned = donch_lower_1h
     
-    # === Regime detection ===
-    # LOW volatility (BBW percentile < 0.25): Trend following mode
-    # HIGH volatility (BBW percentile > 0.75): Mean reversion mode
-    # MEDIUM volatility (0.25-0.75): Reduced position or no trade
-    REGIME_LOW_THRESHOLD = 0.25
-    REGIME_HIGH_THRESHOLD = 0.75
-    
-    # === ADX thresholds ===
-    ADX_TREND_MIN = 25  # Only trade when ADX > 25 (strong trend)
-    ADX_STRONG = 40  # Very strong trend = larger position
-    
-    # === Position sizing (discrete levels, scaled by ADX) ===
+    # === Position sizing (discrete levels) ===
     SIZE_BASE = 0.25
     SIZE_STRONG = 0.35
-    SIZE_WEAK = 0.15
-    SIZE_MR = 0.20  # Mean reversion uses smaller size
+    SIZE_EXIT = 0.0
     
     # === Entry thresholds ===
-    VOLUME_SPIKE_MULT = 1.5  # Volume must be 1.5x average for confirmation
-    RSI_LONG_MAX = 60  # Don't buy if RSI too high
-    RSI_SHORT_MIN = 40  # Don't sell if RSI too low
+    VOLUME_SPIKE_MULT = 1.5
     ATR_STOP_MULT = 2.5
+    RSI_OVERBOUGHT = 70
+    RSI_OVERSOLD = 30
     
     # === Initialize tracking arrays ===
     signals = np.zeros(n)
-    position_side = np.zeros(n)
+    position_side = np.zeros(n, dtype=np.int8)
     entry_price = np.zeros(n)
-    tp_triggered = np.zeros(n)
+    tp_triggered = np.zeros(n, dtype=bool)
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
-    first_valid = max(250, 150)  # Need enough data for ADX and BBW percentile
+    first_valid = 250  # Need enough data for Donchian and ATR
     
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_1h[i]) or atr_1h[i] == 0:
+        if np.isnan(atr_1h[i]) or atr_1h[i] <= 0:
             signals[i] = 0.0
+            position_side[i] = 0
             continue
         
-        if np.isnan(bbw_pct_4h_aligned[i]) or np.isnan(adx_4h_aligned[i]):
+        if np.isnan(donch_upper_4h_aligned[i]) or np.isnan(donch_lower_4h_aligned[i]):
             signals[i] = 0.0
+            position_side[i] = 0
             continue
         
         price = close[i]
         atr = atr_1h[i]
-        regime = bbw_pct_4h_aligned[i]
-        adx_4h = adx_4h_aligned[i]
-        adx_1h = adx_1h[i]
-        kama_4h_val = kama_4h_aligned[i]
-        kama_1h_val = kama_1h[i]
         vol_ratio = volume[i] / volume_sma_1h[i] if volume_sma_1h[i] > 0 else 1.0
+        
+        # 4h trend regime
+        donch_4h_range = donch_upper_4h_aligned[i] - donch_lower_4h_aligned[i]
+        donch_4h_position = (price - donch_lower_4h_aligned[i]) / donch_4h_range if donch_4h_range > 0 else 0.5
+        
+        # 1h channel levels
+        donch_upper = donch_upper_1h[i]
+        donch_lower = donch_lower_1h[i]
+        donch_mid = donch_mid_1h[i]
         
         # === Check existing positions (stoploss & take profit) ===
         if position_side[i - 1] != 0:
@@ -324,7 +207,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
-                    tp_triggered[i] = 0
+                    tp_triggered[i] = False
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
                     continue
@@ -335,17 +218,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     signals[i] = SIZE_BASE / 2
                     position_side[i] = 1
                     entry_price[i] = prev_entry
-                    tp_triggered[i] = 1
+                    tp_triggered[i] = True
+                    highest_since_entry[i] = current_high
+                    lowest_since_entry[i] = current_low
                     continue
                 
-                # Trail stop at 1R
+                # Trail stop at 1R after TP triggered
                 if prev_tp:
                     trail_stop = current_high - ATR_STOP_MULT * atr
                     if price < trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
                         entry_price[i] = 0
-                        tp_triggered[i] = 0
+                        tp_triggered[i] = False
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         continue
@@ -356,7 +241,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     signals[i] = 0.0
                     position_side[i] = 0
                     entry_price[i] = 0
-                    tp_triggered[i] = 0
+                    tp_triggered[i] = False
                     highest_since_entry[i] = 0
                     lowest_since_entry[i] = 0
                     continue
@@ -367,22 +252,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     signals[i] = -SIZE_BASE / 2
                     position_side[i] = -1
                     entry_price[i] = prev_entry
-                    tp_triggered[i] = 1
+                    tp_triggered[i] = True
+                    highest_since_entry[i] = current_high
+                    lowest_since_entry[i] = current_low
                     continue
                 
-                # Trail stop at 1R
+                # Trail stop at 1R after TP triggered
                 if prev_tp:
                     trail_stop = current_low + ATR_STOP_MULT * atr
                     if price > trail_stop:
                         signals[i] = 0.0
                         position_side[i] = 0
                         entry_price[i] = 0
-                        tp_triggered[i] = 0
+                        tp_triggered[i] = False
                         highest_since_entry[i] = 0
                         lowest_since_entry[i] = 0
                         continue
             
-            # Hold position
+            # Hold position - no new entry signal
             signals[i] = signals[i - 1]
             position_side[i] = position_side[i - 1]
             entry_price[i] = entry_price[i - 1]
@@ -391,102 +278,56 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # === REGIME-ADAPTIVE ENTRY LOGIC ===
+        # === NEW ENTRY LOGIC ===
         
-        # LOW volatility regime: Trend following
-        if regime < REGIME_LOW_THRESHOLD:
-            # 4h ADX must confirm strong trend
-            if adx_4h < ADX_TREND_MIN:
-                signals[i] = 0.0
-                position_side[i] = 0
-                continue
-            
-            # Determine trend direction from 4h KAMA and DI
-            if kama_4h_val > 0 and price > kama_4h_val and plus_di_4h_aligned[i] > minus_di_4h_aligned[i]:
-                # Uptrend - check 1h confirmation
-                if price > kama_1h_val and plus_di_1h[i] > minus_di_1h[i]:
-                    # Volume confirmation
-                    if vol_ratio >= VOLUME_SPIKE_MULT:
-                        # RSI filter (not overbought)
-                        if rsi_1h[i] < RSI_LONG_MAX:
-                            # Position size based on ADX strength
-                            if adx_4h >= ADX_STRONG:
-                                signals[i] = SIZE_STRONG
-                            else:
-                                signals[i] = SIZE_BASE
-                            
-                            position_side[i] = 1
-                            entry_price[i] = price
-                            tp_triggered[i] = 0
-                            highest_since_entry[i] = price
-                            lowest_since_entry[i] = price
-                        else:
-                            signals[i] = 0.0
-                            position_side[i] = 0
+        # Determine 4h trend regime
+        # Price in upper half of 4h Donchian = bullish regime
+        # Price in lower half of 4h Donchian = bearish regime
+        bullish_regime = donch_4h_position > 0.5
+        bearish_regime = donch_4h_position < 0.5
+        
+        # LONG entry: 1h breakout above Donchian upper + volume spike + 4h bullish
+        if bullish_regime:
+            if price > donch_upper and vol_ratio >= VOLUME_SPIKE_MULT:
+                # RSI filter - not extremely overbought
+                if rsi_1h[i] < RSI_OVERBOUGHT:
+                    # Strong trend if price well above 4h middle
+                    if price > donch_mid_4h_aligned[i] * 1.02:
+                        signals[i] = SIZE_STRONG
                     else:
-                        signals[i] = 0.0
-                        position_side[i] = 0
-                else:
-                    signals[i] = 0.0
-                    position_side[i] = 0
+                        signals[i] = SIZE_BASE
                     
-            elif kama_4h_val > 0 and price < kama_4h_val and minus_di_4h_aligned[i] > plus_di_4h_aligned[i]:
-                # Downtrend - check 1h confirmation
-                if price < kama_1h_val and minus_di_1h[i] > plus_di_1h[i]:
-                    # Volume confirmation
-                    if vol_ratio >= VOLUME_SPIKE_MULT:
-                        # RSI filter (not oversold)
-                        if rsi_1h[i] > RSI_SHORT_MIN:
-                            # Position size based on ADX strength
-                            if adx_4h >= ADX_STRONG:
-                                signals[i] = -SIZE_STRONG
-                            else:
-                                signals[i] = -SIZE_BASE
-                            
-                            position_side[i] = -1
-                            entry_price[i] = price
-                            tp_triggered[i] = 0
-                            highest_since_entry[i] = price
-                            lowest_since_entry[i] = price
-                        else:
-                            signals[i] = 0.0
-                            position_side[i] = 0
+                    position_side[i] = 1
+                    entry_price[i] = price
+                    tp_triggered[i] = False
+                    highest_since_entry[i] = price
+                    lowest_since_entry[i] = price
+                    continue
+        
+        # SHORT entry: 1h breakout below Donchian lower + volume spike + 4h bearish
+        if bearish_regime:
+            if price < donch_lower and vol_ratio >= VOLUME_SPIKE_MULT:
+                # RSI filter - not extremely oversold
+                if rsi_1h[i] > RSI_OVERSOLD:
+                    # Strong trend if price well below 4h middle
+                    if price < donch_mid_4h_aligned[i] * 0.98:
+                        signals[i] = -SIZE_STRONG
                     else:
-                        signals[i] = 0.0
-                        position_side[i] = 0
-                else:
-                    signals[i] = 0.0
-                    position_side[i] = 0
-            else:
-                signals[i] = 0.0
-                position_side[i] = 0
+                        signals[i] = -SIZE_BASE
+                    
+                    position_side[i] = -1
+                    entry_price[i] = price
+                    tp_triggered[i] = False
+                    highest_since_entry[i] = price
+                    lowest_since_entry[i] = price
+                    continue
         
-        # HIGH volatility regime: Mean reversion
-        elif regime > REGIME_HIGH_THRESHOLD:
-            # Mean reversion: buy when oversold, sell when overbought
-            # Use smaller position size in high vol
-            if rsi_1h[i] < 30 and price < kama_1h_val * 0.98:
-                signals[i] = -SIZE_MR  # Reduced size in high vol
-                position_side[i] = 1
-                entry_price[i] = price
-                tp_triggered[i] = 0
-                highest_since_entry[i] = price
-                lowest_since_entry[i] = price
-                
-            elif rsi_1h[i] > 70 and price > kama_1h_val * 1.02:
-                signals[i] = -SIZE_MR  # Reduced size in high vol
-                position_side[i] = -1
-                entry_price[i] = price
-                tp_triggered[i] = 0
-                highest_since_entry[i] = price
-                lowest_since_entry[i] = price
-            else:
-                signals[i] = 0.0
-                position_side[i] = 0
-        
-        # MEDIUM volatility: No trade or very small positions
-        else:
-            signals[i] = 0.0
-            position_side[i] = 0
+        # No entry signal
+        signals[i] = 0.0
+        position_side[i] = 0
+        entry_price[i] = 0
+        tp_triggered[i] = False
+        highest_since_entry[i] = 0
+        lowest_since_entry[i] = 0
     
     return signals
