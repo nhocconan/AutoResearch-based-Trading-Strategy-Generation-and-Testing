@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #371: 12h KAMA Adaptive Crossover + Daily HMA Trend + Choppiness Regime + ATR Stop
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market efficiency - fast during trends,
-slow during ranges. This should reduce whipsaws compared to fixed EMA/HMA. 12h timeframe captures
-medium-term moves with fewer false signals than 4h. Daily HMA provides trend bias filter.
-Choppiness Index (CHOP) detects regime: CHOP>61.8 = range (avoid trend trades), CHOP<38.2 = trend.
-RSI(14) with loose thresholds (30-70) ensures minimum trade frequency. ATR(14) stoploss at 2.5x.
-Timeframe: 12h (REQUIRED), HTF: 1d for trend bias via mtf_data helper.
-Target: Beat Sharpe=0.499 with 40-80 trades total across train+test.
-Key insight: KAMA's adaptive nature should outperform fixed MA in crypto's varying volatility regimes.
-Build on #359 by replacing Donchian with KAMA crossover + CHOP regime filter.
+Experiment #372: 1d Donchian Breakout + Weekly HMA Trend + Choppiness Regime + ATR Stop
+Hypothesis: Donchian Channel breakouts (20-period) are proven trend-following signals that work
+well on daily timeframes for crypto. Weekly HMA provides higher-timeframe trend bias.
+Choppiness Index filters out ranging markets where breakouts fail. RSI confirms momentum.
+This combines Turtle Trading breakout logic with modern regime detection.
+Timeframe: 1d (REQUIRED), HTF: 1w for trend bias via mtf_data helper.
+Target: Beat Sharpe=0.499 with 20-50 trades total (daily = fewer but higher quality signals).
+Key insight: Daily breakouts with weekly trend filter should capture major moves while avoiding
+whipsaws in ranging markets. Loose RSI thresholds ensure minimum trade frequency.
+Position sizing: 0.25 entry, 0.125 half (take profit), stoploss at 2.5*ATR.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_daily_hma_chop_regime_rsi_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_weekly_hma_chop_regime_rsi_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -28,56 +28,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_kama(close, fast_period=2, slow_period=30, efficiency_period=10):
-    """
-    Calculate Kaufman Adaptive Moving Average.
-    KAMA adapts speed based on market efficiency (trend vs noise).
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    
-    # Calculate price change and noise
-    price_change = np.abs(close - np.roll(close, efficiency_period))
-    price_change[:efficiency_period] = np.abs(close[:efficiency_period] - close[0])
-    
-    noise = np.zeros(n)
-    for i in range(1, n):
-        noise[i] = np.abs(close[i] - close[i-1])
-    
-    # Sum of noise over efficiency period
-    noise_sum = np.zeros(n)
-    for i in range(efficiency_period, n):
-        noise_sum[i] = np.sum(noise[i-efficiency_period+1:i+1])
-    noise_sum[:efficiency_period] = noise_sum[efficiency_period]
-    
-    # Efficiency Ratio (ER)
-    er = np.zeros(n)
-    mask = noise_sum > 0
-    er[mask] = price_change[mask] / noise_sum[mask]
-    er = np.clip(er, 0, 1)
-    
-    # Smoothing constants
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for faster trend response."""
-    close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -91,11 +41,21 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average for faster trend response."""
+    close_s = pd.Series(close)
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
+
 def calculate_choppiness(high, low, close, period=14):
     """
     Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market
-    CHOP < 38.2 = trending market
+    CHOP > 61.8 = ranging market (avoid breakouts)
+    CHOP < 38.2 = trending market (favor breakouts)
     """
     n = len(close)
     chop = np.zeros(n)
@@ -119,6 +79,21 @@ def calculate_choppiness(high, low, close, period=14):
     chop[:period] = 50.0
     return chop
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel upper and lower bands."""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(period, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    upper[:period] = upper[period]
+    lower[:period] = lower[period]
+    
+    return upper, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -126,26 +101,26 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     chop = calculate_choppiness(high, low, close, 14)
+    donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # KAMA fast and slow
-    kama_fast = calculate_kama(close, fast_period=2, slow_period=10, efficiency_period=10)
-    kama_slow = calculate_kama(close, fast_period=2, slow_period=30, efficiency_period=10)
+    # Donchian middle line
+    donch_mid = (donch_upper + donch_lower) / 2
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -161,62 +136,68 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
             signals[i] = 0.0
             continue
         
-        # Daily trend bias
-        daily_bullish = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
-        daily_bearish = not np.isnan(hma_1d_aligned[i]) and close[i] < hma_1d_aligned[i]
+        # Weekly trend bias
+        weekly_bullish = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
+        weekly_bearish = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
         
         # Choppiness regime filter
-        is_trending = chop[i] < 50  # Loose filter to allow more trades
-        is_ranging = chop[i] >= 50
+        is_trending = chop[i] < 55  # Loose filter to allow more trades
+        is_ranging = chop[i] >= 55
         
-        # KAMA crossover signals
-        kama_cross_long = kama_fast[i] > kama_slow[i] and kama_fast[i-1] <= kama_slow[i-1]
-        kama_cross_short = kama_fast[i] < kama_slow[i] and kama_fast[i-1] >= kama_slow[i-1]
+        # Donchian breakout signals
+        breakout_long = close[i] > donch_upper[i-1]  # Break above previous upper
+        breakout_short = close[i] < donch_lower[i-1]  # Break below previous lower
         
-        # KAMA position (already crossed)
-        kama_bullish = kama_fast[i] > kama_slow[i]
-        kama_bearish = kama_fast[i] < kama_slow[i]
+        # Donchian position (already broken out)
+        donch_bullish = close[i] > donch_mid[i]
+        donch_bearish = close[i] < donch_mid[i]
         
-        # RSI filter (LOOSE to ensure trade frequency)
+        # RSI filter (LOOSE to ensure trade frequency on daily)
         rsi_ok_long = rsi[i] > 30  # Not deeply oversold
         rsi_ok_short = rsi[i] < 70  # Not deeply overbought
         
         # RSI momentum confirmation
-        rsi_momentum_long = rsi[i] > 40 and rsi[i] < 75
-        rsi_momentum_short = rsi[i] > 25 and rsi[i] < 60
+        rsi_momentum_long = rsi[i] > 35 and rsi[i] < 80
+        rsi_momentum_short = rsi[i] > 20 and rsi[i] < 65
         
         new_signal = 0.0
         
         # === LONG ENTRIES ===
-        # Primary: KAMA cross long + Daily bullish + Trending + RSI ok
-        if kama_cross_long and daily_bullish and is_trending and rsi_ok_long:
+        # Primary: Donchian breakout long + Weekly bullish + Trending + RSI ok
+        if breakout_long and weekly_bullish and is_trending and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        # Secondary: KAMA bullish + Daily bullish + RSI momentum (no cross needed)
-        elif kama_bullish and daily_bullish and rsi_momentum_long:
+        # Secondary: Donchian bullish + Weekly bullish + RSI momentum (no breakout needed)
+        elif donch_bullish and weekly_bullish and rsi_momentum_long:
             new_signal = SIZE_ENTRY
-        # Tertiary: KAMA cross long + RSI ok (daily neutral ok in strong trend)
-        elif kama_cross_long and is_trending and rsi[i] > 35:
+        # Tertiary: Donchian breakout long + RSI ok (weekly neutral ok in strong trend)
+        elif breakout_long and is_trending and rsi[i] > 35:
             new_signal = SIZE_ENTRY
-        # Quaternary: KAMA bullish alone (ensures minimum trade frequency)
-        elif kama_bullish and rsi[i] > 35 and rsi[i] < 70:
+        # Quaternary: Donchian bullish alone (ensures minimum trade frequency)
+        elif donch_bullish and rsi[i] > 35 and rsi[i] < 75:
+            new_signal = SIZE_ENTRY
+        # Quintenary: Breakout without regime filter (catches strong moves)
+        elif breakout_long and rsi[i] > 40:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES ===
-        # Primary: KAMA cross short + Daily bearish + Trending + RSI ok
-        if kama_cross_short and daily_bearish and is_trending and rsi_ok_short:
+        # Primary: Donchian breakout short + Weekly bearish + Trending + RSI ok
+        if breakout_short and weekly_bearish and is_trending and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        # Secondary: KAMA bearish + Daily bearish + RSI momentum (no cross needed)
-        elif kama_bearish and daily_bearish and rsi_momentum_short:
+        # Secondary: Donchian bearish + Weekly bearish + RSI momentum (no breakout needed)
+        elif donch_bearish and weekly_bearish and rsi_momentum_short:
             new_signal = -SIZE_ENTRY
-        # Tertiary: KAMA cross short + RSI ok (daily neutral ok in strong trend)
-        elif kama_cross_short and is_trending and rsi[i] < 65:
+        # Tertiary: Donchian breakout short + RSI ok (weekly neutral ok in strong trend)
+        elif breakout_short and is_trending and rsi[i] < 65:
             new_signal = -SIZE_ENTRY
-        # Quaternary: KAMA bearish alone (ensures minimum trade frequency)
-        elif kama_bearish and rsi[i] > 30 and rsi[i] < 65:
+        # Quaternary: Donchian bearish alone (ensures minimum trade frequency)
+        elif donch_bearish and rsi[i] > 25 and rsi[i] < 65:
+            new_signal = -SIZE_ENTRY
+        # Quintenary: Breakout without regime filter (catches strong moves)
+        elif breakout_short and rsi[i] < 60:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
