@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #376: 4h Fisher Transform + Donchian Breakout + Daily HMA Trend + ATR Stop
-Hypothesis: Ehlers Fisher Transform excels at identifying turning points in bear/range markets
-(2025 test period) while Donchian breakout captures trending moves (2021 bull). Combined with
-Daily HMA trend filter, this should reduce whipsaws and improve Sharpe vs pure trend strategies.
-Fisher normalizes price to Gaussian distribution, making extremes (-2/+2) statistically significant.
-Timeframe: 4h (REQUIRED), HTF: 1d for trend bias via mtf_data helper.
-Position sizing: 0.25 entry, 0.125 half-profit, stoploss at 2.5*ATR trailing.
-Target: Beat Sharpe=0.499 with 50-100 trades total, work in both bull and bear regimes.
-Key insight: Fisher Transform outperforms RSI for reversal detection in crypto's non-normal returns.
+Experiment #377: 12h Supertrend + Weekly HMA + Bollinger Volatility + RSI Divergence + Volume
+Hypothesis: Supertrend provides clean trend signals (proven in #371 baseline). Weekly HMA gives
+stronger long-term bias than daily. Bollinger Band Width detects volatility expansion/contraction
+(regime filter different from CHOP). RSI divergence catches reversals before price confirms.
+Volume spike confirms breakout validity. This combines trend-following (Supertrend) with
+momentum confirmation (RSI div) and regime filter (BB Width) for better risk-adjusted returns.
+Timeframe: 12h (REQUIRED), HTF: 1w for strong trend bias via mtf_data helper.
+Target: Beat Sharpe=0.499 from mtf_12h_supertrend_daily_hma_rsi_pullback_v2
+Key insight: Weekly trend filter + volatility regime + divergence detection should reduce
+false signals while maintaining trade frequency through multiple entry conditions.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_fisher_donchian_daily_hma_volume_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_supertrend_weekly_hma_bbvol_rsi_div_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -28,60 +29,44 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_fisher_transform(high, low, close, period=9):
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     """
-    Calculate Ehlers Fisher Transform.
-    Transforms price to near-Gaussian distribution for clearer reversal signals.
-    Long when Fisher crosses above -1.5 from below, short when crosses below +1.5 from above.
+    Calculate Supertrend indicator.
+    Returns: supertrend values, direction (1=long, -1=short)
     """
     n = len(close)
-    fisher = np.zeros(n)
-    fisher_signal = np.zeros(n)
+    atr = calculate_atr(high, low, close, period)
     
-    for i in range(period, n):
-        # Calculate typical price
-        hl2 = (high[i] + low[i]) / 2.0
-        
-        # Find highest high and lowest low over period
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        # Normalize price to 0-1 range
-        range_val = highest_high - lowest_low
-        if range_val > 0:
-            normalized = (hl2 - lowest_low) / range_val
+    hl2 = (high + low) / 2.0
+    
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    supertrend = np.zeros(n)
+    direction = np.zeros(n)
+    
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
+    
+    for i in range(1, n):
+        if close[i-1] <= supertrend[i-1]:
+            # Previously short or neutral
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+            if close[i] > supertrend[i]:
+                direction[i] = 1
+                supertrend[i] = lower_band[i]
+            else:
+                direction[i] = -1
         else:
-            normalized = 0.5
-        
-        # Clamp to avoid division issues
-        normalized = np.clip(normalized, 0.001, 0.999)
-        
-        # Fisher calculation
-        fisher[i] = 0.5 * np.log((1 + normalized) / (1 - normalized))
-        
-        # Signal line (1-period lag)
-        if i > period:
-            fisher_signal[i] = fisher[i-1]
-        else:
-            fisher_signal[i] = fisher[i]
+            # Previously long
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+            if close[i] < supertrend[i]:
+                direction[i] = -1
+                supertrend[i] = upper_band[i]
+            else:
+                direction[i] = 1
     
-    fisher[:period] = 0.0
-    fisher_signal[:period] = 0.0
-    return fisher, fisher_signal
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel upper and lower bands."""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    
-    for i in range(period, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    upper[:period] = high[:period].max() if period <= len(high) else high[0]
-    lower[:period] = low[:period].min() if period <= len(low) else low[0]
-    return upper, lower
+    return supertrend, direction
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -93,13 +78,69 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs moving average."""
+def calculate_rsi(close, period=14):
+    """Calculate RSI indicator."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
+    rsi = 100 - 100 / (1 + rs)
+    rsi = np.clip(rsi, 0, 100)
+    return rsi
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands and Band Width."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    band_width = (upper - lower) / sma * 100.0
+    band_width = np.nan_to_num(band_width, nan=0.0)
+    return upper, lower, band_width, sma
+
+def calculate_rsi_divergence(close, rsi, lookback=5):
+    """
+    Detect RSI divergence.
+    Bullish: price makes lower low, RSI makes higher low
+    Bearish: price makes higher high, RSI makes lower high
+    Returns: divergence score (-2 to +2)
+    """
+    n = len(close)
+    divergence = np.zeros(n)
+    
+    for i in range(lookback * 2, n):
+        # Check for bullish divergence (last lookback*2 bars)
+        price_low_recent = np.min(close[i-lookback:i])
+        price_low_prev = np.min(close[i-lookback*2:i-lookback])
+        rsi_low_recent = np.min(rsi[i-lookback:i])
+        rsi_low_prev = np.min(rsi[i-lookback*2:i-lookback])
+        
+        # Bullish: price lower low, RSI higher low
+        if price_low_recent < price_low_prev and rsi_low_recent > rsi_low_prev:
+            divergence[i] = max(divergence[i], 1.0)
+        
+        # Check for bearish divergence
+        price_high_recent = np.max(close[i-lookback:i])
+        price_high_prev = np.max(close[i-lookback*2:i-lookback])
+        rsi_high_recent = np.max(rsi[i-lookback:i])
+        rsi_high_prev = np.max(rsi[i-lookback*2:i-lookback])
+        
+        # Bearish: price higher high, RSI lower high
+        if price_high_recent > price_high_prev and rsi_high_recent < rsi_high_prev:
+            divergence[i] = min(divergence[i], -1.0)
+    
+    return divergence
+
+def calculate_volume_spike(volume, period=20):
+    """Detect volume spikes (> 2x average volume)."""
     vol_s = pd.Series(volume)
-    vol_ma = vol_s.ewm(span=period, min_periods=period, adjust=False).mean().values
-    ratio = volume / vol_ma
-    ratio = np.nan_to_num(ratio, nan=1.0)
-    return ratio
+    vol_avg = vol_s.rolling(window=period, min_periods=period).mean().values
+    vol_spike = volume > 2.0 * vol_avg
+    vol_spike = np.nan_to_num(vol_spike, nan=False)
+    return vol_spike.astype(float)
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -109,19 +150,27 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    fisher, fisher_signal = calculate_fisher_transform(high, low, close, 9)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    vol_ratio = calculate_volume_ratio(volume, 20)
+    rsi = calculate_rsi(close, 14)
+    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
+    bb_upper, bb_lower, bb_width, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
+    rsi_div = calculate_rsi_divergence(close, rsi, 5)
+    vol_spike = calculate_volume_spike(volume, 20)
+    
+    # BB Width percentile for regime (rolling 100 bars)
+    bb_width_pct = pd.Series(bb_width).rolling(window=100, min_periods=50).apply(
+        lambda x: np.sum(x < x[-1]) / len(x), raw=False
+    ).values
+    bb_width_pct = np.nan_to_num(bb_width_pct, nan=0.5)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.30
@@ -137,57 +186,76 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after 100 bars for indicators
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(fisher[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_width[i]):
             signals[i] = 0.0
             continue
         
-        # Daily trend bias
-        daily_bullish = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
-        daily_bearish = not np.isnan(hma_1d_aligned[i]) and close[i] < hma_1d_aligned[i]
+        if np.isnan(supertrend[i]) or np.isnan(st_direction[i]):
+            signals[i] = 0.0
+            continue
         
-        # Fisher Transform signals
-        fisher_oversold = fisher[i] < -1.0
-        fisher_overbought = fisher[i] > 1.0
+        # Weekly trend bias
+        weekly_bullish = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
+        weekly_bearish = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
         
-        # Fisher crossover signals
-        fisher_cross_long = fisher_signal[i] < -1.0 and fisher[i] >= -1.0
-        fisher_cross_short = fisher_signal[i] > 1.0 and fisher[i] <= 1.0
+        # Volatility regime from BB Width
+        is_low_vol = bb_width_pct[i] < 0.3  # Bottom 30% = contraction
+        is_high_vol = bb_width_pct[i] > 0.7  # Top 30% = expansion
         
-        # Donchian breakout signals
-        donchian_breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        donchian_breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        # Supertrend signals
+        st_long = st_direction[i] == 1
+        st_short = st_direction[i] == -1
+        
+        # Supertrend flip detection
+        st_flip_long = st_direction[i] == 1 and st_direction[i-1] == -1
+        st_flip_short = st_direction[i] == -1 and st_direction[i-1] == 1
+        
+        # RSI conditions
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
+        rsi_neutral = 35 < rsi[i] < 65
+        
+        # RSI divergence
+        rsi_bull_div = rsi_div[i] > 0.5
+        rsi_bear_div = rsi_div[i] < -0.5
         
         # Volume confirmation
-        volume_confirmed = vol_ratio[i] > 0.8  # At least 80% of average volume
+        vol_confirmed = vol_spike[i] > 0.5
         
         new_signal = 0.0
         
         # === LONG ENTRIES ===
-        # Primary: Fisher oversold crossover + Daily bullish + Volume confirmed
-        if fisher_cross_long and daily_bullish and volume_confirmed:
+        # Primary: Supertrend flip long + Weekly bullish + Volume spike
+        if st_flip_long and weekly_bullish and vol_confirmed:
             new_signal = SIZE_ENTRY
-        # Secondary: Fisher oversold + Donchian breakout + Daily bullish
-        elif fisher_oversold and donchian_breakout_long and daily_bullish:
+        # Secondary: Supertrend long + Weekly bullish + RSI oversold (pullback entry)
+        elif st_long and weekly_bullish and rsi_oversold:
             new_signal = SIZE_ENTRY
-        # Tertiary: Fisher cross long + Donchian breakout (trend confirmation)
-        elif fisher_cross_long and donchian_breakout_long and volume_confirmed:
+        # Tertiary: Supertrend flip long + RSI bull divergence (reversal)
+        elif st_flip_long and rsi_bull_div:
             new_signal = SIZE_ENTRY
-        # Quaternary: Fisher oversold alone (ensures trade frequency in bear markets)
-        elif fisher_oversold and fisher[i] > fisher_signal[i] and volume_confirmed:
+        # Quaternary: Supertrend long + Low vol regime (trend continuation)
+        elif st_long and weekly_bullish and is_low_vol:
+            new_signal = SIZE_ENTRY
+        # Quintenary: Supertrend long + RSI neutral (momentum continuation)
+        elif st_long and rsi_neutral and vol_confirmed:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES ===
-        # Primary: Fisher overbought crossover + Daily bearish + Volume confirmed
-        if fisher_cross_short and daily_bearish and volume_confirmed:
+        # Primary: Supertrend flip short + Weekly bearish + Volume spike
+        if st_flip_short and weekly_bearish and vol_confirmed:
             new_signal = -SIZE_ENTRY
-        # Secondary: Fisher overbought + Donchian breakdown + Daily bearish
-        elif fisher_overbought and donchian_breakout_short and daily_bearish:
+        # Secondary: Supertrend short + Weekly bearish + RSI overbought (pullback entry)
+        elif st_short and weekly_bearish and rsi_overbought:
             new_signal = -SIZE_ENTRY
-        # Tertiary: Fisher cross short + Donchian breakdown (trend confirmation)
-        elif fisher_cross_short and donchian_breakout_short and volume_confirmed:
+        # Tertiary: Supertrend flip short + RSI bear divergence (reversal)
+        elif st_flip_short and rsi_bear_div:
             new_signal = -SIZE_ENTRY
-        # Quaternary: Fisher overbought alone (ensures trade frequency in bear markets)
-        elif fisher_overbought and fisher[i] < fisher_signal[i] and volume_confirmed:
+        # Quaternary: Supertrend short + Low vol regime (trend continuation)
+        elif st_short and weekly_bearish and is_low_vol:
+            new_signal = -SIZE_ENTRY
+        # Quintenary: Supertrend short + RSI neutral (momentum continuation)
+        elif st_short and rsi_neutral and vol_confirmed:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
