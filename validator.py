@@ -23,7 +23,7 @@ from pathlib import Path
 
 
 REQUIRED_FIELDS = ["name", "timeframe", "leverage", "generate_signals"]
-VALID_TIMEFRAMES = ["5m", "15m", "30m", "1h", "4h", "1d"]  # 1m excluded: too noisy/risky
+VALID_TIMEFRAMES = ["5m", "15m", "30m", "1h", "4h", "6h", "12h", "1d"]  # 1m excluded: too noisy
 MAX_LEVERAGE = 5.0
 
 LOOK_AHEAD_PATTERNS = [
