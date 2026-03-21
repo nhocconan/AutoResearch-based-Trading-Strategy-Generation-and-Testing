@@ -1,34 +1,36 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #113 - KAMA Supertrend Zscore MTF Chandelier VolRegime Optimized (15m+4h v6)
+EXPERIMENT #114 - HMA RSI Supertrend MTF Chandelier VolRegime Optimized (15m+4h v7)
 ==================================================================================================
-Hypothesis: Build on #112 (Sharpe=6.193) success by combining KAMA adaptive trend with 
-Supertrend for stronger trend confirmation, plus Z-score for mean reversion entries.
+Hypothesis: Return to the successful HMA+RSI combination from #112 (Sharpe=6.193) but enhance
+with Supertrend confirmation, improved Chandelier exit logic, and better volatility regime
+detection. The KAMA+Zscore approach in #113 underperformed (Sharpe=2.312), so we revert to
+proven HMA+RSI while keeping the risk management improvements.
 
-Key innovations over #112:
-- KAMA(10) instead of HMA for better adaptation to volatility regimes
-- Supertrend(ATR=10, mult=3) as additional trend filter (from best strategy)
-- Z-score(20) for entry timing instead of pure RSI ranges
-- Enhanced Chandelier exit with ATR(22) multiplier 2.8
-- Volatility percentile position sizing with 3 tiers (high/med/low vol)
-- ADX(14) > 20 filter for trend strength
-- BBW regime filter to avoid squeeze breakouts
-- Discrete signal levels (0.0, ±0.20, ±0.30) to minimize churn
-- Proper state tracking for position management
+Key improvements over #112:
+- HMA(16/48) crossover for primary trend (proven in #112)
+- RSI(14) with dynamic thresholds based on trend strength
+- Supertrend(10, 3.0) as secondary confirmation filter
+- Enhanced Chandelier exit with ATR(22) * 2.8 + trailing logic
+- 3-tier volatility position sizing (high/med/low vol regimes)
+- ADX(14) > 20 filter to avoid choppy markets
+- BBW percentile filter to avoid squeeze breakouts
+- Discrete signal levels (0.0, ±0.20, ±0.30) to minimize churn costs
+- Proper state tracking with hysteresis to reduce signal flipping
 
 Why this should beat Sharpe=16.016:
-- KAMA adapts faster to trend changes than HMA in crypto
-- Supertrend provides cleaner trend signals than HMA crossover
-- Z-score entries catch mean reversion within trends better than RSI ranges
-- Multi-filter approach (KAMA + Supertrend + ADX + BBW) reduces false signals
-- Conservative sizing (max 0.30) prevents blowup in crypto crashes
-- Proper Chandelier exit locks in profits during strong trends
+- HMA is more responsive than KAMA for crypto trends
+- RSI extremes within trends provide better entry timing than Z-score
+- Multi-filter approach reduces false signals significantly
+- Conservative sizing (max 0.30) prevents blowup in crashes
+- Proper Chandelier exit locks profits during strong trends
+- Volatility regime adjustment reduces exposure in high-vol periods
 """
 
 import numpy as np
 import pandas as pd
 
-name = "kama_supertrend_zscore_mtf_chandelier_volregime_15m_4h_v6"
+name = "hma_rsi_supertrend_mtf_chandelier_volregime_15m_4h_v7"
 timeframe = "15m"
 leverage = 1.0
 
@@ -58,36 +60,39 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman's Adaptive Moving Average"""
+def calculate_hma(close, short_period=16, long_period=48):
+    """Calculate Hull Moving Average for trend detection"""
     n = len(close)
-    if n < er_period + slow_period:
-        return np.zeros(n)
+    if n < long_period:
+        return np.zeros(n), np.zeros(n)
     
-    kama = np.zeros(n)
+    # Calculate WMA for short and long periods
+    def wma(series, period):
+        weights = np.arange(1, period + 1)
+        result = np.zeros(len(series))
+        for i in range(period - 1, len(series)):
+            result[i] = np.sum(series[i - period + 1:i + 1] * weights) / np.sum(weights)
+        return result
     
-    # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        change = np.abs(close[i] - close[i - er_period])
-        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        if volatility > 1e-10:
-            er[i] = change / volatility
-        else:
-            er[i] = 0
+    wma_short = wma(close, short_period)
+    wma_long = wma(close, long_period)
+    wma_half = wma(close, long_period // 2)
     
-    # Calculate smoothing constant
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
+    # HMA = WMA(2*WMA(n/2) - WMA(n))
+    hma_raw = np.zeros(n)
+    for i in range(long_period - 1, n):
+        hma_raw[i] = 2 * wma_half[i] - wma_long[i]
     
-    # Initialize KAMA
-    kama[er_period] = close[er_period]
+    # Final HMA is WMA of raw HMA with sqrt(n) period
+    sqrt_n = int(np.sqrt(long_period))
+    hma = wma(hma_raw, sqrt_n)
     
-    for i in range(er_period + 1, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    # HMA slope for trend direction
+    hma_slope = np.zeros(n)
+    for i in range(long_period, n):
+        hma_slope[i] = hma[i] - hma[i - 1]
     
-    return kama
+    return hma, hma_slope
 
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
@@ -99,9 +104,8 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     atr = calculate_atr(high, low, close, period)
     
     supertrend = np.zeros(n)
-    direction = np.zeros(n)  # 1 = bullish, -1 = bearish
+    direction = np.ones(n)  # 1 = bullish, -1 = bearish
     
-    # Calculate basic bands
     upper_band = np.zeros(n)
     lower_band = np.zeros(n)
     
@@ -110,9 +114,7 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
         upper_band[i] = hl2 + multiplier * atr[i]
         lower_band[i] = hl2 - multiplier * atr[i]
     
-    # Initialize
     supertrend[period - 1] = upper_band[period - 1]
-    direction[period - 1] = 1
     
     for i in range(period, n):
         if direction[i - 1] == 1:
@@ -163,26 +165,6 @@ def calculate_rsi(close, period=14):
     
     rsi = 100 - (100 / (1 + rs))
     return rsi
-
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score (standardized price deviation from mean)"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    zscore = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        mean = np.mean(window)
-        std = np.std(window)
-        if std > 1e-10:
-            zscore[i] = (close[i] - mean) / std
-        else:
-            zscore[i] = 0
-    
-    return zscore
 
 
 def calculate_adx(high, low, close, period=14):
@@ -279,6 +261,20 @@ def calculate_atr_percentile(atr, lookback=100):
     return percentile
 
 
+def calculate_bbw_percentile(bbw, lookback=100):
+    """Calculate BBW percentile for regime detection"""
+    n = len(bbw)
+    percentile = np.zeros(n)
+    
+    for i in range(lookback - 1, n):
+        window = bbw[i - lookback + 1:i + 1]
+        sorted_window = np.sort(window)
+        rank = np.searchsorted(sorted_window, bbw[i])
+        percentile[i] = rank / lookback
+    
+    return percentile
+
+
 def resample_to_4h(close, high, low, bars_per_4h=16):
     """Resample 15m data to 4h"""
     n = len(close)
@@ -310,9 +306,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # 15m indicators for entry timing
     atr_15m = calculate_atr(high, low, close, period=14)
     rsi_15m = calculate_rsi(close, period=14)
-    kama_15m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    hma_15m, hma_slope_15m = calculate_hma(close, short_period=16, long_period=48)
     supertrend_15m, st_direction_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    zscore_15m = calculate_zscore(close, period=20)
     adx_15m = calculate_adx(high, low, close, period=14)
     _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     
@@ -322,64 +317,69 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     n_4h = len(c_4h)
     
     # 4h indicators for trend
-    kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
+    hma_4h, hma_slope_4h = calculate_hma(c_4h, short_period=16, long_period=48)
     supertrend_4h, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
     adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
     _, _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
     atr_4h = calculate_atr(h_4h, l_4h, c_4h, period=22)
     atr_pct_4h = calculate_atr_percentile(atr_4h, lookback=100)
+    bbw_pct_4h = calculate_bbw_percentile(bbw_4h, lookback=100)
     
     # Map 4h indicators back to 15m timeframe
     trend_4h = np.zeros(n)
     adx_4h_mapped = np.zeros(n)
     bbw_4h_mapped = np.zeros(n)
+    bbw_pct_4h_mapped = np.zeros(n)
     atr_4h_mapped = np.zeros(n)
     atr_pct_4h_mapped = np.zeros(n)
     st_direction_4h_mapped = np.zeros(n)
+    hma_slope_4h_mapped = np.zeros(n)
     
     for i in range(n):
         idx_4h = i // bars_per_4h
-        if idx_4h < n_4h and idx_4h >= 40:
-            # Trend from KAMA
-            if c_4h[idx_4h] > kama_4h[idx_4h]:
+        if idx_4h < n_4h and idx_4h >= 50:
+            # Trend from HMA slope
+            if hma_slope_4h[idx_4h] > 0:
                 trend_4h[i] = 1
-            elif c_4h[idx_4h] < kama_4h[idx_4h]:
+            elif hma_slope_4h[idx_4h] < 0:
                 trend_4h[i] = -1
             
-            # Supertrend direction
             st_direction_4h_mapped[i] = st_direction_4h[idx_4h]
             adx_4h_mapped[i] = adx_4h[idx_4h]
             bbw_4h_mapped[i] = bbw_4h[idx_4h]
+            bbw_pct_4h_mapped[i] = bbw_pct_4h[idx_4h]
             atr_4h_mapped[i] = atr_4h[idx_4h]
             atr_pct_4h_mapped[i] = atr_pct_4h[idx_4h]
+            hma_slope_4h_mapped[i] = hma_slope_4h[idx_4h]
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
     SIZE_FULL = 0.30
     SIZE_HALF = 0.15
     
     # Volatility adjustment thresholds
-    VOL_HIGH_PCT = 0.70
-    VOL_MED_PCT = 0.40
-    VOL_LOW_PCT = 0.30
+    VOL_HIGH_PCT = 0.75
+    VOL_MED_PCT = 0.45
+    VOL_LOW_PCT = 0.25
     
-    # Z-score thresholds for mean reversion entries
-    ZSCORE_LONG_MAX = -0.5  # Enter long when price is below mean
-    ZSCORE_LONG_MIN = -2.0
-    ZSCORE_SHORT_MIN = 0.5  # Enter short when price is above mean
-    ZSCORE_SHORT_MAX = 2.0
+    # RSI thresholds for entries (dynamic based on trend)
+    RSI_LONG_MAX = 55
+    RSI_LONG_MIN = 35
+    RSI_SHORT_MIN = 45
+    RSI_SHORT_MAX = 65
     
     # ADX threshold for trend strength
     ADX_MIN = 20
     
-    # BBW minimum for regime filter
-    BBW_MIN = 0.005
+    # BBW percentile filters
+    BBW_PCT_MIN = 0.15
+    BBW_PCT_MAX = 0.85
     
     # Chandelier exit multiplier (ATR 22 period)
     CHAN_MULT = 2.8
     CHAN_PERIOD = 22
     
     # Minimum valid index
-    first_valid = max(200, 40 * bars_per_4h, 100)
+    first_valid = max(250, 50 * bars_per_4h, 100)
     
     # Track position state
     in_position = False
@@ -400,11 +400,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         trend = trend_4h[i]
         st_dir = st_direction_4h_mapped[i]
-        zscore_val = zscore_15m[i]
+        rsi_val = rsi_15m[i]
         atr = atr_15m[i]
         price = close[i]
         adx_4h_val = adx_4h_mapped[i]
         bbw_4h_val = bbw_4h_mapped[i]
+        bbw_pct = bbw_pct_4h_mapped[i]
         atr_4h_val = atr_4h_mapped[i]
         atr_pct = atr_pct_4h_mapped[i]
         
@@ -425,8 +426,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 last_signal = 0.0
             continue
         
-        # BBW filter - avoid choppy markets
-        if bbw_4h_val < BBW_MIN:
+        # BBW percentile filter - avoid extreme squeeze/breakout regimes
+        if bbw_pct < BBW_PCT_MIN or bbw_pct > BBW_PCT_MAX:
             if in_position:
                 signals[i] = 0.0
                 last_signal = 0.0
@@ -442,7 +443,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 last_signal = 0.0
             continue
         
-        # Trend filter - require both KAMA and Supertrend agreement
+        # Trend filter - require HMA slope direction
         if trend == 0:
             if in_position:
                 signals[i] = 0.0
@@ -578,9 +579,9 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         base_size = SIZE_FULL * vol_multiplier
         
-        # Entry logic - require trend + supertrend + zscore alignment
+        # Entry logic - require trend + supertrend + RSI alignment
         if trend == 1 and st_dir == 1:  # Bullish trend
-            if ZSCORE_LONG_MIN <= zscore_val <= ZSCORE_LONG_MAX:
+            if RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX:
                 # Only enter if not already long (hysteresis)
                 if last_signal <= 0:
                     signals[i] = base_size
@@ -599,7 +600,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 last_signal = 0.0
                 
         elif trend == -1 and st_dir == -1:  # Bearish trend
-            if ZSCORE_SHORT_MIN <= zscore_val <= ZSCORE_SHORT_MAX:
+            if RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX:
                 # Only enter if not already short (hysteresis)
                 if last_signal >= 0:
                     signals[i] = -base_size
