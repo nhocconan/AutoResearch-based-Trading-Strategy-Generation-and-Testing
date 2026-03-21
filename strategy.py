@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #117: 1h KAMA Adaptive Trend + 4h HMA Filter + Volume Confirmation
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise better than EMA.
-In ranging markets (2022 crash, 2025 bear), KAMA flattens to avoid whipsaws. In trends,
-it accelerates to catch moves. Combine with 4h HMA trend filter (proven in best strategy)
-and volume spike confirmation to reduce false breakouts. Use 2.5*ATR stoploss with
-1.5R take-profit partial reduction. Position sizing: 0.25 entry, 0.15 after TP.
-Timeframe: 1h (mandatory for this experiment) with 4h HTF reference.
+Experiment #118: 4h Donchian Breakout with Daily HMA Trend + RSI Momentum Filter
+Hypothesis: Previous Donchian attempt (#106) failed with Sharpe=-1.241, likely due to
+too many filters preventing trades. This version simplifies entry logic:
+- Daily HMA for trend bias (price above = long only, below = short only)
+- Donchian 20-period breakout for entry (break high = long, break low = short)
+- RSI(14) momentum filter (RSI>50 for longs, RSI<50 for shorts) - simple and effective
+- ATR(14) trailing stop at 2.5*ATR
+- Position size 0.30 entry, reduce to 0.15 at 1.5R profit
+Key change: Fewer conflicting filters to ensure 10+ trades per symbol.
+4h timeframe captures multi-day trends while avoiding 12h/1d slowness.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_kama_4h_hma_volume_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_donchian_daily_hma_rsi_momentum_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -40,43 +43,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """
-    Calculate Kaufman Adaptive Moving Average.
-    KAMA adapts to market noise: flat in ranges, fast in trends.
-    ER (Efficiency Ratio) = |Net Change| / Sum of Absolute Changes
-    SC (Smoothing Constant) = [ER * (fast_sc - slow_sc) + slow_sc]^2
-    """
-    close_s = pd.Series(close)
-    n = len(close)
-    kama = np.zeros(n)
-    
-    # Efficiency Ratio
-    net_change = close_s.diff(er_period).abs()
-    sum_changes = close_s.diff().abs().rolling(window=er_period, min_periods=er_period).sum()
-    er = net_change / sum_changes.replace(0, np.nan)
-    er = er.fillna(0)
-    
-    # Smoothing Constants
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama[er_period] = close[er_period]
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
-def calculate_volume_spike(volume, period=20):
-    """Detect volume spikes (> 2x average volume)."""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean()
-    vol_ratio = vol_s / vol_avg.replace(0, np.nan)
-    vol_ratio = vol_ratio.fillna(1)
-    return vol_ratio.values
-
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -89,36 +55,38 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high, lowest low over period)."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2
+    return upper, lower, mid
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
-    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    # Align HTF to LTF (Rule 2 - no manual index mapping)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    vol_spike = calculate_volume_spike(volume, 20)
-    
-    # KAMA adaptive MA
-    kama_fast = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    kama_slow = calculate_kama(close, er_period=10, fast_period=5, slow_period=50)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, 20)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
+    SIZE_ENTRY = 0.30
     SIZE_HALF = 0.15
     
-    # Track positions for stoploss/takeprofit
+    # Track positions for stoploss
     position_side = 0
     entry_price = 0.0
     trailing_stop = 0.0
@@ -127,62 +95,34 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # 4h trend filter (HTF)
-        hma_4h_val = hma_4h_aligned[i]
-        if np.isnan(hma_4h_val) or hma_4h_val == 0:
-            hma_4h_val = close[i]  # fallback if alignment fails
+        # Skip if indicators not ready
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            signals[i] = 0.0
+            continue
         
-        trend_4h_bullish = close[i] > hma_4h_val
-        trend_4h_bearish = close[i] < hma_4h_val
+        # Daily trend filter (HTF) - price relative to Daily HMA
+        daily_bullish = close[i] > hma_1d_aligned[i]
+        daily_bearish = close[i] < hma_1d_aligned[i]
         
-        # KAMA crossover signals
-        kama_cross_long = kama_fast[i] > kama_slow[i] and (i > 0 and kama_fast[i-1] <= kama_slow[i-1])
-        kama_cross_short = kama_fast[i] < kama_slow[i] and (i > 0 and kama_fast[i-1] >= kama_slow[i-1])
+        # Donchian breakout signals
+        breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
+        breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
         
-        # KAMA trend state
-        kama_trend_long = kama_fast[i] > kama_slow[i]
-        kama_trend_short = kama_fast[i] < kama_slow[i]
-        
-        # KAMA slope confirmation
-        kama_slope_long = kama_fast[i] > kama_fast[i-1] if i > 0 else False
-        kama_slope_short = kama_fast[i] < kama_fast[i-1] if i > 0 else False
-        
-        # Volume confirmation (spike > 1.5x average)
-        volume_confirmed = vol_spike[i] > 1.5
-        
-        # RSI filter (avoid extremes)
-        rsi_ok_long = rsi[i] < 70
-        rsi_ok_short = rsi[i] > 30
-        
-        # RSI momentum (rising/falling)
-        rsi_rising = rsi[i] > rsi[i-1] if i > 0 else False
-        rsi_falling = rsi[i] < rsi[i-1] if i > 0 else False
+        # RSI momentum filter (simple: above 50 = bullish momentum, below 50 = bearish)
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
         
         new_signal = 0.0
         
-        # LONG ENTRY conditions
-        # Condition 1: KAMA cross + 4h bullish + volume spike
-        if kama_cross_long and trend_4h_bullish and volume_confirmed:
-            new_signal = SIZE_ENTRY
-        # Condition 2: KAMA trend + 4h bullish + RSI ok + slope up
-        elif kama_trend_long and trend_4h_bullish and rsi_ok_long and kama_slope_long:
-            new_signal = SIZE_ENTRY
-        # Condition 3: KAMA trend + 4h bullish + RSI rising (momentum)
-        elif kama_trend_long and trend_4h_bullish and rsi_rising and rsi_ok_long:
+        # LONG ENTRY: Daily bullish + Donchian breakout + RSI momentum
+        if daily_bullish and breakout_long and rsi_bullish:
             new_signal = SIZE_ENTRY
         
-        # SHORT ENTRY conditions
-        # Condition 1: KAMA cross + 4h bearish + volume spike
-        if kama_cross_short and trend_4h_bearish and volume_confirmed:
-            new_signal = -SIZE_ENTRY
-        # Condition 2: KAMA trend + 4h bearish + RSI ok + slope down
-        elif kama_trend_short and trend_4h_bearish and rsi_ok_short and kama_slope_short:
-            new_signal = -SIZE_ENTRY
-        # Condition 3: KAMA trend + 4h bearish + RSI falling (momentum)
-        elif kama_trend_short and trend_4h_bearish and rsi_falling and rsi_ok_short:
+        # SHORT ENTRY: Daily bearish + Donchian breakout + RSI momentum
+        if daily_bearish and breakout_short and rsi_bearish:
             new_signal = -SIZE_ENTRY
         
-        # Stoploss logic (Rule 6) - check BEFORE updating position
+        # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
             # Update highest close for trailing
             if close[i] > highest_close:
@@ -198,15 +138,15 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 1.5R
-                initial_risk = 2.5 * atr[i]  # approximate
+                risk = 2.5 * atr[i]
                 profit = close[i] - entry_price
-                if profit >= 1.5 * initial_risk:
+                if profit >= 1.5 * risk:
                     new_signal = SIZE_HALF
                     position_reduced = True
         
         if position_side < 0 and entry_price > 0:
             # Update lowest close for trailing
-            if lowest_close == 0.0 or close[i] < lowest_close:
+            if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
             # Calculate trailing stop (2.5*ATR from lowest)
@@ -219,9 +159,9 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 1.5R
-                initial_risk = 2.5 * atr[i]  # approximate
+                risk = 2.5 * atr[i]
                 profit = entry_price - close[i]
-                if profit >= 1.5 * initial_risk:
+                if profit >= 1.5 * risk:
                     new_signal = -SIZE_HALF
                     position_reduced = True
         
