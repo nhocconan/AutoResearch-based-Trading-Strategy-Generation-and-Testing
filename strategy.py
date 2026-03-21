@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #038 - HMA Trend + RSI Pullback + ATR Trailing Stop + 1h Timeframe
+EXPERIMENT #039 - HMA Trend + RSI Pullback + Z-Score Filter + ATR Trailing Stop
 ====================================================================================
-Hypothesis: Building on #021's success, shift from 15m to 1h timeframe for fewer whipsaws
-and lower transaction costs. 1h provides better signal-to-noise ratio while maintaining
-responsiveness. Keep 4h HMA for trend filter but use 1h RSI for entries.
+Hypothesis: Building on #038's framework but fixing the indentation crash and adding
+a Z-score filter to avoid entering when price is already extended from the mean.
+This should reduce false entries at trend exhaustion points.
 
-Key improvements over #021:
-- 1h timeframe instead of 15m - fewer false signals, lower fees
-- Tighter RSI thresholds (40/60 vs 45/55) for cleaner entries
-- ATR trailing stop that moves with price (not fixed at entry)
-- Position sizing capped at 0.30 max (more conservative than 0.35)
-- Add Bollinger Band width filter to avoid low-volatility chop
+Key improvements over #038:
+- Fixed all indentation errors (was crashing at line 316)
+- Added Z-score(20) filter - only enter when |z| < 1.5 (not overextended)
+- Simplified position tracking logic to avoid bugs
+- Position size capped at 0.28 max (more conservative)
+- ATR stop at 2.2x (slightly wider to avoid premature stops)
+- Cleaner code structure with fewer nested conditionals
 
 Why this might beat Sharpe=11.523:
-- 1h has better risk/reward than 15m (less noise, similar capture)
-- Fewer signal changes = lower transaction costs (0.10% per change)
-- Trailing stop locks in more profit on strong trends
-- BB width filter avoids dead zones
+- Z-score filter avoids buying tops/selling bottoms
+- Wider ATR stop reduces whipsaw exits
+- Cleaner code = fewer bugs in live trading
+- 1h timeframe still provides good signal-to-noise ratio
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_rsi_atr_trail_1h_v1"
+name = "mtf_hma_rsi_zscore_atr_trail_1h_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -41,7 +42,6 @@ def calculate_hma(close, period=16):
     if half < 1:
         half = 1
     
-    # WMA helper function
     def wma(arr, w):
         result = np.zeros(len(arr))
         weights = np.arange(1, w + 1, dtype=np.float64)
@@ -52,8 +52,6 @@ def calculate_hma(close, period=16):
     
     wma_half = wma(close, half)
     wma_full = wma(close, period)
-    
-    # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
     hma_raw = 2 * wma_half - wma_full
     hma = wma(hma_raw, sqrt_period)
     
@@ -103,17 +101,17 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands"""
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion filter"""
     n = len(close)
     mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     
-    upper = mean + std_mult * std
-    lower = mean - std_mult * std
-    width = (upper - lower) / mean
+    zscore = np.zeros(n)
+    mask = (std > 0) & (~np.isnan(std))
+    zscore[mask] = (close[mask] - mean[mask]) / std[mask]
     
-    return upper, lower, width
+    return zscore
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -126,7 +124,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # 1h indicators for entry timing and risk
     rsi_1h = calculate_rsi(close, period=14)
     atr_1h = calculate_atr(high, low, close, period=14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    zscore_1h = calculate_zscore(close, period=20)
     hma_16_1h = calculate_hma(close, period=16)
     hma_48_1h = calculate_hma(close, period=48)
     
@@ -140,7 +138,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     })
     df_1h.index = pd.date_range(start='2021-01-01', periods=n, freq='1h')
     
-    # Resample to 4h
     df_4h = df_1h.resample('4h').agg({
         'open': 'first',
         'high': 'max',
@@ -150,22 +147,18 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     }).dropna()
     
     c_4h = df_4h['close'].values.astype(np.float64)
-    h_4h = df_4h['high'].values.astype(np.float64)
-    l_4h = df_4h['low'].values.astype(np.float64)
-    
-    # Calculate 4h HMA for trend
     hma_16_4h = calculate_hma(c_4h, period=16)
     hma_48_4h = calculate_hma(c_4h, period=48)
     
-    # 4h trend direction based on HMA cross and price position
+    # 4h trend direction
     trend_4h = np.zeros(len(c_4h))
     for i in range(48, len(c_4h)):
         if hma_16_4h[i] > hma_48_4h[i] and c_4h[i] > hma_16_4h[i]:
-            trend_4h[i] = 1  # Bullish
+            trend_4h[i] = 1
         elif hma_16_4h[i] < hma_48_4h[i] and c_4h[i] < hma_16_4h[i]:
-            trend_4h[i] = -1  # Bearish
+            trend_4h[i] = -1
     
-    # Map 4h trend back to 1h timeframe (4 x 1h = 4h)
+    # Map 4h trend back to 1h timeframe
     trend_1h = np.zeros(n)
     idx_1h_to_4h = np.arange(n) // 4
     
@@ -174,35 +167,30 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if idx_4h < len(trend_4h):
             trend_1h[i] = trend_4h[idx_4h]
     
-    # Generate signals with multi-timeframe logic
+    # Generate signals
     signals = np.zeros(n)
     
-    # Position sizing - DISCRETE levels to reduce churn
-    SIZE_FULL = 0.30   # Full position (reduced from 0.35)
-    SIZE_HALF = 0.15   # Half position (after take profit)
+    # Position sizing - DISCRETE levels
+    SIZE_FULL = 0.28
+    SIZE_HALF = 0.14
     
-    # RSI thresholds for pullback entries (tighter than 15m version)
-    RSI_LONG_ENTRY = 40   # Enter long on pullback in uptrend
-    RSI_SHORT_ENTRY = 60  # Enter short on rally in downtrend
-    RSI_EXIT_LONG = 70    # Exit long when overbought
-    RSI_EXIT_SHORT = 30   # Exit short when oversold
+    # RSI thresholds
+    RSI_LONG_ENTRY = 42
+    RSI_SHORT_ENTRY = 58
+    RSI_EXIT_LONG = 72
+    RSI_EXIT_SHORT = 28
     
-    # Bollinger Band width filter (avoid low volatility chop)
-    BB_WIDTH_MIN = 0.02   # Minimum BB width % to trade
+    # Z-score filter (avoid overextended entries)
+    ZSCORE_MAX = 1.5
     
-    # ATR stoploss multiplier
-    ATR_STOP_MULT = 2.0
-    
-    # Take profit multiplier (2R)
+    # ATR stoploss multiplier (slightly wider than before)
+    ATR_STOP_MULT = 2.2
     TP_MULT = 2.0
     
-    # ATR volatility target for dynamic sizing
-    TARGET_ATR_PCT = 0.015  # Target 1.5% ATR (lower for 1h)
+    first_valid = max(80, 48, 14, 20)
     
-    first_valid = max(80, 48, 14, 20)  # Wait for all indicators
-    
-    # Track position state
-    position_side = 0  # 1 for long, -1 for short, 0 for flat
+    # Position state tracking
+    position_side = 0
     entry_price = 0.0
     tp_triggered = False
     highest_since_entry = 0.0
@@ -210,60 +198,37 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     trailing_stop = 0.0
     
     for i in range(first_valid, n):
-        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(bb_width[i]):
+        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(zscore_1h[i]):
             signals[i] = 0.0
             continue
         
         trend = trend_1h[i]
         rsi_val = rsi_1h[i]
-        bb_w = bb_width[i]
+        z_val = zscore_1h[i]
         atr = atr_1h[i]
         price = close[i]
         
-        # BB width filter - avoid low volatility chop
-        if bb_w < BB_WIDTH_MIN:
+        # Z-score filter - avoid overextended entries
+        if abs(z_val) > ZSCORE_MAX:
             if position_side != 0:
-                # Close existing position
-                signals[i] = 0.0
-                position_side = 0
-                entry_price = 0.0
-                tp_triggered = False
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
-                trailing_stop = 0.0
+                signals[i] = signals[i-1]
             else:
                 signals[i] = 0.0
             continue
         
-        # ATR filter - avoid trading when ATR is extremely high
-        if atr > 0 and atr / price > 0.05:  # ATR > 5% of price = too volatile
-            if position_side != 0:
-                signals[i] = 0.0
-                position_side = 0
-                entry_price = 0.0
-                tp_triggered = False
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
-                trailing_stop = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check trailing stop and take profit for existing positions
+        # Manage existing positions
         if position_side != 0:
-            prev_side = position_side
-            
-            # Update highest/lowest since entry for trailing
-            if prev_side == 1:
+            if position_side == 1:
                 highest_since_entry = max(highest_since_entry, price)
-                lowest_since_entry = min(lowest_since_entry, price) if lowest_since_entry > 0 else price
+                if lowest_since_entry == 0:
+                    lowest_since_entry = price
+                else:
+                    lowest_since_entry = min(lowest_since_entry, price)
                 
-                # Update trailing stop (move up only)
                 new_trailing = highest_since_entry - ATR_STOP_MULT * atr
                 if new_trailing > trailing_stop:
                     trailing_stop = new_trailing
                 
-                # Stoploss check
                 if price < trailing_stop:
                     signals[i] = 0.0
                     position_side = 0
@@ -274,18 +239,14 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     trailing_stop = 0.0
                     continue
                 
-                # Take profit check (2R)
                 tp_price = entry_price + TP_MULT * ATR_STOP_MULT * atr
                 if not tp_triggered and price >= tp_price:
-                    # Reduce to half position
                     signals[i] = SIZE_HALF
                     position_side = 1
                     tp_triggered = True
-                    # Trail stop to breakeven
                     trailing_stop = max(trailing_stop, entry_price)
                     continue
                 
-                # RSI exit signal
                 if rsi_val > RSI_EXIT_LONG:
                     signals[i] = 0.0
                     position_side = 0
@@ -296,38 +257,38 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     trailing_stop = 0.0
                     continue
                     
-            elif prev_side == -1:
-                lowest_since_entry = min(lowest_since_entry, price) if lowest_since_entry > 0 else price
+            elif position_side == -1:
+                if lowest_since_entry == 0:
+                    lowest_since_entry = price
+                else:
+                    lowest_since_entry = min(lowest_since_entry, price)
                 highest_since_entry = max(highest_since_entry, price)
                 
-                # Update trailing stop (move down only)
                 new_trailing = lowest_since_entry + ATR_STOP_MULT * atr
-                if new_trailing < trailing_stop or trailing_stop == 0:
+                if trailing_stop == 0 or new_trailing < trailing_stop:
                     trailing_stop = new_trailing
                 
-                # Stoploss check
                 if price > trailing_stop:
                     signals[i] = 0.0
                     position_side = 0
                     entry_price = 0.0
                     tp_triggered = False
                     highest_since_entry = 0.0
-                lowest_since_entry = 0.0
+                    lowest_since_entry = 0.0
                     trailing_stop = 0.0
                     continue
                 
-                # Take profit check (2R)
                 tp_price = entry_price - TP_MULT * ATR_STOP_MULT * atr
                 if not tp_triggered and price <= tp_price:
-                    # Reduce to half position
                     signals[i] = -SIZE_HALF
                     position_side = -1
                     tp_triggered = True
-                    # Trail stop to breakeven
-                    trailing_stop = min(trailing_stop, entry_price) if trailing_stop > 0 else entry_price
+                    if trailing_stop == 0:
+                        trailing_stop = entry_price
+                    else:
+                        trailing_stop = min(trailing_stop, entry_price)
                     continue
                 
-                # RSI exit signal
                 if rsi_val < RSI_EXIT_SHORT:
                     signals[i] = 0.0
                     position_side = 0
@@ -337,48 +298,34 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     lowest_since_entry = 0.0
                     trailing_stop = 0.0
                     continue
+            
+            signals[i] = signals[i-1]
+            continue
         
-        # Dynamic position sizing based on ATR volatility
-        current_atr_pct = atr / price if price > 0 else 0
-        if current_atr_pct > 0:
-            size_multiplier = min(1.5, max(0.5, TARGET_ATR_PCT / current_atr_pct))
-        else:
-            size_multiplier = 1.0
-        
-        position_size = SIZE_FULL * size_multiplier
-        position_size = min(SIZE_FULL, max(SIZE_HALF, position_size))  # Clamp
-        
-        # Entry logic
-        if position_side == 0:
-            if trend == 1:  # 4h uptrend
-                # RSI pullback entry in uptrend
-                if rsi_val < RSI_LONG_ENTRY and rsi_val > 30:
-                    signals[i] = position_size
-                    position_side = 1
-                    entry_price = price
-                    tp_triggered = False
-                    highest_since_entry = price
-                    lowest_since_entry = price
-                    trailing_stop = price - ATR_STOP_MULT * atr
-                    
-            elif trend == -1:  # 4h downtrend
-                # RSI rally entry in downtrend
-                if rsi_val > RSI_SHORT_ENTRY and rsi_val < 70:
-                    signals[i] = -position_size
-                    position_side = -1
-                    entry_price = price
-                    tp_triggered = False
-                    highest_since_entry = price
-                    lowest_since_entry = price
-                    trailing_stop = price + ATR_STOP_MULT * atr
-            else:  # No clear trend
+        # Entry logic (flat position)
+        if trend == 1:
+            if rsi_val < RSI_LONG_ENTRY and rsi_val > 30:
+                signals[i] = SIZE_FULL
+                position_side = 1
+                entry_price = price
+                tp_triggered = False
+                highest_since_entry = price
+                lowest_since_entry = price
+                trailing_stop = price - ATR_STOP_MULT * atr
+            else:
+                signals[i] = 0.0
+        elif trend == -1:
+            if rsi_val > RSI_SHORT_ENTRY and rsi_val < 70:
+                signals[i] = -SIZE_FULL
+                position_side = -1
+                entry_price = price
+                tp_triggered = False
+                highest_since_entry = price
+                lowest_since_entry = price
+                trailing_stop = price + ATR_STOP_MULT * atr
+            else:
                 signals[i] = 0.0
         else:
-            # Hold existing position
-            signals[i] = signals[i-1] if i > 0 else 0.0
-            if position_side == 1 and signals[i] <= 0:
-                signals[i] = SIZE_HALF if tp_triggered else SIZE_FULL
-            elif position_side == -1 and signals[i] >= 0:
-                signals[i] = -SIZE_HALF if tp_triggered else -SIZE_FULL
+            signals[i] = 0.0
     
     return signals
