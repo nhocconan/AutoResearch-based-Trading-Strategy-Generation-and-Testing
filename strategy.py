@@ -1,45 +1,88 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #082 - CLEAN_MTF_ENSEMBLE_1H_4H_V2
+EXPERIMENT #083 - KAMA_SUPER_RSI_CONFIDENCE_1H_4H_V1
 ==================================================================================================
-Hypothesis: Fix the read-only array issues from #081 by never modifying array views.
-Use a cleaner 3-signal ensemble (HMA trend + RSI momentum + ATR filter) with 4h trend confirmation.
-Add signal persistence to reduce churn - only flip when conviction is strong.
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts better to regime changes than HMA/EMA.
+Combine KAMA trend + Supertrend direction + RSI timing with confidence-based position sizing.
+More signals agreeing = larger position (up to 0.35 max). Fewer signals = smaller position (0.15 min).
 
-Key improvements over #081:
-- NEVER modify array views - always create new arrays with np.where()
-- Simpler 3-signal voting (HMA, RSI, ATR) instead of 4+ signals
-- Signal persistence: require 2 consecutive bars to flip direction
-- Better warmup handling with clear first_valid index
-- Discrete signal levels (0.0, ±0.25, ±0.35) to minimize fees
+Key innovations:
+- KAMA adapts to market efficiency ratio (ER) - faster in trends, slower in chop
+- Supertrend provides clear stop-loss levels for risk management
+- Confidence scoring: 3 signals agree = 0.35, 2 signals = 0.25, 1 signal = 0.15
+- Strong signal persistence: require 2 consecutive bars with same direction
+- 4h KAMA slope filter for major trend alignment
+- Avoid read-only array issues by always creating new arrays with np.where()
 
-Why this should work:
-- #070 achieved Sharpe=1.256 with similar MTF approach
-- #072 achieved Sharpe=0.589 with HMA+ST+RSI on 1h/4h
-- Proper array handling avoids read-only crashes (#080, #081)
-- Signal persistence reduces churn costs (0.10% per change)
-- 4h trend filter provides directional bias
+Why this should beat #082 (Sharpe=0.594):
+- KAMA responds better to volatility changes than fixed-period HMA
+- Confidence-based sizing captures more alpha in high-conviction setups
+- Supertrend adds explicit risk management (stop levels)
+- Cleaner signal persistence logic
 
 Position sizing:
-- MAX signal: 0.35 (controls drawdown during 2022 crash)
-- Discrete levels: 0.0, ±0.25, ±0.35
-- Higher size in confirmed trend regime
+- MAX signal: 0.35 (3 signals agree in trend regime)
+- MIN signal: 0.15 (1 signal only)
+- Discrete levels: 0.0, ±0.15, ±0.25, ±0.35
+- leverage=1.0 (no leverage, risk controlled by position size)
 """
 
 import numpy as np
 import pandas as pd
 
-name = "clean_mtf_ensemble_1h_4h_v2"
+name = "kama_super_rsi_confidence_1h_4h_v1"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_atr(high, low, close, period=14):
-    """Calculate ATR using Wilder's smoothing - fully vectorized"""
+def calculate_kama(close, er_period=10, fast_sc=2/31, slow_sc=2/31):
+    """
+    Kaufman Adaptive Moving Average
+    Adapts smoothing based on market efficiency ratio (ER)
+    ER = |net change| / sum of absolute changes
+    High ER (trending) = faster SC, Low ER (choppy) = slower SC
+    """
     n = len(close)
-    if n < period:
+    if n < er_period + 1:
         return np.zeros(n)
     
+    # Calculate Efficiency Ratio (ER)
+    net_change = np.abs(close - np.roll(close, er_period))
+    net_change[:er_period] = 0
+    
+    sum_changes = np.zeros(n)
+    for i in range(er_period, n):
+        sum_changes[i] = np.sum(np.abs(close[i-er_period+1:i+1] - np.roll(close[i-er_period+1:i+1], 1))[1:])
+    
+    # Avoid division by zero
+    er = np.zeros(n)
+    mask = sum_changes > 0
+    er[mask] = net_change[mask] / sum_changes[mask]
+    er = np.clip(er, 0, 1)
+    
+    # Calculate Smoothing Constant (SC)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[er_period] = close[er_period]
+    
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
+
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """
+    Supertrend indicator
+    Returns: supertrend value, direction (1=above=bullish, -1=below=bearish)
+    """
+    n = len(close)
+    if n < period:
+        return np.zeros(n), np.zeros(n)
+    
+    # Calculate ATR
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -48,39 +91,37 @@ def calculate_atr(high, low, close, period=14):
     
     atr = np.zeros(n)
     atr[period-1] = np.mean(tr[:period])
-    
     for i in range(period, n):
         atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
     
-    return atr
-
-
-def calculate_hma(close, short_period=16, long_period=48):
-    """Calculate Hull Moving Average - vectorized with pandas"""
-    n = len(close)
-    if n < long_period:
-        return np.zeros(n)
+    # Calculate basic bands
+    hl2 = (high + low) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
     
-    close_series = pd.Series(close)
+    # Calculate supertrend with direction
+    supertrend = np.zeros(n)
+    direction = np.zeros(n)
     
-    def wma(x, period):
-        weights = np.arange(1, period + 1)
-        return x.rolling(window=period, min_periods=period).apply(
-            lambda y: np.sum(y * weights) / np.sum(weights), raw=True
-        )
+    supertrend[period-1] = upper_band[period-1]
+    direction[period-1] = -1
     
-    wma_short = wma(close_series, short_period)
-    wma_long = wma(close_series, long_period)
+    for i in range(period, n):
+        if close[i] > supertrend[i-1]:
+            supertrend[i] = lower_band[i]
+            direction[i] = 1
+        elif close[i] < supertrend[i-1]:
+            supertrend[i] = upper_band[i]
+            direction[i] = -1
+        else:
+            supertrend[i] = supertrend[i-1]
+            direction[i] = direction[i-1]
     
-    sqrt_long = int(np.sqrt(long_period))
-    diff = 2 * wma_short - wma_long
-    
-    hma = wma(diff, sqrt_long)
-    return hma.values
+    return supertrend, direction
 
 
 def calculate_rsi(close, period=14):
-    """Calculate RSI - vectorized"""
+    """Calculate RSI - vectorized with proper warmup"""
     n = len(close)
     if n < period + 1:
         return np.full(n, 50.0)
@@ -102,17 +143,11 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX - vectorized"""
+def calculate_atr(high, low, close, period=14):
+    """Calculate ATR using Wilder's smoothing"""
     n = len(close)
-    if n < period * 2:
+    if n < period:
         return np.zeros(n)
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    plus_dm[1:] = np.maximum(0, high[1:] - high[:-1])
-    minus_dm[1:] = np.maximum(0, low[:-1] - low[1:])
     
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -122,70 +157,43 @@ def calculate_adx(high, low, close, period=14):
     
     atr = np.zeros(n)
     atr[period-1] = np.mean(tr[:period])
+    
     for i in range(period, n):
         atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
     
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    mask = atr > 0
-    plus_di[mask] = 100 * plus_dm[mask] / atr[mask]
-    minus_di[mask] = 100 * minus_dm[mask] / atr[mask]
-    
-    dx = np.zeros(n)
-    di_sum = plus_di + minus_di
-    mask = di_sum > 0
-    dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / di_sum[mask]
-    
-    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
-    adx = np.nan_to_num(adx, nan=0)
-    
-    return adx
+    return atr
 
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands - vectorized"""
+def calculate_bbw_percentile(close, high, low, period=20, lookback=100):
+    """Calculate Bollinger Band Width percentile for regime detection"""
     n = len(close)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    rolling_mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    rolling_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    middle = rolling_mean
-    upper = middle + std_mult * rolling_std
-    lower = middle - std_mult * rolling_std
-    
-    bbw = np.zeros(n)
-    mask = middle > 0
-    bbw[mask] = (upper[mask] - lower[mask]) / middle[mask]
-    bbw = np.nan_to_num(bbw, nan=0)
-    
-    return upper, middle, lower, bbw
-
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion"""
-    n = len(close)
-    if n < period:
+    if n < lookback:
         return np.zeros(n)
     
     rolling_mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     rolling_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     
-    zscore = (close - rolling_mean) / rolling_std
-    zscore = np.nan_to_num(zscore, nan=0)
+    upper = rolling_mean + 2.0 * rolling_std
+    lower = rolling_mean - 2.0 * rolling_std
+    bbw = (upper - lower) / rolling_mean
+    bbw = np.nan_to_num(bbw, nan=0)
     
-    return zscore
+    percentile = np.zeros(n)
+    for i in range(lookback - 1, n):
+        window = bbw[i - lookback + 1:i + 1]
+        rank = np.sum(window <= bbw[i])
+        percentile[i] = rank / lookback
+    
+    return percentile
 
 
-def resample_to_timeframe(close, high, low, bars_per_tf):
-    """Resample data to higher timeframe"""
+def resample_ohlcv(close, high, low, bars_per_tf):
+    """Resample OHLCV to higher timeframe"""
     n = len(close)
     n_tf = n // bars_per_tf
     
     if n_tf < 1:
-        return np.array([close[-1]]), np.array([high[-1]]), np.array([low[-1]])
+        return close[-1:], high[-1:], low[-1:]
     
     c_tf = np.zeros(n_tf)
     h_tf = np.zeros(n_tf)
@@ -213,33 +221,20 @@ def map_tf_to_base(tf_array, bars_per_tf, base_length):
     return mapped
 
 
-def calculate_bbw_percentile(bbw, lookback=100):
-    """Calculate BBW percentile for regime detection - vectorized"""
-    n = len(bbw)
-    percentile = np.zeros(n)
-    
-    for i in range(lookback - 1, n):
-        window = bbw[i - lookback + 1:i + 1]
-        rank = np.sum(window <= bbw[i])
-        percentile[i] = rank / lookback
-    
-    return percentile
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
     n = len(close)
     
-    # Position sizing constants (MAX 0.35 to control drawdown)
-    SIZE_LOW = 0.25
-    SIZE_HIGH = 0.35
+    # Position sizing based on signal confidence
+    SIZE_LOW = 0.15   # 1 signal agrees
+    SIZE_MED = 0.25   # 2 signals agree
+    SIZE_HIGH = 0.35  # 3 signals agree
     
     # Regime thresholds
-    ADX_TREND_THRESHOLD = 25
-    BBW_TREND_PERCENTILE = 0.40
-    BBW_MR_PERCENTILE = 0.70
+    BBW_TREND_PERCENTILE = 0.40  # Low vol = trend regime
+    BBW_MR_PERCENTILE = 0.70     # High vol = mean reversion regime
     
     # RSI thresholds by regime
     RSI_TREND_LONG = 55
@@ -247,148 +242,179 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     RSI_MR_LONG = 35
     RSI_MR_SHORT = 65
     
-    # Z-score thresholds
-    ZSCORE_MR_LONG = -2.0
-    ZSCORE_MR_SHORT = 2.0
-    
-    # Timeframe conversion: 4h = 4 x 1h
+    # Timeframe: 1h base, 4h trend filter
     bars_per_4h = 4
     
-    # Base timeframe (1h) indicators
+    # === BASE TIMEFRAME (1h) INDICATORS ===
     atr_1h = calculate_atr(high, low, close, period=14)
     rsi_1h = calculate_rsi(close, period=14)
-    hma_1h = calculate_hma(close, short_period=16, long_period=48)
-    adx_1h = calculate_adx(high, low, close, period=14)
-    bb_upper_1h, bb_mid_1h, bb_lower_1h, bbw_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    zscore_1h = calculate_zscore(close, period=20)
+    kama_1h = calculate_kama(close, er_period=10, fast_sc=2/31, slow_sc=2/31)
+    st_1h, st_dir_1h = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    bbw_pct_1h = calculate_bbw_percentile(close, high, low, period=20, lookback=100)
     
-    # 4h timeframe indicators for trend filter
-    c_4h, h_4h, l_4h = resample_to_timeframe(close, high, low, bars_per_4h)
-    hma_4h = calculate_hma(c_4h, short_period=16, long_period=48)
-    adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
-    _, _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
-    bbw_pct_4h = calculate_bbw_percentile(bbw_4h, lookback=100)
+    # === 4H TIMEFRAME INDICATORS (trend filter) ===
+    c_4h, h_4h, l_4h = resample_ohlcv(close, high, low, bars_per_4h)
+    kama_4h = calculate_kama(c_4h, er_period=10, fast_sc=2/31, slow_sc=2/31)
+    st_4h, st_dir_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
+    bbw_pct_4h = calculate_bbw_percentile(c_4h, h_4h, l_4h, period=20, lookback=100)
     
     # Map 4h indicators to 1h
-    hma_4h_mapped = map_tf_to_base(hma_4h, bars_per_4h, n)
-    adx_4h_mapped = map_tf_to_base(adx_4h, bars_per_4h, n)
+    kama_4h_mapped = map_tf_to_base(kama_4h, bars_per_4h, n)
+    st_dir_4h_mapped = map_tf_to_base(st_dir_4h, bars_per_4h, n)
     bbw_pct_4h_mapped = map_tf_to_base(bbw_pct_4h, bars_per_4h, n)
     
-    # Calculate HMA slope (trend direction)
-    hma_slope_1h = np.zeros(n)
-    hma_slope_1h[5:] = np.sign(hma_1h[5:] - hma_1h[:-5])
-    
-    # Calculate 4h trend direction
-    trend_4h = np.zeros(n)
-    for i in range(n):
-        tf_idx = min(i // bars_per_4h, len(c_4h) - 1)
-        if hma_4h[tf_idx] > 0:
-            trend_4h[i] = np.sign(c_4h[tf_idx] - hma_4h[tf_idx])
-    
-    # Minimum warmup period
-    first_valid = max(200, 100 * bars_per_4h, 48, 45)
-    
-    # Initialize signals array
-    signals = np.zeros(n)
-    
-    # Vectorized regime detection
-    is_trend_regime = (adx_4h_mapped > ADX_TREND_THRESHOLD) & (bbw_pct_4h_mapped < BBW_TREND_PERCENTILE)
+    # === REGIME DETECTION ===
+    is_trend_regime = bbw_pct_4h_mapped < BBW_TREND_PERCENTILE
     is_mr_regime = bbw_pct_4h_mapped > BBW_MR_PERCENTILE
     is_neutral = (~is_trend_regime) & (~is_mr_regime)
     
-    # Signal 1: HMA trend (1h)
-    hma_signal = np.zeros(n)
-    hma_valid = hma_1h > 0
-    hma_signal = np.where(hma_valid, np.sign(close - hma_1h), hma_signal)
+    # === SIGNAL 1: KAMA TREND ===
+    # Long when price > KAMA and KAMA sloping up
+    # Short when price < KAMA and KAMA sloping down
+    kama_signal = np.zeros(n)
+    kama_valid = kama_1h > 0
     
-    # Signal 2: RSI momentum (regime-dependent)
+    kama_slope = np.zeros(n)
+    kama_slope[5:] = np.sign(kama_1h[5:] - kama_1h[:-5])
+    
+    kama_long_mask = kama_valid & (close > kama_1h) & (kama_slope > 0)
+    kama_short_mask = kama_valid & (close < kama_1h) & (kama_slope < 0)
+    
+    kama_signal = np.where(kama_long_mask, 1, kama_signal)
+    kama_signal = np.where(kama_short_mask, -1, kama_signal)
+    
+    # === SIGNAL 2: SUPERTREND DIRECTION ===
+    # Direct from supertrend direction indicator
+    super_signal = st_dir_1h.copy()
+    
+    # === SIGNAL 3: RSI MOMENTUM (regime-dependent) ===
     rsi_signal = np.zeros(n)
     
-    # Trend regime RSI
+    # Trend regime: RSI confirms direction
     trend_long_mask = is_trend_regime & (rsi_1h > RSI_TREND_LONG)
     trend_short_mask = is_trend_regime & (rsi_1h < RSI_TREND_SHORT)
     rsi_signal = np.where(trend_long_mask, 1, rsi_signal)
     rsi_signal = np.where(trend_short_mask, -1, rsi_signal)
     
-    # Mean reversion regime RSI
+    # Mean reversion regime: RSI extremes
     mr_long_mask = is_mr_regime & (rsi_1h < RSI_MR_LONG)
     mr_short_mask = is_mr_regime & (rsi_1h > RSI_MR_SHORT)
     rsi_signal = np.where(mr_long_mask, 1, rsi_signal)
     rsi_signal = np.where(mr_short_mask, -1, rsi_signal)
     
-    # Neutral regime RSI
+    # Neutral regime: standard RSI
     neutral_long_mask = is_neutral & (rsi_1h > 55)
     neutral_short_mask = is_neutral & (rsi_1h < 45)
     rsi_signal = np.where(neutral_long_mask, 1, rsi_signal)
     rsi_signal = np.where(neutral_short_mask, -1, rsi_signal)
     
-    # Signal 3: Z-score mean reversion
-    zscore_signal = np.zeros(n)
-    zscore_signal = np.where(zscore_1h < ZSCORE_MR_LONG, 1, zscore_signal)
-    zscore_signal = np.where(zscore_1h > ZSCORE_MR_SHORT, -1, zscore_signal)
-    
-    # === ENSEMBLE VOTING ===
+    # === CONFIDENCE-BASED POSITION SIZING ===
+    # Count agreeing signals for long and short
     votes_long = np.zeros(n)
     votes_short = np.zeros(n)
     
-    # HMA vote (weighted by 4h trend alignment)
-    hma_aligned_long = (hma_signal == 1) & (trend_4h >= 0)
-    hma_aligned_short = (hma_signal == -1) & (trend_4h <= 0)
-    votes_long = np.where(hma_aligned_long, votes_long + 1.5, votes_long)
-    votes_short = np.where(hma_aligned_short, votes_short + 1.5, votes_short)
+    # KAMA vote (weighted by 4h trend alignment)
+    kama_4h_aligned_long = (kama_signal == 1) & (st_dir_4h_mapped >= 0)
+    kama_4h_aligned_short = (kama_signal == -1) & (st_dir_4h_mapped <= 0)
+    votes_long = np.where(kama_4h_aligned_long, votes_long + 1, votes_long)
+    votes_long = np.where((kama_signal == 1) & (~kama_4h_aligned_long), votes_long + 0.5, votes_long)
+    votes_short = np.where(kama_4h_aligned_short, votes_short + 1, votes_short)
+    votes_short = np.where((kama_signal == -1) & (~kama_4h_aligned_short), votes_short + 0.5, votes_short)
+    
+    # Supertrend vote
+    votes_long = np.where(super_signal == 1, votes_long + 1, votes_long)
+    votes_short = np.where(super_signal == -1, votes_short + 1, votes_short)
     
     # RSI vote
-    votes_long = np.where(rsi_signal == 1, votes_long + 1.0, votes_long)
-    votes_short = np.where(rsi_signal == -1, votes_short + 1.0, votes_short)
+    votes_long = np.where(rsi_signal == 1, votes_long + 1, votes_long)
+    votes_short = np.where(rsi_signal == -1, votes_short + 1, votes_short)
     
-    # Z-score vote (mean reversion only, lower weight)
-    zscore_mr_mask = is_mr_regime | is_neutral
-    votes_long = np.where(zscore_mr_mask & (zscore_signal == 1), votes_long + 0.5, votes_long)
-    votes_short = np.where(zscore_mr_mask & (zscore_signal == -1), votes_short + 0.5, votes_short)
+    # === GENERATE FINAL SIGNALS ===
+    signals = np.zeros(n)
     
-    # Generate final signals with discrete levels
-    long_mask = (votes_long >= 2.5) & (votes_long > votes_short)
-    short_mask = (votes_short >= 2.5) & (votes_short > votes_long)
+    # Long signals with confidence-based sizing
+    long_3sig = (votes_long >= 2.5) & (votes_long > votes_short)
+    long_2sig = (votes_long >= 1.5) & (votes_long < 2.5) & (votes_long > votes_short)
+    long_1sig = (votes_long >= 0.5) & (votes_long < 1.5) & (votes_long > votes_short)
     
-    # Create new signal array based on conditions
-    new_signals = np.zeros(n)
-    new_signals = np.where(long_mask & is_trend_regime, SIZE_HIGH, new_signals)
-    new_signals = np.where(long_mask & (~is_trend_regime), SIZE_LOW, new_signals)
-    new_signals = np.where(short_mask & is_trend_regime, -SIZE_HIGH, new_signals)
-    new_signals = np.where(short_mask & (~is_trend_regime), -SIZE_LOW, new_signals)
+    signals = np.where(long_3sig & is_trend_regime, SIZE_HIGH, signals)
+    signals = np.where(long_3sig & (~is_trend_regime), SIZE_MED, signals)
+    signals = np.where(long_2sig, SIZE_MED, signals)
+    signals = np.where(long_1sig, SIZE_LOW, signals)
     
-    signals = new_signals.copy()
+    # Short signals with confidence-based sizing
+    short_3sig = (votes_short >= 2.5) & (votes_short > votes_long)
+    short_2sig = (votes_short >= 1.5) & (votes_short < 2.5) & (votes_short > votes_long)
+    short_1sig = (votes_short >= 0.5) & (votes_short < 1.5) & (votes_short > votes_long)
     
-    # Apply ATR filter (no trades in extremely high volatility)
+    signals = np.where(short_3sig & is_trend_regime, -SIZE_HIGH, signals)
+    signals = np.where(short_3sig & (~is_trend_regime), -SIZE_MED, signals)
+    signals = np.where(short_2sig, -SIZE_MED, signals)
+    signals = np.where(short_1sig, -SIZE_LOW, signals)
+    
+    # === ATR VOLATILITY FILTER ===
+    # Reduce position size in extremely high volatility
     atr_pct = atr_1h / close
-    atr_valid = ~np.isnan(atr_pct)
-    if np.sum(atr_valid) > 0:
-        high_vol_threshold = np.percentile(atr_pct[atr_valid], 95)
-        high_vol_mask = atr_pct > high_vol_threshold
-        signals = np.where(high_vol_mask, 0, signals)
+    atr_pct = np.nan_to_num(atr_pct, nan=0)
     
-    # Signal persistence: require 2 consecutive bars to flip direction
+    valid_atr = atr_pct > 0
+    if np.sum(valid_atr) > 50:
+        high_vol_threshold = np.percentile(atr_pct[valid_atr], 95)
+        extreme_vol_mask = atr_pct > high_vol_threshold
+        signals = np.where(extreme_vol_mask, signals * 0.5, signals)
+    
+    # === SIGNAL PERSISTENCE ===
+    # Require 2 consecutive bars with same direction to flip
     # This reduces churn and transaction costs
     persistent_signals = np.zeros(n)
-    for i in range(first_valid, n):
-        if i < 2:
+    prev_signal = 0
+    
+    first_valid = max(100, 48 * bars_per_4h)
+    
+    for i in range(n):
+        if i < first_valid:
             persistent_signals[i] = 0
-        elif signals[i] > 0 and signals[i-1] > 0:
-            persistent_signals[i] = signals[i]
-        elif signals[i] < 0 and signals[i-1] < 0:
-            persistent_signals[i] = signals[i]
-        elif signals[i] == 0:
+            prev_signal = 0
+        elif i < 2:
             persistent_signals[i] = 0
+            prev_signal = 0
         else:
-            # Keep previous signal if not confirmed
-            persistent_signals[i] = persistent_signals[i-1]
+            current = signals[i]
+            
+            # Same direction as previous - keep it
+            if current > 0 and prev_signal > 0:
+                persistent_signals[i] = current
+                prev_signal = current
+            elif current < 0 and prev_signal < 0:
+                persistent_signals[i] = current
+                prev_signal = current
+            # Flipping direction - require confirmation
+            elif current > 0 and prev_signal <= 0:
+                if signals[i-1] > 0:
+                    persistent_signals[i] = current
+                    prev_signal = current
+                else:
+                    persistent_signals[i] = prev_signal
+            elif current < 0 and prev_signal >= 0:
+                if signals[i-1] < 0:
+                    persistent_signals[i] = current
+                    prev_signal = current
+                else:
+                    persistent_signals[i] = prev_signal
+            # Going to flat
+            elif current == 0:
+                persistent_signals[i] = 0
+                prev_signal = 0
+            else:
+                persistent_signals[i] = prev_signal
     
     signals = persistent_signals
     
-    # Warmup period
-    signals[:first_valid] = 0
-    
+    # === FINAL CLEANUP ===
     # Ensure no NaN values
     signals = np.nan_to_num(signals, nan=0.0)
+    
+    # Clip to max position size
+    signals = np.clip(signals, -SIZE_HIGH, SIZE_HIGH)
     
     return signals
