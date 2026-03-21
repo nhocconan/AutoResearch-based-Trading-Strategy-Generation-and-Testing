@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #008 - Donchian Breakout with RSI Pullback (30m Primary, 4h+1d HTF)
+EXPERIMENT #009 - Bollinger Squeeze + MACD Momentum with Daily Trend (6h Primary)
 ==================================================================================================
-Hypothesis: Current best uses 4h+1d with HMA+RSI (Sharpe=0.537). This uses 30m+4h+1d with
-Donchian channels + RSI pullback + volume confirmation. Donchian breakouts capture momentum
-better than HMA crossovers, and 30m primary gives 2x more trade opportunities than 1h.
+Hypothesis: Current best uses 4h+1d with HMA+RSI. This tests 6h+1d with BB squeeze + MACD momentum.
+6h timeframe should have fewer false signals than 4h, cleaner trends than 1h/30m.
+Bollinger Band squeeze detects low volatility periods before breakouts.
+MACD histogram confirms momentum direction. Daily trend filter prevents counter-trend trades.
 
 Key innovations:
-1. 30m PRIMARY (not 1h): More entry opportunities, captures intraday momentum
-2. 4h Donchian(20): Clean breakout-based trend filter (not MA lag)
-3. 1d SMA(50): Regime filter - only long in bull market, short in bear
-4. Volume confirmation: Avoid fake breakouts (volume > 20-period average)
-5. RSI pullback entry: Enter on pullback within trend, not at breakout extreme
+1. 6h PRIMARY + 1d HTF: Even fewer trades than 4h, less noise, better risk/reward
+2. BB Squeeze: BW percentile < 20% indicates compression before expansion
+3. MACD histogram: Confirms momentum direction (not just crossover)
+4. Daily SMA(50) trend: Simple but effective master filter
+5. Conservative sizing: 0.20-0.30 discrete levels, 2.5 ATR stoploss (wider for 6h)
 
 Why this should beat #005 (Sharpe=0.537):
-- 30m timeframe = 2x more signals than 1h strategies
-- Donchian channels = cleaner trend detection than HMA (no whipsaw in ranges)
-- Daily regime filter = avoids counter-trend trades in strong markets
-- Volume filter = reduces false breakouts significantly
+- 6h has less noise than 4h, fewer whipsaws
+- BB squeeze captures volatility expansion (proven breakout signal)
+- MACD histogram more responsive than RSI for momentum
+- Daily SMA(50) is classic trend filter used by institutions
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "donchian_rsi_volume_mtf_30m_4h_1d_v1"
-timeframe = "30m"
+name = "bb_squeeze_macd_daily_trend_6h_v1"
+timeframe = "6h"
 leverage = 1.0
 
 
@@ -52,139 +53,185 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_donchian(high, low, period=20):
-    """
-    Donchian Channel - returns upper band, lower band, and mid line
-    Trend direction: price above mid = uptrend, below mid = downtrend
-    """
-    n = len(high)
-    if n < period:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
-    
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    mid = (upper + lower) / 2
-    
-    return upper, lower, mid
-
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI"""
-    n = len(close)
-    if n < period + 1:
-        return np.zeros(n)
-    
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    rs = np.zeros(n)
-    mask = avg_loss > 0
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rs[~mask] = 100
-    
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-
-def calculate_sma(close, period=50):
+def calculate_sma(series, period):
     """Calculate Simple Moving Average"""
-    n = len(close)
+    n = len(series)
     if n < period:
         return np.zeros(n)
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    sma = np.zeros(n)
+    for i in range(period - 1, n):
+        sma[i] = np.mean(series[i - period + 1:i + 1])
+    
     return sma
 
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume moving average"""
-    n = len(volume)
+def calculate_ema(series, period):
+    """Calculate Exponential Moving Average"""
+    n = len(series)
     if n < period:
         return np.zeros(n)
     
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+    ema = np.zeros(n)
+    ema[period - 1] = np.mean(series[:period])
+    
+    multiplier = 2 / (period + 1)
+    for i in range(period, n):
+        ema[i] = (series[i] - ema[i - 1]) * multiplier + ema[i - 1]
+    
+    return ema
+
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """
+    Calculate Bollinger Bands
+    Returns: upper, middle, lower, bandwidth, percent_b
+    """
+    n = len(close)
+    if n < period:
+        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    middle = calculate_sma(close, period)
+    
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    bandwidth = np.zeros(n)
+    percent_b = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        if middle[i] == 0:
+            continue
+        
+        window = close[i - period + 1:i + 1]
+        std = np.std(window)
+        
+        upper[i] = middle[i] + std_mult * std
+        lower[i] = middle[i] - std_mult * std
+        bandwidth[i] = (upper[i] - lower[i]) / middle[i]
+        
+        if upper[i] != lower[i]:
+            percent_b[i] = (close[i] - lower[i]) / (upper[i] - lower[i])
+        else:
+            percent_b[i] = 0.5
+    
+    return upper, middle, lower, bandwidth, percent_b
+
+
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """
+    Calculate MACD indicator
+    Returns: macd_line, signal_line, histogram
+    """
+    n = len(close)
+    if n < slow + signal:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    ema_fast = calculate_ema(close, fast)
+    ema_slow = calculate_ema(close, slow)
+    
+    macd_line = ema_fast - ema_slow
+    
+    # Signal line is EMA of MACD
+    signal_line = np.zeros(n)
+    first_valid = slow - 1
+    if first_valid + signal <= n:
+        macd_for_signal = macd_line[first_valid:first_valid + signal]
+        signal_line[first_valid + signal - 1] = np.mean(macd_for_signal)
+        
+        multiplier = 2 / (signal + 1)
+        for i in range(first_valid + signal, n):
+            signal_line[i] = (macd_line[i] - signal_line[i - 1]) * multiplier + signal_line[i - 1]
+    
+    histogram = macd_line - signal_line
+    
+    return macd_line, signal_line, histogram
+
+
+def calculate_bb_squeeze_percentile(bandwidth, lookback=100):
+    """
+    Calculate Bollinger Bandwidth percentile over lookback period
+    Low percentile = squeeze (compression)
+    """
+    n = len(bandwidth)
+    percentile = np.zeros(n)
+    
+    for i in range(lookback - 1, n):
+        if bandwidth[i] == 0:
+            percentile[i] = 50
+            continue
+        
+        window = bandwidth[i - lookback + 1:i + 1]
+        valid_window = window[window > 0]
+        
+        if len(valid_window) == 0:
+            percentile[i] = 50
+            continue
+        
+        rank = np.sum(valid_window <= bandwidth[i])
+        percentile[i] = (rank / len(valid_window)) * 100
+    
+    return percentile
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
-    # ========== 30m INDICATORS (PRIMARY TIMEFRAME) ==========
-    atr_30m = calculate_atr(high, low, close, period=14)
-    rsi_30m = calculate_rsi(close, period=14)
-    vol_sma_30m = calculate_volume_sma(volume, period=20)
+    # ========== 6h INDICATORS (PRIMARY TIMEFRAME) ==========
+    atr_6h = calculate_atr(high, low, close, period=14)
     
-    # ========== 4h INDICATORS (TREND FILTER) - PROPER MTF ==========
-    try:
-        df_4h = get_htf_data(prices, '4h')
-        close_4h = df_4h['close'].values
-        high_4h = df_4h['high'].values
-        low_4h = df_4h['low'].values
-        
-        # 4h Donchian channel for trend direction
-        _, lower_4h, mid_4h = calculate_donchian(high_4h, low_4h, period=20)
-        
-        # 4h RSI for momentum confirmation
-        rsi_4h = calculate_rsi(close_4h, period=14)
-        
-        # Align to 30m timeframe (auto shift for completed bars)
-        mid_4h_aligned = align_htf_to_ltf(prices, df_4h, mid_4h)
-        rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-        
-    except Exception:
-        mid_4h_aligned = np.zeros(n)
-        rsi_4h_aligned = np.zeros(n)
+    # Bollinger Bands
+    bb_upper, bb_middle, bb_lower, bb_bandwidth, bb_pct_b = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    bb_squeeze_pct = calculate_bb_squeeze_percentile(bb_bandwidth, lookback=100)
     
-    # ========== 1d INDICATORS (REGIME FILTER) - PROPER MTF ==========
+    # MACD
+    macd_line, macd_signal, macd_hist = calculate_macd(close, fast=12, slow=26, signal=9)
+    
+    # Trend EMAs
+    ema_21 = calculate_ema(close, 21)
+    ema_50 = calculate_ema(close, 50)
+    
+    # ========== 1d INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
         df_1d = get_htf_data(prices, '1d')
         close_1d = df_1d['close'].values
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
         
-        # Daily SMA(50) for bull/bear regime
-        sma_1d = calculate_sma(close_1d, period=50)
+        # Daily SMA(50) for trend direction
+        sma_50_1d = calculate_sma(close_1d, 50)
+        sma_20_1d = calculate_sma(close_1d, 20)
+        atr_1d = calculate_atr(high_1d, low_1d, close_1d, period=14)
         
-        # Align to 30m timeframe
-        sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+        # Align to 6h timeframe (auto shift for completed bars)
+        sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+        sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
+        atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
         
     except Exception:
-        sma_1d_aligned = np.zeros(n)
+        sma_50_1d_aligned = np.zeros(n)
+        sma_20_1d_aligned = np.zeros(n)
+        atr_1d_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
     
     # Position sizing - CONSERVATIVE
-    SIZE_BASE = 0.20   # Base position (20% of capital)
-    SIZE_HIGH = 0.30   # High conviction (30% of capital)
+    SIZE_BASE = 0.20   # Base position
+    SIZE_HIGH = 0.30   # High conviction
     
-    # ATR stoploss
-    ATR_STOP_MULT = 2.5  # Wider stop for 30m noise
+    # ATR stoploss (wider for 6h timeframe)
+    ATR_STOP_MULT = 2.5
     
-    # RSI zones for pullback entries
-    RSI_LONG_MIN = 35
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 65
+    # BB squeeze threshold (low bandwidth = compression)
+    BB_SQUEEZE_THRESHOLD = 25  # Bottom 25% of bandwidth
     
-    # Volume filter (avoid low volume breakouts)
-    VOLUME_MULT = 1.2  # Volume must be > 1.2x average
+    # MACD momentum threshold
+    MACD_MOMENTUM_THRESHOLD = 0.0
     
-    # Donchian trend threshold
-    DONCHIAN_TREND_THRESHOLD = 0.005  # 0.5% above/below mid
-    
-    first_valid = max(100, 50)
+    first_valid = max(150, 100)
     
     # Track position state
     position_side = np.zeros(n, dtype=int)
@@ -195,35 +242,45 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_30m[i]) or atr_30m[i] == 0 or np.isnan(rsi_30m[i]):
+        if np.isnan(atr_6h[i]) or atr_6h[i] == 0 or np.isnan(bb_bandwidth[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_30m[i]
-        rsi_val = rsi_30m[i]
-        vol_ratio = volume[i] / vol_sma_30m[i] if vol_sma_30m[i] > 0 else 0
+        atr = atr_6h[i]
         
-        # 4h trend filters (MASTER FILTER)
-        mid_4h = mid_4h_aligned[i]
-        rsi_4h = rsi_4h_aligned[i]
+        # Bollinger signals
+        bb_squeeze = bb_squeeze_pct[i] < BB_SQUEEZE_THRESHOLD
+        bb_expansion = bb_bandwidth[i] > bb_bandwidth[i - 1] if i > 0 else False
         
-        # 1d regime filter
-        sma_1d = sma_1d_aligned[i]
+        # MACD signals
+        macd_momentum = macd_hist[i]
+        macd_cross_up = macd_hist[i] > 0 and macd_hist[i - 1] <= 0 if i > 0 else False
+        macd_cross_down = macd_hist[i] < 0 and macd_hist[i - 1] >= 0 if i > 0 else False
         
-        # Determine 4h trend direction from Donchian mid
-        trend_4h = 0
-        if mid_4h > 0 and price > mid_4h * (1 + DONCHIAN_TREND_THRESHOLD):
-            trend_4h = 1
-        elif mid_4h > 0 and price < mid_4h * (1 - DONCHIAN_TREND_THRESHOLD):
-            trend_4h = -1
+        # EMA trend
+        ema_trend = 0
+        if ema_21[i] > ema_50[i]:
+            ema_trend = 1
+        elif ema_21[i] < ema_50[i]:
+            ema_trend = -1
         
-        # Determine daily regime
-        regime_1d = 0
-        if sma_1d > 0 and price > sma_1d:
-            regime_1d = 1  # Bull market
-        elif sma_1d > 0 and price < sma_1d:
-            regime_1d = -1  # Bear market
+        # 1d trend filters (MASTER FILTER)
+        sma_50_1d_val = sma_50_1d_aligned[i]
+        sma_20_1d_val = sma_20_1d_aligned[i]
+        
+        # Determine daily trend direction
+        daily_trend = 0
+        if sma_50_1d_val > 0 and price > sma_50_1d_val:
+            daily_trend = 1
+        elif sma_50_1d_val > 0 and price < sma_50_1d_val:
+            daily_trend = -1
+        
+        # SMA20 vs SMA50 confirmation
+        if sma_20_1d_val > sma_50_1d_val and sma_50_1d_val > 0:
+            daily_trend = max(daily_trend, 1)
+        elif sma_20_1d_val < sma_50_1d_val and sma_50_1d_val > 0:
+            daily_trend = min(daily_trend, -1)
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -244,7 +301,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.5*ATR)
+            # Stoploss check (2.5*ATR for 6h)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -318,42 +375,29 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ========== ENTRY LOGIC - DONCHIAN TREND + RSI PULLBACK + VOLUME ==========
-        # LONG: 4h trend up + daily bull + 30m RSI pullback + volume confirmation
+        # ========== ENTRY LOGIC - BB SQUEEZE BREAKOUT + MACD MOMENTUM ==========
+        # LONG: Daily trend up + BB squeeze + MACD momentum up + price above BB middle
         long_condition = (
-            trend_4h == 1 and
-            regime_1d >= 0 and  # Bull or neutral daily
-            rsi_val >= RSI_LONG_MIN and rsi_val <= RSI_LONG_MAX and
-            vol_ratio >= VOLUME_MULT and
-            rsi_4h > 45 and  # 4h momentum not oversold
-            price > mid_4h  # Price above 4h Donchian mid
+            daily_trend == 1 and
+            bb_squeeze and
+            macd_momentum > MACD_MOMENTUM_THRESHOLD and
+            price > bb_middle[i] and
+            ema_trend == 1
         )
         
-        # SHORT: 4h trend down + daily bear + 30m RSI pullback + volume confirmation
+        # SHORT: Daily trend down + BB squeeze + MACD momentum down + price below BB middle
         short_condition = (
-            trend_4h == -1 and
-            regime_1d <= 0 and  # Bear or neutral daily
-            rsi_val >= RSI_SHORT_MIN and rsi_val <= RSI_SHORT_MAX and
-            vol_ratio >= VOLUME_MULT and
-            rsi_4h < 55 and  # 4h momentum not overbought
-            price < mid_4h  # Price below 4h Donchian mid
+            daily_trend == -1 and
+            bb_squeeze and
+            macd_momentum < MACD_MOMENTUM_THRESHOLD and
+            price < bb_middle[i] and
+            ema_trend == -1
         )
         
         # Determine position size based on conviction
-        # High conviction: All filters aligned strongly
-        high_conviction_long = (
-            long_condition and
-            regime_1d == 1 and  # Strong bull daily
-            rsi_4h > 50 and  # 4h momentum bullish
-            vol_ratio > 1.5  # Strong volume
-        )
-        
-        high_conviction_short = (
-            short_condition and
-            regime_1d == -1 and  # Strong bear daily
-            rsi_4h < 50 and  # 4h momentum bearish
-            vol_ratio > 1.5  # Strong volume
-        )
+        # High conviction: strong daily trend + MACD cross
+        high_conviction_long = long_condition and macd_cross_up and daily_trend == 1
+        high_conviction_short = short_condition and macd_cross_down and daily_trend == -1
         
         if long_condition:
             size = SIZE_HIGH if high_conviction_long else SIZE_BASE
