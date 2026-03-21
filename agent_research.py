@@ -42,36 +42,49 @@ def write_strategy(code: str):
     STRATEGY_FILE.write_text(code)
 
 
-BACKTEST_TIMEOUT_S = 120  # Kill backtest if it takes > 2 minutes per symbol
+BACKTEST_TIMEOUT_S = 90  # Hard kill after 90s per symbol
+
+
+def _run_single_backtest(queue, strategy_path, symbol, period):
+    """Worker function for subprocess backtest."""
+    try:
+        result = run_strategy_backtest(
+            strategy_path=strategy_path,
+            symbol=symbol,
+            period=period,
+        )
+        m = compute_metrics(result)
+        m["symbol"] = symbol
+        m["strategy"] = result.strategy_name
+        queue.put(("ok", m))
+    except Exception as e:
+        queue.put(("error", str(e)))
 
 
 def run_backtest_all(symbols: list[str], strategy_path: str, period: str = "train") -> list[dict]:
-    """Run backtest on all symbols and return metrics dicts. Timeout per symbol."""
-    import signal as _signal
-
-    class BacktestTimeout(Exception):
-        pass
-
-    def _timeout_handler(signum, frame):
-        raise BacktestTimeout(f"Backtest timed out after {BACKTEST_TIMEOUT_S}s")
+    """Run backtest on all symbols with HARD timeout using multiprocessing."""
+    from multiprocessing import Process, Queue
 
     results = []
     for symbol in symbols:
-        old_handler = _signal.signal(_signal.SIGALRM, _timeout_handler)
-        _signal.alarm(BACKTEST_TIMEOUT_S)
-        try:
-            result = run_strategy_backtest(
-                strategy_path=strategy_path,
-                symbol=symbol,
-                period=period,
-            )
-            m = compute_metrics(result)
-            m["symbol"] = symbol
-            m["strategy"] = result.strategy_name
-            results.append(m)
-        finally:
-            _signal.alarm(0)
-            _signal.signal(_signal.SIGALRM, old_handler)
+        q = Queue()
+        p = Process(target=_run_single_backtest, args=(q, strategy_path, symbol, period))
+        p.start()
+        p.join(timeout=BACKTEST_TIMEOUT_S)
+
+        if p.is_alive():
+            p.kill()
+            p.join(timeout=5)
+            raise TimeoutError(f"{symbol} backtest killed after {BACKTEST_TIMEOUT_S}s (stuck in C code)")
+
+        if q.empty():
+            raise RuntimeError(f"{symbol} backtest returned no result")
+
+        status, data = q.get_nowait()
+        if status == "error":
+            raise RuntimeError(data)
+        results.append(data)
+
     return results
 
 
@@ -192,9 +205,10 @@ NEVER resample data yourself! NEVER use pd.date_range()!
 Use the mtf_data module which loads ACTUAL Binance HTF candles:
 ```
 from mtf_data import get_htf_data, align_htf_to_ltf
-df_4h = get_htf_data(prices, '4h')  # loads actual Binance 4h parquet
+df_4h = get_htf_data(prices, '4h')  # loads actual Binance 4h parquet — call ONCE before the loop!
 ema_4h = pd.Series(df_4h['close'].values).ewm(span=21).mean().values
 ema_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # auto shift(1) for completed bars only
+# NEVER call get_htf_data() inside a for-loop! It loads a Parquet file each call = 45K file reads!
 ```
 This ensures: correct 4h boundaries, no look-ahead (shift by 1 HTF bar),
 works on SOLUSDT with data gaps. 46 strategies failed audit without this.
@@ -377,6 +391,18 @@ def validate_strategy(code: str) -> tuple[bool, str]:
     if re.search(r'\.resample\s*\(', code):
         if 'get_htf_data' not in code and 'mtf_data' not in code:
             return False, "Manual .resample() detected. Use mtf_data.get_htf_data() instead."
+
+    # PERFORMANCE: Block get_htf_data inside for-loops (causes 45K file reads)
+    in_loop = False
+    for line in code.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('for ') or stripped.startswith('while '):
+            in_loop = True
+        if in_loop and 'get_htf_data' in stripped:
+            return False, "PERFORMANCE: get_htf_data() inside loop! Call it ONCE before the loop, use aligned arrays inside."
+        # Simple heuristic: unindented non-empty line = out of loop
+        if in_loop and stripped and not line.startswith(' ') and not line.startswith('\t') and not stripped.startswith('#'):
+            in_loop = False
 
     return True, "ok"
 
