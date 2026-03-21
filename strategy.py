@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #300: 1d HMA Trend + Weekly Bias + Volume Confirmation with ATR Stops
-Hypothesis: Daily timeframe with weekly macro bias works, but #294 had too many AND conditions causing few trades.
-This version simplifies entry logic: HMA crossover + RSI zone + volume confirmation (above 20-day avg).
-Fewer filters = more trades while maintaining quality. Weekly HMA provides macro trend direction.
-ATR trailing stop (2.5*ATR) controls drawdown. Position size 0.30 balances returns vs risk.
-Target: Beat Sharpe=0.499 while ensuring >=10 trades per symbol on 1d timeframe.
-Key change: Remove SMA200 filter, simplify RSI ranges, add volume confirmation for breakout validity.
+Experiment #301: 15m Multi-Timeframe Trend Following with Generous Entries
+Hypothesis: 15m primary with 4h/1h trend filters captures intraday moves while avoiding whipsaw.
+Key insight from failures: Entry conditions MUST be generous to ensure >=10 trades (learned from #289, #295, #296).
+Using 4h HMA for macro bias + 1h RSI for timing + ADX to filter choppy markets.
+Position size 0.25 (conservative), ATR stoploss at 2.5x, discrete levels to minimize fee churn.
+Target: Beat Sharpe=0.499 while ensuring >=10 trades per symbol on 15m timeframe.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_weekly_volume_rsi_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_4h_hma_1h_rsi_adx_trend_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -48,45 +47,93 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume moving average for volume confirmation."""
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean() / atr
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    return adx.values, plus_di.values, minus_di.values
+
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average."""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1)
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
+    df_1h = get_htf_data(prices, '1h')
     
-    # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    # Calculate 4h indicators (macro trend)
+    hma_4h_21 = calculate_hma(df_4h['close'].values, 21)
+    hma_4h_50 = calculate_hma(df_4h['close'].values, 50)
+    rsi_4h = calculate_rsi(df_4h['close'].values, 14)
+    
+    # Calculate 1h indicators (entry timing)
+    hma_1h_21 = calculate_hma(df_1h['close'].values, 21)
+    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
+    adx_1h, plus_di_1h, minus_di_1h = calculate_adx(
+        df_1h['high'].values, 
+        df_1h['low'].values, 
+        df_1h['close'].values, 
+        14
+    )
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
+    hma_4h_50_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_50)
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # Calculate 1d indicators
+    hma_1h_21_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_21)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
+    adx_1h_aligned = align_htf_to_ltf(prices, df_1h, adx_1h)
+    plus_di_1h_aligned = align_htf_to_ltf(prices, df_1h, plus_di_1h)
+    minus_di_1h_aligned = align_htf_to_ltf(prices, df_1h, minus_di_1h)
+    
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    hma_21 = calculate_hma(close, 21)
-    hma_50 = calculate_hma(close, 50)
-    rsi = calculate_rsi(close, 14)
-    vol_sma = calculate_volume_sma(volume, 20)
+    hma_15m_21 = calculate_hma(close, 21)
+    hma_15m_50 = calculate_hma(close, 50)
+    rsi_15m = calculate_rsi(close, 14)
+    adx_15m, plus_di_15m, minus_di_15m = calculate_adx(high, low, close, 14)
+    sma_15m_50 = calculate_sma(close, 50)
     
     # Track previous values for crossover detection
     prev_close = np.roll(close, 1)
     prev_close[0] = close[0]
-    prev_hma_21 = np.roll(hma_21, 1)
-    prev_hma_21[0] = hma_21[0]
-    prev_hma_50 = np.roll(hma_50, 1)
-    prev_hma_50[0] = hma_50[0]
+    prev_hma_15m_21 = np.roll(hma_15m_21, 1)
+    prev_hma_15m_21[0] = hma_15m_21[0]
+    prev_rsi_15m = np.roll(rsi_15m, 1)
+    prev_rsi_15m[0] = rsi_15m[0]
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -98,67 +145,94 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(hma_21[i]) or np.isnan(hma_50[i]) or np.isnan(atr[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(hma_15m_21[i]) or np.isnan(hma_15m_50[i]) or np.isnan(atr[i]):
+            signals[i] = 0.0
+            continue
+        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(rsi_4h_aligned[i]):
+            signals[i] = 0.0
+            continue
+        if np.isnan(rsi_1h_aligned[i]) or np.isnan(adx_1h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Weekly macro trend bias (simpler: just price vs weekly HMA)
-        weekly_bullish = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
-        weekly_bearish = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
+        # === 4H MACRO TREND BIAS ===
+        # Bullish: Price > HMA21 > HMA50 on 4h
+        trend_4h_bullish = (close[i] > hma_4h_21_aligned[i] and 
+                           hma_4h_21_aligned[i] > hma_4h_50_aligned[i])
+        # Bearish: Price < HMA21 < HMA50 on 4h
+        trend_4h_bearish = (close[i] < hma_4h_21_aligned[i] and 
+                           hma_4h_21_aligned[i] < hma_4h_50_aligned[i])
         
-        # Daily trend filter (HMA21 vs HMA50)
-        daily_bullish = hma_21[i] > hma_50[i]
-        daily_bearish = hma_21[i] < hma_50[i]
+        # 4h RSI confirmation (not extreme)
+        rsi_4h_ok_long = 35 < rsi_4h_aligned[i] < 75
+        rsi_4h_ok_short = 25 < rsi_4h_aligned[i] < 65
         
-        # Volume confirmation (above average)
-        volume_confirmed = volume[i] > vol_sma[i]
+        # === 1H ENTRY TIMING ===
+        # 1h trend alignment
+        trend_1h_bullish = close[i] > hma_1h_21_aligned[i]
+        trend_1h_bearish = close[i] < hma_1h_21_aligned[i]
         
-        # RSI zones (generous ranges to ensure trades)
-        rsi_long_ok = 35 < rsi[i] < 65
-        rsi_short_ok = 35 < rsi[i] < 65
-        rsi_not_overbought = rsi[i] < 70
-        rsi_not_oversold = rsi[i] > 30
+        # 1h RSI pullback (generous ranges for more trades)
+        rsi_1h_pullback_long = 30 < rsi_1h_aligned[i] < 60
+        rsi_1h_pullback_short = 40 < rsi_1h_aligned[i] < 70
         
-        # HMA crossover signals
-        hma_cross_long = prev_close[i] <= prev_hma_21[i] and close[i] > hma_21[i]
-        hma_cross_short = prev_close[i] >= prev_hma_21[i] and close[i] < hma_21[i]
+        # 1h ADX filter (trend strength > 20 to avoid chop)
+        adx_1h_strong = adx_1h_aligned[i] > 18
         
-        # HMA slope (trend direction)
-        hma_slope_bullish = hma_21[i] > prev_hma_21[i]
-        hma_slope_bearish = hma_21[i] < prev_hma_21[i]
+        # 1h DI crossover
+        di_bullish = plus_di_1h_aligned[i] > minus_di_1h_aligned[i]
+        di_bearish = plus_di_1h_aligned[i] < minus_di_1h_aligned[i]
         
-        # HMA50 slope
-        hma50_slope_bullish = hma_50[i] > prev_hma_50[i]
-        hma50_slope_bearish = hma_50[i] < prev_hma_50[i]
+        # === 15M LOCAL SIGNALS ===
+        # 15m trend
+        trend_15m_bullish = close[i] > hma_15m_21[i] and hma_15m_21[i] > hma_15m_50[i]
+        trend_15m_bearish = close[i] < hma_15m_21[i] and hma_15m_21[i] < hma_15m_50[i]
+        
+        # 15m RSI (not extreme)
+        rsi_15m_ok_long = 25 < rsi_15m[i] < 75
+        rsi_15m_ok_short = 25 < rsi_15m[i] < 75
+        
+        # 15m HMA crossover
+        hma_cross_long = prev_close[i] <= prev_hma_15m_21[i] and close[i] > hma_15m_21[i]
+        hma_cross_short = prev_close[i] >= prev_hma_15m_21[i] and close[i] < hma_15m_21[i]
+        
+        # 15m ADX
+        adx_15m_strong = adx_15m[i] > 15
         
         new_signal = 0.0
         
-        # === LONG ENTRY ===
-        # Primary: Weekly bullish + Daily bullish + HMA cross + Volume + RSI ok
-        if weekly_bullish and daily_bullish and hma_cross_long and volume_confirmed and rsi_long_ok:
+        # === LONG ENTRY (generous conditions for trades) ===
+        # Primary: 4h bullish + 1h bullish + 1h RSI pullback + 15m cross
+        if trend_4h_bullish and rsi_4h_ok_long and trend_1h_bullish and rsi_1h_pullback_long and hma_cross_long:
             new_signal = SIZE_ENTRY
-        # Secondary: Weekly bullish + Price > HMA21 > HMA50 + Volume + RSI not overbought
-        elif weekly_bullish and close[i] > hma_21[i] > hma_50[i] and volume_confirmed and rsi_not_overbought and hma_slope_bullish:
+        # Secondary: 4h bullish + 1h ADX strong + 15m trend + RSI ok
+        elif trend_4h_bullish and rsi_4h_ok_long and adx_1h_strong and trend_15m_bullish and rsi_15m_ok_long:
             new_signal = SIZE_ENTRY
-        # Tertiary: Daily bullish + HMA cross + Volume (simpler for more trades)
-        elif daily_bullish and hma_cross_long and volume_confirmed and rsi_not_overbought:
+        # Tertiary: 4h bullish + 1h DI bullish + 15m cross (simpler for more trades)
+        elif trend_4h_bullish and rsi_4h_ok_long and di_bullish and hma_cross_long:
             new_signal = SIZE_ENTRY
-        # Quaternary: Price > HMA21 + HMA21 > HMA50 + RSI 40-60 + volume (trend continuation)
-        elif close[i] > hma_21[i] > hma_50[i] and 40 < rsi[i] < 60 and volume_confirmed and hma50_slope_bullish:
+        # Quaternary: 4h bullish + 15m above SMA50 + RSI 40-65
+        elif trend_4h_bullish and close[i] > sma_15m_50[i] and 40 < rsi_15m[i] < 65:
+            new_signal = SIZE_ENTRY
+        # Simple: 4h bullish + 1h bullish + 15m price > HMA21
+        elif trend_4h_bullish and trend_1h_bullish and close[i] > hma_15m_21[i] and rsi_15m_ok_long:
             new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRY ===
-        # Primary: Weekly bearish + Daily bearish + HMA cross + Volume + RSI ok
-        if weekly_bearish and daily_bearish and hma_cross_short and volume_confirmed and rsi_short_ok:
+        # === SHORT ENTRY (generous conditions for trades) ===
+        # Primary: 4h bearish + 1h bearish + 1h RSI pullback + 15m cross
+        if trend_4h_bearish and rsi_4h_ok_short and trend_1h_bearish and rsi_1h_pullback_short and hma_cross_short:
             new_signal = -SIZE_ENTRY
-        # Secondary: Weekly bearish + Price < HMA21 < HMA50 + Volume + RSI not oversold
-        elif weekly_bearish and close[i] < hma_21[i] < hma_50[i] and volume_confirmed and rsi_not_oversold and hma_slope_bearish:
+        # Secondary: 4h bearish + 1h ADX strong + 15m trend + RSI ok
+        elif trend_4h_bearish and rsi_4h_ok_short and adx_1h_strong and trend_15m_bearish and rsi_15m_ok_short:
             new_signal = -SIZE_ENTRY
-        # Tertiary: Daily bearish + HMA cross + Volume (simpler for more trades)
-        elif daily_bearish and hma_cross_short and volume_confirmed and rsi_not_oversold:
+        # Tertiary: 4h bearish + 1h DI bearish + 15m cross (simpler for more trades)
+        elif trend_4h_bearish and rsi_4h_ok_short and di_bearish and hma_cross_short:
             new_signal = -SIZE_ENTRY
-        # Quaternary: Price < HMA21 < HMA50 + RSI 40-60 + volume (trend continuation)
-        elif close[i] < hma_21[i] < hma_50[i] and 40 < rsi[i] < 60 and volume_confirmed and hma50_slope_bearish:
+        # Quaternary: 4h bearish + 15m below SMA50 + RSI 35-60
+        elif trend_4h_bearish and close[i] < sma_15m_50[i] and 35 < rsi_15m[i] < 60:
+            new_signal = -SIZE_ENTRY
+        # Simple: 4h bearish + 1h bearish + 15m price < HMA21
+        elif trend_4h_bearish and trend_1h_bearish and close[i] < hma_15m_21[i] and rsi_15m_ok_short:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
