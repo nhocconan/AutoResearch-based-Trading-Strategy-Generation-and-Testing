@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #057 - ADX Regime + KAMA Trend + RSI Pullback + Volume (30m Primary)
+EXPERIMENT #058 - Ensemble Voting + Regime Detection + Adaptive Sizing (1h Primary)
 ==================================================================================================
-Hypothesis: Current best (Sharpe=0.563) uses 1h primary with BB regime detection.
+Hypothesis: Current best (Sharpe=0.563) uses BB regime + Supertrend + RSI on 1h.
 This strategy improves by:
-1. Using 30m primary timeframe → more trade opportunities than 1h
-2. ADX for regime detection → better trend/chop identification than BB width
-3. KAMA adaptive trend → proven in #045, #047 (Sharpe=0.49-0.53)
-4. Volume confirmation → filters false breakouts
-5. 4h HMA trend filter → proven MTF combination
+1. Ensemble voting: 3 independent signals (Trend, Momentum, Mean-Reversion) vote on direction
+2. Regime-adaptive: BB Width percentile determines which signals to trust (trend vs mean-revert)
+3. Adaptive sizing: More agreement = larger position (0.20 single, 0.30 double, 0.35 triple)
+4. 4h HMA trend filter for directional bias (proven in #047, #053)
+5. Z-score filter to avoid extreme overbought/oversold entries
 
 Why this should beat current best (Sharpe=0.563):
-- 30m captures more intraday moves than 1h (2x trade frequency)
-- ADX > 25 = trending, ADX < 20 = chopping (more precise than BB percentile)
-- KAMA adapts to volatility better than Supertrend
-- Volume filter reduces false signals in low-liquidity periods
-- Conservative sizing (0.25 base, 0.35 high) controls drawdown
+- Ensemble reduces false signals (need 2/3 agreement vs single indicator)
+- Regime detection avoids trend-following in chop and mean-reversion in strong trends
+- Adaptive sizing maximizes returns on high-conviction setups
+- 1h primary captures intraday moves with fewer whipsaws than 30m
+- Conservative base sizing (0.20) controls drawdown during uncertain regimes
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "adx_kama_rsi_volume_30m_4h_v1"
-timeframe = "30m"
+name = "ensemble_regime_adaptive_voting_1h_4h_v2"
+timeframe = "1h"
 leverage = 1.0
 
 
@@ -50,43 +50,33 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, period=10, fast=2, slow=30):
+def calculate_hma(close, period=21):
     """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts to market noise - fast in trends, slow in chop
+    Hull Moving Average - faster response than EMA with less lag
+    HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
     """
     n = len(close)
-    if n < period + slow:
+    if n < period:
         return np.zeros(n)
     
-    kama = np.zeros(n)
+    close_series = pd.Series(close)
     
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(period, n):
-        price_change = abs(close[i] - close[i - period])
-        volatility = np.sum(np.abs(np.diff(close[i - period:i + 1])))
-        if volatility > 0:
-            er[i] = price_change / volatility
-        else:
-            er[i] = 0
+    def wma(series, window):
+        weights = np.arange(1, window + 1)
+        return series.rolling(window=window, min_periods=window).apply(
+            lambda x: np.dot(x, weights) / weights.sum(), raw=True
+        )
     
-    # Calculate Smoothing Constant (SC)
-    fast_sc = 2.0 / (fast + 1)
-    slow_sc = 2.0 / (slow + 1)
-    sc = np.zeros(n)
-    for i in range(period, n):
-        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
     
-    # Initialize KAMA
-    first_valid = period
-    kama[first_valid] = close[first_valid]
+    wma_half = wma(close_series, half_period)
+    wma_full = wma(close_series, period)
     
-    # Calculate KAMA
-    for i in range(first_valid + 1, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    raw_hma = 2 * wma_half - wma_full
+    hma = wma(raw_hma, sqrt_period)
     
-    return kama
+    return hma.values
 
 
 def calculate_rsi(close, period=14):
@@ -111,98 +101,94 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_adx(high, low, close, period=14):
-    """
-    Average Directional Index (ADX)
-    Measures trend strength (not direction)
-    ADX > 25 = trending, ADX < 20 = chopping
-    """
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram"""
     n = len(close)
-    if n < period * 3:
-        return np.zeros(n)
+    if n < slow + signal:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
     
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
+    close_series = pd.Series(close)
     
-    for i in range(1, n):
-        # True Range
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
-        
-        # Directional Movement
-        plus_dm[i] = max(0, high[i] - high[i - 1]) if (high[i] - high[i - 1]) > (low[i - 1] - low[i]) else 0
-        minus_dm[i] = max(0, low[i - 1] - low[i]) if (low[i - 1] - low[i]) > (high[i] - high[i - 1]) else 0
+    ema_fast = close_series.ewm(span=fast, adjust=False, min_periods=fast).mean().values
+    ema_slow = close_series.ewm(span=slow, adjust=False, min_periods=slow).mean().values
     
-    # Smooth DM and TR
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    dx = np.zeros(n)
-    adx = np.zeros(n)
+    macd_line = ema_fast - ema_slow
+    signal_line = pd.Series(macd_line).ewm(span=signal, adjust=False, min_periods=signal).mean().values
+    histogram = macd_line - signal_line
     
-    # First ADX calculation at period*2
-    start_idx = period
-    
-    for i in range(start_idx, n):
-        if i == start_idx:
-            sum_plus_dm = np.sum(plus_dm[start_idx - period + 1:start_idx + 1])
-            sum_minus_dm = np.sum(minus_dm[start_idx - period + 1:start_idx + 1])
-            sum_tr = np.sum(tr[start_idx - period + 1:start_idx + 1])
-        else:
-            sum_plus_dm = sum_plus_dm - plus_dm[i - 1] + plus_dm[i]
-            sum_minus_dm = sum_minus_dm - minus_dm[i - 1] + minus_dm[i]
-            sum_tr = sum_tr - tr[i - 1] + tr[i]
-        
-        if sum_tr > 0:
-            plus_di[i] = 100 * sum_plus_dm / sum_tr
-            minus_di[i] = 100 * sum_minus_dm / sum_tr
-        else:
-            plus_di[i] = 0
-            minus_di[i] = 0
-        
-        # DX calculation
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-        else:
-            dx[i] = 0
-    
-    # Smooth DX to get ADX
-    adx_start = start_idx + period
-    if adx_start < n:
-        adx[adx_start] = np.mean(dx[adx_start - period:adx_start])
-        for i in range(adx_start + 1, n):
-            adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
-    
-    return adx, plus_di, minus_di
+    return macd_line, signal_line, histogram
 
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate Volume SMA for volume confirmation"""
-    n = len(volume)
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    close_series = pd.Series(close)
+    
+    sma = close_series.rolling(window=period, min_periods=period).mean().values
+    std = close_series.rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    band_width = (upper - lower) / sma  # Normalized band width
+    
+    return upper, lower, sma, band_width
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion signals"""
+    n = len(close)
     if n < period:
         return np.zeros(n)
     
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+    close_series = pd.Series(close)
+    sma = close_series.rolling(window=period, min_periods=period).mean().values
+    std = close_series.rolling(window=period, min_periods=period).std().values
+    
+    zscore = np.zeros(n)
+    mask = std > 0
+    zscore[mask] = (close[mask] - sma[mask]) / std[mask]
+    
+    return zscore
+
+
+def calculate_bb_width_percentile(band_width, lookback=100):
+    """Calculate rolling percentile of BB Width for regime detection"""
+    n = len(band_width)
+    if n < lookback:
+        return np.zeros(n)
+    
+    percentile = np.zeros(n)
+    for i in range(lookback - 1, n):
+        window = band_width[i - lookback + 1:i + 1]
+        valid = window[~np.isnan(window)]
+        if len(valid) > 0:
+            percentile[i] = np.sum(valid <= band_width[i]) / len(valid) * 100
+        else:
+            percentile[i] = 50
+    
+    return percentile
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
-    # ========== 30m INDICATORS (PRIMARY TIMEFRAME) ==========
-    atr_30m = calculate_atr(high, low, close, period=14)
-    rsi_30m = calculate_rsi(close, period=14)
-    kama_30m = calculate_kama(close, period=10, fast=2, slow=30)
-    adx_30m, plus_di_30m, minus_di_30m = calculate_adx(high, low, close, period=14)
-    vol_sma_30m = calculate_volume_sma(volume, period=20)
+    # ========== 1h INDICATORS (PRIMARY TIMEFRAME) ==========
+    atr_1h = calculate_atr(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
+    macd_line_1h, macd_signal_1h, macd_hist_1h = calculate_macd(close, fast=12, slow=26, signal=9)
+    bb_upper_1h, bb_lower_1h, bb_sma_1h, bb_width_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    zscore_1h = calculate_zscore(close, period=20)
+    bb_percentile_1h = calculate_bb_width_percentile(bb_width_1h, lookback=100)
+    
+    # HMA for trend direction
+    hma_1h = calculate_hma(close, period=21)
+    hma_1h_fast = calculate_hma(close, period=9)
     
     # ========== 4h INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
@@ -211,48 +197,41 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         high_4h = df_4h['high'].values
         low_4h = df_4h['low'].values
         
-        # 4h KAMA for trend direction
-        kama_4h = calculate_kama(close_4h, period=10, fast=2, slow=30)
-        
-        # 4h ADX for trend strength confirmation
-        adx_4h, _, _ = calculate_adx(high_4h, low_4h, close_4h, period=14)
-        
-        # 4h HMA for additional trend confirmation
-        from mtf_data import align_htf_to_ltf
+        # 4h HMA for trend direction
         hma_4h_raw = calculate_hma(close_4h, period=21)
         
-        # Align to 30m timeframe (auto shift for completed bars)
-        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
-        adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+        # 4h RSI for overbought/oversold context
+        rsi_4h_raw = calculate_rsi(close_4h, period=14)
+        
+        # Align to 1h timeframe (auto shift for completed bars)
         hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+        rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h_raw)
         
     except Exception:
-        kama_4h_aligned = np.zeros(n)
-        adx_4h_aligned = np.zeros(n)
         hma_4h_aligned = np.zeros(n)
+        rsi_4h_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
     
-    # Position sizing - CONSERVATIVE
-    SIZE_BASE = 0.25   # Base position (25% of capital)
-    SIZE_HIGH = 0.35   # High conviction (35% of capital)
+    # Position sizing - ADAPTIVE based on signal agreement
+    SIZE_SINGLE = 0.20   # 1 signal agrees (low conviction)
+    SIZE_DOUBLE = 0.30   # 2 signals agree (medium conviction)
+    SIZE_TRIPLE = 0.35   # 3 signals agree (high conviction)
     
     # ATR stoploss
     ATR_STOP_MULT = 2.0
     
-    # RSI thresholds for pullback entries
+    # Regime thresholds
+    BB_PERCENTILE_LOW = 30    # Low volatility = trend regime
+    BB_PERCENTILE_HIGH = 70   # High volatility = mean reversion regime
+    
+    # Signal thresholds
     RSI_OVERSOLD = 35
     RSI_OVERBOUGHT = 65
+    ZSCORE_EXTREME = 2.0
     
-    # ADX regime thresholds
-    ADX_TRENDING = 25   # Above = trending market
-    ADX_CHOPPING = 20   # Below = chopping market
-    
-    # Volume confirmation threshold
-    VOL_CONFIRM_MULT = 1.2  # Volume must be > 1.2x SMA for breakout confirmation
-    
-    first_valid = max(200, 100)
+    first_valid = max(200, 150)
     
     # Track position state
     position_side = np.zeros(n, dtype=int)
@@ -263,42 +242,72 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_30m[i]) or atr_30m[i] == 0 or np.isnan(rsi_30m[i]):
+        if np.isnan(atr_1h[i]) or atr_1h[i] == 0 or np.isnan(rsi_1h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_30m[i]
-        rsi_val = rsi_30m[i]
-        kama_val = kama_30m[i]
-        adx_val = adx_30m[i]
-        plus_di = plus_di_30m[i]
-        minus_di = minus_di_30m[i]
-        vol_ratio = volume[i] / vol_sma_30m[i] if vol_sma_30m[i] > 0 else 0
+        atr = atr_1h[i]
+        rsi_val = rsi_1h[i]
+        macd_hist = macd_hist_1h[i]
+        zscore_val = zscore_1h[i]
+        bb_pct = bb_percentile_1h[i]
+        
+        # Price position in BB
+        bb_position = (price - bb_lower_1h[i]) / (bb_upper_1h[i] - bb_lower_1h[i]) if (bb_upper_1h[i] - bb_lower_1h[i]) > 0 else 0.5
+        
+        # HMA trend
+        hma_slope = hma_1h[i] - hma_1h[i - 1] if i > 0 else 0
+        hma_fast_slope = hma_1h_fast[i] - hma_1h_fast[i - 1] if i > 0 else 0
         
         # 4h trend filters
-        kama_4h_val = kama_4h_aligned[i]
-        adx_4h_val = adx_4h_aligned[i]
         hma_4h_val = hma_4h_aligned[i]
+        rsi_4h_val = rsi_4h_aligned[i]
         
         # Determine 4h trend direction
         trend_4h = 0
-        if kama_4h_val > 0 and hma_4h_val > 0:
-            if price > kama_4h_val and price > hma_4h_val:
+        if hma_4h_val > 0:
+            if price > hma_4h_val:
                 trend_4h = 1
-            elif price < kama_4h_val and price < hma_4h_val:
+            elif price < hma_4h_val:
                 trend_4h = -1
         
-        # Determine 30m regime
-        is_trending = adx_val > ADX_TRENDING
-        is_chopping = adx_val < ADX_CHOPPING
+        # Determine regime
+        is_trend_regime = bb_pct < BB_PERCENTILE_LOW
+        is_mr_regime = bb_pct > BB_PERCENTILE_HIGH
+        is_neutral_regime = not is_trend_regime and not is_mr_regime
         
-        # Determine 30m trend direction (KAMA + DI)
-        trend_30m = 0
-        if price > kama_val and plus_di > minus_di:
-            trend_30m = 1
-        elif price < kama_val and minus_di > plus_di:
-            trend_30m = -1
+        # ========== SIGNAL VOTING SYSTEM ==========
+        # Each signal votes: +1 (long), -1 (short), 0 (neutral)
+        trend_vote = 0
+        momentum_vote = 0
+        mr_vote = 0
+        
+        # SIGNAL 1: TREND (HMA slope + price position + 4h alignment)
+        if is_trend_regime or is_neutral_regime:
+            if hma_slope > 0 and hma_fast_slope > 0 and price > hma_1h[i] and trend_4h != -1:
+                trend_vote = 1
+            elif hma_slope < 0 and hma_fast_slope < 0 and price < hma_1h[i] and trend_4h != 1:
+                trend_vote = -1
+        
+        # SIGNAL 2: MOMENTUM (MACD histogram + RSI direction)
+        if macd_hist > 0 and rsi_val > 50 and rsi_val < 70:
+            momentum_vote = 1
+        elif macd_hist < 0 and rsi_val < 50 and rsi_val > 30:
+            momentum_vote = -1
+        
+        # SIGNAL 3: MEAN REVERSION (BB position + Z-score + 4h RSI filter)
+        if is_mr_regime or is_neutral_regime:
+            # Long: price at lower BB, oversold RSI, negative Z-score
+            if bb_position < 0.2 and rsi_val < RSI_OVERSOLD and zscore_val < -ZSCORE_EXTREME and trend_4h != -1:
+                mr_vote = 1
+            # Short: price at upper BB, overbought RSI, positive Z-score
+            elif bb_position > 0.8 and rsi_val > RSI_OVERBOUGHT and zscore_val > ZSCORE_EXTREME and trend_4h != 1:
+                mr_vote = -1
+        
+        # Count votes
+        total_vote = trend_vote + momentum_vote + mr_vote
+        vote_agreement = abs(total_vote)
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -334,7 +343,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = SIZE_BASE / 2  # Reduce to half
+                    signals[i] = SIZE_SINGLE / 2
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -366,7 +375,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = -SIZE_BASE / 2  # Reduce to half
+                    signals[i] = -SIZE_SINGLE / 2
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -384,7 +393,25 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                         lowest_since_entry[i] = 0
                         continue
             
-            # Hold position if no exit triggered
+            # Check if we should reverse position
+            if prev_side == 1 and total_vote <= -2:
+                signals[i] = -SIZE_SINGLE
+                position_side[i] = -1
+                entry_price[i] = price
+                tp_triggered[i] = False
+                highest_since_entry[i] = price
+                lowest_since_entry[i] = price
+                continue
+            elif prev_side == -1 and total_vote >= 2:
+                signals[i] = SIZE_SINGLE
+                position_side[i] = 1
+                entry_price[i] = price
+                tp_triggered[i] = False
+                highest_since_entry[i] = price
+                lowest_since_entry[i] = price
+                continue
+            
+            # Hold position if no exit/reversal triggered
             signals[i] = signals[i - 1]
             position_side[i] = position_side[i - 1]
             entry_price[i] = entry_price[i - 1]
@@ -393,76 +420,36 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ========== ENTRY LOGIC - REGIME-BASED ==========
+        # ========== ENTRY LOGIC - ENSEMBLE VOTING ==========
         
-        # Volume confirmation
-        vol_confirmed = vol_ratio >= VOL_CONFIRM_MULT
-        
-        # LONG conditions
-        # Trending regime: KAMA trend + ADX confirming + volume
-        long_trending = (is_trending and trend_30m == 1 and trend_4h != -1 and vol_confirmed)
-        
-        # Chopping regime: RSI oversold pullback + 4h trend not bearish
-        long_pullback = (is_chopping and rsi_val < RSI_OVERSOLD and trend_4h != -1)
-        
-        # High conviction: trending + 4h aligns + volume spike
-        high_conviction_long = (is_trending and trend_30m == 1 and trend_4h == 1 and vol_ratio > 1.5)
-        
-        # SHORT conditions
-        short_trending = (is_trending and trend_30m == -1 and trend_4h != 1 and vol_confirmed)
-        short_pullback = (is_chopping and rsi_val > RSI_OVERBOUGHT and trend_4h != 1)
-        
-        high_conviction_short = (is_trending and trend_30m == -1 and trend_4h == -1 and vol_ratio > 1.5)
-        
-        long_condition = long_trending or long_pullback
-        short_condition = short_trending or short_pullback
-        
-        if long_condition:
-            size = SIZE_HIGH if high_conviction_long else SIZE_BASE
-            signals[i] = size
-            position_side[i] = 1
-            entry_price[i] = price
-            tp_triggered[i] = False
-            highest_since_entry[i] = price
-            lowest_since_entry[i] = price
-        
-        elif short_condition:
-            size = SIZE_HIGH if high_conviction_short else SIZE_BASE
-            signals[i] = -size
-            position_side[i] = -1
-            entry_price[i] = price
-            tp_triggered[i] = False
-            highest_since_entry[i] = price
-            lowest_since_entry[i] = price
+        # Need at least 2 signals agreeing for entry
+        if vote_agreement >= 2:
+            if total_vote >= 2:
+                # Long entry - size based on agreement level
+                if vote_agreement == 3:
+                    size = SIZE_TRIPLE
+                else:
+                    size = SIZE_DOUBLE
+                
+                signals[i] = size
+                position_side[i] = 1
+                entry_price[i] = price
+                tp_triggered[i] = False
+                highest_since_entry[i] = price
+                lowest_since_entry[i] = price
+            
+            elif total_vote <= -2:
+                # Short entry - size based on agreement level
+                if vote_agreement == 3:
+                    size = SIZE_TRIPLE
+                else:
+                    size = SIZE_DOUBLE
+                
+                signals[i] = -size
+                position_side[i] = -1
+                entry_price[i] = price
+                tp_triggered[i] = False
+                highest_since_entry[i] = price
+                lowest_since_entry[i] = price
     
     return signals
-
-
-def calculate_hma(close, period=21):
-    """
-    Hull Moving Average - faster response than EMA with less lag
-    HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    """
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    close_series = pd.Series(close)
-    
-    # WMA helper
-    def wma(series, window):
-        weights = np.arange(1, window + 1)
-        return series.rolling(window=window, min_periods=window).apply(
-            lambda x: np.dot(x, weights) / weights.sum(), raw=True
-        )
-    
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    wma_half = wma(close_series, half_period)
-    wma_full = wma(close_series, period)
-    
-    raw_hma = 2 * wma_half - wma_full
-    hma = wma(raw_hma, sqrt_period)
-    
-    return hma.values
