@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #016 - MTF KAMA_STOCH_RSI_ADX_15m_1h_4h_v1
+EXPERIMENT #017 - MTF_EMA_MACD_VOL_ATR_15m_1h_4h_v1
 ==================================================================================================
-Hypothesis: Replace Supertrend/ROC with Stochastic oscillator for entry timing.
-KAMA(4h) proven trend filter + Stochastic(1h) for overbought/oversold entries + RSI(15m) pullback confirmation.
+Hypothesis: Replace KAMA/Supertrend with EMA crossover trend + MACD momentum + Volume confirmation.
+4H EMA(21/55) for trend direction + 1H MACD histogram for momentum entry + 15m Volume spike filter.
 
 Why this should work:
-- KAMA(4h) adapts to volatility better than HMA/DEMA (proven in #009, #014)
-- Stochastic(1h) captures momentum extremes better than MACD for entries
-- RSI(15m) confirms pullback hasn't gone too far
-- ADX(4h) > 20 filters weak trends (reduces whipsaws in ranging markets)
-- ATR trailing stop protects capital during reversals
+- EMA(21/55) crossover is a proven trend filter (simpler than KAMA, more responsive than SMA)
+- MACD histogram captures momentum shifts better than RSI/Stochastic for entries
+- Volume spike (>1.5x 20-bar avg) confirms institutional participation (avoids fake breakouts)
+- ATR volatility filter avoids trading during extreme volatility (reduces whipsaws)
+- Different signal combination from #009 (EMA vs KAMA, MACD vs Supertrend, Volume vs BBW)
 
 Key differences from #009:
-- Stochastic instead of Supertrend for entry timing
-- RSI on 15m instead of 1h for faster pullback detection
-- Simpler ADX threshold (20 vs 25) for more trades
-- Same proven KAMA trend + ATR stoploss
+- EMA crossover instead of KAMA for trend
+- MACD histogram instead of Supertrend for entry timing
+- Volume confirmation instead of Bollinger Band Width
+- Same proven ATR stoploss + multi-timeframe structure
 
 Risk management:
-- Position size: 0.30 max (discrete: 0.0, ±0.30)
+- Position size: 0.30 max (discrete: 0.0, ±0.20, ±0.30)
 - Stoploss: 2.5*ATR (signal→0)
 - Take profit: 2R (reduce to half), trail at 1R
 """
@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_kama_stoch_rsi_adx_15m_1h_4h_v1"
+name = "mtf_ema_macd_vol_atr_15m_1h_4h_v1"
 timeframe = "15m"
 leverage = 1.0
 
@@ -56,212 +56,116 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average"""
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average"""
     n = len(close)
-    if n < period + slow:
+    if n < period:
         return np.zeros(n)
     
-    kama = np.zeros(n)
+    ema = np.zeros(n)
+    multiplier = 2.0 / (period + 1)
     
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
+    # Initialize with SMA
+    ema[period - 1] = np.mean(close[:period])
+    
     for i in range(period, n):
-        signal = abs(close[i] - close[i - period])
-        noise = np.sum(np.abs(np.diff(close[max(0, i - period):i + 1])))
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0
+        ema[i] = (close[i] - ema[i - 1]) * multiplier + ema[i - 1]
     
-    # Calculate Smoothing Constant (SC)
-    sc = np.zeros(n)
-    for i in range(period, n):
-        sc[i] = (er[i] * (2.0 / (fast + 1) - 2.0 / (slow + 1)) + 2.0 / (slow + 1)) ** 2
-    
-    # Initialize KAMA
-    kama[period] = close[period]
-    
-    # Calculate KAMA
-    for i in range(period + 1, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama
+    return ema
 
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI"""
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD (line, signal, histogram)"""
     n = len(close)
-    if n < period + 1:
+    if n < slow + signal:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    ema_fast = calculate_ema(close, fast)
+    ema_slow = calculate_ema(close, slow)
+    
+    macd_line = ema_fast - ema_slow
+    
+    # Signal line (EMA of MACD line)
+    signal_line = np.zeros(n)
+    multiplier = 2.0 / (signal + 1)
+    
+    first_valid = slow + signal - 1
+    signal_line[first_valid] = np.mean(macd_line[slow:first_valid + 1])
+    
+    for i in range(first_valid + 1, n):
+        signal_line[i] = (macd_line[i] - signal_line[i - 1]) * multiplier + signal_line[i - 1]
+    
+    histogram = macd_line - signal_line
+    
+    return macd_line, signal_line, histogram
+
+
+def calculate_volume_sma(volume, period=20):
+    """Calculate SMA of volume"""
+    n = len(volume)
+    if n < period:
         return np.zeros(n)
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, adjust=False).mean().values
-    
-    rs = np.zeros(n)
-    for i in range(n):
-        if avg_loss[i] == 0:
-            rs[i] = 100
-        else:
-            rs[i] = avg_gain[i] / avg_loss[i]
-    
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi
-
-
-def calculate_stochastic(high, low, close, k_period=14, d_period=3):
-    """Calculate Stochastic Oscillator (%K and %D)"""
-    n = len(close)
-    if n < k_period + d_period:
-        return np.zeros(n), np.zeros(n)
-    
-    k_percent = np.zeros(n)
-    d_percent = np.zeros(n)
-    
-    for i in range(k_period - 1, n):
-        lowest_low = np.min(low[max(0, i - k_period + 1):i + 1])
-        highest_high = np.max(high[max(0, i - k_period + 1):i + 1])
-        
-        if highest_high - lowest_low > 0:
-            k_percent[i] = 100 * (close[i] - lowest_low) / (highest_high - lowest_low)
-        else:
-            k_percent[i] = 50
-    
-    # Calculate %D (SMA of %K)
-    for i in range(d_period - 1, n):
-        d_percent[i] = np.mean(k_percent[max(0, i - d_period + 1):i + 1])
-    
-    return k_percent, d_percent
-
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    n = len(close)
-    if n < period * 3:
-        return np.zeros(n)
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
-        
-        if high[i] - high[i - 1] > low[i - 1] - low[i]:
-            plus_dm[i] = max(high[i] - high[i - 1], 0)
-        else:
-            plus_dm[i] = 0
-            
-        if low[i - 1] - low[i] > high[i] - high[i - 1]:
-            minus_dm[i] = max(low[i - 1] - low[i], 0)
-        else:
-            minus_dm[i] = 0
-    
-    # Smooth TR, +DM, -DM
-    tr_smooth = np.zeros(n)
-    plus_dm_smooth = np.zeros(n)
-    minus_dm_smooth = np.zeros(n)
-    
-    tr_smooth[period - 1] = np.sum(tr[1:period])
-    plus_dm_smooth[period - 1] = np.sum(plus_dm[1:period])
-    minus_dm_smooth[period - 1] = np.sum(minus_dm[1:period])
+    vol_sma = np.zeros(n)
+    vol_sma[period - 1] = np.mean(volume[:period])
     
     for i in range(period, n):
-        tr_smooth[i] = tr_smooth[i - 1] - tr_smooth[i - 1] / period + tr[i]
-        plus_dm_smooth[i] = plus_dm_smooth[i - 1] - plus_dm_smooth[i - 1] / period + plus_dm[i]
-        minus_dm_smooth[i] = minus_dm_smooth[i - 1] - minus_dm_smooth[i - 1] / period + minus_dm[i]
+        vol_sma[i] = vol_sma[i - 1] + (volume[i] - volume[i - period]) / period
     
-    # Calculate +DI, -DI
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period, n):
-        if tr_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
-    
-    # Calculate DX
-    dx = np.zeros(n)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    # Calculate ADX (smoothed DX)
-    adx = np.zeros(n)
-    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
-    
-    for i in range(period * 2, n):
-        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
-    
-    return adx
+    return vol_sma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # 15m indicators for entry timing
     atr_15m = calculate_atr(high, low, close, period=14)
-    rsi_15m = calculate_rsi(close, period=14)
+    vol_sma_15m = calculate_volume_sma(volume, period=20)
     
     # Get 1h data using mtf_data helper
     try:
         df_1h = get_htf_data(prices, '1h')
-        h_1h = df_1h['high'].values
-        l_1h = df_1h['low'].values
         c_1h = df_1h['close'].values
         
-        # 1h Stochastic for overbought/oversold entries
-        stoch_k_1h, stoch_d_1h = calculate_stochastic(h_1h, l_1h, c_1h, k_period=14, d_period=3)
+        # 1h MACD for momentum entry timing
+        macd_1h, signal_1h, hist_1h = calculate_macd(c_1h, fast=12, slow=26, signal=9)
         
         # Align 1h indicators to 15m timeframe
-        stoch_k_1h_aligned = align_htf_to_ltf(prices, df_1h, stoch_k_1h)
-        stoch_d_1h_aligned = align_htf_to_ltf(prices, df_1h, stoch_d_1h)
+        hist_1h_aligned = align_htf_to_ltf(prices, df_1h, hist_1h)
+        macd_1h_aligned = align_htf_to_ltf(prices, df_1h, macd_1h)
     except Exception:
-        stoch_k_1h_aligned = np.zeros(n)
-        stoch_d_1h_aligned = np.zeros(n)
+        hist_1h_aligned = np.zeros(n)
+        macd_1h_aligned = np.zeros(n)
     
     # Get 4h data using mtf_data helper for trend filter
     try:
         df_4h = get_htf_data(prices, '4h')
         c_4h = df_4h['close'].values
-        h_4h = df_4h['high'].values
-        l_4h = df_4h['low'].values
         
-        # 4h KAMA for trend direction
-        kama_4h = calculate_kama(c_4h, period=10, fast=2, slow=30)
-        
-        # 4h ADX for trend strength
-        adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
+        # 4h EMA(21/55) crossover for trend direction
+        ema21_4h = calculate_ema(c_4h, period=21)
+        ema55_4h = calculate_ema(c_4h, period=55)
         
         # Align 4h indicators to 15m timeframe
-        kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
-        adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+        ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+        ema55_4h_aligned = align_htf_to_ltf(prices, df_4h, ema55_4h)
         
-        # Calculate 4h trend direction (price vs KAMA)
+        # Calculate 4h trend direction (EMA21 vs EMA55)
         trend_4h = np.zeros(n)
         for i in range(n):
             idx_4h = min(i // 16, len(c_4h) - 1)
             if idx_4h < len(c_4h) and idx_4h >= 0:
-                if c_4h[idx_4h] > kama_4h[idx_4h]:
+                if ema21_4h[idx_4h] > ema55_4h[idx_4h]:
                     trend_4h[i] = 1
-                elif c_4h[idx_4h] < kama_4h[idx_4h]:
+                elif ema21_4h[idx_4h] < ema55_4h[idx_4h]:
                     trend_4h[i] = -1
     except Exception:
-        kama_4h_aligned = np.zeros(n)
-        adx_4h_aligned = np.zeros(n)
+        ema21_4h_aligned = np.zeros(n)
+        ema55_4h_aligned = np.zeros(n)
         trend_4h = np.zeros(n)
     
     # Generate signals with multi-timeframe logic
@@ -271,25 +175,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     SIZE_FULL = 0.30
     SIZE_HALF = 0.15
     
-    # Stochastic thresholds for entry timing
-    STOCH_LONG_K_MAX = 35  # %K below 35 = oversold
-    STOCH_LONG_D_MAX = 35
-    STOCH_SHORT_K_MIN = 65  # %K above 65 = overbought
-    STOCH_SHORT_D_MIN = 65
+    # MACD histogram thresholds for entry timing (1h)
+    MACD_LONG_MIN = -50  # Histogram rising from negative
+    MACD_SHORT_MAX = 50  # Histogram falling from positive
     
-    # RSI thresholds for pullback confirmation (15m)
-    RSI_LONG_MIN = 35
-    RSI_LONG_MAX = 55
-    RSI_SHORT_MIN = 45
-    RSI_SHORT_MAX = 65
+    # Volume spike threshold (15m)
+    VOL_SPIKE_MULT = 1.5  # Volume must be >1.5x 20-bar average
     
-    # ADX minimum for trend strength filter
-    ADX_MIN = 20
+    # ATR volatility filter (avoid extreme volatility)
+    ATR_VOLATILITY_WINDOW = 50
+    ATR_VOLATILITY_UPPER = 2.0  # Don't trade if ATR > 2x recent average
+    ATR_VOLATILITY_LOWER = 0.3  # Don't trade if ATR < 0.3x recent average (dead market)
     
     # ATR stoploss multiplier
     ATR_STOP_MULT = 2.5
     
-    first_valid = max(200, 14 * 3, 20, 10)
+    first_valid = max(200, 55, 20, 14)
     
     # Track position state
     position_side = np.zeros(n)
@@ -298,24 +199,37 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     highest_since_entry = np.zeros(n)
     lowest_since_entry = np.zeros(n)
     
+    # Calculate ATR volatility filter
+    atr_avg = np.zeros(n)
+    for i in range(ATR_VOLATILITY_WINDOW, n):
+        atr_avg[i] = np.mean(atr_15m[max(0, i - ATR_VOLATILITY_WINDOW):i])
+    
     for i in range(first_valid, n):
-        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or atr_15m[i] == 0:
+        if np.isnan(atr_15m[i]) or np.isnan(vol_sma_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
             position_side[i] = 0
             continue
         
         # Get aligned MTF values
         trend_4h_val = trend_4h[i] if i < len(trend_4h) else 0
-        adx_4h = adx_4h_aligned[i] if i < len(adx_4h_aligned) else 0
-        stoch_k_1h = stoch_k_1h_aligned[i] if i < len(stoch_k_1h_aligned) else 50
-        stoch_d_1h = stoch_d_1h_aligned[i] if i < len(stoch_d_1h_aligned) else 50
-        kama_4h_val = kama_4h_aligned[i] if i < len(kama_4h_aligned) else 0
+        hist_1h = hist_1h_aligned[i] if i < len(hist_1h_aligned) else 0
+        macd_1h = macd_1h_aligned[i] if i < len(macd_1h_aligned) else 0
         
-        # ADX filter - require strong trend (4h)
-        if adx_4h < ADX_MIN:
-            signals[i] = 0.0
-            position_side[i] = 0
-            continue
+        # ATR volatility filter
+        if atr_avg[i] > 0:
+            atr_ratio = atr_15m[i] / atr_avg[i]
+            if atr_ratio > ATR_VOLATILITY_UPPER or atr_ratio < ATR_VOLATILITY_LOWER:
+                signals[i] = 0.0
+                position_side[i] = 0
+                continue
+        
+        # Volume filter (only trade on volume spikes)
+        if vol_sma_15m[i] > 0:
+            vol_ratio = volume[i] / vol_sma_15m[i]
+            if vol_ratio < VOL_SPIKE_MULT:
+                signals[i] = 0.0
+                position_side[i] = 0
+                continue
         
         # Check stoploss and take profit for existing positions
         if position_side[i - 1] != 0:
@@ -416,34 +330,34 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h trend + 4h ADX strength + 1h Stochastic + 15m RSI pullback
+        # Entry logic: 4h trend + 1h MACD momentum + 15m Volume spike
         price = close[i]
         
-        if trend_4h_val == 1:  # Bullish trend on 4h
-            # Stochastic oversold on 1h (entry timing)
-            # RSI pullback on 15m (not overbought)
-            if (stoch_k_1h < STOCH_LONG_K_MAX and 
-                stoch_d_1h < STOCH_LONG_D_MAX and
-                RSI_LONG_MIN <= rsi_15m[i] <= RSI_LONG_MAX):
-                signals[i] = SIZE_FULL
-                position_side[i] = 1
-                entry_price[i] = price
-                tp_triggered[i] = 0
-                highest_since_entry[i] = price
-                lowest_since_entry[i] = price
+        if trend_4h_val == 1:  # Bullish trend on 4h (EMA21 > EMA55)
+            # MACD histogram rising from negative (momentum shift)
+            # Check previous bar histogram was more negative
+            if i > 0 and hist_1h < 0:
+                prev_hist = hist_1h_aligned[i - 1] if i - 1 < len(hist_1h_aligned) else 0
+                if prev_hist < hist_1h and hist_1h > MACD_LONG_MIN:
+                    signals[i] = SIZE_FULL
+                    position_side[i] = 1
+                    entry_price[i] = price
+                    tp_triggered[i] = 0
+                    highest_since_entry[i] = price
+                    lowest_since_entry[i] = price
                 
-        elif trend_4h_val == -1:  # Bearish trend on 4h
-            # Stochastic overbought on 1h (entry timing)
-            # RSI pullback on 15m (not oversold)
-            if (stoch_k_1h > STOCH_SHORT_K_MIN and 
-                stoch_d_1h > STOCH_SHORT_D_MIN and
-                RSI_SHORT_MIN <= rsi_15m[i] <= RSI_SHORT_MAX):
-                signals[i] = -SIZE_FULL
-                position_side[i] = -1
-                entry_price[i] = price
-                tp_triggered[i] = 0
-                highest_since_entry[i] = price
-                lowest_since_entry[i] = price
+        elif trend_4h_val == -1:  # Bearish trend on 4h (EMA21 < EMA55)
+            # MACD histogram falling from positive (momentum shift)
+            # Check previous bar histogram was more positive
+            if i > 0 and hist_1h > 0:
+                prev_hist = hist_1h_aligned[i - 1] if i - 1 < len(hist_1h_aligned) else 0
+                if prev_hist > hist_1h and hist_1h < MACD_SHORT_MAX:
+                    signals[i] = -SIZE_FULL
+                    position_side[i] = -1
+                    entry_price[i] = price
+                    tp_triggered[i] = 0
+                    highest_since_entry[i] = price
+                    lowest_since_entry[i] = price
         
         else:
             signals[i] = 0.0
