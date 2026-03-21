@@ -657,11 +657,10 @@ def main():
             else:
                 print(f"  [4/4] ✓ KEEP (Sharpe={avg_sharpe:.3f}, Return/DD={return_dd_ratio:.1f})")
 
-            # Run test backtest — DISCARD if test Sharpe < 0 (overfit to train)
-            # No early_discard on test: test period is short, allow all symbols to complete
+            # Run test — early discard if first symbol Sharpe < 0
             test_results = []
             try:
-                test_results = run_backtest_all(symbols, str(STRATEGY_FILE), period="test", early_discard=False)
+                test_results = run_backtest_all(symbols, str(STRATEGY_FILE), period="test", early_discard=True)
                 test_sharpe = sum(r["sharpe_ratio"] for r in test_results) / len(test_results)
                 test_return = sum(r["total_return_pct"] for r in test_results) / len(test_results)
                 print(f"       Test: Sharpe={test_sharpe:.3f} | Return={test_return:+.1f}%")
@@ -670,12 +669,21 @@ def main():
                 test_all_good = all(r["sharpe_ratio"] > 0 and r["num_trades"] >= 3 for r in test_results)
                 if test_sharpe < 0 or not test_all_good or test_trades < 10:
                     reason = "Sharpe<0" if test_sharpe < 0 else "0-trade symbols" if not test_all_good else "too few trades"
-                    print(f"       DEMOTED: Test {reason} → overfit/unusable, demoting to discard")
+                    print(f"       DEMOTED: Test {reason}")
                     status = "discard"
                     git_revert_strategy()
                     STRATEGY_FILE.write_text(best_strategy_code)
+            except EarlyDiscardError as e:
+                print(f"       Test EARLY DISCARD: {e}")
+                test_results = e.partial_results
+                status = "discard"
+                git_revert_strategy()
+                STRATEGY_FILE.write_text(best_strategy_code)
             except Exception as e:
-                print(f"       Test backtest failed: {e}")
+                print(f"       Test failed: {e}")
+                status = "discard"
+                git_revert_strategy()
+                STRATEGY_FILE.write_text(best_strategy_code)
 
             # Save doc
             doc_path = DOCS_DIR / f"{strategy_name}.md"

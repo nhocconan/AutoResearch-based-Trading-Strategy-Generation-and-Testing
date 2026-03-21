@@ -395,6 +395,11 @@ def render_html() -> str:
   <label>TF:</label>
   <button class="filter-btn active" onclick="filterTF('train', 'ALL')">All</button>
   {''.join(f'<button class="filter-btn" onclick="filterTF(&#39;train&#39;, &#39;{tf}&#39;)">{tf}</button>' for tf in timeframes)}
+  <span style="margin:0 8px;color:#30363d">|</span>
+  <label>Status:</label>
+  <button class="filter-btn active" onclick="filterStatus('train', 'ALL')">All</button>
+  <button class="filter-btn" onclick="filterStatus('train', 'keep')" style="border-color:#2ecc71;color:#2ecc71">Keep</button>
+  <button class="filter-btn" onclick="filterStatus('train', 'discard')" style="border-color:#e74c3c;color:#e74c3c">Discard</button>
   <span class="filter-info" id="train-filter-info"></span>
 </div>
 <table id="train-table">
@@ -613,6 +618,22 @@ function filterTable(tableId, symbol) {{
 
   const info = document.getElementById(tableId + '-filter-info');
   if (info && symbol === 'AVG') info.textContent = 'Showing average across all symbols per strategy';
+}}
+
+// --- Status filter ---
+function filterStatus(tableId, status) {{
+  const tbodyRows = document.getElementById(tableId + '-tbody-rows');
+  if (!tbodyRows) return;
+  const rows = tbodyRows.querySelectorAll('tr[data-strategy]');
+  rows.forEach(row => {{
+    const badge = row.querySelector('.badge');
+    const rowStatus = badge ? badge.textContent.trim() : '';
+    if (status === 'ALL' || rowStatus === status) {{
+      row.style.display = '';
+    }} else {{
+      row.style.display = 'none';
+    }}
+  }});
 }}
 
 // --- Column sort ---
