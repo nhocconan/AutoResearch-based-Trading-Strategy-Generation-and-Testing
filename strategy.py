@@ -1,32 +1,34 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #022 - MTF HMA+KAMA+MACD+RSI+Volume+BBW-Percentile (1h+4h v2)
+EXPERIMENT #023 - MTF HMA+KAMA+Stoch+RSI+ROC+Volume+BBW (15m+1h v3)
 ==================================================================================================
-Hypothesis: Building on #021 (Sharpe=4.629) which proved 15m+1h MTF works excellently.
-This experiment tests 1h+4h MTF combination with refined parameters:
+Hypothesis: Building on #021 (Sharpe=4.629) which proved 15m+1h MTF is the best combination.
+This experiment refines the winning formula with optimized parameters:
 
-New improvements vs #021:
-- Timeframe: 1h entries + 4h trend (slower, fewer false signals, lower fees)
-- Add MACD(12,26,9) histogram for momentum confirmation at entry
-- Position size: 0.25 (more conservative than 0.30 to reduce drawdown)
-- RSI range: 40-60 for longs, 40-60 for shorts (symmetric pullback detection)
-- MACD histogram must align with trend direction
-- Volume ratio filter: 1.3x average (higher than 1.2x for better confirmation)
-- ATR stoploss: 2.2*ATR (slightly tighter than 2.0*ATR)
+Key improvements vs #021:
+- Timeframe: 15m entries + 1h trend (same as #021, proven best)
+- Position size: 0.30 (increased from 0.25 for better returns, still safe)
+- RSI range: 35-65 (wider than 40-60 for more entry opportunities)
+- Stochastic: (14,3,3) with 20/80 thresholds (classic settings)
+- Add ROC(10) momentum filter: must align with trend direction
+- Volume ratio: 1.2x (slightly lower than 1.3x for more signals)
+- BBW percentile: >25 (avoid bottom 25% choppy markets)
+- Stoploss: 2.0*ATR (tighter than 2.2*ATR for better risk control)
+- HMA periods: 16/48 (faster than 21 for quicker trend detection)
 
 Why this should beat #021:
-- 4h trend is more stable than 1h trend (fewer whipsaws)
-- MACD adds momentum confirmation missing in #021
-- Lower position size (0.25 vs 0.30) reduces drawdown risk
-- Fewer trades = lower fee drag (1h vs 15m entries)
-- Based on proven MTF structure from #012, #019, #021
+- Wider RSI range captures more valid pullback entries
+- ROC momentum filter adds confirmation missing in pure mean-reversion
+- Tighter stoploss reduces loss magnitude on failed trades
+- 15m+1h proven best in #021 (Sharpe=4.629 vs #022's 2.727 with 1h+4h)
+- Position size 0.30 balances return vs drawdown better than 0.25
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_kama_macd_rsi_volume_bbw_pct_1h_v2"
-timeframe = "1h"
+name = "mtf_hma_kama_stoch_rsi_roc_volume_bbw_15m_v3"
+timeframe = "15m"
 leverage = 1.0
 
 
@@ -139,47 +141,45 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram"""
+def calculate_stochastic(high, low, close, k_period=14, d_period=3):
+    """Calculate Stochastic Oscillator"""
     n = len(close)
-    if n < slow + signal:
-        return np.zeros(n), np.zeros(n), np.zeros(n)
+    if n < k_period:
+        return np.zeros(n), np.zeros(n)
     
-    ema_fast = np.zeros(n)
-    ema_slow = np.zeros(n)
-    macd_line = np.zeros(n)
-    signal_line = np.zeros(n)
-    histogram = np.zeros(n)
+    k = np.zeros(n)
+    d = np.zeros(n)
     
-    # Calculate EMA fast
-    multiplier_fast = 2.0 / (fast + 1)
-    ema_fast[fast - 1] = np.mean(close[:fast])
-    for i in range(fast, n):
-        ema_fast[i] = (close[i] - ema_fast[i - 1]) * multiplier_fast + ema_fast[i - 1]
+    for i in range(k_period - 1, n):
+        lowest_low = np.min(low[i - k_period + 1:i + 1])
+        highest_high = np.max(high[i - k_period + 1:i + 1])
+        
+        if highest_high > lowest_low:
+            k[i] = 100 * (close[i] - lowest_low) / (highest_high - lowest_low)
+        else:
+            k[i] = 50
     
-    # Calculate EMA slow
-    multiplier_slow = 2.0 / (slow + 1)
-    ema_slow[slow - 1] = np.mean(close[:slow])
-    for i in range(slow, n):
-        ema_slow[i] = (close[i] - ema_slow[i - 1]) * multiplier_slow + ema_slow[i - 1]
+    for i in range(k_period - 1 + d_period - 1, n):
+        d[i] = np.mean(k[i - d_period + 1:i + 1])
     
-    # MACD line
-    for i in range(slow - 1, n):
-        macd_line[i] = ema_fast[i] - ema_slow[i]
+    return k, d
+
+
+def calculate_roc(close, period=10):
+    """Calculate Rate of Change"""
+    n = len(close)
+    if n < period + 1:
+        return np.zeros(n)
     
-    # Signal line (EMA of MACD)
-    multiplier_signal = 2.0 / (signal + 1)
-    first_signal_idx = slow - 1 + signal - 1
-    if first_signal_idx < n:
-        signal_line[first_signal_idx] = np.mean(macd_line[slow - 1:first_signal_idx + 1])
-        for i in range(first_signal_idx + 1, n):
-            signal_line[i] = (macd_line[i] - signal_line[i - 1]) * multiplier_signal + signal_line[i - 1]
+    roc = np.zeros(n)
     
-    # Histogram
-    for i in range(first_signal_idx, n):
-        histogram[i] = macd_line[i] - signal_line[i]
+    for i in range(period, n):
+        if close[i - period] != 0:
+            roc[i] = (close[i] - close[i - period]) / close[i - period] * 100
+        else:
+            roc[i] = 0
     
-    return macd_line, signal_line, histogram
+    return roc
 
 
 def calculate_zscore(close, period=20):
@@ -264,21 +264,6 @@ def calculate_bbw_percentile(bbw, lookback=100):
     return percentile
 
 
-def resample_to_timeframe(prices, timeframe='4h'):
-    """Resample prices to higher timeframe using open_time index"""
-    prices_indexed = prices.set_index('open_time')
-    
-    df_resampled = prices_indexed.resample(timeframe).agg({
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
-        'volume': 'sum'
-    }).dropna()
-    
-    return df_resampled
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
@@ -286,21 +271,22 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values
     n = len(close)
     
-    # 1h indicators for entry timing
-    atr_1h = calculate_atr(high, low, close, period=14)
-    rsi_1h = calculate_rsi(close, period=14)
-    zscore_1h = calculate_zscore(close, period=20)
-    hma_1h = calculate_hma(close, period=21)
-    kama_1h = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    macd_1h, macd_signal_1h, macd_hist_1h = calculate_macd(close, fast=12, slow=26, signal=9)
-    volume_ratio_1h = calculate_volume_sma_ratio(volume, period=20)
-    _, _, _, bbw_1h = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    bbw_pct_1h = calculate_bbw_percentile(bbw_1h, lookback=100)
+    # 15m indicators for entry timing
+    atr_15m = calculate_atr(high, low, close, period=14)
+    rsi_15m = calculate_rsi(close, period=14)
+    zscore_15m = calculate_zscore(close, period=20)
+    hma_15m = calculate_hma(close, period=16)
+    kama_15m = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    stoch_k_15m, stoch_d_15m = calculate_stochastic(high, low, close, k_period=14, d_period=3)
+    roc_15m = calculate_roc(close, period=10)
+    volume_ratio_15m = calculate_volume_sma_ratio(volume, period=20)
+    _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    bbw_pct_15m = calculate_bbw_percentile(bbw_15m, lookback=100)
     
-    # Resample to 4h for trend filters using proper method
+    # Resample to 1h for trend filters using proper method
     try:
         prices_indexed = prices.set_index('open_time')
-        df_4h = prices_indexed.resample('4h').agg({
+        df_1h = prices_indexed.resample('1h').agg({
             'open': 'first',
             'high': 'max',
             'low': 'min',
@@ -308,104 +294,108 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             'volume': 'sum'
         }).dropna()
         
-        # Calculate 4h indicators
-        c_4h = df_4h['close'].values
-        h_4h = df_4h['high'].values
-        l_4h = df_4h['low'].values
+        # Calculate 1h indicators
+        c_1h = df_1h['close'].values
+        h_1h = df_1h['high'].values
+        l_1h = df_1h['low'].values
         
-        hma_4h = calculate_hma(c_4h, period=21)
-        kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
-        _, _, _, bbw_4h = calculate_bollinger_bands(c_4h, period=20, std_mult=2.0)
-        bbw_pct_4h = calculate_bbw_percentile(bbw_4h, lookback=100)
+        hma_1h = calculate_hma(c_1h, period=48)
+        kama_1h = calculate_kama(c_1h, er_period=10, fast_period=2, slow_period=30)
+        _, _, _, bbw_1h = calculate_bollinger_bands(c_1h, period=20, std_mult=2.0)
+        bbw_pct_1h = calculate_bbw_percentile(bbw_1h, lookback=100)
         
-        # Map 4h indicators back to 1h timeframe using ffill
-        trend_4h = np.zeros(len(c_4h))
-        kama_trend_4h = np.zeros(len(c_4h))
+        # Calculate 1h trend
+        trend_1h = np.zeros(len(c_1h))
+        kama_trend_1h = np.zeros(len(c_1h))
         
-        for i in range(len(c_4h)):
-            if i >= 40:
-                if c_4h[i] > hma_4h[i]:
-                    trend_4h[i] = 1
-                elif c_4h[i] < hma_4h[i]:
-                    trend_4h[i] = -1
+        for i in range(len(c_1h)):
+            if i >= 48:
+                if c_1h[i] > hma_1h[i]:
+                    trend_1h[i] = 1
+                elif c_1h[i] < hma_1h[i]:
+                    trend_1h[i] = -1
                 
-                if c_4h[i] > kama_4h[i]:
-                    kama_trend_4h[i] = 1
-                elif c_4h[i] < kama_4h[i]:
-                    kama_trend_4h[i] = -1
+                if c_1h[i] > kama_1h[i]:
+                    kama_trend_1h[i] = 1
+                elif c_1h[i] < kama_1h[i]:
+                    kama_trend_1h[i] = -1
         
-        # Create 4h index for reindexing
-        df_4h['trend'] = trend_4h
-        df_4h['kama_trend'] = kama_trend_4h
-        df_4h['bbw_pct'] = bbw_pct_4h
+        # Create 1h index for reindexing
+        df_1h['trend'] = trend_1h
+        df_1h['kama_trend'] = kama_trend_1h
+        df_1h['bbw_pct'] = bbw_pct_1h
         
-        # Reindex to 1h with ffill
-        df_4h_reindexed = df_4h.reindex(prices_indexed.index, method='ffill')
+        # Reindex to 15m with ffill
+        df_1h_reindexed = df_1h.reindex(prices_indexed.index, method='ffill')
         
-        trend_4h_mapped = df_4h_reindexed['trend'].values
-        kama_trend_4h_mapped = df_4h_reindexed['kama_trend'].values
-        bbw_pct_4h_mapped = df_4h_reindexed['bbw_pct'].values
+        trend_1h_mapped = df_1h_reindexed['trend'].values
+        kama_trend_1h_mapped = df_1h_reindexed['kama_trend'].values
+        bbw_pct_1h_mapped = df_1h_reindexed['bbw_pct'].values
         
     except Exception:
         # Fallback: simple downsampling if resample fails
-        bars_per_4h = 4
-        n_4h = (n // bars_per_4h)
+        bars_per_1h = 4
+        n_1h = (n // bars_per_1h)
         
-        c_4h = np.zeros(n_4h)
-        for i in range(n_4h):
-            start_idx = i * bars_per_4h
-            end_idx = start_idx + bars_per_4h
-            c_4h[i] = close[end_idx - 1]
+        c_1h = np.zeros(n_1h)
+        for i in range(n_1h):
+            start_idx = i * bars_per_1h
+            end_idx = start_idx + bars_per_1h
+            c_1h[i] = close[end_idx - 1]
         
-        hma_4h = calculate_hma(c_4h, period=21)
-        kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
+        hma_1h = calculate_hma(c_1h, period=48)
+        kama_1h = calculate_kama(c_1h, er_period=10, fast_period=2, slow_period=30)
         
-        trend_4h_mapped = np.zeros(n)
-        kama_trend_4h_mapped = np.zeros(n)
-        bbw_pct_4h_mapped = np.zeros(n)
+        trend_1h_mapped = np.zeros(n)
+        kama_trend_1h_mapped = np.zeros(n)
+        bbw_pct_1h_mapped = np.zeros(n)
         
         for i in range(n):
-            idx_4h = i // bars_per_4h
-            if idx_4h < n_4h and idx_4h >= 40:
-                if c_4h[idx_4h] > hma_4h[idx_4h]:
-                    trend_4h_mapped[i] = 1
-                elif c_4h[idx_4h] < hma_4h[idx_4h]:
-                    trend_4h_mapped[i] = -1
+            idx_1h = i // bars_per_1h
+            if idx_1h < n_1h and idx_1h >= 48:
+                if c_1h[idx_1h] > hma_1h[idx_1h]:
+                    trend_1h_mapped[i] = 1
+                elif c_1h[idx_1h] < hma_1h[idx_1h]:
+                    trend_1h_mapped[i] = -1
                 
-                if c_4h[idx_4h] > kama_4h[idx_4h]:
-                    kama_trend_4h_mapped[i] = 1
-                elif c_4h[idx_4h] < kama_4h[idx_4h]:
-                    kama_trend_4h_mapped[i] = -1
+                if c_1h[idx_1h] > kama_1h[idx_1h]:
+                    kama_trend_1h_mapped[i] = 1
+                elif c_1h[idx_1h] < kama_1h[idx_1h]:
+                    kama_trend_1h_mapped[i] = -1
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.25
-    SIZE_HALF = 0.125
+    SIZE_FULL = 0.30
+    SIZE_HALF = 0.15
     
-    # RSI thresholds for pullback entries (symmetric range)
-    RSI_LONG_MIN = 40
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 60
+    # RSI thresholds for pullback entries (wider range for more entries)
+    RSI_LONG_MIN = 35
+    RSI_LONG_MAX = 65
+    RSI_SHORT_MIN = 35
+    RSI_SHORT_MAX = 65
     
-    # MACD histogram threshold
-    MACD_MIN = 0.0  # Must be positive for longs, negative for shorts
+    # Stochastic thresholds
+    STOCH_LONG_MAX = 80
+    STOCH_SHORT_MIN = 20
+    
+    # ROC threshold (momentum must align with trend)
+    ROC_MIN = 0.0
     
     # Z-score threshold for mean reversion filter
     ZSCORE_MAX = 2.0
     
     # Volume ratio threshold
-    VOLUME_RATIO_MIN = 1.3
+    VOLUME_RATIO_MIN = 1.2
     
-    # BBW percentile threshold (avoid bottom 20% = too choppy)
-    BBW_PCT_MIN = 20
+    # BBW percentile threshold (avoid bottom 25% = too choppy)
+    BBW_PCT_MIN = 25
     
     # ATR stoploss multiplier
-    ATR_STOP_MULT = 2.2
+    ATR_STOP_MULT = 2.0
     
-    first_valid = max(200, 40 * 4, 14 * 2, 20, 28, 100)
+    first_valid = max(200, 48 * 4, 14 * 2, 20, 28, 100)
     
     # Track position state
     position_side = np.zeros(n)
@@ -415,27 +405,29 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_1h[i]) or np.isnan(rsi_1h[i]) or np.isnan(zscore_1h[i]) or atr_1h[i] == 0:
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(zscore_15m[i]) or atr_15m[i] == 0:
             signals[i] = 0.0
             continue
         
-        trend = trend_4h_mapped[i]
-        kama_trend = kama_trend_4h_mapped[i]
-        rsi_val = rsi_1h[i]
-        zscore_val = zscore_1h[i]
-        atr = atr_1h[i]
+        trend = trend_1h_mapped[i]
+        kama_trend = kama_trend_1h_mapped[i]
+        rsi_val = rsi_15m[i]
+        zscore_val = zscore_15m[i]
+        atr = atr_15m[i]
         price = close[i]
-        macd_hist = macd_hist_1h[i]
-        vol_ratio = volume_ratio_1h[i]
-        bbw_pct = bbw_pct_4h_mapped[i]
+        stoch_k = stoch_k_15m[i]
+        stoch_d = stoch_d_15m[i]
+        roc_val = roc_15m[i]
+        vol_ratio = volume_ratio_15m[i]
+        bbw_pct = bbw_pct_1h_mapped[i]
         
-        # BBW percentile filter - avoid choppy markets (bottom 20%)
+        # BBW percentile filter - avoid choppy markets (bottom 25%)
         if bbw_pct < BBW_PCT_MIN:
             signals[i] = 0.0
             position_side[i] = 0
             continue
         
-        # Trend filters must agree (HMA + KAMA on 4h)
+        # Trend filters must agree (HMA + KAMA on 1h)
         if trend != kama_trend or trend == 0:
             signals[i] = 0.0
             position_side[i] = 0
@@ -460,7 +452,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (2.2*ATR)
+            # Stoploss check (2.0*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -534,12 +526,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # Entry logic: 4h HMA + KAMA + BBW% + 1h RSI + MACD + Volume + Z-score
-        if trend == 1 and kama_trend == 1:  # Bullish trend confirmed on 4h
+        # Entry logic: 1h HMA + KAMA + BBW% + 15m RSI + Stoch + ROC + Volume + Z-score
+        if trend == 1 and kama_trend == 1:  # Bullish trend confirmed on 1h
             if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
-                macd_hist > MACD_MIN and
+                stoch_k < STOCH_LONG_MAX and
+                roc_val > ROC_MIN and
                 abs(zscore_val) < ZSCORE_MAX and
-                vol_ratio >= VOLUME_RATIO_MIN):  # Pullback + MACD positive + Volume confirm
+                vol_ratio >= VOLUME_RATIO_MIN):  # Pullback + Stoch not overbought + ROC positive + Volume confirm
                 signals[i] = SIZE_FULL
                 position_side[i] = 1
                 entry_price[i] = price
@@ -547,11 +540,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
                 
-        elif trend == -1 and kama_trend == -1:  # Bearish trend confirmed on 4h
+        elif trend == -1 and kama_trend == -1:  # Bearish trend confirmed on 1h
             if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
-                macd_hist < -MACD_MIN and
+                stoch_k > STOCH_SHORT_MIN and
+                roc_val < -ROC_MIN and
                 abs(zscore_val) < ZSCORE_MAX and
-                vol_ratio >= VOLUME_RATIO_MIN):  # Pullback + MACD negative + Volume confirm
+                vol_ratio >= VOLUME_RATIO_MIN):  # Pullback + Stoch not oversold + ROC negative + Volume confirm
                 signals[i] = -SIZE_FULL
                 position_side[i] = -1
                 entry_price[i] = price
