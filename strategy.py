@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #353: 12h Donchian Breakout + Daily HMA Trend + RSI Filter + ATR Stop
-Hypothesis: 12h timeframe with Donchian(20) breakouts captures medium-term trends better
-than EMA/KAMA crossovers. Daily HMA provides trend bias (soft filter). RSI(14) with
+Experiment #354: 1d Donchian Breakout + Weekly HMA + RSI Filter + ATR Stop
+Hypothesis: Daily Donchian channels (20-day) capture trend breakouts effectively on crypto.
+Weekly HMA provides macro trend bias to filter counter-trend breakouts. RSI(14) with
 loose thresholds (25-75) ensures sufficient trade frequency. ATR(14) stoploss at 2.5x
-protects during reversals. Donchian breakouts work well on 12h/1d timeframes as they
-capture genuine momentum moves rather than noise.
-Timeframe: 12h (REQUIRED), HTF: 1d for trend bias via mtf_data helper.
+protects during reversals. This combines breakout momentum with trend confirmation.
+Timeframe: 1d (REQUIRED), HTF: 1w for trend bias via mtf_data helper.
 Target: Beat Sharpe=0.499 with 30-60 trades total across train+test.
-Key insight: Donchian breakouts on 12h capture sustained moves, fewer whipsaws than crossovers.
+Key insight: Donchian breakouts work well on daily crypto data; weekly filter reduces whipsaws.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_daily_hma_rsi_filter_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_weekly_hma_rsi_breakout_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -50,26 +49,17 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_donchian_channels(high, low, period=20):
+def calculate_donchian(high, low, period=20):
     """Calculate Donchian Channel upper and lower bands."""
     n = len(high)
     upper = np.zeros(n)
     lower = np.zeros(n)
     
-    for i in range(period - 1, n):
+    for i in range(period, n):
         upper[i] = np.max(high[i - period + 1:i + 1])
         lower[i] = np.min(low[i - period + 1:i + 1])
     
-    # Fill initial values
-    for i in range(period - 1):
-        upper[i] = np.max(high[:i + 1])
-        lower[i] = np.min(low[:i + 1])
-    
     return upper, lower
-
-def calculate_mid_price(high, low):
-    """Calculate midpoint of current bar."""
-    return (high + low) / 2.0
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -78,19 +68,21 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, 20)
-    mid_price = calculate_mid_price(high, low)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    
+    # Calculate Donchian midpoint
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -110,19 +102,19 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Daily macro trend bias (SOFT filter - boosts confidence, not required)
-        daily_bullish = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
-        daily_bearish = not np.isnan(hma_1d_aligned[i]) and close[i] < hma_1d_aligned[i]
+        # Weekly macro trend bias (SOFT filter - boosts confidence)
+        weekly_bullish = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
+        weekly_bearish = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
         
         # Donchian breakout signals
-        breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
+        breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
+        breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
         
-        # Donchian position (price relative to channel)
-        in_upper_half = close[i] > (donchian_upper[i] + donchian_lower[i]) / 2.0
-        in_lower_half = close[i] < (donchian_upper[i] + donchian_lower[i]) / 2.0
+        # Price position relative to Donchian channel
+        above_mid = close[i] > donchian_mid[i]
+        below_mid = close[i] < donchian_mid[i]
         
-        # RSI momentum filter (LOOSE for 12h - ensure trades)
+        # RSI momentum filter (LOOSE for daily - ensure trades)
         rsi_ok_long = rsi[i] > 25  # Not deeply oversold
         rsi_ok_short = rsi[i] < 75  # Not deeply overbought
         
@@ -133,24 +125,24 @@ def generate_signals(prices):
         new_signal = 0.0
         
         # === LONG ENTRIES ===
-        # Primary: Donchian breakout + Daily bullish + RSI ok
-        if breakout_long and daily_bullish and rsi_ok_long:
+        # Primary: Donchian breakout + Weekly bullish + RSI ok
+        if breakout_long and weekly_bullish and rsi_ok_long:
             new_signal = SIZE_ENTRY
-        # Secondary: Price in upper half + Daily bullish + RSI strong
-        elif in_upper_half and daily_bullish and rsi_strong_long:
+        # Secondary: Price above mid + Weekly bullish + RSI strong
+        elif above_mid and weekly_bullish and rsi_strong_long:
             new_signal = SIZE_ENTRY
-        # Tertiary: Donchian breakout without daily filter (momentum only - ensures trades)
+        # Tertiary: Donchian breakout without weekly filter (momentum only - ensures trades)
         elif breakout_long and rsi[i] > 30:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES ===
-        # Primary: Donchian breakout + Daily bearish + RSI ok
-        if breakout_short and daily_bearish and rsi_ok_short:
+        # Primary: Donchian breakout + Weekly bearish + RSI ok
+        if breakout_short and weekly_bearish and rsi_ok_short:
             new_signal = -SIZE_ENTRY
-        # Secondary: Price in lower half + Daily bearish + RSI strong
-        elif in_lower_half and daily_bearish and rsi_strong_short:
+        # Secondary: Price below mid + Weekly bearish + RSI strong
+        elif below_mid and weekly_bearish and rsi_strong_short:
             new_signal = -SIZE_ENTRY
-        # Tertiary: Donchian breakout without daily filter (momentum only - ensures trades)
+        # Tertiary: Donchian breakout without weekly filter (momentum only - ensures trades)
         elif breakout_short and rsi[i] < 70:
             new_signal = -SIZE_ENTRY
         
