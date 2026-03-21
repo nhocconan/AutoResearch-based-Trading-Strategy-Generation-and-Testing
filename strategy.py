@@ -1,182 +1,247 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #084 - REGIME_ADAPTIVE_ENSEMBLE_15M_4H_V1
+EXPERIMENT #085 - ENSEMBLE_REGIME_CONFIDENCE_VOTING_15M_V2
 ==================================================================================================
-Hypothesis: Adaptive regime switching between trend-following and mean-reversion based on 
-volatility percentile + trend strength. Use 15m for entries, 4h for trend bias.
+Hypothesis: Combine 3 independent signal generators with regime-adaptive weighting.
+- Signal 1: Trend (HMA + Supertrend agreement)
+- Signal 2: Momentum (RSI + MACD histogram)
+- Signal 3: Mean Reversion (Z-score + Bollinger position)
+- Regime: BBW percentile determines which signals to trust more
+- Confidence: More signals agree = larger position (0.20 to 0.35)
+- Timeframe: 15m (proven optimal in experiments #031, #034, #035)
+- Max position: 0.35 (conservative for drawdown control)
+- Stoploss: 2.0*ATR with trailing at 1R profit
 
-Key innovations:
-- Dual-regime system: Trend regime (low BBW + strong ADX) vs MR regime (high BBW + weak ADX)
-- Three-signal ensemble: HMA trend, RSI momentum, Bollinger position
-- Confidence-weighted position sizing: more agreement = larger position
-- 4h HMA slope as major trend filter (only trade with higher TF trend)
-- Clean array handling to avoid read-only issues
-
-Why this should beat #083 (Sharpe=0.051):
-- Simpler, cleaner signal logic without complex nested conditions
-- Better regime detection using both BBW and ADX
-- Proper 4h trend alignment filter
-- Discrete position levels to reduce churn costs
-
-Position sizing:
-- MAX signal: 0.35 (3 signals agree in favorable regime)
-- MED signal: 0.25 (2 signals agree)
-- MIN signal: 0.15 (1 signal only)
-- leverage=1.0 (no leverage, risk controlled by position size)
+Why this should work:
+- Ensemble reduces false signals from any single indicator
+- Regime detection adapts to market conditions
+- Confidence-based sizing rewards high-conviction setups
+- Simpler than #040 but more robust across regimes
 """
 
 import numpy as np
 import pandas as pd
 
-name = "regime_adaptive_ensemble_15m_4h_v1"
+name = "ensemble_regime_confidence_voting_15m_v2"
 timeframe = "15m"
 leverage = 1.0
 
 
-def calculate_hma(close, period=16):
-    """Hull Moving Average - faster response than EMA"""
+def calculate_atr(high, low, close, period=14):
+    """Calculate ATR using Wilder's smoothing"""
     n = len(close)
     if n < period:
         return np.zeros(n)
     
-    half = period // 2
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+    
+    atr = np.zeros(n)
+    atr[period - 1] = np.mean(tr[1:period])
+    
+    for i in range(period, n):
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    
+    return atr
+
+
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n)
+    
+    half_period = period // 2
     sqrt_period = int(np.sqrt(period))
     
-    wma1 = pd.Series(close).rolling(window=half, min_periods=half).mean().values
-    wma2 = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    wma1 = np.zeros(n)
+    wma2 = np.zeros(n)
+    hma = np.zeros(n)
     
-    diff = 2 * wma1 - wma2
-    hma = pd.Series(diff).rolling(window=sqrt_period, min_periods=sqrt_period).mean().values
+    for i in range(half_period - 1, n):
+        weights = np.arange(1, half_period + 1)
+        wma1[i] = np.sum(close[i - half_period + 1:i + 1] * weights) / np.sum(weights)
     
-    return np.nan_to_num(hma, nan=0)
+    for i in range(period - 1, n):
+        weights = np.arange(1, period + 1)
+        wma2[i] = np.sum(close[i - period + 1:i + 1] * weights) / np.sum(weights)
+    
+    for i in range(period - 1 + sqrt_period - 1, n):
+        start_idx = i - sqrt_period + 1
+        weights = np.arange(1, sqrt_period + 1)
+        raw_vals = 2 * wma1[start_idx:i + 1] - wma2[start_idx:i + 1]
+        hma[i] = np.sum(raw_vals * weights) / np.sum(weights)
+    
+    return hma
 
 
 def calculate_rsi(close, period=14):
-    """RSI with proper warmup"""
+    """Calculate RSI"""
     n = len(close)
     if n < period + 1:
-        return np.full(n, 50.0)
+        return np.zeros(n)
     
     delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = pd.Series(gain).rolling(window=period, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).rolling(window=period, min_periods=period).mean().values
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
     
-    rs = np.ones(n)
-    mask = avg_loss > 0
-    rs[mask] = avg_gain[mask] / (avg_loss[mask] + 1e-10)
+    avg_gain[period] = np.mean(gain[:period + 1])
+    avg_loss[period] = np.mean(loss[:period + 1])
+    
+    for i in range(period + 1, n):
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
+    
+    rs = np.zeros(n)
+    for i in range(period, n):
+        if avg_loss[i] == 0:
+            rs[i] = 100
+        else:
+            rs[i] = avg_gain[i] / avg_loss[i]
     
     rsi = 100 - (100 / (1 + rs))
-    rsi = np.nan_to_num(rsi, nan=50.0)
     
     return rsi
 
 
-def calculate_atr(high, low, close, period=14):
-    """ATR using Wilder's smoothing"""
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD histogram"""
+    n = len(close)
+    if n < slow + signal:
+        return np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    ema_fast = np.zeros(n)
+    ema_slow = np.zeros(n)
+    macd_line = np.zeros(n)
+    signal_line = np.zeros(n)
+    histogram = np.zeros(n)
+    
+    ema_fast[0] = close[0]
+    ema_slow[0] = close[0]
+    
+    for i in range(1, n):
+        ema_fast[i] = close[i] * (2.0 / (fast + 1)) + ema_fast[i - 1] * (1.0 - 2.0 / (fast + 1))
+        ema_slow[i] = close[i] * (2.0 / (slow + 1)) + ema_slow[i - 1] * (1.0 - 2.0 / (slow + 1))
+    
+    for i in range(slow - 1, n):
+        macd_line[i] = ema_fast[i] - ema_slow[i]
+    
+    signal_line[slow - 1] = macd_line[slow - 1]
+    for i in range(slow, n):
+        signal_line[i] = macd_line[i] * (2.0 / (signal + 1)) + signal_line[i - 1] * (1.0 - 2.0 / (signal + 1))
+    
+    for i in range(slow - 1, n):
+        histogram[i] = macd_line[i] - signal_line[i]
+    
+    return macd_line, signal_line, histogram
+
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score (standardized deviation from mean)"""
     n = len(close)
     if n < period:
         return np.zeros(n)
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]
+    zscore = np.zeros(n)
     
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    return np.nan_to_num(atr, nan=0)
+    for i in range(period - 1, n):
+        window = close[i - period + 1:i + 1]
+        mean = np.mean(window)
+        std = np.std(window)
+        
+        if std > 0:
+            zscore[i] = (close[i] - mean) / std
+        else:
+            zscore[i] = 0
+    
+    return zscore
 
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - trend strength"""
-    n = len(close)
-    if n < period * 2:
-        return np.zeros(n)
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]
-    
-    # Directional Movement
-    plus_dm = np.maximum(high - np.roll(high, 1), 0)
-    minus_dm = np.maximum(np.roll(low, 1) - low, 0)
-    
-    # Filter DM
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-    
-    # Smooth with Wilder's method
-    atr_smooth = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=period, min_periods=period).mean().values / (atr_smooth + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=period, min_periods=period).mean().values / (atr_smooth + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
-    
-    return np.nan_to_num(adx, nan=0)
-
-
-def calculate_bbw(close, period=20):
-    """Bollinger Band Width"""
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
     n = len(close)
     if n < period:
-        return np.zeros(n)
+        return np.zeros(n), np.zeros(n)
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    atr = calculate_atr(high, low, close, period)
     
-    upper = sma + 2.0 * std
-    lower = sma - 2.0 * std
-    bbw = (upper - lower) / (sma + 1e-10)
+    supertrend = np.zeros(n)
+    trend_direction = np.ones(n)
     
-    return np.nan_to_num(bbw, nan=0)
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    
+    for i in range(period, n):
+        mid = (high[i] + low[i]) / 2
+        upper_band[i] = mid + multiplier * atr[i]
+        lower_band[i] = mid - multiplier * atr[i]
+    
+    supertrend[period] = lower_band[period]
+    
+    for i in range(period + 1, n):
+        if trend_direction[i - 1] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i - 1])
+            if close[i] < supertrend[i]:
+                supertrend[i] = upper_band[i]
+                trend_direction[i] = -1
+            else:
+                trend_direction[i] = 1
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i - 1])
+            if close[i] > supertrend[i]:
+                supertrend[i] = lower_band[i]
+                trend_direction[i] = 1
+            else:
+                trend_direction[i] = -1
+    
+    return supertrend, trend_direction
+
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width"""
+    n = len(close)
+    if n < period:
+        return np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
+    
+    middle = np.zeros(n)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    bbw = np.zeros(n)
+    
+    for i in range(period - 1, n):
+        window = close[i - period + 1:i + 1]
+        middle[i] = np.mean(window)
+        std = np.std(window)
+        upper[i] = middle[i] + std_mult * std
+        lower[i] = middle[i] - std_mult * std
+        
+        if middle[i] > 0:
+            bbw[i] = (upper[i] - lower[i]) / middle[i]
+        else:
+            bbw[i] = 0
+    
+    return upper, middle, lower, bbw
 
 
 def calculate_bbw_percentile(bbw, lookback=100):
-    """BBW percentile for regime detection"""
+    """Calculate BBW percentile for regime detection"""
     n = len(bbw)
     percentile = np.zeros(n)
     
     for i in range(lookback - 1, n):
         window = bbw[i - lookback + 1:i + 1]
-        rank = np.sum(window <= bbw[i])
-        percentile[i] = rank / lookback
+        current = bbw[i]
+        percentile[i] = np.sum(window <= current) / len(window)
     
     return percentile
-
-
-def resample_to_higher_tf(close, high, low, bars_per_tf):
-    """Resample OHLCV to higher timeframe"""
-    n = len(close)
-    n_tf = n // bars_per_tf
-    
-    if n_tf < 2:
-        return close[-1:], high[-1:], low[-1:]
-    
-    c_tf = np.array([close[(i + 1) * bars_per_tf - 1] for i in range(n_tf)])
-    h_tf = np.array([np.max(high[i * bars_per_tf:(i + 1) * bars_per_tf]) for i in range(n_tf)])
-    l_tf = np.array([np.min(low[i * bars_per_tf:(i + 1) * bars_per_tf]) for i in range(n_tf)])
-    
-    return c_tf, h_tf, l_tf
-
-
-def map_tf_to_base(tf_array, bars_per_tf, base_length):
-    """Map higher timeframe array back to base timeframe"""
-    n_tf = len(tf_array)
-    mapped = np.zeros(base_length)
-    
-    for i in range(base_length):
-        tf_idx = min(i // bars_per_tf, n_tf - 1)
-        mapped[i] = tf_array[tf_idx]
-    
-    return mapped
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -185,217 +250,235 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     low = prices["low"].values.copy()
     n = len(close)
     
-    # Position sizing levels
-    SIZE_LOW = 0.15
-    SIZE_MED = 0.25
+    # Calculate all indicators
+    atr = calculate_atr(high, low, close, period=14)
+    rsi = calculate_rsi(close, period=14)
+    zscore = calculate_zscore(close, period=20)
+    hma = calculate_hma(close, period=21)
+    supertrend, st_direction = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    _, _, macd_hist = calculate_macd(close, fast=12, slow=26, signal=9)
+    bb_upper, bb_middle, bb_lower, bbw = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    bbw_pct = calculate_bbw_percentile(bbw, lookback=100)
+    
+    # Signal parameters
+    SIZE_LOW = 0.20
+    SIZE_MED = 0.275
     SIZE_HIGH = 0.35
+    ATR_STOP_MULT = 2.0
     
     # Regime thresholds
-    BBW_TREND_THRESHOLD = 0.45  # Low BBW = trend regime
-    BBW_MR_THRESHOLD = 0.70     # High BBW = mean reversion regime
-    ADX_TREND_THRESHOLD = 25    # ADX > 25 = strong trend
+    LOW_VOL_PCT = 0.30  # BBW percentile < 30% = low vol (trend regime)
+    HIGH_VOL_PCT = 0.70  # BBW percentile > 70% = high vol (mean reversion regime)
     
-    # RSI thresholds by regime
-    RSI_TREND_LONG = 52
-    RSI_TREND_SHORT = 48
-    RSI_MR_LONG = 35
-    RSI_MR_SHORT = 65
+    # Signal thresholds
+    RSI_LONG_MIN = 40
+    RSI_LONG_MAX = 60
+    RSI_SHORT_MIN = 40
+    RSI_SHORT_MAX = 60
+    ZSCORE_MAX = 2.0
+    MACD_MIN = 0.0
     
-    # Timeframe: 15m base, 4h trend filter (16 bars per 4h)
-    bars_per_4h = 16
+    first_valid = max(200, 14 * 2, 20, 26 + 9, 100)
     
-    # === BASE TIMEFRAME (15m) INDICATORS ===
-    hma_15m = calculate_hma(close, period=16)
-    hma_fast_15m = calculate_hma(close, period=8)
-    rsi_15m = calculate_rsi(close, period=14)
-    atr_15m = calculate_atr(high, low, close, period=14)
-    adx_15m = calculate_adx(high, low, close, period=14)
-    bbw_15m = calculate_bbw(close, period=20)
-    bbw_pct_15m = calculate_bbw_percentile(bbw_15m, lookback=100)
-    
-    # === 4H TIMEFRAME INDICATORS (trend filter) ===
-    c_4h, h_4h, l_4h = resample_to_higher_tf(close, high, low, bars_per_4h)
-    hma_4h = calculate_hma(c_4h, period=16)
-    adx_4h = calculate_adx(h_4h, l_4h, c_4h, period=14)
-    bbw_4h = calculate_bbw(c_4h, period=20)
-    bbw_pct_4h = calculate_bbw_percentile(bbw_4h, lookback=100)
-    
-    # Map 4h indicators to 15m
-    hma_4h_mapped = map_tf_to_base(hma_4h, bars_per_4h, n)
-    adx_4h_mapped = map_tf_to_base(adx_4h, bars_per_4h, n)
-    bbw_pct_4h_mapped = map_tf_to_base(bbw_pct_4h, bars_per_4h, n)
-    
-    # === REGIME DETECTION ===
-    # Trend regime: low volatility + strong trend
-    is_trend_regime = (bbw_pct_4h_mapped < BBW_TREND_THRESHOLD) & (adx_4h_mapped > ADX_TREND_THRESHOLD)
-    
-    # Mean reversion regime: high volatility + weak trend
-    is_mr_regime = (bbw_pct_4h_mapped > BBW_MR_THRESHOLD) & (adx_4h_mapped < ADX_TREND_THRESHOLD)
-    
-    # Neutral regime: everything else
-    is_neutral = (~is_trend_regime) & (~is_mr_regime)
-    
-    # === 4H TREND BIAS ===
-    hma_4h_slope = np.zeros(n)
-    hma_4h_slope[16:] = np.sign(hma_4h_mapped[16:] - hma_4h_mapped[:-16])
-    
-    bullish_bias = hma_4h_slope > 0
-    bearish_bias = hma_4h_slope < 0
-    
-    # === SIGNAL 1: HMA TREND ===
-    hma_signal = np.zeros(n)
-    hma_valid = hma_15m > 0
-    
-    # Price above HMA + HMA sloping up
-    hma_slope = np.zeros(n)
-    hma_slope[8:] = np.sign(hma_15m[8:] - hma_15m[:-8])
-    
-    hma_long = hma_valid & (close > hma_15m) & (hma_slope > 0)
-    hma_short = hma_valid & (close < hma_15m) & (hma_slope < 0)
-    
-    hma_signal = np.where(hma_long, 1, hma_signal)
-    hma_signal = np.where(hma_short, -1, hma_signal)
-    
-    # === SIGNAL 2: RSI MOMENTUM (regime-dependent) ===
-    rsi_signal = np.zeros(n)
-    
-    # Trend regime: RSI confirms direction
-    rsi_trend_long = is_trend_regime & (rsi_15m > RSI_TREND_LONG)
-    rsi_trend_short = is_trend_regime & (rsi_15m < RSI_TREND_SHORT)
-    
-    # Mean reversion regime: RSI extremes
-    rsi_mr_long = is_mr_regime & (rsi_15m < RSI_MR_LONG)
-    rsi_mr_short = is_mr_regime & (rsi_15m > RSI_MR_SHORT)
-    
-    # Neutral regime: standard RSI
-    rsi_neutral_long = is_neutral & (rsi_15m > 55)
-    rsi_neutral_short = is_neutral & (rsi_15m < 45)
-    
-    rsi_signal = np.where(rsi_trend_long | rsi_mr_long | rsi_neutral_long, 1, rsi_signal)
-    rsi_signal = np.where(rsi_trend_short | rsi_mr_short | rsi_neutral_short, -1, rsi_signal)
-    
-    # === SIGNAL 3: BOLLINGER POSITION ===
-    bb_signal = np.zeros(n)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2.0 * std_20
-    bb_lower = sma_20 - 2.0 * std_20
-    
-    # In trend regime: price above middle = long
-    bb_trend_long = is_trend_regime & (close > sma_20)
-    bb_trend_short = is_trend_regime & (close < sma_20)
-    
-    # In MR regime: price at extremes = fade
-    bb_mr_long = is_mr_regime & (close < bb_lower)
-    bb_mr_short = is_mr_regime & (close > bb_upper)
-    
-    # Neutral: standard BB
-    bb_neutral_long = is_neutral & (close < sma_20)
-    bb_neutral_short = is_neutral & (close > sma_20)
-    
-    bb_signal = np.where(bb_trend_long | bb_mr_long | bb_neutral_long, 1, bb_signal)
-    bb_signal = np.where(bb_trend_short | bb_mr_short | bb_neutral_short, -1, bb_signal)
-    
-    # === CONFIDENCE-BASED POSITION SIZING ===
-    votes_long = np.zeros(n)
-    votes_short = np.zeros(n)
-    
-    # HMA vote (weighted by 4h bias)
-    hma_long_aligned = hma_signal == 1
-    hma_short_aligned = hma_signal == -1
-    
-    # Add full vote if aligned with 4h trend, half vote if not
-    votes_long = np.where(hma_long_aligned & bullish_bias, votes_long + 1.0, votes_long)
-    votes_long = np.where(hma_long_aligned & (~bullish_bias), votes_long + 0.5, votes_long)
-    votes_short = np.where(hma_short_aligned & bearish_bias, votes_short + 1.0, votes_short)
-    votes_short = np.where(hma_short_aligned & (~bearish_bias), votes_short + 0.5, votes_short)
-    
-    # RSI vote
-    votes_long = np.where(rsi_signal == 1, votes_long + 1.0, votes_long)
-    votes_short = np.where(rsi_signal == -1, votes_short + 1.0, votes_short)
-    
-    # BB vote
-    votes_long = np.where(bb_signal == 1, votes_long + 1.0, votes_long)
-    votes_short = np.where(bb_signal == -1, votes_short + 1.0, votes_short)
-    
-    # === GENERATE FINAL SIGNALS ===
+    # Track position state
     signals = np.zeros(n)
+    position_side = np.zeros(n, dtype=np.int32)
+    entry_price = np.zeros(n)
+    tp_triggered = np.zeros(n, dtype=np.int32)
+    highest_since_entry = np.zeros(n)
+    lowest_since_entry = np.zeros(n)
     
-    # Long signals
-    long_3sig = (votes_long >= 2.5) & (votes_long > votes_short)
-    long_2sig = (votes_long >= 1.5) & (votes_long < 2.5) & (votes_long > votes_short)
-    long_1sig = (votes_long >= 0.5) & (votes_long < 1.5) & (votes_long > votes_short)
-    
-    signals = np.where(long_3sig, SIZE_HIGH, signals)
-    signals = np.where(long_2sig, SIZE_MED, signals)
-    signals = np.where(long_1sig, SIZE_LOW, signals)
-    
-    # Short signals
-    short_3sig = (votes_short >= 2.5) & (votes_short > votes_long)
-    short_2sig = (votes_short >= 1.5) & (votes_short < 2.5) & (votes_short > votes_long)
-    short_1sig = (votes_short >= 0.5) & (votes_short < 1.5) & (votes_short > votes_long)
-    
-    signals = np.where(short_3sig, -SIZE_HIGH, signals)
-    signals = np.where(short_2sig, -SIZE_MED, signals)
-    signals = np.where(short_1sig, -SIZE_LOW, signals)
-    
-    # === ATR VOLATILITY FILTER ===
-    atr_pct = atr_15m / (close + 1e-10)
-    atr_pct = np.nan_to_num(atr_pct, nan=0)
-    
-    valid_atr = atr_pct > 0
-    if np.sum(valid_atr) > 50:
-        high_vol_threshold = np.percentile(atr_pct[valid_atr], 95)
-        extreme_vol_mask = atr_pct > high_vol_threshold
-        signals = np.where(extreme_vol_mask, signals * 0.5, signals)
-    
-    # === SIGNAL PERSISTENCE (reduce churn) ===
-    persistent_signals = np.zeros(n)
-    prev_signal = 0.0
-    
-    first_valid = max(100, 48 * bars_per_4h)
-    
-    for i in range(n):
-        if i < first_valid:
-            persistent_signals[i] = 0.0
-            prev_signal = 0.0
-        elif i < 2:
-            persistent_signals[i] = 0.0
-            prev_signal = 0.0
-        else:
-            current = signals[i]
+    for i in range(first_valid, n):
+        # Skip invalid data
+        if np.isnan(atr[i]) or atr[i] == 0 or np.isnan(bbw_pct[i]):
+            signals[i] = 0.0
+            position_side[i] = 0
+            continue
+        
+        price = close[i]
+        regime = bbw_pct[i]
+        
+        # Check existing position for stoploss/takeprofit
+        if position_side[i - 1] != 0:
+            prev_side = position_side[i - 1]
+            prev_entry = entry_price[i - 1] if entry_price[i - 1] > 0 else close[i - 1]
+            prev_tp = tp_triggered[i - 1]
+            prev_high = highest_since_entry[i - 1] if highest_since_entry[i - 1] > 0 else prev_entry
+            prev_low = lowest_since_entry[i - 1] if lowest_since_entry[i - 1] > 0 else prev_entry
             
-            # Same direction as previous - keep it
-            if current > 0 and prev_signal > 0:
-                persistent_signals[i] = current
-                prev_signal = current
-            elif current < 0 and prev_signal < 0:
-                persistent_signals[i] = current
-                prev_signal = current
-            # Flipping from flat or opposite - require confirmation
-            elif current > 0 and prev_signal <= 0:
-                if signals[i-1] > 0:
-                    persistent_signals[i] = current
-                    prev_signal = current
-                else:
-                    persistent_signals[i] = prev_signal
-            elif current < 0 and prev_signal >= 0:
-                if signals[i-1] < 0:
-                    persistent_signals[i] = current
-                    prev_signal = current
-                else:
-                    persistent_signals[i] = prev_signal
-            # Going to flat
-            elif current == 0:
-                persistent_signals[i] = 0.0
-                prev_signal = 0.0
+            # Update highest/lowest since entry
+            if prev_side == 1:
+                current_high = max(prev_high, price)
+                current_low = min(prev_low, price) if prev_low > 0 else price
             else:
-                persistent_signals[i] = prev_signal
-    
-    signals = persistent_signals
-    
-    # === FINAL CLEANUP ===
-    signals = np.nan_to_num(signals, nan=0.0)
-    signals = np.clip(signals, -SIZE_HIGH, SIZE_HIGH)
+                current_high = max(prev_high, price) if prev_high > 0 else price
+                current_low = min(prev_low, price)
+            
+            highest_since_entry[i] = current_high
+            lowest_since_entry[i] = current_low
+            
+            # Stoploss check
+            if prev_side == 1:
+                stoploss_price = prev_entry - ATR_STOP_MULT * atr[i]
+                if price < stoploss_price:
+                    signals[i] = 0.0
+                    position_side[i] = 0
+                    entry_price[i] = 0
+                    tp_triggered[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
+                    continue
+                
+                # Take profit at 2R
+                tp_price = prev_entry + 2 * ATR_STOP_MULT * atr[i]
+                if not prev_tp and price >= tp_price:
+                    signals[i] = SIZE_LOW
+                    position_side[i] = 1
+                    entry_price[i] = prev_entry
+                    tp_triggered[i] = 1
+                    continue
+                
+                # Trail stop at 1R
+                if prev_tp:
+                    trail_stop = current_high - ATR_STOP_MULT * atr[i]
+                    if price < trail_stop:
+                        signals[i] = 0.0
+                        position_side[i] = 0
+                        entry_price[i] = 0
+                        tp_triggered[i] = 0
+                        highest_since_entry[i] = 0
+                        lowest_since_entry[i] = 0
+                        continue
+            else:
+                stoploss_price = prev_entry + ATR_STOP_MULT * atr[i]
+                if price > stoploss_price:
+                    signals[i] = 0.0
+                    position_side[i] = 0
+                    entry_price[i] = 0
+                    tp_triggered[i] = 0
+                    highest_since_entry[i] = 0
+                    lowest_since_entry[i] = 0
+                    continue
+                
+                tp_price = prev_entry - 2 * ATR_STOP_MULT * atr[i]
+                if not prev_tp and price <= tp_price:
+                    signals[i] = -SIZE_LOW
+                    position_side[i] = -1
+                    entry_price[i] = prev_entry
+                    tp_triggered[i] = 1
+                    continue
+                
+                if prev_tp:
+                    trail_stop = current_low + ATR_STOP_MULT * atr[i]
+                    if price > trail_stop:
+                        signals[i] = 0.0
+                        position_side[i] = 0
+                        entry_price[i] = 0
+                        tp_triggered[i] = 0
+                        highest_since_entry[i] = 0
+                        lowest_since_entry[i] = 0
+                        continue
+            
+            # Hold position
+            signals[i] = signals[i - 1]
+            position_side[i] = position_side[i - 1]
+            entry_price[i] = entry_price[i - 1]
+            tp_triggered[i] = tp_triggered[i - 1]
+            highest_since_entry[i] = highest_since_entry[i - 1]
+            lowest_since_entry[i] = lowest_since_entry[i - 1]
+            continue
+        
+        # Generate ensemble signals
+        trend_signal = 0
+        momentum_signal = 0
+        meanrev_signal = 0
+        
+        # Signal 1: Trend (HMA + Supertrend agreement)
+        if price > hma[i] and st_direction[i] == 1:
+            trend_signal = 1
+        elif price < hma[i] and st_direction[i] == -1:
+            trend_signal = -1
+        
+        # Signal 2: Momentum (RSI + MACD histogram)
+        if RSI_LONG_MIN <= rsi[i] <= RSI_LONG_MAX and macd_hist[i] > MACD_MIN:
+            momentum_signal = 1
+        elif RSI_SHORT_MIN <= rsi[i] <= RSI_SHORT_MAX and macd_hist[i] < -MACD_MIN:
+            momentum_signal = -1
+        
+        # Signal 3: Mean Reversion (Z-score + BB position)
+        bb_position = (price - bb_lower[i]) / (bb_upper[i] - bb_lower[i]) if (bb_upper[i] - bb_lower[i]) > 0 else 0.5
+        if zscore[i] < -ZSCORE_MAX and bb_position < 0.3:
+            meanrev_signal = 1
+        elif zscore[i] > ZSCORE_MAX and bb_position > 0.7:
+            meanrev_signal = -1
+        
+        # Regime-adaptive weighting
+        if regime < LOW_VOL_PCT:
+            # Low volatility = trend regime (weight trend higher)
+            weights = [0.5, 0.3, 0.2]
+        elif regime > HIGH_VOL_PCT:
+            # High volatility = mean reversion regime (weight meanrev higher)
+            weights = [0.2, 0.3, 0.5]
+        else:
+            # Normal volatility = balanced
+            weights = [0.33, 0.33, 0.34]
+        
+        # Weighted vote
+        vote_score = (trend_signal * weights[0] + 
+                      momentum_signal * weights[1] + 
+                      meanrev_signal * weights[2])
+        
+        # Count agreeing signals
+        agree_count = 0
+        if trend_signal > 0:
+            agree_count += 1
+        elif trend_signal < 0:
+            agree_count -= 1
+        
+        if momentum_signal > 0:
+            agree_count += 1
+        elif momentum_signal < 0:
+            agree_count -= 1
+        
+        if meanrev_signal > 0:
+            agree_count += 1
+        elif meanrev_signal < 0:
+            agree_count -= 1
+        
+        # Determine position based on vote and confidence
+        if vote_score > 0.3:
+            if agree_count >= 2:
+                signals[i] = SIZE_HIGH
+                position_side[i] = 1
+            elif agree_count == 1:
+                signals[i] = SIZE_MED
+                position_side[i] = 1
+            else:
+                signals[i] = SIZE_LOW
+                position_side[i] = 1
+            
+            entry_price[i] = price
+            tp_triggered[i] = 0
+            highest_since_entry[i] = price
+            lowest_since_entry[i] = price
+            
+        elif vote_score < -0.3:
+            if agree_count <= -2:
+                signals[i] = -SIZE_HIGH
+                position_side[i] = -1
+            elif agree_count == -1:
+                signals[i] = -SIZE_MED
+                position_side[i] = -1
+            else:
+                signals[i] = -SIZE_LOW
+                position_side[i] = -1
+            
+            entry_price[i] = price
+            tp_triggered[i] = 0
+            highest_since_entry[i] = price
+            lowest_since_entry[i] = price
+        else:
+            signals[i] = 0.0
+            position_side[i] = 0
     
     return signals
