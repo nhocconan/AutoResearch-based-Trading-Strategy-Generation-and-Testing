@@ -1,36 +1,34 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #026 - Donchian Breakout + 4h HMA Trend + Volume Filter (30m primary)
+EXPERIMENT #027 - EMA Crossover + 4h HMA Trend + RSI Filter (1h primary)
 =====================================================================================
-Hypothesis: 30m Donchian(20) breakouts capture momentum moves effectively, but generate
-false signals in choppy markets. Adding 4h HMA(21) trend filter ensures we only trade
-breakouts in the direction of the higher timeframe trend. Volume confirmation (>1.5x avg)
-filters weak breakouts. This is simpler than Supertrend+RSI+ADX (which had too many
-conflicting filters causing 0 trades in some experiments).
+Hypothesis: Simple EMA(8)/EMA(21) crossover on 1h captures trend changes effectively.
+Adding 4h HMA(21) trend filter ensures we trade with higher timeframe direction.
+RSI(14) filter avoids entering at extremes (RSI 35-65 range for better entries).
+ADX filter removed - it was too restrictive and caused 0 trades in previous attempts.
 
 Key features:
-- Primary TF: 30m (this experiment)
+- Primary TF: 1h (required for this experiment)
 - HTF filter: 4h HMA(21) for major trend direction
-- Entry: Donchian(20) breakout (20-bar high/low)
-- Filter: Volume > 1.5x 20-bar average volume
+- Trend: EMA(8)/EMA(21) crossover for entry signals
+- Filter: RSI(14) between 35-65 (not overbought/oversold at entry)
 - Stoploss: 2.0*ATR(14) trailing
-- Position sizing: 0.25-0.30 discrete levels (conservative to control DD)
-- Take profit: Reduce to half at 2R profit, trail stop
+- Position sizing: 0.25-0.30 discrete levels
+- Take profit: Reduce to half at 2R profit
 
-Why this should beat failed experiments:
-- Simpler entry logic (Donchian breakout vs Supertrend+RSI+ADX) = more trades
-- 4h HMA filter removes counter-trend breakouts (major source of losses)
-- Volume filter confirms breakout strength
-- Conservative sizing (0.25-0.30) prevents blowup during crypto crashes
-- 30m TF captures more opportunities than 1h/4h/12h strategies
+Why this should work better:
+- Simpler entry conditions = more trades (previous Supertrend+RSI+ADX was too strict)
+- 4h HMA filter still provides trend alignment
+- RSI filter prevents chasing tops/bottoms
+- Conservative sizing controls drawdown
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "donchian_vol_4hhma_30m_v1"
-timeframe = "30m"
+name = "ema_cross_4hhma_rsi_1h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 
@@ -47,19 +45,37 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (20-period high/low)"""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average"""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, adjust=False, min_periods=period).mean().values
+    return ema
+
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI (Relative Strength Index)"""
+    n = len(close)
+    rsi = np.zeros(n)
+    rsi[:] = np.nan
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
+    delta = np.diff(close)
+    gain = np.zeros(n)
+    loss = np.zeros(n)
     
-    return upper, lower
+    gain[1:] = np.where(delta > 0, delta, 0)
+    loss[1:] = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    for i in range(period, n):
+        if avg_loss[i] == 0:
+            rsi[i] = 100.0
+        else:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+    
+    return rsi
 
 
 def calculate_hma(close, period):
@@ -72,18 +88,10 @@ def calculate_hma(close, period):
     return hma.values
 
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate SMA of volume"""
-    vol_s = pd.Series(volume)
-    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_sma
-
-
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
-    volume = prices["volume"].values.copy()
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
@@ -95,16 +103,15 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    # Calculate 1h indicators
+    ema_fast = calculate_ema(close, 8)
+    ema_slow = calculate_ema(close, 21)
+    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    vol_sma = calculate_volume_sma(volume, period=20)
     
     # Generate signals
     signals = np.zeros(n)
     BASE_SIZE = 0.28  # Base position size (28% of capital)
-    MAX_SIZE = 0.35   # Max position size
-    MIN_SIZE = 0.20   # Min position size
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -115,13 +122,16 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     entry_atr = 0.0
     profit_target_hit = False
     
-    min_period = 100  # Wait for all indicators to stabilize
+    # Track EMA crossover state
+    prev_ema_diff = 0.0  # ema_fast - ema_slow
+    
+    min_period = 50  # Wait for indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(donchian_upper[i]) or
-            np.isnan(donchian_lower[i]) or np.isnan(atr[i]) or np.isnan(vol_sma[i]) or
-            atr[i] == 0 or vol_sma[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(ema_fast[i]) or
+            np.isnan(ema_slow[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]) or
+            atr[i] == 0):
             signals[i] = 0.0
             continue
         
@@ -129,29 +139,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         price_above_4h_hma = close[i] > hma_4h_aligned[i]
         hma_trend = 1 if price_above_4h_hma else -1
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
+        # EMA crossover signal
+        ema_diff = ema_fast[i] - ema_slow[i]
+        ema_bullish_cross = (prev_ema_diff <= 0 and ema_diff > 0)  # Fast crosses above slow
+        ema_bearish_cross = (prev_ema_diff >= 0 and ema_diff < 0)  # Fast crosses below slow
         
-        # Volume confirmation (volume > 1.5x average)
-        volume_confirmed = volume[i] > 1.5 * vol_sma[i]
+        # RSI filter - avoid extremes at entry
+        rsi_neutral = 35 < rsi[i] < 65  # Not overbought or oversold
         
-        # Calculate position size (discrete levels to minimize fee churn)
-        if volume_confirmed:
-            position_size = BASE_SIZE
-        else:
-            position_size = MIN_SIZE  # Smaller size without volume confirmation
-        
-        # Determine target signal based on all filters
+        # Calculate target signal
         target_signal = 0.0
         
-        # Long entry: Donchian breakout + 4h HMA bullish + volume confirmed
-        if breakout_long and hma_trend == 1:
-            target_signal = position_size
+        # Long entry: EMA bullish cross + 4h HMA bullish + RSI neutral
+        if ema_bullish_cross and hma_trend == 1 and rsi_neutral:
+            target_signal = BASE_SIZE
         
-        # Short entry: Donchian breakout + 4h HMA bearish + volume confirmed
-        elif breakout_short and hma_trend == -1:
-            target_signal = -position_size
+        # Short entry: EMA bearish cross + 4h HMA bearish + RSI neutral
+        elif ema_bearish_cross and hma_trend == -1 and rsi_neutral:
+            target_signal = -BASE_SIZE
         
         # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
@@ -210,11 +215,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if 4h HMA alignment breaks (trend reversal)
+                # Exit if EMA reverses OR 4h HMA alignment breaks
+                ema_reversal_long = ema_diff < 0  # Fast below slow
+                ema_reversal_short = ema_diff > 0  # Fast above slow
                 hma_alignment_broken = (position_side == 1 and hma_trend == -1) or \
                                        (position_side == -1 and hma_trend == 1)
                 
-                if hma_alignment_broken:
+                if ema_reversal_long or ema_reversal_short or hma_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
@@ -224,8 +231,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                     profit_target_hit = False
                 else:
                     # Maintain position
-                    signals[i] = position_size * position_side if not profit_target_hit else HALF_SIZE * position_side
+                    signals[i] = BASE_SIZE * position_side if not profit_target_hit else HALF_SIZE * position_side
             else:
                 signals[i] = 0.0
+        
+        # Update previous EMA diff for next iteration
+        prev_ema_diff = ema_diff
     
     return signals
