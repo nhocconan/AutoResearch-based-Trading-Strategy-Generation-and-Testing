@@ -1,41 +1,39 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #025 - HMA Trend + RSI Momentum + Volume Confirmation (15m primary, 1h HTF)
-======================================================================================
-Hypothesis: 15m HMA(21) captures fast trend changes better than EMA/KAMA on short TF.
-RSI(14) momentum filter ensures we enter on pullbacks (not chasing). Volume ratio
-confirms genuine moves vs fakeouts. 1h HMA(50) provides HTF trend alignment without
-being too slow (4h was too laggy for 15m entries in previous attempts).
+EXPERIMENT #026 - HMA Crossover + RSI Momentum + 4h Trend Filter (30m primary)
+================================================================================
+Hypothesis: Hull Moving Average crossovers provide faster trend detection than 
+traditional EMA crossovers with less lag. RSI momentum confirmation ensures we 
+enter when momentum supports the trend direction. 4h HMA(50) provides major 
+trend alignment to avoid counter-trend trades. ADX filters out weak/choppy markets.
 
-Key differences from failed strategies:
-- Uses HMA (faster response than KAMA/EMA) instead of Supertrend
-- 1h HTF (not 4h) for better alignment with 15m entries
-- Volume ratio filter (not just raw volume) to confirm breakouts
-- Z-score on price for mean reversion filter (avoid extreme entries)
-
-Risk management:
-- Position size: 0.25-0.30 discrete levels
-- Stoploss: 2.0*ATR(14) trailing
-- Take profit: Reduce to half at 2R, trail stop at 1R
-- Max signal magnitude: 0.35
+Key features:
+- Primary TF: 30m (REQUIRED for this experiment)
+- HTF filter: 4h HMA(50) for major trend direction
+- Trend: HMA(8) / HMA(21) crossover on 30m
+- Momentum: RSI(14) > 55 for long, < 45 for short
+- Regime: ADX(14) > 20 for trend strength
+- Stoploss: 2.5*ATR(14) trailing
+- Position sizing: 0.25-0.30 discrete levels
+- Take profit: Reduce to half at 2R profit
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "hma_rsi_volume_zscore_15m_1h_v1"
-timeframe = "15m"
+name = "hma_crossover_rsi_30m_4h_v1"
+timeframe = "30m"
 leverage = 1.0
 
 
 def calculate_hma(close, period):
-    """Calculate Hull Moving Average - faster response than EMA"""
+    """Calculate Hull Moving Average - reduces lag vs EMA"""
     close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period // 2, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, adjust=False).mean()
+    wma1 = close_s.ewm(span=period // 2, adjust=False, min_periods=period // 2).mean()
+    wma2 = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
     raw_hma = 2 * wma1 - wma2
-    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
+    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False, min_periods=int(np.sqrt(period))).mean()
     return hma.values
 
 
@@ -65,200 +63,178 @@ def calculate_rsi(close, period=14):
     return rsi.values
 
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion filter"""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - sma) / (std + 1e-10)
-    return zscore.values
-
-
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs rolling average"""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean()
-    vol_ratio = vol_s / (vol_avg + 1e-10)
-    return vol_ratio.values
-
-
-def calculate_hma_slope(hma_values, lookback=5):
-    """Calculate HMA slope direction"""
-    n = len(hma_values)
-    slope = np.zeros(n)
-    for i in range(lookback, n):
-        if not np.isnan(hma_values[i]) and not np.isnan(hma_values[i - lookback]):
-            slope[i] = 1 if hma_values[i] > hma_values[i - lookback] else -1
-    return slope
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) - trend strength"""
+    n = len(close)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        if high[i] - high[i-1] > low[i-1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+        if low[i-1] - low[i] > high[i] - high[i-1]:
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i-1]),
+                    abs(low[i] - close[i-1]))
+    
+    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    plus_di = 100 * plus_dm_smooth / (tr_smooth + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (tr_smooth + 1e-10)
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return adx
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
-    volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load 1h HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
-    hma_1h = calculate_hma(df_1h['close'].values, 50)
-    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h)  # auto shift(1)
+    # Load 4h HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
+    hma_4h = calculate_hma(df_4h['close'].values, 50)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)  # auto shift(1) for completed bars
     
-    # Calculate 15m indicators (pre-compute before loop for performance)
-    hma_15m = calculate_hma(close, 21)
-    hma_15m_fast = calculate_hma(close, 9)
+    # Calculate 30m indicators (pre-compute before loop for performance)
+    hma_fast = calculate_hma(close, 8)
+    hma_slow = calculate_hma(close, 21)
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    zscore = calculate_zscore(close, 20)
-    vol_ratio = calculate_volume_ratio(volume, 20)
-    hma_slope = calculate_hma_slope(hma_15m, 5)
+    adx = calculate_adx(high, low, close, 14)
     
     # Generate signals
     signals = np.zeros(n)
-    SIZE = 0.28  # Base position size (28% of capital)
-    HALF_SIZE = SIZE / 2  # For take profit reduction
-    MAX_SIZE = 0.35  # Maximum position size
+    SIZE = 0.28  # 28% of capital - conservative sizing
+    HALF_SIZE = SIZE / 2  # 14% for take profit reduction
     
     # Track position state for stoploss and take profit
     position_side = 0  # 0=flat, 1=long, -1=short
+    entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
-    entry_price = 0.0
     profit_target_hit = False
-    entry_atr = 1.0  # ATR at entry for R calculation
     
-    min_period = 100  # Wait for all indicators to stabilize
+    min_period = 120  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1h_aligned[i]) or np.isnan(hma_15m[i]) or 
-            np.isnan(hma_15m_fast[i]) or np.isnan(atr[i]) or np.isnan(rsi[i]) or 
-            np.isnan(zscore[i]) or np.isnan(vol_ratio[i]) or np.isnan(hma_slope[i]) or
-            atr[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(hma_fast[i]) or 
+            np.isnan(hma_slow[i]) or np.isnan(atr[i]) or np.isnan(rsi[i]) or 
+            np.isnan(adx[i]) or atr[i] == 0):
             signals[i] = 0.0
             continue
         
-        # HTF trend filter (1h HMA50)
-        htf_trend = 1 if close[i] > hma_1h_aligned[i] else -1
+        # 4h trend filter (HTF) - only trade with major trend
+        daily_trend = 1 if close[i] > hma_4h_aligned[i] else -1
         
-        # 15m trend filter (HMA21 slope)
-        ltf_trend = int(hma_slope[i])
+        # ADX trend strength filter - avoid choppy markets
+        trend_strength = adx[i] > 20
         
-        # HMA crossover signal (fast vs slow)
-        hma_cross = 1 if hma_15m_fast[i] > hma_15m[i] else -1
+        # HMA crossover signals
+        hma_cross_long = hma_fast[i] > hma_slow[i] and hma_fast[i-1] <= hma_slow[i-1]
+        hma_cross_short = hma_fast[i] < hma_slow[i] and hma_fast[i-1] >= hma_slow[i-1]
         
-        # RSI momentum filter (avoid extremes, prefer pullbacks)
-        rsi_valid_long = 35 <= rsi[i] <= 65  # Not overbought
-        rsi_valid_short = 35 <= rsi[i] <= 65  # Not oversold
-        rsi_momentum_long = rsi[i] > 50  # Bullish momentum
-        rsi_momentum_short = rsi[i] < 50  # Bearish momentum
-        
-        # Z-score filter (avoid extreme mean reversion entries)
-        zscore_valid = abs(zscore[i]) < 2.0  # Not at extreme
-        
-        # Volume confirmation (volume > 1.2x average for conviction)
-        volume_confirmed = vol_ratio[i] > 1.0
+        # RSI momentum confirmation
+        rsi_long = rsi[i] > 55
+        rsi_short = rsi[i] < 45
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: HTF bullish + LTF bullish + HMA cross bullish + RSI valid + Z-score ok + Volume
-        if (htf_trend == 1 and ltf_trend == 1 and hma_cross == 1 and 
-            rsi_valid_long and rsi_momentum_long and zscore_valid and volume_confirmed):
+        # Long entry: HMA cross + RSI momentum + 4h trend + ADX strength
+        if hma_cross_long and rsi_long and daily_trend == 1 and trend_strength:
             target_signal = SIZE
         
-        # Short entry: HTF bearish + LTF bearish + HMA cross bearish + RSI valid + Z-score ok + Volume
-        elif (htf_trend == -1 and ltf_trend == -1 and hma_cross == -1 and 
-              rsi_valid_short and rsi_momentum_short and zscore_valid and volume_confirmed):
+        # Short entry: HMA cross + RSI momentum + 4h trend + ADX strength
+        elif hma_cross_short and rsi_short and daily_trend == -1 and trend_strength:
             target_signal = -SIZE
         
         # Stoploss and take profit logic - check BEFORE setting new signal
         stoploss_triggered = False
         take_profit_triggered = False
-        trend_reversal = False
         
         if position_side != 0:
-            r_multiple = 2.0 * entry_atr  # R = 2*ATR
-            
             if position_side == 1:
                 # Long position - update highest
                 highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.0 * atr[i]
+                trailing_stop = highest_since_entry - 2.5 * atr[i]
                 
                 # Check stoploss
                 if close[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry)
+                # Check take profit (2R from entry, where R = 2.5*ATR)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 2 * r_multiple:  # 2R = 4*ATR from entry
+                    if close[i] >= entry_price + 5.0 * atr[i]:  # 2R = 5*ATR
                         take_profit_triggered = True
-                
-                # Check trend reversal (HMA cross bearish)
-                if hma_cross == -1:
-                    trend_reversal = True
-                    
             else:
                 # Short position - update lowest
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.0 * atr[i]
+                trailing_stop = lowest_since_entry + 2.5 * atr[i]
                 
                 # Check stoploss
                 if close[i] > trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry)
+                # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 2 * r_multiple:  # 2R profit
+                    if close[i] <= entry_price - 5.0 * atr[i]:  # 2R profit
                         take_profit_triggered = True
-                
-                # Check trend reversal (HMA cross bullish)
-                if hma_cross == 1:
-                    trend_reversal = True
         
-        # Apply signal based on conditions
         if stoploss_triggered:
             signals[i] = 0.0
             position_side = 0
+            entry_price = 0.0
             highest_since_entry = 0.0
             lowest_since_entry = float('inf')
-            entry_price = 0.0
             profit_target_hit = False
-            entry_atr = 1.0
-            
         elif take_profit_triggered:
             # Reduce position to half at 2R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
-            
-        elif trend_reversal and position_side != 0:
-            # Trend reversed, exit position
-            signals[i] = 0.0
-            position_side = 0
-            highest_since_entry = 0.0
-            lowest_since_entry = float('inf')
-            entry_price = 0.0
-            profit_target_hit = False
-            entry_atr = 1.0
-            
         else:
             # Apply signal change
             if target_signal != 0.0 and position_side == 0:
                 # New entry
                 signals[i] = target_signal
                 position_side = 1 if target_signal > 0 else -1
+                entry_price = close[i]
                 highest_since_entry = close[i]
                 lowest_since_entry = close[i]
-                entry_price = close[i]
                 profit_target_hit = False
-                entry_atr = atr[i]
-                
             elif position_side != 0:
-                # Maintain existing position
-                if not profit_target_hit:
-                    signals[i] = SIZE * position_side
+                # Maintain existing position - check if trend reversed (opposite crossover)
+                if position_side == 1 and hma_cross_short:
+                    # Opposite crossover, exit long
+                    signals[i] = 0.0
+                    position_side = 0
+                    entry_price = 0.0
+                    highest_since_entry = 0.0
+                    lowest_since_entry = float('inf')
+                    profit_target_hit = False
+                elif position_side == -1 and hma_cross_long:
+                    # Opposite crossover, exit short
+                    signals[i] = 0.0
+                    position_side = 0
+                    entry_price = 0.0
+                    highest_since_entry = 0.0
+                    lowest_since_entry = float('inf')
+                    profit_target_hit = False
                 else:
-                    signals[i] = HALF_SIZE * position_side
+                    # Maintain position - same signal value = no fee churn
+                    signals[i] = SIZE * position_side if not profit_target_hit else HALF_SIZE * position_side
             else:
                 signals[i] = 0.0
     
