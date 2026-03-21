@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #244: 4h Keltner Channel Breakout + Fisher Transform + ADX Trend Strength
-Hypothesis: 4h timeframe needs better entry timing than pure trend following. Keltner Channels
-(ADR-based) are more adaptive than Donchian for crypto volatility. Fisher Transform catches
-reversals at channel boundaries better than RSI. ADX(14) > 20 filters out choppy periods.
-Daily HMA provides trend bias, Weekly HMA confirms macro direction. Volume ratio adds conviction.
-This differs from failed 4h strategies by using Fisher for entry timing instead of RSI, and
-Keltner instead of Donchian/Supertrend. Position sizing: 0.25 entry, stoploss 2.5*ATR.
-Target: Beat Sharpe=0.499 with better entry timing on 4h timeframe.
+Experiment #245: 12h Choppiness Index Regime-Adaptive with Daily/Weekly HMA Trend Filter
+Hypothesis: Market regime (trending vs ranging) determines which strategy works best.
+Choppiness Index (CHOP) identifies regime: CHOP<38.2=trending (use breakout), CHOP>61.8=ranging
+(use mean reversion). Daily HMA provides primary trend bias, Weekly HMA confirms macro.
+This differs from previous attempts by using CHOP as the PRIMARY regime filter instead of
+RSI/Supertrend alone. Simpler entry conditions to ensure sufficient trades. Position sizing:
+0.25 entry, 0.15 half at 2R profit. Stoploss: 2.5*ATR trailing stop. Target: Beat Sharpe=0.499.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_keltner_fisher_adx_daily_weekly_hma_volume_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_chop_regime_daily_weekly_hma_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -37,84 +36,62 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_fisher_transform(high, low, period=9):
-    """Calculate Ehlers Fisher Transform for reversal detection."""
-    hl2 = (high + low) / 2
-    hl2_s = pd.Series(hl2)
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    CHOP > 61.8 = ranging market, CHOP < 38.2 = trending market
+    """
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Calculate highest high and lowest low over period
-    highest = hl2_s.rolling(window=period, min_periods=period).max().values
-    lowest = hl2_s.rolling(window=period, min_periods=period).min().values
+    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
     
-    # Normalize price position within range (0 to 1)
-    range_val = highest - lowest
-    range_val = np.where(range_val > 0, range_val, 1e-10)
-    normalized = (hl2 - lowest) / range_val
-    normalized = np.clip(normalized, 0.001, 0.999)  # Avoid log(0)
+    price_range = highest_high - lowest_low
+    price_range = np.where(price_range > 0, price_range, 1e-10)
     
-    # Fisher transform
-    fisher = 0.5 * np.log((1 + normalized) / (1 - normalized))
-    
-    # Signal line (1-period lag of fisher)
-    fisher_signal = np.roll(fisher, 1)
-    fisher_signal[0] = fisher[0]
-    
-    return fisher, fisher_signal
+    chop = 100 * np.log10(atr_sum / price_range) / np.log10(period)
+    chop = np.clip(chop, 0, 100)
+    chop[:period] = 50  # Initialize early values
+    return chop
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
+def calculate_rsi(close, period=14):
+    """Calculate RSI indicator."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
+    rsi = 100 - 100 / (1 + rs)
+    rsi = np.clip(rsi, 0, 100)
+    return rsi
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion signals."""
     close_s = pd.Series(close)
-    
-    # True Range
-    tr1 = high_s - low_s
-    tr2 = np.abs(high_s - close_s.shift(1))
-    tr3 = np.abs(low_s - close_s.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    # Directional Movement
-    plus_dm = high_s.diff()
-    minus_dm = -low_s.diff()
-    
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-    
-    plus_dm_s = pd.Series(plus_dm)
-    minus_dm_s = pd.Series(minus_dm)
-    
-    plus_di = 100 * (plus_dm_s.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    minus_di = 100 * (minus_dm_s.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (np.abs(plus_di + minus_di) + 1e-10)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return adx.values, plus_di.values, minus_di.values
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    std = np.where(std > 0, std, 1e-10)
+    zscore = (close - sma) / std
+    return zscore
 
-def calculate_keltner_channels(high, low, close, atr_period=14, atr_mult=2.0, ema_period=20):
-    """Calculate Keltner Channels (EMA +/- ATR multiplier)."""
-    close_s = pd.Series(close)
-    ema = close_s.ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
-    atr = calculate_atr(high, low, close, atr_period)
-    
-    upper = ema + atr_mult * atr
-    lower = ema - atr_mult * atr
-    
-    return upper, lower, ema
-
-def calculate_volume_ratio(taker_buy_volume, volume):
-    """Calculate taker buy volume ratio (0-1, >0.5 = bullish)."""
-    ratio = np.where(volume > 0, taker_buy_volume / volume, 0.5)
-    return ratio
+def calculate_momentum(close, period=10):
+    """Calculate Rate of Change (ROC) momentum."""
+    prev_close = np.roll(close, period)
+    prev_close[:period] = close[0]
+    roc = (close - prev_close) / prev_close * 100
+    return roc
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
@@ -129,24 +106,24 @@ def generate_signals(prices):
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
-    fisher, fisher_signal = calculate_fisher_transform(high, low, 9)
-    keltner_upper, keltner_lower, keltner_mid = calculate_keltner_channels(high, low, close, 14, 2.0, 20)
-    vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
+    rsi = calculate_rsi(close, 14)
+    chop = calculate_choppiness(high, low, close, 14)
+    zscore = calculate_zscore(close, 20)
+    momentum = calculate_momentum(close, 10)
     
-    # Track previous values for breakout/cross detection
-    prev_fisher = np.roll(fisher, 1)
-    prev_fisher[0] = fisher[0]
-    prev_keltner_upper = np.roll(keltner_upper, 1)
-    prev_keltner_lower = np.roll(keltner_lower, 1)
-    prev_keltner_upper[0] = keltner_upper[0]
-    prev_keltner_lower[0] = keltner_lower[0]
+    # Track previous values for crossover detection
+    prev_rsi = np.roll(rsi, 1)
+    prev_rsi[0] = rsi[0]
+    prev_zscore = np.roll(zscore, 1)
+    prev_zscore[0] = zscore[0]
+    prev_momentum = np.roll(momentum, 1)
+    prev_momentum[0] = momentum[0]
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.125
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -157,102 +134,77 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filters (looser to ensure trades)
+        # HTF trend filters
         daily_bullish = close[i] > hma_1d_aligned[i]
         daily_bearish = close[i] < hma_1d_aligned[i]
         weekly_bullish = close[i] > hma_1w_aligned[i]
         weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # ADX trend strength (must have some trend, but not too strict)
-        trend_strength = adx[i] > 20  # Lower threshold for more trades
+        # Regime detection via Choppiness Index
+        trending_regime = chop[i] < 38.2
+        ranging_regime = chop[i] > 61.8
+        neutral_regime = not trending_regime and not ranging_regime
         
-        # DI crossover for direction
-        di_bullish = plus_di[i] > minus_di[i]
-        di_bearish = plus_di[i] < minus_di[i]
+        # RSI signals
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
+        rsi_cross_up = prev_rsi[i] < 40 and rsi[i] >= 40
+        rsi_cross_down = prev_rsi[i] > 60 and rsi[i] <= 60
         
-        # Fisher Transform signals (reversal detection)
-        # Long: Fisher crosses above -1.5 from below (oversold reversal)
-        fisher_cross_up = prev_fisher[i] < -1.0 and fisher[i] > -1.0
-        # Short: Fisher crosses below +1.5 from above (overbought reversal)
-        fisher_cross_down = prev_fisher[i] > 1.0 and fisher[i] < 1.0
-        # Extreme oversold/overbought
-        fisher_oversold = fisher[i] < -1.5
-        fisher_overbought = fisher[i] > 1.5
+        # Z-score mean reversion signals
+        zscore_oversold = zscore[i] < -1.5
+        zscore_overbought = zscore[i] > 1.5
+        zscore_cross_up = prev_zscore[i] < -1.0 and zscore[i] >= -1.0
+        zscore_cross_down = prev_zscore[i] > 1.0 and zscore[i] <= 1.0
         
-        # Volume confirmation
-        vol_bullish = vol_ratio[i] > 0.52
-        vol_bearish = vol_ratio[i] < 0.48
-        
-        # Keltner Channel breakout detection
-        breakout_long = close[i] > prev_keltner_upper[i]
-        breakout_short = close[i] < prev_keltner_lower[i]
-        
-        # Price position in channel
-        above_mid = close[i] > keltner_mid[i]
-        below_mid = close[i] < keltner_mid[i]
-        
-        # Channel squeeze (low volatility - potential breakout)
-        channel_width = (keltner_upper[i] - keltner_lower[i]) / keltner_mid[i]
-        prev_width = (prev_keltner_upper[i] - prev_keltner_lower[i]) / keltner_mid[i]
-        squeeze = channel_width < prev_width * 0.9  # Width decreasing
+        # Momentum signals
+        momentum_positive = momentum[i] > 0
+        momentum_negative = momentum[i] < 0
+        momentum_cross_up = prev_momentum[i] <= 0 and momentum[i] > 0
+        momentum_cross_down = prev_momentum[i] >= 0 and momentum[i] < 0
         
         new_signal = 0.0
         
-        # === LONG ENTRY ===
-        # Breakout long with trend and momentum
-        if breakout_long:
-            if daily_bullish and trend_strength and di_bullish:
+        # === TRENDING REGIME (CHOP < 38.2) - Use breakout/momentum ===
+        if trending_regime:
+            # Long: momentum cross up + daily bullish
+            if momentum_cross_up and daily_bullish:
                 new_signal = SIZE_ENTRY
-            elif weekly_bullish and vol_bullish and above_mid:
+            # Long: weekly bullish + momentum positive
+            elif weekly_bullish and momentum_positive and rsi[i] > 45:
                 new_signal = SIZE_ENTRY
-        
-        # Fisher reversal from oversold in uptrend
-        elif fisher_cross_up:
-            if daily_bullish and above_mid:
-                new_signal = SIZE_ENTRY
-            elif weekly_bullish and di_bullish and vol_bullish:
-                new_signal = SIZE_ENTRY
-        
-        # Fisher extreme oversold with trend support
-        elif fisher_oversold:
-            if daily_bullish and trend_strength:
-                new_signal = SIZE_ENTRY
-            elif weekly_bullish and above_mid:
-                new_signal = SIZE_ENTRY
-        
-        # Pullback to Keltner mid in uptrend
-        elif above_mid and daily_bullish:
-            if close[i-1] < keltner_mid[i-1] and close[i] > keltner_mid[i]:
-                if di_bullish or vol_bullish:
-                    new_signal = SIZE_ENTRY
-        
-        # === SHORT ENTRY ===
-        # Breakout short with trend and momentum
-        if breakout_short:
-            if daily_bearish and trend_strength and di_bearish:
+            
+            # Short: momentum cross down + daily bearish
+            if momentum_cross_down and daily_bearish:
                 new_signal = -SIZE_ENTRY
-            elif weekly_bearish and vol_bearish and below_mid:
+            # Short: weekly bearish + momentum negative
+            elif weekly_bearish and momentum_negative and rsi[i] < 55:
                 new_signal = -SIZE_ENTRY
         
-        # Fisher reversal from overbought in downtrend
-        elif fisher_cross_down:
-            if daily_bearish and below_mid:
+        # === RANGING REGIME (CHOP > 61.8) - Use mean reversion ===
+        elif ranging_regime:
+            # Long: Z-score oversold + RSI oversold
+            if zscore_oversold and rsi_oversold:
+                new_signal = SIZE_ENTRY
+            # Long: Z-score cross up from oversold
+            elif zscore_cross_up and daily_bullish:
+                new_signal = SIZE_ENTRY
+            
+            # Short: Z-score overbought + RSI overbought
+            if zscore_overbought and rsi_overbought:
                 new_signal = -SIZE_ENTRY
-            elif weekly_bearish and di_bearish and vol_bearish:
+            # Short: Z-score cross down from overbought
+            elif zscore_cross_down and daily_bearish:
                 new_signal = -SIZE_ENTRY
         
-        # Fisher extreme overbought with trend support
-        elif fisher_overbought:
-            if daily_bearish and trend_strength:
+        # === NEUTRAL REGIME - Use conservative entries ===
+        else:
+            # Long: RSI cross up + daily bullish
+            if rsi_cross_up and daily_bullish:
+                new_signal = SIZE_ENTRY
+            # Short: RSI cross down + daily bearish
+            elif rsi_cross_down and daily_bearish:
                 new_signal = -SIZE_ENTRY
-            elif weekly_bearish and below_mid:
-                new_signal = -SIZE_ENTRY
-        
-        # Pullback to Keltner mid in downtrend
-        elif below_mid and daily_bearish:
-            if close[i-1] > keltner_mid[i-1] and close[i] < keltner_mid[i]:
-                if di_bearish or vol_bearish:
-                    new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
