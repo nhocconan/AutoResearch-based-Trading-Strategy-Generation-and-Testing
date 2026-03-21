@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #125 - MTF HMA+RSI+Zscore+Chandelier+VolRegime Optimized v125
+EXPERIMENT #126 - MTF HMA+RSI+Zscore+Chandelier+VolRegime Optimized v126
 ==================================================================================================
-Hypothesis: Beat Sharpe=16.016 by simplifying entry logic from #124 (too many filters caused
-underperformance), returning to proven components from #120 (Sharpe=5.643) and #123 (Sharpe=5.078),
-while implementing proper ATR trailing stops (3*ATR(22)), volatility-adjusted position sizing,
-and reduced signal churn.
+Hypothesis: Beat Sharpe=16.016 by learning from #125's underperformance. Key insight: ROC filter
+added in #125 actually DECREASED Sharpe from 5.643 (#120) to 4.037 (#125). Removing ROC and returning
+to simpler, proven entry logic from #120 while maintaining proper risk management.
 
-Key improvements over #124:
-1. Simplified entry logic - removed KAMA filter (added complexity without benefit)
-2. Relaxed ADX threshold: 18 instead of 22 (was too restrictive, missed entries)
-3. Simpler RSI bands: 40-60 for both directions (was asymmetric 35-50/50-65)
-4. Chandelier exit: 3.0*ATR(22) per experiment instructions (was 2.5)
-5. Better volatility regime: rolling 200-bar percentile (more stable than 100)
-6. Reduced signal persistence: 2 bars instead of 3 (faster entries, still filters noise)
-7. Added ROC momentum confirmation (10-bar ROC > 0 for longs, < 0 for shorts)
-8. Improved position sizing: 4 discrete levels based on vol regime quartiles
+Key improvements over #125:
+1. REMOVED ROC momentum filter - it was reducing win rate without improving risk-adjusted returns
+2. Asymmetric RSI bands: 35-55 for longs (deeper pullback), 45-65 for shorts (shallower)
+3. Simplified signal persistence: removed complex pending_signal tracking
+4. Cleaner position state management - explicit tracking separate from signal array
+5. Maintained proven components: HMA(16), RSI(14), Z-score(20), Chandelier(3*ATR22), Vol regime
 
-Risk Management:
-- Max signal: 0.40 (Q1 low vol), 0.30 (Q2), 0.20 (Q3), 0.15 (Q4 high vol)
+Risk Management (per experiment instructions):
+- Max signal: 0.40 (Q1 low vol) down to 0.15 (Q4 high vol) - discrete quartile sizing
 - Chandelier exit: 3.0*ATR(22) trailing stop with 1R trail after 2R profit
 - ADX filter: 4h ADX > 18 (moderate trend requirement)
-- Hysteresis: 0.15 threshold (reduces churn costs)
+- Hysteresis: 0.15 threshold (reduces churn costs from 0.10% per flip)
 - Position tracking with proper TP/SL state management
+- leverage=1.0 (no leverage, position sizing controls risk)
+
+Timeframe: 15m entries with 4h trend filter (proven MTF combination)
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_rsi_zscore_chandelier_volregime_roc_15m_4h_v125"
+name = "mtf_hma_rsi_zscore_chandelier_volregime_15m_4h_v126"
 timeframe = "15m"
 leverage = 1.0
 
@@ -58,9 +57,8 @@ def calculate_atr(high, low, close, period=14):
 
 def calculate_hma(close, period=16):
     """
-    Calculate Hull Moving Average (HMA)
+    Hull Moving Average - reduces lag while maintaining smoothness
     HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    More responsive than EMA with significantly less lag
     """
     n = len(close)
     if n < period:
@@ -69,33 +67,18 @@ def calculate_hma(close, period=16):
     half_period = period // 2
     sqrt_period = int(np.sqrt(period))
     
-    # WMA for half period
-    wma_half = np.zeros(n)
-    for i in range(half_period - 1, n):
-        weights = np.arange(1, half_period + 1)
-        window = close[i - half_period + 1:i + 1]
-        wma_half[i] = np.sum(window * weights) / np.sum(weights)
+    def wma(data, w_period):
+        result = np.zeros(len(data))
+        for i in range(w_period - 1, len(data)):
+            weights = np.arange(1, w_period + 1)
+            window = data[i - w_period + 1:i + 1]
+            result[i] = np.sum(window * weights) / np.sum(weights)
+        return result
     
-    # WMA for full period
-    wma_full = np.zeros(n)
-    for i in range(period - 1, n):
-        weights = np.arange(1, period + 1)
-        window = close[i - period + 1:i + 1]
-        wma_full[i] = np.sum(window * weights) / np.sum(weights)
-    
-    # Raw HMA
+    wma_half = wma(close, half_period)
+    wma_full = wma(close, period)
     raw_hma = 2 * wma_half - wma_full
-    
-    # Final HMA with sqrt period smoothing
-    hma = np.zeros(n)
-    for i in range(sqrt_period - 1, n):
-        weights = np.arange(1, sqrt_period + 1)
-        start_idx = max(0, i - sqrt_period + 1)
-        window = raw_hma[start_idx:i + 1]
-        if len(window) == sqrt_period:
-            hma[i] = np.sum(window * weights) / np.sum(weights)
-        else:
-            hma[i] = np.mean(window)
+    hma = wma(raw_hma, sqrt_period)
     
     return hma
 
@@ -106,10 +89,7 @@ def calculate_rsi(close, period=14):
     if n < period + 1:
         return np.zeros(n)
     
-    delta = np.zeros(n)
-    for i in range(1, n):
-        delta[i] = close[i] - close[i - 1]
-    
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
@@ -131,12 +111,11 @@ def calculate_rsi(close, period=14):
             rs[i] = avg_gain[i] / avg_loss[i]
     
     rsi = 100 - (100 / (1 + rs))
-    
     return rsi
 
 
 def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength"""
+    """Calculate ADX for trend strength"""
     n = len(close)
     if n < period * 2:
         return np.zeros(n)
@@ -146,21 +125,12 @@ def calculate_adx(high, low, close, period=14):
     tr = np.zeros(n)
     
     for i in range(1, n):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1])
-        )
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i - 1]), abs(low[i] - close[i - 1]))
         
         if high[i] - high[i - 1] > low[i - 1] - low[i]:
             plus_dm[i] = max(0, high[i] - high[i - 1])
-        else:
-            plus_dm[i] = 0
-            
         if low[i - 1] - low[i] > high[i] - high[i - 1]:
             minus_dm[i] = max(0, low[i - 1] - low[i])
-        else:
-            minus_dm[i] = 0
     
     atr = np.zeros(n)
     atr[period - 1] = np.mean(tr[1:period])
@@ -169,7 +139,6 @@ def calculate_adx(high, low, close, period=14):
     
     plus_di = np.zeros(n)
     minus_di = np.zeros(n)
-    
     for i in range(period, n):
         if atr[i] > 0:
             plus_di[i] = 100 * plus_dm[i] / atr[i]
@@ -190,19 +159,14 @@ def calculate_adx(high, low, close, period=14):
 
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator
-    Returns: supertrend_values, direction (1=below price/bullish, -1=above price/bearish)
-    """
+    """Calculate Supertrend indicator"""
     n = len(close)
     if n < period:
         return np.zeros(n), np.zeros(n)
     
     atr = calculate_atr(high, low, close, period)
-    
     supertrend = np.zeros(n)
     direction = np.zeros(n)
-    
     upper_band = np.zeros(n)
     lower_band = np.zeros(n)
     
@@ -250,41 +214,29 @@ def calculate_bollinger_bands(close, period=20, std_mult=2.0):
         std = np.std(window)
         upper[i] = middle[i] + std_mult * std
         lower[i] = middle[i] - std_mult * std
-        
-        if middle[i] > 0:
-            bbw[i] = (upper[i] - lower[i]) / middle[i]
-        else:
-            bbw[i] = 0
+        bbw[i] = (upper[i] - lower[i]) / middle[i] if middle[i] > 0 else 0
     
     return upper, middle, lower, bbw
 
 
 def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion / overextension detection"""
+    """Calculate Z-score for overextension detection"""
     n = len(close)
     if n < period:
         return np.zeros(n)
     
     zscore = np.zeros(n)
-    
     for i in range(period - 1, n):
         window = close[i - period + 1:i + 1]
         mean = np.mean(window)
         std = np.std(window)
-        if std > 0:
-            zscore[i] = (close[i] - mean) / std
-        else:
-            zscore[i] = 0
+        zscore[i] = (close[i] - mean) / std if std > 0 else 0
     
     return zscore
 
 
 def calculate_chandelier_exit(high, low, close, atr, period=22, multiplier=3.0):
-    """
-    Calculate Chandelier Exit (ATR trailing stop)
-    Long exit: highest_high - multiplier * ATR
-    Short exit: lowest_low + multiplier * ATR
-    """
+    """Chandelier Exit (ATR trailing stop): 3.0*ATR(22) per experiment instructions"""
     n = len(close)
     if n < period:
         return np.zeros(n), np.zeros(n)
@@ -295,27 +247,10 @@ def calculate_chandelier_exit(high, low, close, atr, period=22, multiplier=3.0):
     for i in range(period - 1, n):
         highest = np.max(high[i - period + 1:i + 1])
         lowest = np.min(low[i - period + 1:i + 1])
-        
         chandelier_long[i] = highest - multiplier * atr[i]
         chandelier_short[i] = lowest + multiplier * atr[i]
     
     return chandelier_long, chandelier_short
-
-
-def calculate_roc(close, period=10):
-    """Calculate Rate of Change (momentum indicator)"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    roc = np.zeros(n)
-    for i in range(period, n):
-        if close[i - period] > 0:
-            roc[i] = (close[i] - close[i - period]) / close[i - period] * 100
-        else:
-            roc[i] = 0
-    
-    return roc
 
 
 def resample_to_4h(close, high, low):
@@ -349,16 +284,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     rsi_15m = calculate_rsi(close, period=14)
     hma_15m = calculate_hma(close, period=16)
     zscore_15m = calculate_zscore(close, period=20)
-    roc_15m = calculate_roc(close, period=10)
     _, _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    supertrend_15m, st_dir_15m = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    
-    # Chandelier exit on 15m (3.0*ATR(22) per experiment instructions)
     chandelier_long_15m, chandelier_short_15m = calculate_chandelier_exit(
         high, low, close, atr_15m, period=22, multiplier=3.0
     )
     
-    # === Resample to 4h for trend filters (16 x 15m = 4h) ===
+    # === Resample to 4h for trend filters ===
     c_4h, h_4h, l_4h, bars_per_4h = resample_to_4h(close, high, low)
     n_4h = len(c_4h)
     
@@ -380,25 +311,15 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # === Map 4h indicators back to 15m timeframe ===
     trend_4h = np.zeros(n)
     adx_4h_mapped = np.zeros(n)
-    bbw_4h_mapped = np.zeros(n)
     vol_regime = np.zeros(n)
     st_dir_4h_mapped = np.zeros(n)
-    hma_4h_mapped = np.zeros(n)
     
     for i in range(n):
         idx_4h = i // bars_per_4h
         if idx_4h < n_4h and idx_4h >= 40:
-            # HMA trend direction
-            if c_4h[idx_4h] > hma_4h[idx_4h]:
-                trend_4h[i] = 1
-            elif c_4h[idx_4h] < hma_4h[idx_4h]:
-                trend_4h[i] = -1
-            
+            trend_4h[i] = 1 if c_4h[idx_4h] > hma_4h[idx_4h] else (-1 if c_4h[idx_4h] < hma_4h[idx_4h] else 0)
             st_dir_4h_mapped[i] = st_dir_4h[idx_4h]
-            hma_4h_mapped[i] = hma_4h[idx_4h]
             adx_4h_mapped[i] = adx_4h[idx_4h]
-            bbw_4h_mapped[i] = bbw_4h[idx_4h]
-            
             if idx_4h >= lookback - 1:
                 vol_regime[i] = vol_percentile[idx_4h]
     
@@ -406,36 +327,21 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     signals = np.zeros(n)
     
     # Position sizing - 4 DISCRETE levels based on vol regime quartiles
-    SIZE_Q1 = 0.40    # Vol regime < 25% (lowest vol, most aggressive)
-    SIZE_Q2 = 0.30    # Vol regime 25-50% (low-med vol)
-    SIZE_Q3 = 0.20    # Vol regime 50-75% (med-high vol)
-    SIZE_Q4 = 0.15    # Vol regime > 75% (highest vol, most conservative)
+    SIZE_Q1 = 0.40  # Vol regime < 25% (lowest vol, most aggressive)
+    SIZE_Q2 = 0.30  # Vol regime 25-50%
+    SIZE_Q3 = 0.20  # Vol regime 50-75%
+    SIZE_Q4 = 0.15  # Vol regime > 75% (highest vol, most conservative)
     
-    # RSI thresholds for pullback entries (simplified symmetric bands)
-    RSI_LONG_MIN = 40
-    RSI_LONG_MAX = 60
-    RSI_SHORT_MIN = 40
-    RSI_SHORT_MAX = 60
+    # Asymmetric RSI bands (improved from #125 symmetric bands)
+    RSI_LONG_MIN, RSI_LONG_MAX = 35, 55  # Deeper pullback for longs
+    RSI_SHORT_MIN, RSI_SHORT_MAX = 45, 65  # Shallower for shorts
     
-    # ADX threshold for trend strength (4h) - relaxed from 22 to 18
-    ADX_MIN = 18
-    
-    # Z-score thresholds to avoid overextended entries
+    ADX_MIN = 18  # Moderate trend requirement
     ZSCORE_MAX = 1.5
     ZSCORE_MIN = -1.5
+    HYSTERESIS = 0.15  # Reduce churn costs
     
-    # ROC threshold for momentum confirmation
-    ROC_THRESHOLD = 0.0
-    
-    # Hysteresis to reduce churn (CRITICAL - each flip costs 0.10% fees)
-    prev_signal = 0.0
-    hysteresis_threshold = 0.15
-    
-    # Signal persistence counter (require 2 bars confirmation)
-    signal_persistence = 0
-    pending_signal = 0.0
-    
-    # Position tracking state
+    # Position tracking state (CRITICAL: separate from signal array)
     in_position = False
     position_side = 0
     entry_price = 0.0
@@ -443,6 +349,11 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     initial_risk = 0.0
+    prev_signal = 0.0
+    
+    # Signal confirmation
+    signal_count = 0
+    confirmed_signal = 0.0
     
     first_valid = max(300, 40 * bars_per_4h, lookback * bars_per_4h)
     
@@ -456,156 +367,129 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         rsi_val = rsi_15m[i]
         atr = atr_15m[i]
         price = close[i]
-        adx_4h_val = adx_4h_mapped[i]
-        vol_regime_val = vol_regime[i]
-        st_direction = st_dir_4h_mapped[i]
+        adx_val = adx_4h_mapped[i]
+        vol_val = vol_regime[i]
+        st_dir = st_dir_4h_mapped[i]
         zscore_val = zscore_15m[i]
-        roc_val = roc_15m[i]
         
-        # Determine position size based on volatility regime quartiles
-        if vol_regime_val < 0.25:
-            size_full = SIZE_Q1
-            size_half = SIZE_Q1 * 0.5
-        elif vol_regime_val < 0.50:
-            size_full = SIZE_Q2
-            size_half = SIZE_Q2 * 0.5
-        elif vol_regime_val < 0.75:
-            size_full = SIZE_Q3
-            size_half = SIZE_Q3 * 0.5
+        # Determine position size based on volatility regime
+        if vol_val < 0.25:
+            size_full, size_half = SIZE_Q1, SIZE_Q1 * 0.5
+        elif vol_val < 0.50:
+            size_full, size_half = SIZE_Q2, SIZE_Q2 * 0.5
+        elif vol_val < 0.75:
+            size_full, size_half = SIZE_Q3, SIZE_Q3 * 0.5
         else:
-            size_full = SIZE_Q4
-            size_half = SIZE_Q4 * 0.5
+            size_full, size_half = SIZE_Q4, SIZE_Q4 * 0.5
         
-        # === ADX filter - only trade when trend has some strength ===
-        if adx_4h_val < ADX_MIN:
+        # === ADX filter - exit if trend weakens ===
+        if adx_val < ADX_MIN:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             prev_signal = 0.0
-            signal_persistence = 0
-            pending_signal = 0.0
+            signal_count = 0
+            confirmed_signal = 0.0
             continue
         
-        # === Check stoploss and take profit for existing positions ===
+        # === Position management (stoploss & take profit) ===
         if in_position:
-            # Update highest/lowest since entry
+            # Update extremes
             if position_side == 1:
                 highest_since_entry = max(highest_since_entry, price)
-                if lowest_since_entry == 0:
-                    lowest_since_entry = price
-                else:
-                    lowest_since_entry = min(lowest_since_entry, price)
+                lowest_since_entry = price if lowest_since_entry == 0 else min(lowest_since_entry, price)
             else:
-                if highest_since_entry == 0:
-                    highest_since_entry = price
-                else:
-                    highest_since_entry = max(highest_since_entry, price)
                 lowest_since_entry = min(lowest_since_entry, price)
+                highest_since_entry = price if highest_since_entry == 0 else max(highest_since_entry, price)
             
-            # Chandelier exit stoploss check
+            # Chandelier stoploss
             if position_side == 1:
-                chandelier_stop = chandelier_long_15m[i]
-                if price < chandelier_stop:
-                    # Stoploss triggered
+                if price < chandelier_long_15m[i]:
                     signals[i] = 0.0
                     in_position = False
                     position_side = 0
                     prev_signal = 0.0
-                    signal_persistence = 0
-                    pending_signal = 0.0
+                    signal_count = 0
+                    confirmed_signal = 0.0
                     continue
                 
-                # Take profit check (2R based on initial ATR)
-                tp_price = entry_price + 2 * initial_risk
-                if not tp_triggered and price >= tp_price:
+                # Take profit at 2R
+                if not tp_triggered and price >= entry_price + 2 * initial_risk:
                     signals[i] = size_half
                     tp_triggered = True
                     prev_signal = signals[i]
                     continue
                 
-                # Trail stop at 1R profit after TP
-                if tp_triggered:
-                    trail_stop = highest_since_entry - initial_risk
-                    if price < trail_stop:
-                        signals[i] = 0.0
-                        in_position = False
-                        position_side = 0
-                        prev_signal = 0.0
-                        signal_persistence = 0
-                        pending_signal = 0.0
-                        continue
-                    
-            elif position_side == -1:
-                chandelier_stop = chandelier_short_15m[i]
-                if price > chandelier_stop:
-                    # Stoploss triggered
+                # Trail at 1R after TP
+                if tp_triggered and price < highest_since_entry - initial_risk:
                     signals[i] = 0.0
                     in_position = False
                     position_side = 0
                     prev_signal = 0.0
-                    signal_persistence = 0
-                    pending_signal = 0.0
+                    signal_count = 0
+                    confirmed_signal = 0.0
+                    continue
+                    
+            elif position_side == -1:
+                if price > chandelier_short_15m[i]:
+                    signals[i] = 0.0
+                    in_position = False
+                    position_side = 0
+                    prev_signal = 0.0
+                    signal_count = 0
+                    confirmed_signal = 0.0
                     continue
                 
-                # Take profit check (2R based on initial ATR)
-                tp_price = entry_price - 2 * initial_risk
-                if not tp_triggered and price <= tp_price:
+                if not tp_triggered and price <= entry_price - 2 * initial_risk:
                     signals[i] = -size_half
                     tp_triggered = True
                     prev_signal = signals[i]
                     continue
                 
-                # Trail stop at 1R profit after TP
-                if tp_triggered:
-                    trail_stop = lowest_since_entry + initial_risk
-                    if price > trail_stop:
-                        signals[i] = 0.0
-                        in_position = False
-                        position_side = 0
-                        prev_signal = 0.0
-                        signal_persistence = 0
-                        pending_signal = 0.0
-                        continue
+                if tp_triggered and price > lowest_since_entry + initial_risk:
+                    signals[i] = 0.0
+                    in_position = False
+                    position_side = 0
+                    prev_signal = 0.0
+                    signal_count = 0
+                    confirmed_signal = 0.0
+                    continue
             
-            # Hold position if no exit triggered
-            signals[i] = signals[i - 1] if i > 0 else 0.0
+            # Hold position
+            signals[i] = prev_signal
             continue
         
-        # === Entry logic: MTF confirmation with ROC momentum ===
+        # === Entry logic: MTF confirmation (NO ROC filter - removed for #126) ===
         target_signal = 0.0
         
-        # Long entry: 4h HMA uptrend + 4h Supertrend bullish + 4h ADX moderate +
-        #             15m RSI pullback + 15m Z-score normal + 15m ROC positive
-        if trend == 1 and st_direction == 1 and adx_4h_val >= ADX_MIN:
+        # Long: 4h uptrend + Supertrend bullish + RSI pullback + Z-score normal
+        if trend == 1 and st_dir == 1:
             if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX) and (ZSCORE_MIN <= zscore_val <= ZSCORE_MAX):
-                if roc_val > ROC_THRESHOLD:
-                    target_signal = size_full
+                target_signal = size_full
         
-        # Short entry: 4h HMA downtrend + 4h Supertrend bearish + 4h ADX moderate +
-        #              15m RSI pullback + 15m Z-score normal + 15m ROC negative
-        elif trend == -1 and st_direction == -1 and adx_4h_val >= ADX_MIN:
+        # Short: 4h downtrend + Supertrend bearish + RSI pullback + Z-score normal
+        elif trend == -1 and st_dir == -1:
             if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX) and (ZSCORE_MIN <= zscore_val <= ZSCORE_MAX):
-                if roc_val < -ROC_THRESHOLD:
-                    target_signal = -size_full
+                target_signal = -size_full
         
-        # === Apply signal persistence (2-bar confirmation) ===
-        if target_signal != 0 and abs(target_signal) > abs(pending_signal):
-            pending_signal = target_signal
-            signal_persistence = 1
-        elif target_signal == pending_signal and pending_signal != 0:
-            signal_persistence += 1
-        elif target_signal == 0:
-            signal_persistence = 0
-            pending_signal = 0.0
+        # === Signal confirmation (2-bar persistence) ===
+        if target_signal != 0 and target_signal == confirmed_signal:
+            signal_count += 1
+        elif target_signal != 0 and target_signal != confirmed_signal:
+            confirmed_signal = target_signal
+            signal_count = 1
+        else:
+            signal_count = 0
+            confirmed_signal = 0.0
         
-        # Only execute if signal persists for 2 bars
-        if signal_persistence >= 2:
-            final_signal = pending_signal
+        # Execute if confirmed for 2 bars
+        if signal_count >= 2:
+            final_signal = confirmed_signal
         else:
             final_signal = prev_signal
         
-        # === Apply hysteresis to reduce churn ===
-        if abs(final_signal - prev_signal) < hysteresis_threshold:
+        # === Hysteresis to reduce churn ===
+        if abs(final_signal - prev_signal) < HYSTERESIS:
             signals[i] = prev_signal
         else:
             signals[i] = final_signal
@@ -620,7 +504,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 lowest_since_entry = price
                 initial_risk = 3.0 * atr
             elif final_signal == 0 and prev_signal != 0:
-                # Exit position
+                # Exit
                 in_position = False
                 position_side = 0
             
