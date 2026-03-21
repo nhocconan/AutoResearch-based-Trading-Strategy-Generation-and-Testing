@@ -1,30 +1,36 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #023 - Donchian Breakout + ADX Trend Strength + Volume Filter (12h primary, 1d HTF)
-==============================================================================================
-Hypothesis: 12h Donchian breakouts capture major trend moves, but need strong filters to avoid
-false breakouts in choppy markets. Daily HMA(50) provides major trend alignment. ADX(14)>25
-ensures we only trade in trending markets (not ranging). Volume confirmation filters low-liquidity
-breakouts. This differs from previous strategies by using pure breakout logic instead of pullback
-entries, which should work better on 12h timeframe where trends persist longer.
+EXPERIMENT #024 - Donchian Breakout + ADX Trend + Volume + Weekly HMA (1d primary)
+================================================================================
+Hypothesis: Daily Donchian channel breakouts capture major trend moves, but need
+filters to avoid false breakouts in choppy markets. ADX(14) > 25 ensures we only
+trade when trend strength is high. Volume confirmation (> 20-day avg) validates
+breakout legitimacy. Weekly HMA(21) provides major trend alignment - only take
+breakouts in direction of weekly trend. This differs from supertrend approach by
+using pure breakout logic with strength/volume filters instead of pullback entries.
 
 Key features:
-- Primary TF: 12h (this experiment's requirement)
-- HTF filter: 1d HMA(50) for major trend direction
-- Entry: Donchian(20) breakout in trend direction
-- Trend strength: ADX(14) > 25 (trending market only)
-- Volume: > 20-period average (confirms breakout)
+- Primary TF: 1d (daily candles for this experiment)
+- HTF filter: 1w HMA(21) for major trend direction
+- Entry: Donchian(20) breakout with volume confirmation
+- Trend strength: ADX(14) > 25 filter
 - Stoploss: 2.5*ATR(14) trailing
 - Position sizing: 0.25-0.30 discrete levels
-- Take profit: Reduce to half at 2R profit, trail stop at 1R
+- Take profit: Reduce to half at 2R profit, trail stop
+
+Why this might beat supertrend_rsi_regime_4h_1d_v1 (Sharpe=0.722):
+- Donchian breakouts capture full trend moves vs supertrend lag
+- Weekly HMA filter stronger than daily HMA for major trend
+- Volume confirmation reduces false breakouts
+- ADX filter ensures we only trade strong trends
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "donchian_adx_volume_12h_1d_v1"
-timeframe = "12h"
+name = "donchian_adx_volume_1d_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 
@@ -76,34 +82,28 @@ def calculate_adx(high, low, close, period=14):
                     abs(high[i] - close[i - 1]),
                     abs(low[i] - close[i - 1]))
     
-    # Smooth TR, +DM, -DM using Wilder's method (EMA with span=period)
-    tr_smooth = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    # Smooth TR, +DM, -DM using Wilder's method (EMA with alpha=1/period)
+    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    plus_di = pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
+    minus_di = pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values
     
     # Calculate +DI and -DI
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
+    plus_di = 100 * plus_di / (atr + 1e-10)
+    minus_di = 100 * minus_di / (atr + 1e-10)
     
-    for i in range(period, n):
-        if tr_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
+    # Calculate DX
+    di_sum = plus_di + minus_di
+    di_diff = np.abs(plus_di - minus_di)
+    dx = 100 * di_diff / (di_sum + 1e-10)
     
-    # Calculate DX and ADX
-    dx = np.zeros(n)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
+    # Calculate ADX (smoothed DX)
     adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
     
     return adx
 
 
 def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (upper and lower bands)"""
+    """Calculate Donchian Channel (highest high and lowest low over period)"""
     n = len(high)
     upper = np.zeros(n)
     lower = np.zeros(n)
@@ -135,22 +135,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     volume = prices["volume"].values.copy()
     n = len(close)
     
-    # Load 1d HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
-    hma_1d = calculate_hma(df_1d['close'].values, 50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Load 1w HTF data ONCE before loop (Rule 1)
+    df_1w = get_htf_data(prices, '1w')
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     adx = calculate_adx(high, low, close, 14)
     donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    rsi = calculate_rsi(close, 14)
     
     # Volume moving average for confirmation
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
-    
-    # RSI for overbought/oversold filter
-    rsi = calculate_rsi(close, 14)
+    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Generate signals
     signals = np.zeros(n)
@@ -163,47 +160,45 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = float('inf')
     entry_price = 0.0
     profit_target_hit = False
-    prev_position_side = 0
     
     min_period = 100  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_1d_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(hma_1w_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(adx[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(rsi[i]) or atr[i] == 0):
+            np.isnan(donchian_lower[i]) or np.isnan(volume_sma[i]) or
+            np.isnan(rsi[i]) or atr[i] == 0 or volume_sma[i] == 0):
             signals[i] = 0.0
-            position_side = 0
             continue
         
-        # Daily trend filter (HTF) - only trade in direction of daily trend
-        daily_trend = 1 if close[i] > hma_1d_aligned[i] else -1
+        # Weekly trend filter (HTF)
+        weekly_trend = 1 if close[i] > hma_1w_aligned[i] else -1
         
-        # ADX trend strength filter - only trade when ADX > 25 (trending market)
+        # ADX trend strength filter (must be > 25 for trending market)
         trend_strong = adx[i] > 25
         
-        # Volume confirmation - volume above 20-period average
-        volume_confirmed = volume[i] > volume_ma[i]
+        # Volume confirmation (current volume > 20-day average)
+        volume_confirmed = volume[i] > volume_sma[i]
         
-        # Donchian breakout signals
+        # Donchian breakout detection
         breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
         breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
         
-        # RSI filter - avoid extreme overbought/oversold for entries
+        # RSI filter to avoid overbought/oversold entries
         rsi_valid_long = rsi[i] < 70  # Not overbought
         rsi_valid_short = rsi[i] > 30  # Not oversold
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: Daily trend bullish + ADX strong + Volume confirmed + Donchian breakout + RSI valid
-        if (daily_trend == 1 and trend_strong and volume_confirmed and 
+        # Long entry: Weekly trend bullish + ADX strong + Volume confirmed + Donchian breakout + RSI valid
+        if (weekly_trend == 1 and trend_strong and volume_confirmed and 
             breakout_long and rsi_valid_long):
             target_signal = SIZE
         
-        # Short entry: Daily trend bearish + ADX strong + Volume confirmed + Donchian breakout + RSI valid
-        elif (daily_trend == -1 and trend_strong and volume_confirmed and 
+        # Short entry: Weekly trend bearish + ADX strong + Volume confirmed + Donchian breakout + RSI valid
+        elif (weekly_trend == -1 and trend_strong and volume_confirmed and 
               breakout_short and rsi_valid_short):
             target_signal = -SIZE
         
@@ -242,7 +237,6 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if stoploss_triggered:
             signals[i] = 0.0
             position_side = 0
-            prev_position_side = 0
             highest_since_entry = 0.0
             lowest_since_entry = float('inf')
             entry_price = 0.0
@@ -257,28 +251,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # New entry
                 signals[i] = target_signal
                 position_side = 1 if target_signal > 0 else -1
-                prev_position_side = position_side
                 highest_since_entry = close[i]
                 lowest_since_entry = close[i]
                 entry_price = close[i]
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if daily trend reverses against position
-                if position_side == 1 and daily_trend == -1:
-                    # Daily trend reversed, exit long
+                if position_side == 1 and weekly_trend == -1:
+                    # Weekly trend reversed, exit long
                     signals[i] = 0.0
                     position_side = 0
-                    prev_position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
                     profit_target_hit = False
-                elif position_side == -1 and daily_trend == 1:
-                    # Daily trend reversed, exit short
+                elif position_side == -1 and weekly_trend == 1:
+                    # Weekly trend reversed, exit short
                     signals[i] = 0.0
                     position_side = 0
-                    prev_position_side = 0
                     highest_since_entry = 0.0
                     lowest_since_entry = float('inf')
                     entry_price = 0.0
