@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #095: 12h Fisher Transform + Daily HMA + Choppiness Regime Filter
-Hypothesis: Fisher Transform catches reversals better than RSI in bear/range markets (2025 test).
-Combine with Choppiness Index to detect regime: CHOP>61.8 = range (mean revert on Fisher extremes),
-CHOP<38.2 = trend (follow Daily HMA direction). This adapts to market conditions instead of
-always trend-following. Daily HMA provides HTF trend bias (proven in current best strategy).
-Position sizing: 0.25 entry, 0.125 at 1.5R profit, stoploss at 2.5*ATR trailing.
-12h timeframe balances trade frequency vs noise. Fisher period=9 for sensitivity.
+Experiment #096: 1d RSI Mean Reversion with Weekly HMA Trend Filter
+Hypothesis: Daily timeframe needs simpler entry logic to ensure 10+ trades.
+Use Weekly HMA for trend bias (proven in best strategy), RSI(14) for mean reversion
+entries within trend. Long when RSI<40 + price>Weekly_HMA, Short when RSI>60 + price<Weekly_HMA.
+Add ATR(14) volatility filter to avoid low-vol chop. Position size 0.25, stoploss 2.5*ATR.
+This should work in both bull (2021) and bear (2022, 2025) markets by following HTF trend.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_fisher_daily_hma_chop_regime_v1"
-timeframe = "12h"
+name = "mtf_1d_rsi_weekly_hma_mr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -40,67 +39,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_fisher_transform(high, low, close, period=9):
-    """
-    Ehlers Fisher Transform - catches reversals in bear/range markets.
-    Formula: Fisher = 0.5 * ln((1 + X) / (1 - X)) where X = 2 * (close - LL) / (HH - LL) - 1
-    """
-    n = len(close)
-    fisher = np.zeros(n)
-    trigger = np.zeros(n)
-    
-    for i in range(period, n):
-        hh = np.max(high[i-period+1:i+1])
-        ll = np.min(low[i-period+1:i+1])
-        
-        if hh == ll:
-            x = 0.0
-        else:
-            x = 2.0 * (close[i] - ll) / (hh - ll) - 1.0
-        
-        # Clamp X to avoid log errors
-        x = np.clip(x, -0.999, 0.999)
-        
-        fisher[i] = 0.5 * np.log((1 + x) / (1 - x))
-        
-        # Trigger line is previous Fisher value
-        if i > period:
-            trigger[i] = fisher[i-1]
-        else:
-            trigger[i] = fisher[i]
-    
-    return fisher, trigger
-
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP) - detects trend vs range regimes.
-    CHOP > 61.8 = range/choppy (mean reversion works)
-    CHOP < 38.2 = trending (trend following works)
-    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    """
-    n = len(close)
-    chop = np.zeros(n)
-    
-    # Calculate ATR for each bar
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i-period+1:i+1])
-        hh = np.max(high[i-period+1:i+1])
-        ll = np.min(low[i-period+1:i+1])
-        
-        if hh == ll or atr_sum == 0:
-            chop[i] = 50.0
-        else:
-            chop[i] = 100.0 * np.log10(atr_sum / (hh - ll)) / np.log10(period)
-    
-    chop = np.clip(chop, 0, 100)
-    return chop
-
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     delta = np.diff(close, prepend=close[0])
@@ -113,26 +51,46 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_sma(close, period):
+    """Calculate Simple Moving Average."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    return sma
+
+def calculate_volatility_ratio(close, period=20):
+    """Calculate volatility ratio (current ATR / average ATR)."""
+    returns = np.diff(close, prepend=close[0]) / close
+    abs_returns = np.abs(returns)
+    avg_vol = pd.Series(abs_returns).rolling(window=period, min_periods=period).mean().values
+    current_vol = pd.Series(abs_returns).rolling(window=5, min_periods=5).mean().values
+    vol_ratio = current_vol / (avg_vol + 1e-10)
+    return vol_ratio
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    fisher, fisher_trigger = calculate_fisher_transform(high, low, close, 9)
-    chop = calculate_choppiness_index(high, low, close, 14)
+    sma_50 = calculate_sma(close, 50)
+    sma_200 = calculate_sma(close, 200)
+    vol_ratio = calculate_volatility_ratio(close, 20)
+    
+    # Volume SMA for confirmation
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.25
@@ -146,64 +104,50 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):
-        # Daily trend filter (HTF) - price relative to Daily HMA
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+    for i in range(250, n):  # Need enough data for 200 SMA + weekly alignment
+        # Weekly trend filter (HTF) - price relative to Weekly HMA
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # Regime detection via Choppiness Index
-        is_range = chop[i] > 61.8  # Mean reversion regime
-        is_trend = chop[i] < 38.2  # Trend following regime
+        # Daily trend confirmation
+        daily_bullish = close[i] > sma_50[i] and sma_50[i] > sma_200[i]
+        daily_bearish = close[i] < sma_50[i] and sma_50[i] < sma_200[i]
         
-        # Fisher Transform signals
-        fisher_cross_long = fisher[i] > -1.5 and fisher_trigger[i] <= -1.5
-        fisher_cross_short = fisher[i] < 1.5 and fisher_trigger[i] >= 1.5
-        fisher_extreme_long = fisher[i] < -2.0  # Oversold
-        fisher_extreme_short = fisher[i] > 2.0  # Overbought
+        # RSI mean reversion signals (moderate thresholds for more trades)
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
+        rsi_extreme_long = rsi[i] < 35
+        rsi_extreme_short = rsi[i] > 65
         
-        # RSI filter
-        rsi_ok_long = rsi[i] < 65
-        rsi_ok_short = rsi[i] > 35
+        # Volatility filter (avoid very low vol)
+        vol_ok = vol_ratio[i] > 0.7
+        
+        # Volume confirmation
+        vol_confirm = volume[i] > 0.8 * vol_sma[i]
         
         new_signal = 0.0
         
-        # LONG ENTRY conditions
-        if is_range:
-            # Mean reversion: Fisher extreme + RSI not too extreme
-            if fisher_extreme_long and rsi_ok_long and daily_bullish:
-                new_signal = SIZE_ENTRY
-            # Fisher cross up from oversold
-            elif fisher_cross_long and daily_bullish:
-                new_signal = SIZE_ENTRY
-        elif is_trend:
-            # Trend following: Daily HMA bullish + price above HMA
-            if daily_bullish and rsi_ok_long:
-                new_signal = SIZE_ENTRY
-        else:
-            # Neutral regime: require stronger confirmation
-            if fisher_cross_long and daily_bullish and rsi_ok_long:
-                new_signal = SIZE_ENTRY
-            elif fisher_extreme_long and daily_bullish:
-                new_signal = SIZE_ENTRY
+        # LONG ENTRY conditions (simpler for more trades)
+        # Primary: Weekly bullish + RSI oversold + volatility OK
+        if weekly_bullish and rsi_oversold and vol_ok:
+            new_signal = SIZE_ENTRY
+        # Secondary: Weekly bullish + RSI extreme + volume confirm
+        elif weekly_bullish and rsi_extreme_long and vol_confirm:
+            new_signal = SIZE_ENTRY
+        # Tertiary: Daily bullish + RSI oversold (catch trend continuations)
+        elif daily_bullish and rsi_oversold and vol_ok:
+            new_signal = SIZE_ENTRY
         
         # SHORT ENTRY conditions
-        if is_range:
-            # Mean reversion: Fisher extreme + RSI not too extreme
-            if fisher_extreme_short and rsi_ok_short and daily_bearish:
-                new_signal = -SIZE_ENTRY
-            # Fisher cross down from overbought
-            elif fisher_cross_short and daily_bearish:
-                new_signal = -SIZE_ENTRY
-        elif is_trend:
-            # Trend following: Daily HMA bearish + price below HMA
-            if daily_bearish and rsi_ok_short:
-                new_signal = -SIZE_ENTRY
-        else:
-            # Neutral regime: require stronger confirmation
-            if fisher_cross_short and daily_bearish and rsi_ok_short:
-                new_signal = -SIZE_ENTRY
-            elif fisher_extreme_short and daily_bearish:
-                new_signal = -SIZE_ENTRY
+        # Primary: Weekly bearish + RSI overbought + volatility OK
+        if weekly_bearish and rsi_overbought and vol_ok:
+            new_signal = -SIZE_ENTRY
+        # Secondary: Weekly bearish + RSI extreme + volume confirm
+        elif weekly_bearish and rsi_extreme_short and vol_confirm:
+            new_signal = -SIZE_ENTRY
+        # Tertiary: Daily bearish + RSI overbought (catch trend continuations)
+        elif daily_bearish and rsi_overbought and vol_ok:
+            new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
         if position_side > 0 and entry_price > 0:
@@ -220,10 +164,10 @@ def generate_signals(prices):
             if close[i] < trailing_stop:
                 new_signal = 0.0
             elif not position_reduced:
-                # Take profit at 1.5R
-                risk = 2.5 * atr[i]
+                # Take profit at 2R
                 profit = close[i] - entry_price
-                if profit >= 1.5 * risk:
+                risk = 2.5 * atr[i]
+                if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
                     position_reduced = True
         
@@ -241,10 +185,10 @@ def generate_signals(prices):
             if close[i] > trailing_stop:
                 new_signal = 0.0
             elif not position_reduced:
-                # Take profit at 1.5R
-                risk = 2.5 * atr[i]
+                # Take profit at 2R
                 profit = entry_price - close[i]
-                if profit >= 1.5 * risk:
+                risk = 2.5 * atr[i]
+                if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
                     position_reduced = True
         
