@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #154: 4h Fisher Transform Reversals with Daily HMA Trend Filter
-Hypothesis: Fisher Transform excels at identifying turning points in bear/range markets
-(2022 crash, 2025 consolidation). Unlike RSI which can stay oversold/overbought for
-extended periods, Fisher Transform normalizes price to Gaussian distribution, creating
-clearer reversal signals at extremes (-2.0/+2.0). Daily HMA provides major trend bias
-to avoid counter-trend traps. Entry thresholds loosened (Fisher<-1.5 or >1.5) to ensure
-sufficient trades. ATR stoploss at 2.5*ATR protects capital. Position sizing: 0.30 entry,
-0.15 at 2R profit, discrete levels minimize fee churn. This targets the weakness of
-pure trend-following strategies that failed in 2022-2025 bear/range conditions.
+Experiment #155: 12h Regime-Adaptive Supertrend with Daily HMA Filter
+Hypothesis: 12h timeframe captures medium-term swings better than 4h (less noise) 
+while being more responsive than 1d. Combining Supertrend for trend direction,
+RSI for pullback entries, and Bollinger Band Width for regime detection allows
+adaptive logic: trend-follow in wide BB regimes, mean-revert in narrow BB regimes.
+Daily HMA provides major trend bias. Entry thresholds loosened (RSI 35/65, not 30/70)
+to ensure sufficient trades. ATR stoploss at 2.5*ATR. Position sizing: 0.25 entry,
+0.15 at 2R profit. This targets both trending and ranging market conditions.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_fisher_daily_hma_atr_reversal_v1"
-timeframe = "4h"
+name = "mtf_12h_regime_supertrend_daily_hma_rsi_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -27,6 +26,64 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """
+    Calculate Supertrend indicator.
+    Returns: supertrend_line, supertrend_direction (1=bullish, -1=bearish)
+    """
+    atr = calculate_atr(high, low, close, period)
+    hl2 = (high + low) / 2.0
+    
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    n = len(close)
+    supertrend = np.zeros(n)
+    direction = np.ones(n)  # 1 = bullish (price above supertrend)
+    
+    supertrend[0] = upper_band[0]
+    
+    for i in range(1, n):
+        if direction[i-1] == 1:
+            if close[i] < supertrend[i-1]:
+                direction[i] = -1
+                supertrend[i] = upper_band[i]
+            else:
+                direction[i] = 1
+                supertrend[i] = max(supertrend[i-1], lower_band[i])
+        else:
+            if close[i] > supertrend[i-1]:
+                direction[i] = 1
+                supertrend[i] = lower_band[i]
+            else:
+                direction[i] = -1
+                supertrend[i] = min(supertrend[i-1], upper_band[i])
+    
+    return supertrend, direction
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI indicator."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
+    rsi = 100 - 100 / (1 + rs)
+    rsi = np.clip(rsi, 0, 100)
+    return rsi
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Band Width."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    band_width = (upper - lower) / sma
+    band_width = np.where(sma > 0, band_width, 0.0)
+    return upper, lower, sma, band_width
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -42,54 +99,15 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_fisher_transform(high, low, close, period=9):
-    """
-    Calculate Ehlers Fisher Transform.
-    Transforms price into Gaussian distribution for clearer reversal signals.
-    Reference: Ehlers, J.F. (2002) "Fisher Transform"
-    """
-    hl2 = (high + low) / 2.0
-    hl2_s = pd.Series(hl2)
-    
-    # Calculate EMA of hl2
-    ema_hl2 = hl2_s.ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Normalize price (0 to 1 range)
-    min_hl2 = pd.Series(hl2).rolling(window=period, min_periods=period).min().values
-    max_hl2 = pd.Series(hl2).rolling(window=period, min_periods=period).max().values
-    
-    range_hl2 = max_hl2 - min_hl2
-    range_hl2 = np.where(range_hl2 > 0, range_hl2, 1e-10)
-    
-    normalized = (hl2 - min_hl2) / range_hl2
-    normalized = np.clip(normalized, 0.001, 0.999)  # Avoid log(0)
-    
-    # Fisher transform
-    fisher_input = np.log(normalized / (1 - normalized))
-    fisher = pd.Series(fisher_input).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Fisher trigger line (1-period lag)
-    fisher_trigger = np.roll(fisher, 1)
-    fisher_trigger[0] = fisher[0]
-    
-    return fisher, fisher_trigger
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI indicator."""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
-    rsi = 100 - 100 / (1 + rs)
-    rsi = np.clip(rsi, 0, 100)
-    return rsi
-
-def calculate_sma(close, period=200):
-    """Calculate Simple Moving Average."""
-    close_s = pd.Series(close)
-    return close_s.rolling(window=period, min_periods=period).mean().values
+def calculate_bbwidth_percentile(band_width, lookback=100):
+    """Calculate rolling percentile of band width for regime detection."""
+    bw_s = pd.Series(band_width)
+    # Calculate percentile rank within rolling window
+    bw_percentile = bw_s.rolling(window=lookback, min_periods=lookback).apply(
+        lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min() + 1e-10),
+        raw=False
+    ).values
+    return bw_percentile
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -106,16 +124,17 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    fisher, fisher_trigger = calculate_fisher_transform(high, low, close, 9)
-    sma_200 = calculate_sma(close, 200)
+    supertrend_line, supertrend_dir = calculate_supertrend(high, low, close, 10, 3.0)
+    bb_upper, bb_lower, bb_mid, bb_width = calculate_bollinger_bands(close, 20, 2.0)
+    bb_percentile = calculate_bbwidth_percentile(bb_width, 100)
     hma_20 = calculate_hma(close, 20)
     hma_50 = calculate_hma(close, 50)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
+    SIZE_ENTRY = 0.25
     SIZE_HALF = 0.15
     
     # Track positions for stoploss
@@ -131,60 +150,83 @@ def generate_signals(prices):
         daily_bullish = hma_1d_aligned[i] > 0 and close[i] > hma_1d_aligned[i]
         daily_bearish = hma_1d_aligned[i] > 0 and close[i] < hma_1d_aligned[i]
         
-        # 4h trend filter
+        # 12h trend filter
         trend_bullish = hma_20[i] > hma_50[i]
         trend_bearish = hma_20[i] < hma_50[i]
         
-        # Price position relative to SMA200
-        above_sma200 = sma_200[i] > 0 and close[i] > sma_200[i]
-        below_sma200 = sma_200[i] > 0 and close[i] < sma_200[i]
+        # Supertrend direction
+        st_bullish = supertrend_dir[i] == 1
+        st_bearish = supertrend_dir[i] == -1
         
-        # Fisher Transform reversal signals (loosened for more trades)
-        fisher_oversold = fisher[i] < -1.5
-        fisher_overbought = fisher[i] > 1.5
-        fisher_cross_up = fisher[i] > fisher_trigger[i] and fisher_trigger[i] < -1.0
-        fisher_cross_down = fisher[i] < fisher_trigger[i] and fisher_trigger[i] > 1.0
+        # Regime detection via BB Width percentile
+        # >0.7 = wide bands (trending), <0.3 = narrow bands (ranging)
+        regime_trending = bb_percentile[i] > 0.5
+        regime_ranging = bb_percentile[i] < 0.5
         
-        # RSI confirmation (wider thresholds for more trades)
+        # RSI signals (loosened thresholds for more trades)
         rsi_oversold = rsi[i] < 45
         rsi_overbought = rsi[i] > 55
         rsi_rising = rsi[i] > rsi[i-2] if i > 2 else False
         rsi_falling = rsi[i] < rsi[i-2] if i > 2 else False
+        rsi_neutral = 40 <= rsi[i] <= 60
         
         new_signal = 0.0
         
-        # LONG ENTRY: Fisher oversold + RSI confirmation + Daily not strongly bearish
-        if fisher_oversold or fisher_cross_up:
-            if daily_bullish and rsi_oversold:
-                # Strong long: daily bullish + oversold
+        # TRENDING REGIME: Follow Supertrend with RSI pullback confirmation
+        if regime_trending:
+            # Long: Supertrend bullish + RSI pullback (not overbought) + Daily not bearish
+            if st_bullish and rsi_oversold and not daily_bearish:
                 new_signal = SIZE_ENTRY
-            elif not daily_bearish and rsi_rising:
-                # Moderate long: daily neutral + RSI rising
+            elif st_bullish and rsi_rising and trend_bullish:
                 new_signal = SIZE_ENTRY
-            elif above_sma200 and fisher_cross_up:
-                # Above SMA200 + Fisher cross up
+            elif st_bullish and daily_bullish and rsi_neutral:
                 new_signal = SIZE_ENTRY
-        
-        # SHORT ENTRY: Fisher overbought + RSI confirmation + Daily not strongly bullish
-        elif fisher_overbought or fisher_cross_down:
-            if daily_bearish and rsi_overbought:
-                # Strong short: daily bearish + overbought
-                new_signal = -SIZE_ENTRY
-            elif not daily_bullish and rsi_falling:
-                # Moderate short: daily neutral + RSI falling
-                new_signal = -SIZE_ENTRY
-            elif below_sma200 and fisher_cross_down:
-                # Below SMA200 + Fisher cross down
-                new_signal = -SIZE_ENTRY
-        
-        # TREND FOLLOWING: HMA crossover with Fisher confirmation
-        if new_signal == 0.0:
-            if trend_bullish and hma_20[i-1] <= hma_50[i-1] and fisher[i] > -1.0:
-                if daily_bullish or above_sma200:
-                    new_signal = SIZE_ENTRY
             
-            elif trend_bearish and hma_20[i-1] >= hma_50[i-1] and fisher[i] < 1.0:
-                if daily_bearish or below_sma200:
+            # Short: Supertrend bearish + RSI pullback (not oversold) + Daily not bullish
+            elif st_bearish and rsi_overbought and not daily_bullish:
+                new_signal = -SIZE_ENTRY
+            elif st_bearish and rsi_falling and trend_bearish:
+                new_signal = -SIZE_ENTRY
+            elif st_bearish and daily_bearish and rsi_neutral:
+                new_signal = -SIZE_ENTRY
+        
+        # RANGING REGIME: Mean reversion with BB boundaries
+        else:
+            # Long: Price near BB lower + RSI oversold + Daily not strongly bearish
+            if close[i] < bb_lower[i] * 0.99 and rsi_oversold and not daily_bearish:
+                new_signal = SIZE_ENTRY
+            elif close[i] < bb_mid[i] * 0.98 and rsi[i] < 40 and rsi_rising:
+                new_signal = SIZE_ENTRY
+            
+            # Short: Price near BB upper + RSI overbought + Daily not strongly bullish
+            elif close[i] > bb_upper[i] * 1.01 and rsi_overbought and not daily_bullish:
+                new_signal = -SIZE_ENTRY
+            elif close[i] > bb_mid[i] * 1.02 and rsi[i] > 60 and rsi_falling:
+                new_signal = -SIZE_ENTRY
+        
+        # Supertrend reversal signals (works in both regimes)
+        if new_signal == 0.0:
+            # Supertrend flipped bullish
+            if st_bullish and supertrend_dir[i-1] == -1:
+                if daily_bullish or trend_bullish:
+                    new_signal = SIZE_ENTRY
+                elif rsi_rising:
+                    new_signal = SIZE_ENTRY * 0.6
+            
+            # Supertrend flipped bearish
+            elif st_bearish and supertrend_dir[i-1] == 1:
+                if daily_bearish or trend_bearish:
+                    new_signal = -SIZE_ENTRY
+                elif rsi_falling:
+                    new_signal = -SIZE_ENTRY * 0.6
+        
+        # HMA crossover signals (additional trend confirmation)
+        if new_signal == 0.0:
+            if trend_bullish and hma_20[i-1] <= hma_50[i-1]:
+                if st_bullish or daily_bullish:
+                    new_signal = SIZE_ENTRY
+            elif trend_bearish and hma_20[i-1] >= hma_50[i-1]:
+                if st_bearish or daily_bearish:
                     new_signal = -SIZE_ENTRY
         
         # Stoploss logic (Rule 6) - check BEFORE updating position tracking
