@@ -1,31 +1,30 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #034 - Simplified MTF HMA + Supertrend + BBW Regime + RSI + ATR Sizing (4h+15m)
+EXPERIMENT #035 - MTF HMA + Supertrend + ADX + RSI + Z-score + BBW (4h+15m Optimized)
 ==================================================================================================
-Hypothesis: #027 achieved Sharpe=10.894 but #033 dropped to 1.646 due to overfitting with too many filters.
-This experiment simplifies the indicator stack while keeping the proven 4h+15m combination.
+Hypothesis: #027 achieved Sharpe=10.894 with ADX+KAMA+RSI+Z-score+Volume on 15m+4h.
+#034 simplified and got Sharpe=7.673. This experiment adds back ADX (trend strength)
+while keeping the simplified indicator stack from #034.
 
-Key changes from #033:
-- Remove KAMA (redundant with HMA + Supertrend)
-- Remove Volume filter (caused premature exits in #033)
-- Add Bollinger Band Width for regime detection (trending vs ranging)
-- Simplify RSI thresholds (40-60 for pullbacks, not 35-65)
-- Tighter stoploss: 1.5*ATR (vs 2.0*ATR in #033)
-- Better ATR-based position sizing with volatility targeting
-- Use BBW percentile to avoid ranging markets (BBW > 40th percentile)
+Key changes from #034:
+- Add ADX(14) > 25 filter for trend strength (was in #027, removed in #034)
+- Looser stoploss: 2.0*ATR (vs 1.5*ATR in #034) - reduces premature exits
+- Wider RSI range: 35-55 for longs, 45-65 for shorts (vs 40-55/45-60)
+- Higher BBW percentile: 0.40 (vs 0.35) - only trade in stronger trending regimes
+- Position size: 0.30 (vs 0.35) - more conservative sizing
+- Add KAMA back for adaptive trend confirmation (was in #027)
 
-Why this should beat #033:
-- Fewer filters = less overfitting, more robust across regimes
-- BBW regime filter avoids choppy markets where trend strategies fail
-- Tighter stoploss with proper trailing improves R:R ratio
-- Proven 4h+15m combination from #027 (Sharpe=10.894)
-- Simpler logic = fewer bugs in position management
+Why this should beat #034:
+- ADX filters out weak trends where strategies fail
+- KAMA provides adaptive trend confirmation (responds to volatility)
+- Looser stoploss reduces whipsaw exits in volatile crypto markets
+- Proven combination from #027 (Sharpe=10.894) with optimized parameters
 """
 
 import numpy as np
 import pandas as pd
 
-name = "mtf_hma_supertrend_bbw_rsi_atr_15m_v1"
+name = "mtf_hma_supertrend_adx_kama_rsi_zscore_bbw_15m_v2"
 timeframe = "15m"
 leverage = 1.0
 
@@ -155,6 +154,87 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    if n < period * 2:
+        return np.zeros(n)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i - 1]),
+            abs(low[i] - close[i - 1])
+        )
+        
+        if high[i] - high[i - 1] > low[i - 1] - low[i]:
+            plus_dm[i] = max(0, high[i] - high[i - 1])
+        else:
+            plus_dm[i] = 0
+            
+        if low[i - 1] - low[i] > high[i] - high[i - 1]:
+            minus_dm[i] = max(0, low[i - 1] - low[i])
+        else:
+            minus_dm[i] = 0
+    
+    atr = np.zeros(n)
+    atr[period - 1] = np.mean(tr[1:period])
+    for i in range(period, n):
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    for i in range(period, n):
+        if atr[i] > 0:
+            plus_di[i] = 100 * plus_dm[i] / atr[i]
+            minus_di[i] = 100 * minus_dm[i] / atr[i]
+    
+    dx = np.zeros(n)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx = np.zeros(n)
+    adx[period * 2 - 1] = np.mean(dx[period:period * 2])
+    for i in range(period * 2, n):
+        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+    
+    return adx
+
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    n = len(close)
+    if n < er_period + slow_period:
+        return np.zeros(n)
+    
+    kama = np.zeros(n)
+    kama[er_period - 1] = close[er_period - 1]
+    
+    for i in range(er_period, n):
+        change = abs(close[i] - close[i - er_period])
+        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        
+        if volatility > 0:
+            er = change / volatility
+        else:
+            er = 0
+        
+        fast_sc = 2 / (fast_period + 1)
+        slow_sc = 2 / (slow_period + 1)
+        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+        
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
+
+
 def calculate_bollinger_bands(close, period=20, std_mult=2.0):
     """Calculate Bollinger Bands and Band Width"""
     n = len(close)
@@ -227,6 +307,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     zscore_15m = calculate_zscore(close, period=20)
     _, _, bbw_15m = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     bbw_pct_15m = calculate_bbw_percentile(bbw_15m, lookback=100)
+    adx_15m = calculate_adx(high, low, close, period=14)
     
     # Resample to 4h for trend filters
     df_15m = pd.DataFrame({
@@ -251,10 +332,12 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     # 4h indicators for trend
     hma_4h = calculate_hma(c_4h, period=21)
     supertrend_4h, st_direction_4h = calculate_supertrend(h_4h, l_4h, c_4h, period=10, multiplier=3.0)
+    kama_4h = calculate_kama(c_4h, er_period=10, fast_period=2, slow_period=30)
     
     # Map 4h indicators back to 15m timeframe (16 x 15m = 4h)
     trend_15m = np.zeros(n)
     st_trend_15m = np.zeros(n)
+    kama_trend_15m = np.zeros(n)
     
     n_4h = len(c_4h)
     idx_15m_to_4h = np.arange(n) // 16
@@ -268,33 +351,41 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 trend_15m[i] = -1
             
             st_trend_15m[i] = st_direction_4h[idx_4h]
+            
+            if c_4h[idx_4h] > kama_4h[idx_4h]:
+                kama_trend_15m[i] = 1
+            elif c_4h[idx_4h] < kama_4h[idx_4h]:
+                kama_trend_15m[i] = -1
     
     # Generate signals with multi-timeframe logic
     signals = np.zeros(n)
     
     # Position sizing - DISCRETE levels (CRITICAL for drawdown control)
-    SIZE_FULL = 0.35
-    SIZE_HALF = 0.175
+    SIZE_FULL = 0.30
+    SIZE_HALF = 0.15
     
-    # RSI thresholds for pullback entries (tighter than #033)
-    RSI_LONG_MIN = 40
+    # RSI thresholds for pullback entries (wider than #034)
+    RSI_LONG_MIN = 35
     RSI_LONG_MAX = 55
     RSI_SHORT_MIN = 45
-    RSI_SHORT_MAX = 60
+    RSI_SHORT_MAX = 65
     
     # Z-score threshold for mean reversion filter
     ZSCORE_MAX = 2.5
     
-    # BBW percentile threshold (avoid ranging markets)
-    BBW_PCT_MIN = 0.35
+    # BBW percentile threshold (higher than #034 - only strong trends)
+    BBW_PCT_MIN = 0.40
     
-    # ATR stoploss multiplier (tighter than #033)
-    ATR_STOP_MULT = 1.5
+    # ADX threshold for trend strength
+    ADX_MIN = 25
+    
+    # ATR stoploss multiplier (looser than #034)
+    ATR_STOP_MULT = 2.0
     
     # ATR volatility target for dynamic sizing
     TARGET_ATR_PCT = 0.012
     
-    first_valid = max(200, 40 * 16, 14 * 2, 20, 100)
+    first_valid = max(200, 40 * 16, 14 * 2, 20, 100, 28)
     
     # Track position state
     entry_price = np.zeros(n)
@@ -304,17 +395,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     lowest_since_entry = np.zeros(n)
     
     for i in range(first_valid, n):
-        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(bbw_pct_15m[i]):
+        if np.isnan(atr_15m[i]) or np.isnan(rsi_15m[i]) or np.isnan(bbw_pct_15m[i]) or np.isnan(adx_15m[i]):
             signals[i] = 0.0
             continue
         
         trend = trend_15m[i]
         st_trend = st_trend_15m[i]
+        kama_trend = kama_trend_15m[i]
         rsi_val = rsi_15m[i]
         zscore_val = zscore_15m[i]
         atr = atr_15m[i]
         price = close[i]
         bbw_pct = bbw_pct_15m[i]
+        adx_val = adx_15m[i]
         
         # BBW regime filter - only trade in trending markets (not ranging)
         if bbw_pct < BBW_PCT_MIN:
@@ -329,8 +422,21 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 signals[i] = 0.0
             continue
         
-        # Trend filters must agree (HMA + Supertrend)
-        if trend != st_trend or trend == 0:
+        # ADX filter - only trade when trend is strong enough
+        if adx_val < ADX_MIN:
+            if i > 0 and position_side[i - 1] != 0:
+                signals[i] = 0.0
+                position_side[i] = 0
+                entry_price[i] = 0
+                tp_triggered[i] = 0
+                highest_since_entry[i] = 0
+                lowest_since_entry[i] = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Trend filters must agree (HMA + Supertrend + KAMA)
+        if trend != st_trend or trend == 0 or trend != kama_trend:
             if i > 0 and position_side[i - 1] != 0:
                 signals[i] = 0.0
                 position_side[i] = 0
@@ -361,7 +467,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (1.5*ATR)
+            # Stoploss check (2.0*ATR)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -443,8 +549,8 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         position_size = SIZE_FULL * size_multiplier
         position_size = min(SIZE_FULL, max(SIZE_HALF, position_size))
         
-        # Entry logic: HMA + Supertrend + RSI + Z-score + BBW regime
-        if trend == 1 and st_trend == 1:  # Bullish trend confirmed
+        # Entry logic: HMA + Supertrend + KAMA + ADX + RSI + Z-score + BBW regime
+        if trend == 1 and st_trend == 1 and kama_trend == 1:  # Bullish trend confirmed
             if (RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX and 
                 abs(zscore_val) < ZSCORE_MAX):  # Pullback + not extreme
                 signals[i] = position_size
@@ -454,7 +560,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 highest_since_entry[i] = price
                 lowest_since_entry[i] = price
                 
-        elif trend == -1 and st_trend == -1:  # Bearish trend confirmed
+        elif trend == -1 and st_trend == -1 and kama_trend == -1:  # Bearish trend confirmed
             if (RSI_SHORT_MIN <= rsi_val <= RSI_SHORT_MAX and 
                 abs(zscore_val) < ZSCORE_MAX):  # Pullback + not extreme
                 signals[i] = -position_size
