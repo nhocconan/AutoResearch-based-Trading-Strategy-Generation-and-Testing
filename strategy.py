@@ -1,44 +1,38 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #050 - HMA Trend + RSI Pullback + BB Regime Filter (30m primary)
+EXPERIMENT #051 - Supertrend + RSI Pullback + 4h HMA Trend Filter (1h primary)
 =====================================================================================
-Hypothesis: 30m timeframe captures medium-term swings better than 15m (less noise) 
-and 1h (faster entries). Using 4h HMA(50) for trend direction + RSI(14) pullback 
-entries + Bollinger Band width regime filter should outperform pure breakout strategies.
+Hypothesis: 1h Supertrend captures trend moves faster than 12h Donchian, but needs
+strong HTF filter to avoid chop. 4h HMA(50) provides proven trend direction filter.
+RSI(14) pullback entries (RSI<45 in uptrend, RSI>55 in downtrend) improve entry timing
+vs pure breakout. Volume confirmation filters false signals. This differs from #047
+by using Supertrend (more responsive) + RSI pullback (better timing) on 1h vs 12h Donchian.
 
 Key features:
-- Primary TF: 30m (this experiment's requirement)
-- HTF filter: 4h HMA(50) for trend direction, 1d HMA(50) for major trend confirmation
-- Entry: RSI(14) pullback in direction of 4h trend (RSI<45 for long, RSI>55 for short)
-- Regime: BB width percentile > 40th (avoid low-volatility chop)
+- Primary TF: 1h (required for this experiment)
+- HTF filter: 4h HMA(50) for trend direction (proven in successful strategies)
+- Trend: Supertrend(10, 3.0) for entry signals
+- Entry: Supertrend flip + RSI pullback confirmation (RSI<45 long, RSI>55 short)
+- Volume filter: volume > 1.2 * SMA(volume, 20) for confirmation
+- Regime: 4h HMA slope > 0 for long bias, < 0 for short bias
 - Stoploss: 2.0*ATR(14) trailing stop
-- Position sizing: 0.25 base, 0.30 max on strong signals, discrete levels
-- Take profit: Reduce to half at 2R profit, trail stop at 1R
+- Position sizing: 0.25-0.30 discrete, scaled by Supertrend strength
+- Take profit: Reduce to half at 2R profit, trail stop
 
-Why this should beat current best (Sharpe=0.490):
-- 30m captures swings faster than 12h while filtering 15m noise
-- RSI pullback entries have better risk/reward than breakouts (enter on dips)
-- BB regime filter avoids 40%+ of choppy periods that kill trend strategies
-- Conservative sizing (0.25-0.30) with mandatory stoploss controls drawdown
+Why this should beat #047 (Sharpe=0.490):
+- 1h Supertrend catches moves earlier than 12h Donchian
+- RSI pullback = better entry timing (buy dips, not breakouts)
+- 4h HMA filter = same proven HTF approach as current best
+- More trades than 12h strategy while maintaining quality filters
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "hma_rsi_bb_regime_30m_4h_1d_v1"
-timeframe = "30m"
+name = "supertrend_rsi_pullback_1h_4h_v1"
+timeframe = "1h"
 leverage = 1.0
-
-
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period // 2, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, adjust=False).mean()
-    raw_hma = 2 * wma1 - wma2
-    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
-    return hma.values
 
 
 def calculate_atr(high, low, close, period=14):
@@ -54,8 +48,59 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    # Calculate basic upper and lower bands
+    hl2 = (high + low) / 2
+    basic_upper = hl2 + multiplier * atr
+    basic_lower = hl2 - multiplier * atr
+    
+    # Final upper and lower bands
+    final_upper = np.zeros(n)
+    final_lower = np.zeros(n)
+    supertrend = np.zeros(n)
+    trend = np.zeros(n)  # 1 = uptrend, -1 = downtrend
+    
+    final_upper[0] = basic_upper[0]
+    final_lower[0] = basic_lower[0]
+    
+    for i in range(1, n):
+        # Final Upper Band
+        if basic_upper[i] < final_upper[i - 1] or close[i - 1] > final_upper[i - 1]:
+            final_upper[i] = basic_upper[i]
+        else:
+            final_upper[i] = final_upper[i - 1]
+        
+        # Final Lower Band
+        if basic_lower[i] > final_lower[i - 1] or close[i - 1] < final_lower[i - 1]:
+            final_lower[i] = basic_lower[i]
+        else:
+            final_lower[i] = final_lower[i - 1]
+        
+        # Supertrend and trend direction
+        if trend[i - 1] == 1:
+            if close[i] < final_lower[i]:
+                trend[i] = -1
+                supertrend[i] = final_upper[i]
+            else:
+                trend[i] = 1
+                supertrend[i] = final_lower[i]
+        else:
+            if close[i] > final_upper[i]:
+                trend[i] = 1
+                supertrend[i] = final_lower[i]
+            else:
+                trend[i] = -1
+                supertrend[i] = final_upper[i]
+    
+    return supertrend, trend, final_upper, final_lower
+
+
 def calculate_rsi(close, period=14):
-    """Calculate RSI (Relative Strength Index)"""
+    """Calculate RSI using Wilder's smoothing"""
     n = len(close)
     delta = np.zeros(n)
     for i in range(1, n):
@@ -67,83 +112,66 @@ def calculate_rsi(close, period=14):
     avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
     avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
     
-    rsi = np.zeros(n)
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100
+    rs = np.zeros(n)
+    for i in range(period - 1, n):
+        if avg_loss[i] > 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
         else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
+            rs[i] = 100
     
+    rsi = 100 - (100 / (1 + rs))
     return rsi
 
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands"""
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma
+    wma1 = close_s.ewm(span=period // 2, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, adjust=False).mean()
+    raw_hma = 2 * wma1 - wma2
+    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
+    return hma.values
 
 
-def calculate_bb_width(upper, lower, sma):
-    """Calculate Bollinger Band Width (normalized)"""
-    width = np.zeros(len(upper))
-    for i in range(len(upper)):
-        if sma[i] > 0:
-            width[i] = (upper[i] - lower[i]) / sma[i]
-        else:
-            width[i] = 0
-    return width
-
-
-def calculate_percentile_rank(series, window=100):
-    """Calculate rolling percentile rank"""
-    n = len(series)
-    pr = np.zeros(n)
-    pr[:] = np.nan
-    
-    for i in range(window - 1, n):
-        if not np.isnan(series[i]) and series[i] != 0:
-            window_data = series[i - window + 1:i + 1]
-            window_data = window_data[~np.isnan(window_data)]
-            if len(window_data) > 0:
-                pr[i] = np.sum(window_data <= series[i]) / len(window_data)
-    
-    return pr
+def calculate_volume_sma(volume, period=20):
+    """Calculate SMA of volume"""
+    vol_s = pd.Series(volume)
+    return vol_s.rolling(window=period, min_periods=period).mean().values
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values.copy()
     high = prices["high"].values.copy()
     low = prices["low"].values.copy()
+    volume = prices["volume"].values.copy()
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 50)
-    hma_1d = calculate_hma(df_1d['close'].values, 50)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
+    supertrend, st_trend, st_upper, st_lower = calculate_supertrend(high, low, close, 10, 3.0)
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
-    bb_width = calculate_bb_width(bb_upper, bb_lower, bb_sma)
-    bb_width_pr = calculate_percentile_rank(bb_width, 100)
+    vol_sma = calculate_volume_sma(volume, 20)
+    
+    # Calculate HMA slope for regime filter (compare current vs 5 bars ago)
+    hma_slope = np.zeros(n)
+    for i in range(5, n):
+        if not np.isnan(hma_4h_aligned[i]) and not np.isnan(hma_4h_aligned[i - 5]):
+            hma_slope[i] = hma_4h_aligned[i] - hma_4h_aligned[i - 5]
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.25  # Base position size (25% of capital)
-    MAX_SIZE = 0.30   # Max position size with strong signals
+    BASE_SIZE = 0.28  # Base position size (28% of capital)
+    MAX_SIZE = 0.32   # Max position size
+    MIN_SIZE = 0.20   # Min position size
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -154,45 +182,50 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     profit_target_hit = False
     entry_atr = 0.0
     
-    min_period = 150  # Wait for all indicators to stabilize
+    min_period = 100  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(bb_width_pr[i]) or
-            atr[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(supertrend[i]) or
+            np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(vol_sma[i]) or
+            np.isnan(hma_slope[i]) or atr[i] == 0 or vol_sma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # HTF trend alignment
+        # 4h HMA trend filter
         price_above_4h_hma = close[i] > hma_4h_aligned[i]
-        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        hma_bullish = price_above_4h_hma and hma_slope[i] > 0
+        hma_bearish = not price_above_4h_hma and hma_slope[i] < 0
         
-        # 4h and 1d trend direction
-        fourh_trend = 1 if price_above_4h_hma else -1
-        oned_trend = 1 if price_above_1d_hma else -1
+        # Supertrend signals
+        st_bullish = st_trend[i] == 1
+        st_bearish = st_trend[i] == -1
         
-        # BB regime filter (avoid low volatility chop)
-        bb_regime_ok = bb_width_pr[i] > 0.40  # Only trade when BB width > 40th percentile
+        # Supertrend flip detection (entry signal)
+        st_flip_long = (i > 0 and st_trend[i] == 1 and st_trend[i - 1] == -1)
+        st_flip_short = (i > 0 and st_trend[i] == -1 and st_trend[i - 1] == 1)
         
-        # RSI pullback signals
-        rsi_oversold = rsi[i] < 45  # Pullback in uptrend
-        rsi_overbought = rsi[i] > 55  # Pullback in downtrend
+        # RSI pullback filter (buy dips in uptrend, sell rallies in downtrend)
+        rsi_pullback_long = rsi[i] < 45  # RSI pulled back in uptrend
+        rsi_pullback_short = rsi[i] > 55  # RSI rallied in downtrend
         
-        # Calculate position size based on trend alignment strength
-        position_size = BASE_SIZE
-        if fourh_trend == oned_trend:  # Both HTF agree
-            position_size = MAX_SIZE
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.2 * vol_sma[i]
+        
+        # Calculate position size based on trend strength
+        trend_strength = abs(hma_slope[i]) / (hma_4h_aligned[i] * 0.01 + 1e-10)
+        size_multiplier = min(1.0 + trend_strength * 0.1, 1.15)
+        position_size = min(MAX_SIZE, max(MIN_SIZE, BASE_SIZE * size_multiplier))
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: 4h uptrend + RSI pullback + BB regime ok
-        if (fourh_trend == 1 and rsi_oversold and bb_regime_ok):
+        # Long entry: Supertrend flip + 4h HMA bullish + RSI pullback + volume
+        if (st_flip_long and hma_bullish and rsi_pullback_long and volume_confirmed):
             target_signal = position_size
         
-        # Short entry: 4h downtrend + RSI pullback + BB regime ok
-        elif (fourh_trend == -1 and rsi_overbought and bb_regime_ok):
+        # Short entry: Supertrend flip + 4h HMA bearish + RSI pullback + volume
+        elif (st_flip_short and hma_bearish and rsi_pullback_short and volume_confirmed):
             target_signal = -position_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -252,11 +285,13 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if 4h HMA trend reverses
-                hma_trend_reversed = (position_side == 1 and fourh_trend == -1) or \
-                                     (position_side == -1 and fourh_trend == 1)
+                # Exit if Supertrend flips against position OR 4h HMA alignment breaks
+                st_reversal_long = st_trend[i] == -1
+                st_reversal_short = st_trend[i] == 1
+                hma_alignment_broken = (position_side == 1 and not hma_bullish) or \
+                                       (position_side == -1 and not hma_bearish)
                 
-                if hma_trend_reversed:
+                if st_reversal_long or st_reversal_short or hma_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
