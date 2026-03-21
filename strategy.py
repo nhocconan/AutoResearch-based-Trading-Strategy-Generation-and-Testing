@@ -1,56 +1,77 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #009 - Keltner Channel Breakout + Volume Confirmation + Dual HTF Filter (1h primary)
-===============================================================================================
-Hypothesis: Keltner Channels (ATR-based) provide better breakout signals than Donchian (pure high/low)
-because they adapt to volatility. Volume confirmation filters false breakouts. Dual HTF filter
-(4h EMA + 1d HMA) ensures we trade with the trend. This differs from failed strategies by:
-- Using Keltner (ATR-based) instead of Donchian (fixed lookback)
-- Adding volume surge confirmation (not just price breakout)
-- Volatility regime filter (BB width percentile) to avoid low-vol traps
-- Conservative sizing (0.25-0.30) with proper stoploss
+EXPERIMENT #003 - EMA Crossover + RSI Pullback + 4h HMA Trend Filter (1h primary)
+=====================================================================================
+Hypothesis: 1h EMA crossovers generate many signals but most fail in chop. 
+RSI pullback entries (waiting for RSI to dip in uptrend / rise in downtrend) 
+filter out 50%+ of false breakouts. 4h HMA(50) ensures we trade with the 
+major trend direction. Volume confirmation adds extra filter for conviction.
 
 Key features:
-- Primary TF: 1h (required for this experiment)
-- HTF filters: 4h EMA(50) + 1d HMA(50) for dual alignment
-- Trend: Keltner Channel(20, 2.0*ATR) breakout
-- Entry: Price breaks Keltner + volume > 1.5x avg + HTF alignment
-- Regime: Bollinger Band Width percentile > 40th (avoid ultra-low vol)
-- Stoploss: 2.0*ATR(14) trailing
-- Position sizing: 0.25-0.30 discrete, stoploss at 2*ATR
-- Take profit: Reduce to half at 2R profit
+- Primary TF: 1h
+- HTF filter: 4h HMA(50) for major trend alignment
+- Trend: EMA(8)/EMA(21) crossover on 1h
+- Entry: RSI(14) pullback (RSI < 45 in uptrend, RSI > 55 in downtrend)
+- Volume: Volume > 1.2x 20-period average for confirmation
+- Stoploss: 2.5*ATR(14) trailing
+- Take profit: Reduce to half at 2.5R profit
+- Position sizing: 0.25 base, 0.30 max (discrete levels)
 
 Why this should beat current best:
-- Keltner adapts to volatility (better than fixed Donchian)
-- Volume filter removes 40%+ of false breakouts
-- Dual HTF (4h+1d) simpler than triple, less lag
-- 1h timeframe balances signal frequency vs noise
+- RSI pullback entries have better risk/reward than breakout entries
+- 4h HMA filter removes counter-trend trades (major drawdown source)
+- Volume confirmation filters low-conviction signals
+- Conservative sizing (0.25-0.30) controls drawdown during crypto crashes
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "keltner_volume_dualhtf_1h_4h_1d_v1"
+name = "ema_rsi_pullback_4hhtf_1h_v1"
 timeframe = "1h"
 leverage = 1.0
+
+
+def calculate_ema(close, span):
+    """Calculate Exponential Moving Average"""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=span, adjust=False, min_periods=span).mean()
+    return ema.values
 
 
 def calculate_hma(close, period):
     """Calculate Hull Moving Average"""
     close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period // 2, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, adjust=False).mean()
+    wma1 = close_s.ewm(span=period // 2, adjust=False, min_periods=period // 2).mean()
+    wma2 = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
     raw_hma = 2 * wma1 - wma2
-    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False).mean()
+    hma = raw_hma.ewm(span=int(np.sqrt(period)), adjust=False, min_periods=int(np.sqrt(period))).mean()
     return hma.values
 
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
-    close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, adjust=False, min_periods=period).mean()
-    return ema.values
+def calculate_rsi(close, period=14):
+    """Calculate RSI (Relative Strength Index)"""
+    n = len(close)
+    delta = np.zeros(n)
+    for i in range(1, n):
+        delta[i] = close[i] - close[i - 1]
+    
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    rs = np.zeros(n)
+    for i in range(period - 1, n):
+        if avg_loss[i] > 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+        else:
+            rs[i] = 100.0
+    
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi
 
 
 def calculate_atr(high, low, close, period=14):
@@ -66,51 +87,11 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 
-def calculate_keltner(high, low, close, period=20, atr_mult=2.0):
-    """Calculate Keltner Channels (EMA middle, ATR-based bands)"""
-    n = len(close)
-    middle = calculate_ema(close, period)
-    atr = calculate_atr(high, low, close, period)
-    
-    upper = middle + atr_mult * atr
-    lower = middle - atr_mult * atr
-    
-    return upper, lower, middle
-
-
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands"""
-    close_s = pd.Series(close)
-    middle = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
-    return upper, lower, middle, std
-
-
-def calculate_bb_width_percentile(upper, lower, middle, window=100):
-    """Calculate Bollinger Band Width and its percentile rank"""
-    n = len(upper)
-    bb_width = (upper - lower) / middle
-    
-    pr = np.zeros(n)
-    pr[:] = np.nan
-    
-    for i in range(window - 1, n):
-        if not np.isnan(bb_width[i]) and not np.isnan(bb_width[i-window+1:i+1]).all():
-            window_data = bb_width[i - window + 1:i + 1]
-            window_data = window_data[~np.isnan(window_data)]
-            if len(window_data) > 0:
-                pr[i] = np.sum(window_data <= bb_width[i]) / len(window_data)
-    
-    return pr, bb_width
-
-
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume simple moving average"""
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average"""
     vol_s = pd.Series(volume)
-    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
@@ -122,30 +103,24 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     # Load HTF data ONCE before loop (Rule 1)
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    ema_4h = calculate_ema(df_4h['close'].values, 50)
-    hma_1d = calculate_hma(df_1d['close'].values, 50)
+    hma_4h = calculate_hma(df_4h['close'].values, 50)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
     # Calculate 1h indicators
-    keltner_upper, keltner_lower, keltner_middle = calculate_keltner(high, low, close, 20, 2.0)
-    bb_upper, bb_lower, bb_middle, bb_std = calculate_bollinger(close, 20, 2.0)
+    ema_fast = calculate_ema(close, 8)
+    ema_slow = calculate_ema(close, 21)
+    rsi = calculate_rsi(close, 14)
     atr = calculate_atr(high, low, close, 14)
-    vol_sma = calculate_volume_sma(volume, 20)
-    
-    # Calculate BB width percentile (volatility regime filter)
-    bb_width_pr, bb_width = calculate_bb_width_percentile(bb_upper, bb_lower, bb_middle, 100)
+    vol_ma = calculate_volume_ma(volume, 20)
     
     # Generate signals
     signals = np.zeros(n)
-    BASE_SIZE = 0.28  # Base position size (28% of capital)
-    MAX_SIZE = 0.32   # Max position size
-    MIN_SIZE = 0.22   # Min position size
+    BASE_SIZE = 0.25  # Base position size (25% of capital)
+    MAX_SIZE = 0.30   # Max position size with strong confirmation
     HALF_SIZE = BASE_SIZE / 2
     
     # Track position state for stoploss and take profit
@@ -156,54 +131,48 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     profit_target_hit = False
     entry_atr = 0.0
     
-    min_period = 150  # Wait for all indicators to stabilize
+    min_period = 100  # Wait for all indicators to stabilize
     
     for i in range(min_period, n):
         # Check for NaN in any indicator
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]) or
-            np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_sma[i]) or np.isnan(bb_width_pr[i]) or
-            atr[i] == 0 or vol_sma[i] == 0):
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(ema_fast[i]) or 
+            np.isnan(ema_slow[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]) or
+            np.isnan(vol_ma[i]) or atr[i] == 0 or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Dual HTF trend alignment
-        price_above_4h_ema = close[i] > ema_4h_aligned[i]
-        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        # 4h HMA trend filter (major trend direction)
+        price_above_4h_hma = close[i] > hma_4h_aligned[i]
+        major_trend = 1 if price_above_4h_hma else -1
         
-        # 4h and 1d trend direction
-        fourh_trend = 1 if price_above_4h_ema else -1
-        daily_trend = 1 if price_above_1d_hma else -1
+        # EMA crossover signals
+        ema_bullish = ema_fast[i] > ema_slow[i]
+        ema_bearish = ema_fast[i] < ema_slow[i]
         
-        # Volatility regime filter (avoid ultra-low vol chop)
-        vol_regime_ok = bb_width_pr[i] > 0.40  # Above 40th percentile
+        # EMA crossover detection (fast crosses above/below slow)
+        ema_cross_long = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
+        ema_cross_short = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
         
-        # Keltner breakout signals
-        breakout_long = close[i] > keltner_upper[i - 1]  # Break above previous upper
-        breakout_short = close[i] < keltner_lower[i - 1]  # Break below previous lower
+        # RSI pullback conditions
+        rsi_pullback_long = rsi[i] < 45  # RSI dipped in uptrend
+        rsi_pullback_short = rsi[i] > 55  # RSI rose in downtrend
         
-        # Volume confirmation (volume surge > 1.5x average)
-        volume_surge = volume[i] > 1.5 * vol_sma[i]
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.2 * vol_ma[i]
         
-        # Calculate position size (discrete levels to reduce fee churn)
-        if vol_regime_ok and volume_surge:
-            position_size = MAX_SIZE
-        elif vol_regime_ok:
-            position_size = BASE_SIZE
-        else:
-            position_size = MIN_SIZE
+        # Calculate position size based on volume strength
+        volume_multiplier = min(1.0 + (volume[i] / vol_ma[i] - 1.2) / 2, 1.2)
+        position_size = min(MAX_SIZE, max(BASE_SIZE, BASE_SIZE * volume_multiplier))
         
         # Determine target signal based on all filters
         target_signal = 0.0
         
-        # Long entry: Keltner breakout + volume surge + Dual HTF bullish
-        if (breakout_long and volume_surge and 
-            fourh_trend == 1 and daily_trend == 1):
+        # Long entry: EMA cross + RSI pullback + major trend up + volume confirmed
+        if (ema_cross_long and rsi_pullback_long and major_trend == 1 and volume_confirmed):
             target_signal = position_size
         
-        # Short entry: Keltner breakout + volume surge + Dual HTF bearish
-        elif (breakout_short and volume_surge and 
-              fourh_trend == -1 and daily_trend == -1):
+        # Short entry: EMA cross + RSI pullback + major trend down + volume confirmed
+        elif (ema_cross_short and rsi_pullback_short and major_trend == -1 and volume_confirmed):
             target_signal = -position_size
         
         # Stoploss and take profit logic - check BEFORE setting new signal
@@ -213,29 +182,29 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         if position_side != 0:
             if position_side == 1:
                 # Long position - update highest
-                highest_since_entry = max(highest_since_entry, close[i])
-                trailing_stop = highest_since_entry - 2.0 * atr[i]
+                highest_since_entry = max(highest_since_entry, high[i])
+                trailing_stop = highest_since_entry - 2.5 * atr[i]
                 
                 # Check stoploss
-                if close[i] < trailing_stop:
+                if low[i] < trailing_stop:
                     stoploss_triggered = True
                 
-                # Check take profit (2R from entry, where R = 2*ATR at entry)
+                # Check take profit (2.5R from entry, where R = 2.5*ATR at entry)
                 if not profit_target_hit:
-                    if close[i] >= entry_price + 4.0 * entry_atr:  # 2R = 4*ATR
+                    if high[i] >= entry_price + 6.25 * entry_atr:  # 2.5R = 6.25*ATR
                         take_profit_triggered = True
             else:
                 # Short position - update lowest
-                lowest_since_entry = min(lowest_since_entry, close[i])
-                trailing_stop = lowest_since_entry + 2.0 * atr[i]
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                trailing_stop = lowest_since_entry + 2.5 * atr[i]
                 
                 # Check stoploss
-                if close[i] > trailing_stop:
+                if high[i] > trailing_stop:
                     stoploss_triggered = True
                 
                 # Check take profit
                 if not profit_target_hit:
-                    if close[i] <= entry_price - 4.0 * entry_atr:  # 2R profit
+                    if low[i] <= entry_price - 6.25 * entry_atr:  # 2.5R profit
                         take_profit_triggered = True
         
         if stoploss_triggered:
@@ -247,7 +216,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             entry_atr = 0.0
             profit_target_hit = False
         elif take_profit_triggered:
-            # Reduce position to half at 2R profit
+            # Reduce position to half at 2.5R profit
             signals[i] = HALF_SIZE * position_side
             profit_target_hit = True
         else:
@@ -256,20 +225,20 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # New entry
                 signals[i] = target_signal
                 position_side = 1 if target_signal > 0 else -1
-                highest_since_entry = close[i]
-                lowest_since_entry = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 entry_price = close[i]
                 entry_atr = atr[i]
                 profit_target_hit = False
             elif position_side != 0:
                 # Maintain existing position (check if trend reversed)
-                # Exit if Keltner reverses OR HTF alignment breaks
-                keltner_reversal_long = close[i] < keltner_middle[i]
-                keltner_reversal_short = close[i] > keltner_middle[i]
-                hma_alignment_broken = (position_side == 1 and daily_trend == -1) or \
-                                       (position_side == -1 and daily_trend == 1)
+                # Exit if EMA reverses OR major trend breaks
+                ema_reversal_long = ema_fast[i] < ema_slow[i]
+                ema_reversal_short = ema_fast[i] > ema_slow[i]
+                hma_alignment_broken = (position_side == 1 and major_trend == -1) or \
+                                       (position_side == -1 and major_trend == 1)
                 
-                if keltner_reversal_long or keltner_reversal_short or hma_alignment_broken:
+                if ema_reversal_long or ema_reversal_short or hma_alignment_broken:
                     signals[i] = 0.0
                     position_side = 0
                     highest_since_entry = 0.0
