@@ -61,8 +61,14 @@ def _run_single_backtest(queue, strategy_path, symbol, period):
         queue.put(("error", str(e)))
 
 
-def run_backtest_all(symbols: list[str], strategy_path: str, period: str = "train") -> list[dict]:
-    """Run backtest on all symbols with HARD timeout using multiprocessing."""
+class EarlyDiscardError(Exception):
+    """Raised when first symbol already fails — skip remaining symbols."""
+    pass
+
+
+def run_backtest_all(symbols: list[str], strategy_path: str, period: str = "train",
+                     early_discard: bool = True) -> list[dict]:
+    """Run backtest on all symbols. Early exit if first symbol Sharpe < 0 or 0 trades."""
     from multiprocessing import Process, Queue
 
     results = []
@@ -75,7 +81,7 @@ def run_backtest_all(symbols: list[str], strategy_path: str, period: str = "trai
         if p.is_alive():
             p.kill()
             p.join(timeout=5)
-            raise TimeoutError(f"{symbol} backtest killed after {BACKTEST_TIMEOUT_S}s (stuck in C code)")
+            raise TimeoutError(f"{symbol} backtest killed after {BACKTEST_TIMEOUT_S}s")
 
         if q.empty():
             raise RuntimeError(f"{symbol} backtest returned no result")
@@ -84,6 +90,16 @@ def run_backtest_all(symbols: list[str], strategy_path: str, period: str = "trai
         if status == "error":
             raise RuntimeError(data)
         results.append(data)
+
+        # Early discard: if this symbol has Sharpe < 0 or 0 trades, skip the rest
+        if early_discard:
+            sharpe = data.get("sharpe_ratio", 0)
+            trades = data.get("num_trades", 0)
+            dd = data.get("max_drawdown_pct", 0)
+            if sharpe < 0 or trades < 5 or dd < -50:
+                raise EarlyDiscardError(
+                    f"{symbol} Sharpe={sharpe:.3f} trades={trades} DD={dd:.1f}% — skip remaining"
+                )
 
     return results
 
@@ -511,7 +527,16 @@ def main():
         # --- Step 3: Backtest ---
         print("  [2/4] Running backtest on train data...")
         try:
-            bt_results = run_backtest_all(symbols, str(STRATEGY_FILE), period="train")
+            bt_results = run_backtest_all(symbols, str(STRATEGY_FILE), period="train", early_discard=True)
+        except EarlyDiscardError as e:
+            print(f"  [EARLY DISCARD] {e}")
+            git_revert_strategy()
+            STRATEGY_FILE.write_text(best_strategy_code)
+            history.append({
+                "num": experiment_num, "name": strategy_name, "status": "discard",
+                "avg_sharpe": -999, "avg_return": 0, "description": f"early: {str(e)[:50]}",
+            })
+            continue
         except Exception as e:
             print(f"  [CRASH] Backtest error: {e}")
             git_revert_strategy()
@@ -627,7 +652,7 @@ def main():
             # Run test backtest — DISCARD if test Sharpe < 0 (overfit to train)
             test_results = []
             try:
-                test_results = run_backtest_all(symbols, str(STRATEGY_FILE), period="test")
+                test_results = run_backtest_all(symbols, str(STRATEGY_FILE), period="test", early_discard=True)
                 test_sharpe = sum(r["sharpe_ratio"] for r in test_results) / len(test_results)
                 test_return = sum(r["total_return_pct"] for r in test_results) / len(test_results)
                 print(f"       Test: Sharpe={test_sharpe:.3f} | Return={test_return:+.1f}%")
