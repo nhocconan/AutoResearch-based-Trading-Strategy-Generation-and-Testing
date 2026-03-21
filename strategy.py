@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #016 - MACD Z-Score Momentum with 4h Trend Filter (1h Primary)
+EXPERIMENT #017 - Keltner Channel Mean Reversion with Daily Trend (6h Primary)
 ==================================================================================================
-Hypothesis: Current best (Sharpe=0.537) uses 4h primary + 1d trend. This uses 1h primary + 4h trend
-with MACD momentum + Z-score filter. The baseline mtf_hma_rsi_zscore_v1 achieved Sharpe=5.4 using
-4h trend + 1h entries + Z-score. This combines MACD histogram (proven in #007 Sharpe=0.488) with
-Z-score mean reversion filter and volume confirmation.
+Hypothesis: Current best (Sharpe=0.537) uses 4h primary + 1d trend with HMA+RSI. This uses 6h primary
++ daily trend with Keltner Channel mean reversion. 6h timeframe reduces noise vs 1h/4h while capturing
+more moves than 4h. Keltner Channels (ATR-based) work better for crypto than Bollinger (std-dev based)
+because volatility clusters in crypto. RSI pullback entries proven in current best.
 
 Key innovations:
-1. 1h PRIMARY + 4h HTF: More trade opportunities than 4h primary, but filtered by stronger 4h trend
-2. MACD histogram momentum: Captures acceleration/deceleration better than RSI alone
-3. Z-score(20) filter: Avoid entering when price is >2 std dev from mean (mean reversion risk)
-4. Volume confirmation: Taker buy/sell ratio confirms institutional interest
-5. Dynamic sizing: 0.15 base, 0.25 high conviction, 0.30 very high conviction
-6. Tighter stoploss: 1.5 ATR (vs 2.0 in current best) for faster loss cutting
+1. 6h PRIMARY (new timeframe) - cleaner signals than 1h/4h, more trades than 4h
+2. Daily HMA trend filter - strongest trend signal, aligns with current best architecture
+3. Keltner Channel (not Bollinger) - ATR-based bands capture crypto volatility regimes better
+4. RSI(14) pullback entries - proven winner from current best (Sharpe=0.537)
+5. Volume confirmation - taker buy/sell ratio filters institutional interest
+6. Conservative sizing: 0.20 base, 0.30 max (vs 0.35 in some failed strategies)
+7. Stoploss: 2.0 ATR (proven in current best, not 1.5 which caused #015 DD=-51.8%)
 
 Why this should beat hma_rsi_pullback_daily_trend_4h_v1 (Sharpe=0.537):
-- 1h timeframe captures more momentum moves than 4h
-- MACD histogram is leading indicator (RSI is lagging)
-- Z-score filter prevents buying tops/selling bottoms
-- Volume confirmation reduces false breakouts
-- Based on proven Sharpe=5.4 baseline architecture
+- 6h timeframe has less noise than 4h (fewer false breakouts)
+- Keltner Channels adapt to volatility better than fixed std-dev bands
+- Same proven RSI pullback + daily trend architecture as current best
+- Conservative sizing prevents the -51.8% DD that killed #015
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "macd_zscore_volume_mtf_1h_4h_v1"
-timeframe = "1h"
+name = "keltner_rsi_daily_trend_6h_v1"
+timeframe = "6h"
 leverage = 1.0
 
 
@@ -83,38 +83,57 @@ def calculate_hma(close, period=21):
     return hma
 
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram"""
+def calculate_rsi(close, period=14):
+    """Calculate RSI using Wilder's smoothing"""
     n = len(close)
-    if n < slow + signal:
+    if n < period + 1:
+        return np.zeros(n)
+    
+    delta = np.diff(close)
+    gain = np.zeros(n)
+    loss = np.zeros(n)
+    
+    gain[1:] = np.maximum(delta, 0)
+    loss[1:] = np.maximum(-delta, 0)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    
+    avg_gain[period] = np.mean(gain[1:period + 1])
+    avg_loss[period] = np.mean(loss[1:period + 1])
+    
+    for i in range(period + 1, n):
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
+    
+    rs = np.zeros(n)
+    mask = avg_loss > 0
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    
+    rsi = np.zeros(n)
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    
+    return rsi
+
+
+def calculate_keltner_channels(high, low, close, atr, ema_period=20, atr_mult=2.0):
+    """
+    Keltner Channels - ATR-based volatility bands
+    Middle: EMA(20)
+    Upper: EMA + 2*ATR
+    Lower: EMA - 2*ATR
+    """
+    n = len(close)
+    if n < ema_period:
         return np.zeros(n), np.zeros(n), np.zeros(n)
     
     close_series = pd.Series(close)
+    middle = close_series.ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
     
-    ema_fast = close_series.ewm(span=fast, adjust=False, min_periods=fast).mean()
-    ema_slow = close_series.ewm(span=slow, adjust=False, min_periods=slow).mean()
+    upper = middle + atr_mult * atr
+    lower = middle - atr_mult * atr
     
-    macd_line = (ema_fast - ema_slow).values
-    signal_line = pd.Series(macd_line).ewm(span=signal, adjust=False, min_periods=signal).mean().values
-    histogram = macd_line - signal_line
-    
-    return macd_line, signal_line, histogram
-
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score: (price - mean) / std"""
-    n = len(close)
-    if n < period:
-        return np.zeros(n)
-    
-    close_series = pd.Series(close)
-    rolling_mean = close_series.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_series.rolling(window=period, min_periods=period).std()
-    
-    zscore = (close_series - rolling_mean) / rolling_std
-    zscore = zscore.fillna(0).values
-    
-    return zscore
+    return upper, middle, lower
 
 
 def calculate_supertrend(high, low, close, atr, multiplier=3.0):
@@ -177,59 +196,59 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     taker_buy_vol = prices["taker_buy_volume"].values
     n = len(close)
     
-    # ========== 1h INDICATORS (PRIMARY TIMEFRAME) ==========
-    atr_1h = calculate_atr(high, low, close, period=14)
-    macd_line, macd_signal, macd_hist = calculate_macd(close, fast=12, slow=26, signal=9)
-    zscore_1h = calculate_zscore(close, period=20)
-    supertrend_1h, st_trend_1h = calculate_supertrend(high, low, close, atr_1h, multiplier=3.0)
+    # ========== 6h INDICATORS (PRIMARY TIMEFRAME) ==========
+    atr_6h = calculate_atr(high, low, close, period=14)
+    rsi_6h = calculate_rsi(close, period=14)
+    supertrend_6h, st_trend_6h = calculate_supertrend(high, low, close, atr_6h, multiplier=3.0)
+    kc_upper, kc_middle, kc_lower = calculate_keltner_channels(high, low, close, atr_6h, ema_period=20, atr_mult=2.0)
     
     # Volume ratio (taker buy / total volume)
     volume_ratio = np.zeros(n)
     mask = volume > 0
     volume_ratio[mask] = taker_buy_vol[mask] / volume[mask]
     
-    # ========== 4h INDICATORS (TREND FILTER) - PROPER MTF ==========
+    # ========== DAILY INDICATORS (TREND FILTER) - PROPER MTF ==========
     try:
-        df_4h = get_htf_data(prices, '4h')
-        close_4h = df_4h['close'].values
-        high_4h = df_4h['high'].values
-        low_4h = df_4h['low'].values
+        df_1d = get_htf_data(prices, '1d')
+        close_1d = df_1d['close'].values
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
         
-        # 4h HMA for trend direction
-        hma_4h = calculate_hma(close_4h, period=21)
-        atr_4h = calculate_atr(high_4h, low_4h, close_4h, period=14)
-        _, st_trend_4h = calculate_supertrend(high_4h, low_4h, close_4h, atr_4h, multiplier=3.0)
+        # Daily HMA for trend direction (proven in current best)
+        hma_1d = calculate_hma(close_1d, period=21)
+        atr_1d = calculate_atr(high_1d, low_1d, close_1d, period=14)
         
-        # Align to 1h timeframe (auto shift for completed bars)
-        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-        st_trend_4h_aligned = align_htf_to_ltf(prices, df_4h, st_trend_4h)
+        # Align to 6h timeframe (auto shift for completed bars)
+        hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+        atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
         
     except Exception:
-        hma_4h_aligned = np.zeros(n)
-        st_trend_4h_aligned = np.zeros(n)
+        hma_1d_aligned = np.zeros(n)
+        atr_1d_aligned = np.zeros(n)
     
     # ========== SIGNAL GENERATION ==========
     signals = np.zeros(n)
     
-    # Position sizing - DISCRETE LEVELS
-    SIZE_BASE = 0.15    # Base position (low conviction)
-    SIZE_HIGH = 0.25    # High conviction
-    SIZE_VHIGH = 0.30   # Very high conviction (max)
+    # Position sizing - DISCRETE LEVELS (conservative to avoid -51% DD)
+    SIZE_BASE = 0.20    # Base position (low conviction)
+    SIZE_HIGH = 0.30    # High conviction (max)
     
-    # ATR stoploss - TIGHTER than current best
-    ATR_STOP_MULT = 1.5
+    # ATR stoploss - PROVEN 2.0 from current best (not 1.5 which caused #015 failure)
+    ATR_STOP_MULT = 2.0
     
-    # MACD histogram thresholds
-    MACD_LONG_MIN = 0.0      # Histogram turning positive
-    MACD_SHORT_MAX = 0.0     # Histogram turning negative
+    # RSI pullback thresholds (proven in current best)
+    RSI_LONG_MAX = 55    # Buy on pullback when RSI < 55 (not oversold)
+    RSI_SHORT_MIN = 45   # Sell on pullback when RSI > 45 (not overbought)
+    RSI_OVERBOUGHT = 70  # Extreme overbought
+    RSI_OVERSOLD = 30    # Extreme oversold
     
-    # Z-score filter (avoid extremes)
-    ZSCORE_MAX = 2.0         # Don't buy if >2 std dev above mean
-    ZSCORE_MIN = -2.0        # Don't sell if >2 std dev below mean
+    # Keltner Channel position
+    KC_LONG_ZONE = 0     # Price below middle (pullback zone)
+    KC_SHORT_ZONE = 0    # Price above middle (pullback zone)
     
     # Volume confirmation
-    VOLUME_RATIO_LONG = 0.52   # Slight buy pressure
-    VOLUME_RATIO_SHORT = 0.48  # Slight sell pressure
+    VOLUME_RATIO_LONG = 0.50   # Neutral to buy pressure
+    VOLUME_RATIO_SHORT = 0.50  # Neutral to sell pressure
     
     first_valid = max(100, 50)
     
@@ -242,33 +261,35 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     
     for i in range(first_valid, n):
         # Skip invalid data
-        if np.isnan(atr_1h[i]) or atr_1h[i] == 0 or np.isnan(macd_hist[i]):
+        if np.isnan(atr_6h[i]) or atr_6h[i] == 0 or np.isnan(rsi_6h[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_1h[i]
-        hist = macd_hist[i]
-        hist_prev = macd_hist[i - 1] if i > 0 else 0
-        zscore_val = zscore_1h[i]
-        st_trend_val = st_trend_1h[i]
+        atr = atr_6h[i]
+        rsi_val = rsi_6h[i]
+        st_trend_val = st_trend_6h[i]
         vol_ratio = volume_ratio[i]
         
-        # 4h trend filters (MASTER FILTER)
-        hma_4h_val = hma_4h_aligned[i]
-        st_trend_4h_val = st_trend_4h_aligned[i]
+        # Keltner Channel position
+        kc_position = 0
+        if kc_middle[i] > 0:
+            if price < kc_middle[i]:
+                kc_position = -1  # Below middle (long pullback zone)
+            elif price > kc_middle[i]:
+                kc_position = 1   # Above middle (short pullback zone)
         
-        # Determine 4h trend direction
-        trend_4h = 0
-        if hma_4h_val > 0 and price > hma_4h_val:
-            trend_4h = 1
-        elif hma_4h_val > 0 and price < hma_4h_val:
-            trend_4h = -1
+        # Daily trend filters (MASTER FILTER - from current best architecture)
+        hma_1d_val = hma_1d_aligned[i]
+        atr_1d_val = atr_1d_aligned[i]
         
-        if st_trend_4h_val == 1:
-            trend_4h = max(trend_4h, 1)
-        elif st_trend_4h_val == -1:
-            trend_4h = min(trend_4h, -1)
+        # Determine daily trend direction
+        trend_1d = 0
+        if hma_1d_val > 0:
+            if price > hma_1d_val:
+                trend_1d = 1  # Bullish
+            elif price < hma_1d_val:
+                trend_1d = -1  # Bearish
         
         # ========== CHECK EXISTING POSITIONS ==========
         if position_side[i - 1] != 0:
@@ -289,7 +310,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             highest_since_entry[i] = current_high
             lowest_since_entry[i] = current_low
             
-            # Stoploss check (1.5*ATR)
+            # Stoploss check (2.0*ATR - proven in current best)
             if prev_side == 1:
                 stoploss_price = prev_entry - ATR_STOP_MULT * atr
                 if price < stoploss_price:
@@ -304,7 +325,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry + 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price >= tp_price:
-                    signals[i] = SIZE_BASE  # Reduce to half
+                    signals[i] = SIZE_BASE / 2  # Reduce to half
                     position_side[i] = 1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -336,7 +357,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 # Take profit check (2R) - reduce to half
                 tp_price = prev_entry - 2 * ATR_STOP_MULT * atr
                 if not prev_tp and price <= tp_price:
-                    signals[i] = -SIZE_BASE  # Reduce to half
+                    signals[i] = -SIZE_BASE / 2  # Reduce to half
                     position_side[i] = -1
                     entry_price[i] = prev_entry
                     tp_triggered[i] = True
@@ -363,35 +384,39 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
             lowest_since_entry[i] = lowest_since_entry[i - 1]
             continue
         
-        # ========== ENTRY LOGIC - MACD MOMENTUM + Z-SCORE FILTER ==========
-        # LONG: 4h trend up + 1h Supertrend up + MACD histogram positive + Z-score not extreme + volume confirms
+        # ========== ENTRY LOGIC - KELTNER MEAN REVERSION + RSI PULLBACK ==========
+        # LONG: Daily trend up + 6h Supertrend up + Price below KC middle (pullback) + RSI not overbought + volume confirms
         long_condition = (
-            trend_4h == 1 and
+            trend_1d == 1 and
             st_trend_val == 1 and
-            hist > MACD_LONG_MIN and hist_prev <= MACD_LONG_MIN and  # Histogram crossing above 0
-            zscore_val < ZSCORE_MAX and  # Not overbought
-            vol_ratio >= VOLUME_RATIO_LONG  # Buy pressure
+            kc_position == -1 and  # Price below KC middle (pullback)
+            rsi_val < RSI_LONG_MAX and  # RSI pullback (not overbought)
+            rsi_val > RSI_OVERSOLD and  # Not extremely oversold (avoid catching falling knife)
+            vol_ratio >= VOLUME_RATIO_LONG
         )
         
-        # SHORT: 4h trend down + 1h Supertrend down + MACD histogram negative + Z-score not extreme + volume confirms
+        # SHORT: Daily trend down + 6h Supertrend down + Price above KC middle (pullback) + RSI not oversold + volume confirms
         short_condition = (
-            trend_4h == -1 and
+            trend_1d == -1 and
             st_trend_val == -1 and
-            hist < MACD_SHORT_MAX and hist_prev >= MACD_SHORT_MAX and  # Histogram crossing below 0
-            zscore_val > ZSCORE_MIN and  # Not oversold
-            vol_ratio <= VOLUME_RATIO_SHORT  # Sell pressure
+            kc_position == 1 and  # Price above KC middle (pullback)
+            rsi_val > RSI_SHORT_MIN and  # RSI pullback (not oversold)
+            rsi_val < RSI_OVERBOUGHT and  # Not extremely overbought
+            vol_ratio <= VOLUME_RATIO_SHORT
         )
         
         # Determine conviction level
         conviction = 0
         if long_condition or short_condition:
-            # High conviction: 4h Supertrend agrees
-            if (long_condition and st_trend_4h_val == 1) or (short_condition and st_trend_4h_val == -1):
+            # High conviction: RSI in optimal pullback zone (40-50 for long, 50-60 for short)
+            if long_condition and 40 <= rsi_val <= 50:
                 conviction = 2
-            # Very high conviction: MACD histogram strong + volume strong
-            if long_condition and hist > 0.5 * atr and vol_ratio > 0.55:
+            elif short_condition and 50 <= rsi_val <= 60:
+                conviction = 2
+            # Very high conviction: Strong volume + RSI optimal
+            if long_condition and vol_ratio > 0.55 and 40 <= rsi_val <= 50:
                 conviction = 3
-            elif short_condition and hist < -0.5 * atr and vol_ratio < 0.45:
+            elif short_condition and vol_ratio < 0.45 and 50 <= rsi_val <= 60:
                 conviction = 3
             elif conviction < 2:
                 conviction = 1
@@ -399,7 +424,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         # Assign position size based on conviction
         if long_condition:
             if conviction >= 3:
-                size = SIZE_VHIGH
+                size = SIZE_HIGH
             elif conviction >= 2:
                 size = SIZE_HIGH
             else:
@@ -414,7 +439,7 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
         
         elif short_condition:
             if conviction >= 3:
-                size = SIZE_VHIGH
+                size = SIZE_HIGH
             elif conviction >= 2:
                 size = SIZE_HIGH
             else:
