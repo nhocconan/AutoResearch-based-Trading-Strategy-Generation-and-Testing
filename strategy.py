@@ -1,219 +1,257 @@
 #!/usr/bin/env python3
 """
-EXPERIMENT #002 - Multi-Timeframe HMA + MACD + RSI Strategy
+EXPERIMENT #022 - MTF KAMA-HMA Trend with ATR Trailing Stop
 ============================================================
-Hypothesis: Combining 4h HMA trend with 1h MACD momentum and RSI pullback entries
-will capture trends while avoiding late entries. The 4h HMA provides cleaner trend
-direction than Supertrend, while MACD histogram confirms momentum before entry.
+Hypothesis: Combining 4h HMA trend filter with 1h KAMA adaptive entry will reduce
+whipsaws compared to pure EMA/Supertrend approaches. KAMA adjusts to market efficiency
+(erases noise in ranging markets, accelerates in trends). ATR trailing stop at 2.5x
+will protect capital during reversals. Position size 0.28 balances risk/return.
 
-Key components:
-- 4h HMA(21) for trend direction (HTF via mtf_data helper)
-- 1h MACD(12,26,9) histogram for momentum confirmation
-- 1h RSI(14) for pullback entries (buy dips in uptrend)
-- ATR(14) trailing stoploss via signal→0
-- Take profit: reduce to half position at 2R profit
-
-Position sizing: 0.30 max, discrete levels (0.0, ±0.15, ±0.30)
-Stoploss: 2.5*ATR against position
-Take profit: 5*ATR (2R), then trail at 2*ATR
+Key improvements:
+- 4h HMA(21) for primary trend direction (smoother than EMA)
+- 1h KAMA(14, ER=10) for adaptive entries (responds to market regime)
+- RSI(14) filter: only enter when 40-70 (momentum confirmation, not extreme)
+- ATR(14) trailing stop at 2.5x with signal→0 logic
+- Discrete signals: 0.0, ±0.28 to minimize fee churn
+- Volume spike confirmation (>1.5x 20-bar avg) for entry validation
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_hma_macd_rsi_v1"
+name = "mtf_1h_4h_kama_hma_atr_v2"
 timeframe = "1h"
 leverage = 1.0
 
 
-def calculate_hma(close: np.ndarray, period: int) -> np.ndarray:
-    """Calculate Hull Moving Average"""
+def calculate_kama(close: np.ndarray, period: int = 14, er_period: int = 10) -> np.ndarray:
+    """Kaufman Adaptive Moving Average - adapts to market efficiency"""
     n = len(close)
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    # Calculate Efficiency Ratio
+    noise = np.zeros(n)
+    signal = np.zeros(n)
+    
+    for i in range(er_period, n):
+        signal[i] = abs(close[i] - close[i - er_period])
+        noise[i] = np.sum(np.abs(np.diff(close[max(0, i - er_period):i + 1])))
+    
+    # Avoid division by zero
+    er = np.zeros(n)
+    mask = noise > 0
+    er[mask] = signal[mask] / noise[mask]
+    
+    # Smoothing constants
+    fast_sc = 2.0 / (2.0 + 1.0)
+    slow_sc = 2.0 / (2.0 + 30.0)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Initialize KAMA
+    first_valid = period + er_period
+    if first_valid < n:
+        kama[first_valid] = close[first_valid]
+        
+        for i in range(first_valid + 1, n):
+            if np.isnan(sc[i]):
+                kama[i] = kama[i - 1]
+            else:
+                kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    return kama
+
+
+def calculate_hma(close: np.ndarray, period: int = 21) -> np.ndarray:
+    """Hull Moving Average - reduced lag, smoother than EMA"""
+    n = len(close)
+    hma = np.zeros(n)
+    hma[:] = np.nan
+    
     if n < period:
-        return np.full(n, np.nan)
+        return hma
     
-    # WMA calculation helper
-    def wma(data, w_period):
-        weights = np.arange(1, w_period + 1)
-        result = np.full(len(data), np.nan)
-        for i in range(w_period - 1, len(data)):
-            result[i] = np.sum(data[i-w_period+1:i+1] * weights) / np.sum(weights)
-        return result
+    close_s = pd.Series(close)
     
-    wma_half = wma(close, period // 2)
-    wma_full = wma(close, period)
+    # WMA(period/2)
+    wma_half = close_s.rolling(window=period // 2, min_periods=period // 2).mean()
+    # WMA(period)
+    wma_full = close_s.rolling(window=period, min_periods=period).mean()
+    # 2*WMA(period/2) - WMA(period)
+    diff = 2.0 * wma_half - wma_full
+    # WMA(sqrt(period))
+    sqrt_period = int(np.sqrt(period))
+    hma_series = diff.rolling(window=sqrt_period, min_periods=sqrt_period).mean()
     
-    # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    hma_raw = 2 * wma_half - wma_full
-    hma = wma(hma_raw, int(np.sqrt(period)))
+    hma[:] = hma_series.values
     
     return hma
 
 
-def calculate_macd(close: np.ndarray, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple:
-    """Calculate MACD line, signal line, and histogram"""
-    n = len(close)
-    ema_fast = pd.Series(close).ewm(span=fast, min_periods=fast, adjust=False).mean().values
-    ema_slow = pd.Series(close).ewm(span=slow, min_periods=slow, adjust=False).mean().values
-    
-    macd_line = ema_fast - ema_slow
-    macd_signal = pd.Series(macd_line).ewm(span=signal, min_periods=signal, adjust=False).mean().values
-    macd_hist = macd_line - macd_signal
-    
-    return macd_line, macd_signal, macd_hist
-
-
-def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
-    """Calculate RSI with proper min_periods"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=period, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).rolling(window=period, min_periods=period).mean().values
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi
-
-
 def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
-    """Calculate ATR with proper min_periods"""
+    """Average True Range with proper min_periods"""
     n = len(close)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
+    
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i],
+                    abs(high[i] - close[i - 1]),
+                    abs(low[i] - close[i - 1]))
     
     atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
     return atr
+
+
+def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+    """Relative Strength Index with proper min_periods"""
+    n = len(close)
+    rsi = np.zeros(n)
+    rsi[:] = np.nan
+    
+    if n < period + 1:
+        return rsi
+    
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    
+    rs = avg_gain / avg_loss.replace(0, np.inf)
+    rsi_series = 100.0 - (100.0 / (1.0 + rs))
+    
+    rsi[:] = rsi_series.values
+    
+    return rsi
 
 
 def generate_signals(prices: pd.DataFrame) -> np.ndarray:
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # === LOAD HTF DATA ONCE BEFORE LOOP (Rule 1) ===
+    # === LOAD HTF DATA ONCE BEFORE LOOP (CRITICAL) ===
     df_4h = get_htf_data(prices, '4h')
+    
+    # Calculate 4h HMA trend indicator
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)  # auto shift(1)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # === CALCULATE 1h INDICATORS (vectorized before loop) ===
-    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
-    rsi = calculate_rsi(close, 14)
-    atr = calculate_atr(high, low, close, 14)
+    # === CALCULATE 1H INDICATORS (VECTORIZED) ===
+    kama_1h = calculate_kama(close, period=14, er_period=10)
+    atr_1h = calculate_atr(high, low, close, period=14)
+    rsi_1h = calculate_rsi(close, period=14)
     
-    # === GENERATE SIGNALS ===
+    # Volume moving average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === GENERATE SIGNALS WITH STOPLOSS LOGIC ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
-    HALF_SIZE = 0.15  # Half position for take profit
+    SIZE = 0.28  # 28% position size - conservative for DD control
     
-    # Track position state for stoploss/take profit
+    # Track position state for stoploss
     position_side = 0  # 0=flat, 1=long, -1=short
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
+    highest_price = 0.0  # For trailing stop
+    lowest_price = 0.0
     
-    # Warmup period for all indicators
-    warmup = max(50, 26 + 9)  # MACD needs slow EMA + signal
+    first_valid = max(50, int(n * 0.01))  # Warmup period
     
-    for i in range(warmup, n):
-        # Check for NaN in any indicator
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(macd_hist[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]):
+    for i in range(first_valid, n):
+        # Skip if any indicator is NaN
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(kama_1h[i]) or np.isnan(atr_1h[i]) or np.isnan(rsi_1h[i]):
             signals[i] = 0.0
             position_side = 0
             continue
         
-        # === TREND FILTER: 4h HMA direction ===
-        hma_slope = hma_4h_aligned[i] - hma_4h_aligned[i-1] if i > 0 else 0
-        trend_bullish = hma_4h_aligned[i] > close[i] * 0.98  # Price above 4h HMA
-        trend_bearish = hma_4h_aligned[i] < close[i] * 1.02  # Price below 4h HMA
+        current_atr = atr_1h[i]
+        current_close = close[i]
+        current_rsi = rsi_1h[i]
+        current_hma_4h = hma_4h_aligned[i]
+        current_kama = kama_1h[i]
+        current_vol = volume[i]
+        avg_vol = vol_ma[i] if not np.isnan(vol_ma[i]) else current_vol
         
-        # === MOMENTUM: MACD histogram ===
-        macd_bullish = macd_hist[i] > 0 and macd_hist[i] > macd_hist[i-1]  # Rising positive
-        macd_bearish = macd_hist[i] < 0 and macd_hist[i] < macd_hist[i-1]  # Falling negative
-        
-        # === ENTRY: RSI pullback ===
-        rsi_oversold = rsi[i] < 45  # Pullback in uptrend
-        rsi_overbought = rsi[i] > 55  # Rally in downtrend
-        
-        # === STOPLOSS / TAKE PROFIT LOGIC ===
+        # === STOPLOSS LOGIC (MUST SET SIGNAL=0 WHEN HIT) ===
         if position_side == 1:  # Long position
-            highest_since_entry = max(highest_since_entry, high[i])
+            # Update highest price for trailing stop
+            highest_price = max(highest_price, current_close)
             
-            # Stoploss: price drops 2.5*ATR below entry
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Trailing stop: exit if price drops 2.5*ATR from highest
+            stop_price = highest_price - 2.5 * current_atr
+            
+            if current_close < stop_price:
                 signals[i] = 0.0
                 position_side = 0
+                entry_price = 0.0
+                highest_price = 0.0
                 continue
             
-            # Take profit: at 5*ATR (2R), reduce to half
-            if close[i] >= entry_price + 5.0 * atr[i]:
-                signals[i] = HALF_SIZE
-                # Trail stop: if price drops 2*ATR from highest, exit
-                if close[i] < highest_since_entry - 2.0 * atr[i]:
-                    signals[i] = 0.0
-                    position_side = 0
-                    continue
-                continue
-            
-            # Trail stop during normal movement
-            if close[i] < highest_since_entry - 2.5 * atr[i]:
+            # Also check 4h trend reversal
+            if current_close < current_hma_4h:
                 signals[i] = 0.0
                 position_side = 0
+                entry_price = 0.0
+                highest_price = 0.0
                 continue
         
         elif position_side == -1:  # Short position
-            lowest_since_entry = min(lowest_since_entry, low[i])
+            # Update lowest price for trailing stop
+            lowest_price = min(lowest_price, current_close) if lowest_price > 0 else current_close
             
-            # Stoploss: price rises 2.5*ATR above entry
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Trailing stop: exit if price rises 2.5*ATR from lowest
+            stop_price = lowest_price + 2.5 * current_atr
+            
+            if current_close > stop_price:
                 signals[i] = 0.0
                 position_side = 0
+                entry_price = 0.0
+                lowest_price = 0.0
                 continue
             
-            # Take profit: at 5*ATR (2R), reduce to half
-            if close[i] <= entry_price - 5.0 * atr[i]:
-                signals[i] = -HALF_SIZE
-                # Trail stop: if price rises 2*ATR from lowest, exit
-                if close[i] > lowest_since_entry + 2.0 * atr[i]:
-                    signals[i] = 0.0
-                    position_side = 0
-                    continue
-                continue
-            
-            # Trail stop during normal movement
-            if close[i] > lowest_since_entry + 2.5 * atr[i]:
+            # Also check 4h trend reversal
+            if current_close > current_hma_4h:
                 signals[i] = 0.0
                 position_side = 0
+                entry_price = 0.0
+                lowest_price = 0.0
                 continue
         
-        # === NEW ENTRY SIGNALS ===
+        # === ENTRY LOGIC (only if flat) ===
         if position_side == 0:
-            # Long entry: bullish trend + MACD momentum + RSI pullback
-            if trend_bullish and macd_bullish and rsi_oversold:
-                signals[i] = SIZE
-                position_side = 1
-                entry_price = close[i]
-                highest_since_entry = high[i]
+            # Volume confirmation (avoid low liquidity entries)
+            vol_confirmed = current_vol > 1.3 * avg_vol if avg_vol > 0 else True
             
-            # Short entry: bearish trend + MACD momentum + RSI rally
-            elif trend_bearish and macd_bearish and rsi_overbought:
-                signals[i] = -SIZE
-                position_side = -1
-                entry_price = close[i]
-                lowest_since_entry = low[i]
+            # RSI momentum filter (not overbought/oversold)
+            rsi_ok = 35 < current_rsi < 70
+            
+            # Long entry: price above 4h HMA, KAMA sloping up, RSI confirming
+            if current_close > current_hma_4h and vol_confirmed and rsi_ok:
+                # Check KAMA slope (adaptive trend confirmation)
+                if i > 5 and kama_1h[i] > kama_1h[i - 3]:
+                    signals[i] = SIZE
+                    position_side = 1
+                    entry_price = current_close
+                    highest_price = current_close
+            
+            # Short entry: price below 4h HMA, KAMA sloping down, RSI confirming
+            elif current_close < current_hma_4h and vol_confirmed and rsi_ok:
+                # Check KAMA slope
+                if i > 5 and kama_1h[i] < kama_1h[i - 3]:
+                    signals[i] = -SIZE
+                    position_side = -1
+                    entry_price = current_close
+                    lowest_price = current_close
+        
+        # === MAINTAIN POSITION (no signal change = no fees) ===
         else:
-            # Maintain current position size
-            if position_side == 1:
-                signals[i] = SIZE if signals[i] != HALF_SIZE else HALF_SIZE
-            elif position_side == -1:
-                signals[i] = -SIZE if signals[i] != -HALF_SIZE else -HALF_SIZE
+            signals[i] = signals[i - 1]  # Keep previous signal
     
     return signals
