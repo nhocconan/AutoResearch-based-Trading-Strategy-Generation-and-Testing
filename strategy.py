@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #023: 12h Supertrend + Daily Regime + RSI Pullback v2
-Hypothesis: 12h timeframe balances noise reduction with trade frequency.
-Daily HMA provides major trend regime (bull/bear market filter).
-Supertrend(10,3) gives clear trend direction with ATR-based stops.
-RSI pullback (35-65 range) enters on dips within trend, not extremes.
-Volume confirmation reduces false signals.
-ATR trailing stop (2.5x) protects capital during crashes like 2022.
-Position sizing: 0.25 discrete levels to minimize fee churn.
-Relaxed entry conditions to ensure ≥10 trades/symbol on 4-year train data.
-FIXED: Proper position tracking with scalars, not arrays.
+Experiment #024: Daily Supertrend + Weekly HMA Regime + RSI Momentum
+Hypothesis: Daily timeframe reduces noise vs intraday while capturing multi-week swings.
+Weekly HMA provides major bull/bear regime filter (avoid counter-trend trades).
+Daily Supertrend gives clear trend direction with ATR-based stops built-in.
+RSI momentum filter ensures we enter with momentum, not against it.
+Multiple entry triggers (Supertrend flip, RSI cross, trend continuation) ensure ≥10 trades.
+Position sizing 0.30 with 2.5x ATR stoploss protects against 2022-style crashes.
+Relaxed RSI thresholds (30-70 range) to avoid 0-trade failure mode.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_supertrend_daily_rsi_v2"
-timeframe = "12h"
+name = "mtf_1d_supertrend_weekly_rsi_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -30,7 +28,7 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average."""
+    """Calculate Hull Moving Average for faster trend response."""
     close_s = pd.Series(close)
     wma1 = close_s.ewm(span=period//2, min_periods=period//2, adjust=False).mean()
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
@@ -57,9 +55,10 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     lower = hl2 - multiplier * atr
     
     supertrend = np.zeros(len(close))
-    direction = np.ones(len(close))
+    direction = np.ones(len(close))  # 1 = bullish, -1 = bearish
     
-    supertrend[0] = upper[0]
+    supertrend[0] = lower[0]
+    direction[0] = 1
     for i in range(1, len(close)):
         if close[i] > supertrend[i-1]:
             supertrend[i] = lower[i]
@@ -80,102 +79,136 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load daily HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Load weekly HTF data ONCE before loop (Rule 1)
+    df_1w = get_htf_data(prices, '1w')
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate daily indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
     
-    # Volume SMA
+    # Daily HMA for additional trend confirmation
+    hma_21 = calculate_hma(close, 21)
+    hma_50 = calculate_hma(close, 50)
+    
+    # Volume SMA for confirmation
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_sma = np.nan_to_num(vol_sma, nan=np.mean(volume))
+    vol_sma = np.nan_to_num(vol_sma, nan=np.nanmean(volume))
     
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
+    HALF_SIZE = 0.15
     
-    # Position tracking (scalars, not arrays)
-    in_position = False
+    # Track positions for stoploss
     position_side = 0
     entry_price = 0.0
     trailing_stop = 0.0
     
     for i in range(100, n):
-        new_signal = 0.0
+        # Weekly trend filter (major regime) - relaxed to allow more trades
+        weekly_bullish = hma_1w_aligned[i] > 0 and close[i] > hma_1w_aligned[i]
+        weekly_bearish = hma_1w_aligned[i] > 0 and close[i] < hma_1w_aligned[i]
         
-        # Daily regime filter
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
-        
-        # Supertrend direction
+        # Daily Supertrend direction
         st_long = st_direction[i] == 1
         st_short = st_direction[i] == -1
         
-        # RSI pullback (relaxed range for more trades)
-        rsi_neutral = 35 < rsi[i] < 65
-        
-        # Volume confirmation (relaxed)
-        vol_ok = volume[i] > vol_sma[i] * 0.8 if vol_sma[i] > 0 else True
-        
-        # Supertrend flip signals (more frequent entries)
+        # Supertrend flip signals (strongest entry trigger)
         st_flip_long = st_direction[i] == 1 and st_direction[i-1] == -1
         st_flip_short = st_direction[i] == -1 and st_direction[i-1] == 1
         
-        # Long entry: daily bullish + supertrend long + RSI ok
-        if daily_bullish and st_long and rsi_neutral and vol_ok:
-            if not in_position or position_side < 0:
-                new_signal = SIZE
+        # HMA trend confirmation
+        hma_trend_long = hma_21[i] > hma_50[i]
+        hma_trend_short = hma_21[i] < hma_50[i]
         
-        # Long on Supertrend flip (catch trend changes)
-        elif st_flip_long and vol_ok:
-            if not in_position or position_side < 0:
-                new_signal = SIZE
+        # RSI momentum (relaxed thresholds for more trades)
+        rsi_bullish = rsi[i] > 45 and rsi[i] < 70  # Positive momentum, not overbought
+        rsi_bearish = rsi[i] > 30 and rsi[i] < 55  # Negative momentum, not oversold
+        rsi_rising = rsi[i] > rsi[i-3] if i > 3 else True
+        rsi_falling = rsi[i] < rsi[i-3] if i > 3 else True
         
-        # Short entry: daily bearish + supertrend short + RSI ok
-        elif daily_bearish and st_short and rsi_neutral and vol_ok:
-            if not in_position or position_side > 0:
-                new_signal = -SIZE
+        # Volume confirmation (optional, not required)
+        vol_confirm = volume[i] > vol_sma[i] * 0.8 if vol_sma[i] > 0 else True
         
-        # Short on Supertrend flip
-        elif st_flip_short and vol_ok:
-            if not in_position or position_side > 0:
-                new_signal = -SIZE
+        # Price above/below HMA21 for trend confirmation
+        price_above_hma = close[i] > hma_21[i]
+        price_below_hma = close[i] < hma_21[i]
         
-        # Stoploss logic (Rule 6)
-        if in_position and position_side > 0:
-            # Long stoploss
+        # Entry logic - MULTIPLE triggers to ensure trades (Rule 9)
+        new_signal = 0.0
+        
+        # LONG ENTRY TRIGGERS (any one can trigger)
+        # Trigger 1: Supertrend flip long with weekly support
+        if st_flip_long and (weekly_bullish or rsi_bullish):
+            new_signal = SIZE
+        # Trigger 2: Supertrend long + HMA trend + RSI ok (trend continuation)
+        elif st_long and hma_trend_long and rsi_bullish and price_above_hma:
+            new_signal = SIZE
+        # Trigger 3: Weekly bullish + Supertrend long + volume (regime + trend)
+        elif weekly_bullish and st_long and vol_confirm:
+            new_signal = SIZE
+        # Trigger 4: RSI rising from neutral with Supertrend support
+        elif rsi_rising and rsi[i] > 50 and st_long:
+            new_signal = SIZE
+        
+        # SHORT ENTRY TRIGGERS (any one can trigger)
+        # Trigger 1: Supertrend flip short with weekly resistance
+        if st_flip_short and (weekly_bearish or rsi_bearish):
+            new_signal = -SIZE
+        # Trigger 2: Supertrend short + HMA trend + RSI ok (trend continuation)
+        elif st_short and hma_trend_short and rsi_bearish and price_below_hma:
+            new_signal = -SIZE
+        # Trigger 3: Weekly bearish + Supertrend short + volume (regime + trend)
+        elif weekly_bearish and st_short and vol_confirm:
+            new_signal = -SIZE
+        # Trigger 4: RSI falling from neutral with Supertrend support
+        elif rsi_falling and rsi[i] < 50 and st_short:
+            new_signal = -SIZE
+        
+        # Stoploss logic (Rule 6) - ATR based with trailing
+        if position_side > 0 and entry_price > 0:
             stop_loss = entry_price - 2.5 * atr[i]
             if close[i] < stop_loss:
-                new_signal = 0.0
+                new_signal = 0.0  # Stoploss hit
+            # Trail stop for longs
             else:
-                # Trail stop
-                trailing_stop = max(trailing_stop, close[i] - 2.5 * atr[i])
-                if close[i] < trailing_stop:
+                new_trailing = close[i] - 2.5 * atr[i]
+                if new_trailing > trailing_stop:
+                    trailing_stop = new_trailing
+                if close[i] < trailing_stop and trailing_stop > 0:
                     new_signal = 0.0
+                # Take partial profit at 3R
+                elif close[i] > entry_price + 3.0 * atr[i] and signals[i-1] == SIZE:
+                    new_signal = HALF_SIZE
         
-        elif in_position and position_side < 0:
-            # Short stoploss
+        if position_side < 0 and entry_price > 0:
             stop_loss = entry_price + 2.5 * atr[i]
             if close[i] > stop_loss:
-                new_signal = 0.0
+                new_signal = 0.0  # Stoploss hit
+            # Trail stop for shorts
             else:
-                # Trail stop
-                trailing_stop = min(trailing_stop, close[i] + 2.5 * atr[i])
-                if close[i] > trailing_stop:
+                new_trailing = close[i] + 2.5 * atr[i]
+                if new_trailing < trailing_stop or trailing_stop == 0:
+                    trailing_stop = new_trailing
+                if close[i] > trailing_stop and trailing_stop > 0:
                     new_signal = 0.0
+                # Take partial profit at 3R
+                elif close[i] < entry_price - 3.0 * atr[i] and signals[i-1] == -SIZE:
+                    new_signal = -HALF_SIZE
         
         # Update position tracking
-        if new_signal != 0:
-            if not in_position or np.sign(new_signal) != position_side:
-                in_position = True
-                position_side = np.sign(new_signal)
+        if new_signal != 0 and position_side == 0:
+            entry_price = close[i]
+            position_side = np.sign(new_signal)
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+        elif new_signal != 0 and position_side != 0:
+            if np.sign(new_signal) != position_side:
                 entry_price = close[i]
+                position_side = np.sign(new_signal)
                 trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
-        elif new_signal == 0 and in_position:
-            in_position = False
+        elif new_signal == 0 and position_side != 0:
             position_side = 0
             entry_price = 0.0
             trailing_stop = 0.0
