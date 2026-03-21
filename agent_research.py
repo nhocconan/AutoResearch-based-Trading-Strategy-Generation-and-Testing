@@ -314,12 +314,8 @@ INSTRUCTIONS:
 1. State your hypothesis in a comment at the top (which strategy, timeframe, why)
 2. Implement using REAL indicator formulas from quantitative trading literature
 3. Use conservative leverage (1.0-2.0x) and keep drawdown under control
-4. MULTI-TIMEFRAME RESAMPLING — MUST USE ACTUAL TIMESTAMPS:
-   prices_idx = prices.set_index('open_time')
-   df_4h = prices_idx.resample('4h').agg({'open':'first','high':'max','low':'min','close':'last','volume':'sum'}).dropna()
-   trend_4h = your_indicator(df_4h)
-   trend_aligned = trend_4h.reindex(prices_idx.index, method='ffill')
-   NEVER use pd.date_range('2021-01-01',...) — it creates FAKE timestamps and breaks on data gaps!
+4. MULTI-TIMEFRAME: use prices.set_index('open_time').resample('4h').agg(open=first,high=max,low=min,close=last).dropna()
+   Then reindex back with method='ffill'. NEVER use pd.date_range('2021-...')!
 5. CRITICAL: Use proper min_periods on all rolling calculations
 
 OUTPUT: Complete strategy.py code only. Start with #!/usr/bin/env python3"""
