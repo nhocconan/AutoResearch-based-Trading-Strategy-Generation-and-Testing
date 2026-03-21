@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #233: 12h KAMA Adaptive Trend with Daily HMA Filter and RSI Pullback
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility - 
-fast during trends, slow during ranges. This should outperform fixed-period EMAs 
-in crypto's varying volatility regimes. Combined with daily HMA trend filter 
-(only trade in direction of 1d trend) and RSI pullback entries (enter on dips 
-in uptrend, rallies in downtrend). This avoids breakout false signals that failed 
-in exp #224. Position sizing: 0.30 entry, 0.15 at 2R profit. Stoploss: 2.5*ATR.
+Experiment #234: 1d RSI Pullback with Weekly HMA Trend Filter
+Hypothesis: On daily timeframe, RSI pullbacks (RSI<40 in uptrend, RSI>60 in downtrend) 
+combined with weekly HMA trend filter provide high-probability entries. Weekly HMA 
+confirms macro direction (only long when price>1w HMA, only short when <). Volume 
+spike (>1.5x 20-day avg) confirms breakout validity. ATR trailing stop at 2.5*ATR 
+protects capital. This is simpler than multi-indicator ensembles and should generate 
+enough trades on 1d while maintaining quality. Position sizing: 0.30 entry, 0.15 half at 2R.
 Target: Beat Sharpe=0.499 from current best (mtf_12h_supertrend_daily_hma_rsi_pullback_v2).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_daily_hma_rsi_pullback_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_rsi_pullback_weekly_hma_volume_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -26,38 +26,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """
-    Calculate Kaufman Adaptive Moving Average.
-    KAMA adapts to market noise - fast in trends, slow in ranges.
-    ER (Efficiency Ratio) measures trend strength.
-    SC (Smoothing Constant) adjusts based on ER.
-    """
-    close_s = pd.Series(close)
-    n = len(close)
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    
-    for i in range(1, n):
-        if i < period:
-            kama[i] = close[i]
-            continue
-        
-        # Calculate Efficiency Ratio (ER)
-        signal = np.abs(close[i] - close[i - period])
-        noise = np.sum(np.abs(np.diff(close[max(0, i-period):i+1])))
-        er = signal / noise if noise > 0 else 0.0
-        
-        # Calculate Smoothing Constant (SC)
-        fast_sc = 2.0 / (fast + 1)
-        slow_sc = 2.0 / (slow + 1)
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-        
-        # Calculate KAMA
-        kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
-    
-    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for faster trend response."""
@@ -81,26 +49,36 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs 20-day average."""
+    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    vol_ratio = volume / vol_avg
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    return vol_ratio
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    kama_fast = calculate_kama(close, period=10, fast=2, slow=30)
-    kama_slow = calculate_kama(close, period=20, fast=2, slow=30)
+    vol_ratio = calculate_volume_ratio(volume, 20)
+    
+    # Calculate 20-day SMA for trend confirmation
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.30
@@ -115,63 +93,56 @@ def generate_signals(prices):
     lowest_close = 0.0
     
     for i in range(100, n):
-        # HTF trend filter
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        # Weekly trend filter
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # RSI pullback levels
-        rsi_oversold = rsi[i] < 45
-        rsi_overbought = rsi[i] > 55
-        rsi_neutral = 40 < rsi[i] < 60
+        # Daily trend confirmation
+        daily_bullish = close[i] > sma_20[i]
+        daily_bearish = close[i] < sma_20[i]
         
-        # KAMA crossover signals
-        kama_bullish = kama_fast[i] > kama_slow[i]
-        kama_bearish = kama_fast[i] < kama_slow[i]
+        # RSI conditions (pullback entries)
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
+        rsi_neutral = 35 < rsi[i] < 65
         
-        # KAMA crossover detection (cross happened this bar)
-        kama_cross_long = kama_fast[i] > kama_slow[i] and kama_fast[i-1] <= kama_slow[i-1]
-        kama_cross_short = kama_fast[i] < kama_slow[i] and kama_fast[i-1] >= kama_slow[i-1]
+        # Volume confirmation
+        volume_confirmed = vol_ratio[i] > 1.2
         
-        # Price position relative to KAMA
-        above_kama = close[i] > kama_slow[i]
-        below_kama = close[i] < kama_slow[i]
+        # Price action: higher low for long, lower high for short
+        higher_low = low[i] > low[i-5] if i > 5 else False
+        lower_high = high[i] < high[i-5] if i > 5 else False
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # KAMA bullish crossover with daily trend confirmation
-        if kama_cross_long:
-            if daily_bullish and rsi_oversold:
-                new_signal = SIZE_ENTRY
-            elif daily_bullish and rsi_neutral:
+        # RSI pullback in weekly uptrend
+        if weekly_bullish and rsi_oversold:
+            if daily_bullish or volume_confirmed:
                 new_signal = SIZE_ENTRY
         
-        # Pullback entry in uptrend (price dips to KAMA then bounces)
-        elif daily_bullish and kama_bullish:
-            # Price was below KAMA, now above (pullback complete)
-            if close[i-1] < kama_slow[i-1] and close[i] > kama_slow[i]:
-                if rsi_oversold or rsi_neutral:
-                    new_signal = SIZE_ENTRY
-            # Price above KAMA, RSI pulled back
-            elif above_kama and rsi_oversold:
+        # RSI recovery from oversold
+        if rsi[i] > 35 and rsi[i-1] < 35 and weekly_bullish:
+            new_signal = SIZE_ENTRY
+        
+        # Breakout with volume in weekly uptrend
+        if weekly_bullish and close[i] > high[i-5] and volume_confirmed:
+            if rsi_neutral or rsi[i] > 50:
                 new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # KAMA bearish crossover with daily trend confirmation
-        if kama_cross_short:
-            if daily_bearish and rsi_overbought:
-                new_signal = -SIZE_ENTRY
-            elif daily_bearish and rsi_neutral:
+        # RSI pullback in weekly downtrend
+        if weekly_bearish and rsi_overbought:
+            if daily_bearish or volume_confirmed:
                 new_signal = -SIZE_ENTRY
         
-        # Pullback entry in downtrend (price rallies to KAMA then drops)
-        elif daily_bearish and kama_bearish:
-            # Price was above KAMA, now below (pullback complete)
-            if close[i-1] > kama_slow[i-1] and close[i] < kama_slow[i]:
-                if rsi_overbought or rsi_neutral:
-                    new_signal = -SIZE_ENTRY
-            # Price below KAMA, RSI rallied
-            elif below_kama and rsi_overbought:
+        # RSI recovery from overbought
+        if rsi[i] < 65 and rsi[i-1] > 65 and weekly_bearish:
+            new_signal = -SIZE_ENTRY
+        
+        # Breakdown with volume in weekly downtrend
+        if weekly_bearish and close[i] < low[i-5] and volume_confirmed:
+            if rsi_neutral or rsi[i] < 50:
                 new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
