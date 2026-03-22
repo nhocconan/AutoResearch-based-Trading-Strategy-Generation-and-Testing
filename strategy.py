@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #006: 1d Donchian Breakout with 1w HMA Trend Filter
-Hypothesis: Daily timeframe reduces noise and whipsaws compared to intraday.
-Weekly HMA provides strong regime filter to avoid counter-trend trades.
-Donchian breakout (20-period) captures sustained moves. RSI confirms momentum.
-Position sizing: 0.25-0.35 discrete levels with ATR trailing stop.
-Why this might work: 1d has fewer false signals, 1w HMA smoother than 1d for regime,
-Donchian breakouts work well in trending markets (2021 bull, 2022 bear).
-Must generate 10+ trades on train - entry conditions loosened vs pure breakout.
-Timeframe: 1d (REQUIRED for exp#006), HTF: 1w via mtf_data helper.
+Experiment #007: 15m Multi-Timeframe Supertrend + RSI Pullback with 4h HMA Bias
+Hypothesis: 15m timeframe captures intraday momentum while 4h HMA provides cleaner trend bias than 1h.
+Key insight: Previous 15m strategy (#001) failed due to complex Choppiness filter. This uses simpler logic:
+4h HMA for regime, 15m Supertrend for momentum, RSI pullback (35-65 range) for entries.
+Why 15m: More trades than 12h/1d, captures intraday moves, but needs HTF filter to avoid whipsaws.
+Position sizing: 0.20-0.25 discrete (smaller than 12h due to more trades/fees), 2*ATR stoploss.
+Entry conditions LOOSENED vs failed experiments to ensure 10+ trades on train, 3+ on test.
+Timeframe: 15m (REQUIRED for exp#007), HTF: 4h via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_1w_hma_v1"
-timeframe = "1d"
+name = "mtf_15m_supertrend_rsi_4h_hma_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -40,6 +39,10 @@ def calculate_atr(high, low, close, period=14):
 
 def calculate_rsi(close, period=14):
     """Calculate RSI."""
+    n = len(close)
+    rsi = np.zeros(n)
+    rsi[:] = np.nan
+    
     delta = np.diff(close)
     delta = np.insert(delta, 0, 0)
     
@@ -49,38 +52,51 @@ def calculate_rsi(close, period=14):
     avg_gain = pd.Series(gains).ewm(span=period, min_periods=period, adjust=False).mean().values
     avg_loss = pd.Series(losses).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    mask = avg_loss > 0
+    rs = np.zeros(n)
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    rsi[~mask] = 100.0
+    
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel upper and lower bands."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_ema(close, period):
+    """Calculate EMA."""
+    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX for trend strength."""
-    high_shift = np.roll(high, 1)
-    low_shift = np.roll(low, 1)
-    
-    plus_dm = np.where((high - high_shift) > (low_shift - low), 
-                       np.maximum(high - high_shift, 0), 0)
-    minus_dm = np.where((low_shift - low) > (high - high_shift),
-                        np.maximum(low_shift - low, 0), 0)
-    
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    
+def calculate_sma(close, period):
+    """Calculate SMA."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+
+def calculate_supertrend(high, low, close, period=10, mult=3.0):
+    """Calculate Supertrend for trend direction."""
     atr = calculate_atr(high, low, close, period)
+    hl2 = (high + low) / 2
     
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10)
+    upper = hl2 + mult * atr
+    lower = hl2 - mult * atr
     
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    supertrend = np.zeros(len(close))
+    trend = np.ones(len(close))  # 1 = bullish, -1 = bearish
     
-    return adx, plus_di, minus_di
+    supertrend[0] = upper[0]
+    for i in range(1, len(close)):
+        if trend[i-1] == 1:
+            if close[i] < lower[i]:
+                trend[i] = -1
+                supertrend[i] = upper[i]
+            else:
+                trend[i] = 1
+                supertrend[i] = max(lower[i], supertrend[i-1])
+        else:
+            if close[i] > upper[i]:
+                trend[i] = 1
+                supertrend[i] = lower[i]
+            else:
+                trend[i] = -1
+                supertrend[i] = min(upper[i], supertrend[i-1])
+    
+    return supertrend, trend
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -89,34 +105,33 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
+    ema_21 = calculate_ema(close, 21)
+    ema_50 = calculate_ema(close, 50)
+    ema_200 = calculate_ema(close, 200)
+    sma_50 = calculate_sma(close, 50)
     
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian(high, low, 20)
+    # Supertrend for trend confirmation (15m)
+    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
     
-    # EMA for trend confirmation
-    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # SMA for long-term trend
-    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    # HMA on 15m for faster trend signal
+    hma_15m = calculate_hma(close, 21)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.30
+    # Smaller than 12h strategy due to more trades on 15m
+    SIZE_BASE = 0.25
     SIZE_HALF = 0.15
     
     # Track positions for stoploss
@@ -132,7 +147,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -140,96 +155,118 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # 1w trend bias (HTF) - main regime filter
-        bull_trend_1w = close[i] > hma_1w_aligned[i]
-        bear_trend_1w = close[i] < hma_1w_aligned[i]
+        # 4h trend bias (HTF) - main regime filter
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # 1d trend confirmation
-        bull_trend_1d = ema_21[i] > ema_50[i] and close[i] > ema_50[i]
-        bear_trend_1d = ema_21[i] < ema_50[i] and close[i] < ema_50[i]
+        # 15m trend confirmation
+        bull_trend_15m = close[i] > ema_50[i] and ema_21[i] > ema_50[i]
+        bear_trend_15m = close[i] < ema_50[i] and ema_21[i] < ema_50[i]
         
-        # ADX trend strength
-        trend_strong = adx[i] > 20
-        trend_weak = adx[i] < 20
+        # Supertrend confirmation
+        st_bullish = st_trend[i] == 1
+        st_bearish = st_trend[i] == -1
         
         # Long-term trend filter
-        above_200 = not np.isnan(sma_200[i]) and close[i] > sma_200[i]
-        below_200 = not np.isnan(sma_200[i]) and close[i] < sma_200[i]
+        above_200 = not np.isnan(ema_200[i]) and close[i] > ema_200[i]
+        below_200 = not np.isnan(ema_200[i]) and close[i] < ema_200[i]
         
-        # RSI conditions - LOOSENED for more trades
-        rsi_bullish = rsi[i] > 45 and rsi[i] < 70
-        rsi_bearish = rsi[i] > 30 and rsi[i] < 55
-        rsi_neutral = 35 < rsi[i] < 65
+        # RSI conditions - LOOSENED for more trades (35-65 pullback range)
+        rsi_pullback_long = 35 < rsi[i] < 65
+        rsi_pullback_short = 35 < rsi[i] < 65
+        rsi_oversold = rsi[i] < 45
+        rsi_overbought = rsi[i] > 55
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donch_upper[i-1] if not np.isnan(donch_upper[i-1]) else False
-        breakout_short = close[i] < donch_lower[i-1] if not np.isnan(donch_lower[i-1]) else False
+        # HMA crossover on 15m
+        hma_cross_long = False
+        hma_cross_short = False
+        if i >= 1 and not np.isnan(hma_15m[i]) and not np.isnan(hma_15m[i-1]):
+            hma_cross_long = hma_15m[i] > ema_50[i] and hma_15m[i-1] <= ema_50[i-1]
+            hma_cross_short = hma_15m[i] < ema_50[i] and hma_15m[i-1] >= ema_50[i-1]
         
-        # Price near Donchian bands (for pullback entries)
-        near_upper = close[i] >= donch_upper[i] * 0.98 if not np.isnan(donch_upper[i]) else False
-        near_lower = close[i] <= donch_lower[i] * 1.02 if not np.isnan(donch_lower[i]) else False
+        # Price pullback to EMA21
+        price_near_ema21_long = close[i] <= ema_21[i] * 1.015 and close[i] >= ema_21[i] * 0.985
+        price_near_ema21_short = close[i] >= ema_21[i] * 0.985 and close[i] <= ema_21[i] * 1.015
         
-        # DI crossover
-        di_bullish = plus_di[i] > minus_di[i]
-        di_bearish = plus_di[i] < minus_di[i]
+        # Price action: higher low for long, lower high for short
+        higher_low = False
+        lower_high = False
+        if i >= 3:
+            higher_low = low[i] > low[i-3]
+            lower_high = high[i] < high[i-3]
+        
+        # EMA21 slope
+        ema21_slope_up = False
+        ema21_slope_down = False
+        if i >= 5 and not np.isnan(ema_21[i]) and not np.isnan(ema_21[i-5]):
+            ema21_slope_up = ema_21[i] > ema_21[i-5]
+            ema21_slope_down = ema_21[i] < ema_21[i-5]
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (only when 1w bullish) ===
-        if bull_trend_1w:
-            # Primary: Donchian breakout with trend confirmation
-            if breakout_long and bull_trend_1d and trend_strong:
+        # === LONG ENTRIES (only when 4h bullish) ===
+        if bull_trend_4h:
+            # Primary: Pullback to EMA21 with RSI confirmation + Supertrend
+            if price_near_ema21_long and rsi_pullback_long and st_bullish:
                 new_signal = SIZE_BASE
             
-            # Secondary: Pullback to lower band in uptrend
-            elif near_lower and bull_trend_1d and rsi_bullish:
+            # Secondary: HMA crossover with 4h confirmation
+            elif hma_cross_long and bull_trend_4h and above_200:
+                new_signal = SIZE_BASE
+            
+            # Tertiary: RSI oversold bounce in uptrend
+            elif rsi_oversold and bull_trend_15m and ema21_slope_up:
                 new_signal = SIZE_HALF
             
-            # Tertiary: DI bullish + RSI confirmation
-            elif di_bullish and bull_trend_1d and rsi[i] > 50:
+            # Momentum: Higher low with trend + Supertrend
+            elif higher_low and bull_trend_15m and st_bullish:
                 new_signal = SIZE_HALF
             
-            # Momentum: Above 200 SMA with RSI
-            elif above_200 and rsi_bullish and close[i] > ema_21[i]:
+            # Breakout: Price above EMA50 with momentum
+            elif close[i] > ema_50[i] and rsi[i] > 50 and st_bullish:
                 new_signal = SIZE_HALF
         
-        # === SHORT ENTRIES (only when 1w bearish) ===
-        elif bear_trend_1w:
-            # Primary: Donchian breakout with trend confirmation
-            if breakout_short and bear_trend_1d and trend_strong:
+        # === SHORT ENTRIES (only when 4h bearish) ===
+        elif bear_trend_4h:
+            # Primary: Bounce to EMA21 with RSI confirmation + Supertrend
+            if price_near_ema21_short and rsi_pullback_short and st_bearish:
                 new_signal = -SIZE_BASE
             
-            # Secondary: Bounce to upper band in downtrend
-            elif near_upper and bear_trend_1d and rsi_bearish:
+            # Secondary: HMA crossover with 4h confirmation
+            elif hma_cross_short and bear_trend_4h and below_200:
+                new_signal = -SIZE_BASE
+            
+            # Tertiary: RSI overbought rejection in downtrend
+            elif rsi_overbought and bear_trend_15m and ema21_slope_down:
                 new_signal = -SIZE_HALF
             
-            # Tertiary: DI bearish + RSI confirmation
-            elif di_bearish and bear_trend_1d and rsi[i] < 50:
+            # Momentum: Lower high with trend + Supertrend
+            elif lower_high and bear_trend_15m and st_bearish:
                 new_signal = -SIZE_HALF
             
-            # Momentum: Below 200 SMA with RSI
-            elif below_200 and rsi_bearish and close[i] < ema_21[i]:
+            # Breakdown: Price below EMA50 with momentum
+            elif close[i] < ema_50[i] and rsi[i] < 50 and st_bearish:
                 new_signal = -SIZE_HALF
         
         # === STOPLOSS LOGIC (Rule 6) ===
-        # Long position stoploss
-        if position_side > 0 and entry_price > 0:
-            if close[i] > highest_close:
+        # Long position stoploss - trail with 2*ATR
+        if position_side > 0:
+            if highest_close == 0.0 or close[i] > highest_close:
                 highest_close = close[i]
             
-            current_stop = highest_close - 2.5 * atr[i]
+            current_stop = highest_close - 2.0 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
             if close[i] < trailing_stop:
                 new_signal = 0.0
         
-        # Short position stoploss
-        if position_side < 0 and entry_price > 0:
-            if close[i] < lowest_close or lowest_close == 0.0:
+        # Short position stoploss - trail with 2*ATR
+        if position_side < 0:
+            if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
             
-            current_stop = lowest_close + 2.5 * atr[i]
+            current_stop = lowest_close + 2.0 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -240,20 +277,23 @@ def generate_signals(prices):
         prev_signal = signals[i - 1] if i > 0 else 0.0
         
         if new_signal != 0.0 and prev_signal == 0.0:
+            # New entry
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
+            # Position reversal
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
         elif new_signal == 0.0 and prev_signal != 0.0:
+            # Exit position
             position_side = 0
             entry_price = 0.0
             trailing_stop = 0.0
