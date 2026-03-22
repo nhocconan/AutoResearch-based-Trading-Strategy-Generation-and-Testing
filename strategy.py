@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #589: 15m RSI Pullback with 4h HMA Trend + Volume Confirmation
+Experiment #590: 30m EMA Crossover with 4h HMA Trend Bias + Loose ADX
 
-Hypothesis: After 588 experiments, the key insight is:
-1. 15m timeframe provides enough signals while filtering noise better than 5m
-2. 4h HMA(21) gives reliable trend bias without excessive lag
-3. RSI(7) pullback entries (not extremes) within trend = higher win rate
-4. Volume confirmation (1.3x avg) filters false breakouts
-5. LOOSE filters to ensure trades: RSI 35-65 (not 30-70), ADX > 12 (not > 25)
-6. 2.5*ATR stoploss allows normal 15m volatility while protecting capital
-7. Position size 0.25 balances return vs drawdown
+Hypothesis: After 520+ failed experiments, the key insight for 30m timeframe:
+1. 30m is faster than 4h/12h - needs quicker entry signals (EMA crossover vs Donchian)
+2. 4h HMA(21) provides trend bias without being too restrictive
+3. EMA(8)/EMA(21) crossover on 30m captures moves fast enough for this TF
+4. ADX>20 (not >25 or >40) is loose enough to generate trades in all regimes
+5. NO RSI filter - too many conditions = 0 trades (see #586, #575)
+6. 2.5*ATR stoploss accounts for 30m volatility (wider than 12h strategies)
+7. Simpler logic = more trades = statistical significance
 
-Why this should work better than #587 (Sharpe=-0.190):
-- Faster 15m TF = more trade opportunities
-- RSI pullback (not breakout) = better entry timing within trend
-- Volume filter reduces false signals
-- Looser ADX threshold ensures trades in all regimes
-- Simpler logic = fewer conditions blocking entries
+Why this should work better than #589 (Sharpe=-4.131, RSI pullback failed):
+- Removed RSI filter that was blocking entries
+- EMA crossover is faster than Donchian for 30m timeframe
+- Looser ADX threshold (20 vs 25) = more trades
+- Position size 0.25 for conservative sizing while staying under 0.40 max
 
-Timeframe: 15m (REQUIRED for this experiment)
+Timeframe: 30m (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25 discrete (max 0.40)
 Stoploss: 2.5 * ATR(14) trailing
@@ -27,8 +26,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_rsi_pullback_4h_hma_volume_adx_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_ema_crossover_4h_hma_loose_adx_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -51,17 +50,11 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI (Relative Strength Index)."""
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average."""
     close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    return ema.values
 
 def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index) for trend strength."""
@@ -69,37 +62,34 @@ def calculate_adx(high, low, close, period=14):
     low_s = pd.Series(low)
     close_s = pd.Series(close)
     
+    # True Range
     tr1 = high_s - low_s
     tr2 = np.abs(high_s - close_s.shift(1))
     tr3 = np.abs(low_s - close_s.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
+    # Directional Movement
     up_move = high_s - high_s.shift(1)
     down_move = low_s.shift(1) - low_s
     
     plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
     minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
     
+    # Smoothed values
     atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
     plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
     minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
     
+    # DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.inf)
     adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
     
     return adx.values
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate SMA of volume for volume confirmation."""
-    vol_s = pd.Series(volume)
-    vol_sma = vol_s.rolling(window=period, min_periods=period).mean()
-    return vol_sma.values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -111,12 +101,11 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, 14)
     adx_14 = calculate_adx(high, low, close, 14)
-    rsi_7 = calculate_rsi(close, 7)  # Faster RSI for 15m
-    rsi_14 = calculate_rsi(close, 14)
-    vol_sma_20 = calculate_volume_sma(volume, 20)
+    ema_8 = calculate_ema(close, 8)
+    ema_21 = calculate_ema(close, 21)
     
     signals = np.zeros(n)
     
@@ -137,40 +126,33 @@ def generate_signals(prices):
         if np.isnan(hma_4h_aligned[i]):
             continue
         
-        if np.isnan(adx_14[i]) or np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
-            continue
-        
-        if np.isnan(vol_sma_20[i]) or vol_sma_20[i] == 0:
+        if np.isnan(adx_14[i]) or np.isnan(ema_8[i]) or np.isnan(ema_21[i]):
             continue
         
         # === 4H HMA TREND BIAS ===
         bull_bias = close[i] > hma_4h_aligned[i]
         bear_bias = close[i] < hma_4h_aligned[i]
         
-        # === 15M RSI PULLBACK (within trend, not extremes) ===
-        # Long: RSI pulled back but still bullish (35-55 range in uptrend)
-        rsi_pullback_long = 35 <= rsi_7[i] <= 55
-        # Short: RSI rallied but still bearish (45-65 range in downtrend)
-        rsi_pullback_short = 45 <= rsi_7[i] <= 65
+        # === 30M EMA CROSSOVER ===
+        ema_cross_long = ema_8[i] > ema_21[i] and ema_8[i-1] <= ema_21[i-1]
+        ema_cross_short = ema_8[i] < ema_21[i] and ema_8[i-1] >= ema_21[i-1]
         
-        # === ADX FILTER (loose threshold for trade frequency) ===
-        trend_present = adx_14[i] > 12  # Very loose to ensure trades
-        
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > 1.3 * vol_sma_20[i]
+        # === ADX FILTER (trend strength - LOOSE threshold) ===
+        trend_strong = adx_14[i] > 20  # Loose enough to generate trades
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # Long: 4h bullish + RSI pullback + ADX confirms + volume
-        if bull_bias and rsi_pullback_long and trend_present and volume_confirmed:
+        # Long: EMA crossover + 4h bullish bias + ADX confirms trend
+        if ema_cross_long and bull_bias and trend_strong:
             new_signal = SIZE
         
-        # Short: 4h bearish + RSI pullback + ADX confirms + volume
-        elif bear_bias and rsi_pullback_short and trend_present and volume_confirmed:
+        # Short: EMA crossover + 4h bearish bias + ADX confirms trend
+        elif ema_cross_short and bear_bias and trend_strong:
             new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # Check stoploss BEFORE updating position state
         stoploss_triggered = False
         
         if in_position and position_side != 0:
@@ -191,6 +173,7 @@ def generate_signals(prices):
                     stoploss_triggered = True
         
         # === TREND REVERSAL EXIT ===
+        # Exit if 4h HMA flips against position
         trend_reversal = False
         if in_position and position_side != 0:
             if position_side > 0 and bear_bias:
@@ -215,6 +198,7 @@ def generate_signals(prices):
                 position_side = np.sign(new_signal)
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
+            # If same side, keep position (don't reset highest/lowest)
         else:
             if in_position:
                 # Exit position
