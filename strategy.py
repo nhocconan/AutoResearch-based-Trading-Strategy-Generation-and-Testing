@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #553: 15m RSI Pullback with 4h HMA Trend Bias
+Experiment #554: 30m Donchian Breakout with 4h HMA Trend Bias + ADX Filter
 
-Hypothesis: After analyzing 500+ failed experiments, the pattern is clear:
-1. Pure mean reversion fails on 15m (too much noise, whipsaw)
-2. Pure trend following fails on 15m (late entries, choppy exits)
-3. MTF trend bias + LTF pullback entries = winning combination (proven in best strategies)
-4. 4h HMA provides reliable trend direction without lag
-5. RSI(7) pullback to 30-50 in uptrend (or 50-70 in downtrend) = optimal entry
-6. ADX>15 filter (loose) ensures we're not trading dead chop
-7. 2.5*ATR stoploss protects against 2022-style crashes
-8. Discrete position sizing (0.25) controls drawdown
+Hypothesis: After analyzing 500+ failed experiments, the key insight is:
+1. 30m timeframe balances noise reduction vs trade frequency (between 15m whipsaw and 4h slowness)
+2. Donchian(20) breakout on 30m = 10-hour range break = captures sustained intraday moves
+3. 4h HMA(21) trend bias prevents counter-trend entries (major failure mode in bear markets)
+4. ADX>15 (loose, not >40) ensures we generate trades while avoiding worst chop
+5. 2.0*ATR stoploss protects against 2022-style crashes without being too tight
+6. Discrete position sizing (0.25) limits drawdown while generating sufficient trades
 
-Why 15m should work:
-- More trade opportunities than 4h/12h (need 10+ trades on train)
-- 4h HMA filter prevents counter-trend deaths (major failure mode)
-- RSI pullback = early entry vs breakout lag
-- Simple logic = fewer conditions = more trades triggered
+Why this should work on 30m:
+- 30m has 48 bars/day = ~17,520 bars/year = good trade frequency
+- Donchian(20) = 10-hour breakout = catches intraday momentum without excessive whipsaw
+- 4h HMA is available via mtf_data helper with proper alignment (shift(1) for completed bars)
+- ADX>15 filter is loose enough to generate 50-100 trades/year (not 0 trades like #551)
+- Simple logic = more consistent signals across BTC/ETH/SOL
 
-Timeframe: 15m (REQUIRED for this experiment)
+Timeframe: 30m (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete
-Stoploss: 2.5 * ATR(14) trailing
+Position sizing: 0.25 discrete (max 0.40)
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_rsi_pullback_4h_hma_adx_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_donchian_breakout_4h_hma_adx_loose_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -50,21 +49,6 @@ def calculate_hma(close, period=21):
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI using standard formula."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi.values
 
 def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index) for trend strength."""
@@ -96,6 +80,16 @@ def calculate_adx(high, low, close, period=14):
     
     return adx.values
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high / lowest low over period)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    upper = high_s.rolling(window=period, min_periods=period).max()
+    lower = low_s.rolling(window=period, min_periods=period).min()
+    
+    return upper.values, lower.values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -111,10 +105,10 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, 14)
     adx_14 = calculate_adx(high, low, close, 14)
-    rsi_7 = calculate_rsi(close, 7)  # Faster RSI for pullback detection
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     signals = np.zeros(n)
     
@@ -138,7 +132,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx_14[i]) or np.isnan(rsi_7[i]):
+        if np.isnan(adx_14[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
@@ -146,33 +140,32 @@ def generate_signals(prices):
         bull_bias = close[i] > hma_4h_aligned[i]
         bear_bias = close[i] < hma_4h_aligned[i]
         
-        # === ADX FILTER (trend strength - loose threshold) ===
-        trend_strong = adx_14[i] > 15  # Loose filter to generate trades
+        # === 30M DONCHIAN BREAKOUT ===
+        # Use previous bar's Donchian levels to avoid lookahead
+        breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
+        breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
         
-        # === RSI PULLBACK ENTRY ===
-        # Long: bullish bias + RSI pulled back to 30-50 (oversold in uptrend)
-        rsi_oversold = rsi_7[i] < 50 and rsi_7[i] > 25
-        # Short: bearish bias + RSI rallied to 50-75 (overbought in downtrend)
-        rsi_overbought = rsi_7[i] > 50 and rsi_7[i] < 75
+        # === ADX FILTER (trend strength - loose threshold for trade generation) ===
+        trend_strong = adx_14[i] > 15  # Loose threshold to ensure trades (not >40)
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # Long: 4h bullish + ADX confirms + RSI pullback
-        if bull_bias and trend_strong and rsi_oversold:
+        # Long: Donchian breakout + 4h bullish bias + ADX confirms trend
+        if breakout_long and bull_bias and trend_strong:
             new_signal = SIZE
         
-        # Short: 4h bearish + ADX confirms + RSI rally
-        elif bear_bias and trend_strong and rsi_overbought:
+        # Short: Donchian breakout + 4h bearish bias + ADX confirms trend
+        elif breakout_short and bear_bias and trend_strong:
             new_signal = -SIZE
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr_14[i]
+                stoploss_price = highest_close - 2.0 * atr_14[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -180,7 +173,7 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr_14[i]
+                stoploss_price = lowest_close + 2.0 * atr_14[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
