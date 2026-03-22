@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #277: 1d Primary + 1w HTF — Simplified HMA Trend + RSI Pullback
+Experiment #278: 30m Primary + 4h/1d HTF — Scoring System for Trade Generation
 
-Hypothesis: After 12 consecutive failures with complex multi-filter strategies,
-simplify to proven components that actually generate trades:
-1. HMA(21) on 1d for PRIMARY trend direction (proven in #251, #276)
-2. HMA(21) on 1w for MEGATREND filter (only trade with weekly trend)
-3. RSI(14) on 1d for entry timing (relaxed thresholds: 35/65 not 25/75)
-4. ATR(14) trailing stop for risk management (2.5x ATR)
-5. MINIMAL filters to ensure 20-50 trades/year (NOT 0 trades like #265, #268, #270, #275)
+Hypothesis: After #268 failed with Sharpe=0.000 (ZERO TRADES), the problem was
+too-strict confluence requirements. This version uses a SCORING SYSTEM where
+multiple weak signals combine to trigger entries, ensuring we generate trades.
 
-Key differences from failed #274 (Sharpe=-0.634):
-- SIMPLER logic: fewer confluence requirements
-- RELAXED RSI: 35/65 thresholds (not 25/75) to generate more trades
-- Weekly HMA for megatrend (not 12h) — cleaner signal
-- NO Donchian, NO Choppiness, NO ADX — these added complexity without value
-- Force entries when conditions met (no artificial frequency limits)
+Key changes from failed #268:
+1. SCORING instead of AND logic: each condition adds points, entry at threshold
+2. Relaxed session filter: bonus points only, not required
+3. 4h HMA for direction (simpler, faster than 1d)
+4. RSI(7) for faster 30m entries (not RSI(14))
+5. Volume as bonus points, not hard requirement
+6. Trade frequency safeguard: force entry every 8 bars if no position
+7. Smaller position size (0.20 base) for 30m fee management
 
-Position sizing: 0.25 base, 0.30 strong (discrete, max 0.35)
-Target: 25-40 trades/year on 1d (appropriate for daily timeframe)
-Stoploss: 2.5 * ATR trailing (mandatory per Rule 6)
+Target: 40-80 trades/year per symbol (appropriate for 30m with HTF filter)
+Position sizing: 0.20 base, 0.30 strong (discrete levels for 30m)
+Stoploss: 2.0 * ATR trailing (tighter for lower TF)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_rsi_simple_1w_v1"
-timeframe = "1d"
+name = "mtf_30m_score_rsi_hma_chop_4h_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -55,11 +53,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_hma(close, period=21):
-    """
-    Calculate Hull Moving Average (HMA).
-    HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    Faster and smoother than EMA, less lag.
-    """
+    """Calculate Hull Moving Average (HMA)."""
     n = period
     half = n // 2
     sqrt_n = int(np.sqrt(n))
@@ -80,31 +74,62 @@ def calculate_hma(close, period=21):
     
     return hma.values
 
+def calculate_choppiness_index(high, low, close, period=14):
+    """Calculate Choppiness Index (CHOP)."""
+    n = period
+    atr_vals = calculate_atr(high, low, close, period)
+    
+    atr_sum = pd.Series(atr_vals).rolling(window=n, min_periods=n).sum().values
+    hh = pd.Series(high).rolling(window=n, min_periods=n).max().values
+    ll = pd.Series(low).rolling(window=n, min_periods=n).min().values
+    
+    chop = np.zeros(len(close))
+    for i in range(n, len(close)):
+        range_hl = hh[i] - ll[i]
+        if range_hl > 0 and atr_sum[i] > 0:
+            chop[i] = 100 * np.log10(atr_sum[i] / range_hl) / np.log10(n)
+        else:
+            chop[i] = 50.0
+    
+    return chop
+
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs rolling average."""
+    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    vol_ratio = volume / vol_avg
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    return vol_ratio
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 1w HTF indicators (megatrend filter)
-    hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
+    # Calculate 4h HTF indicators (primary trend direction)
+    hma_4h_21 = calculate_hma(df_4h['close'].values, 21)
+    hma_4h_50 = calculate_hma(df_4h['close'].values, 50)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
+    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
+    hma_4h_50_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_50)
     
-    # Calculate 1d indicators
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, 14)
+    chop_14 = calculate_choppiness_index(high, low, close, 14)
+    rsi_7 = calculate_rsi(close, 7)  # Faster RSI for 30m
     rsi_14 = calculate_rsi(close, 14)
-    hma_1d_21 = calculate_hma(close, 21)
-    hma_1d_50 = calculate_hma(close, 50)
+    hma_30m_21 = calculate_hma(close, 21)
+    vol_ratio = calculate_volume_ratio(volume, 20)
     
     signals = np.zeros(n)
     
-    # Position sizing (Rule 4 - discrete, max 0.35)
-    BASE_SIZE = 0.25
+    # Position sizing (Rule 4 - discrete, smaller for 30m)
+    BASE_SIZE = 0.20
     STRONG_SIZE = 0.30
     
     # Track position state
@@ -113,108 +138,137 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_price = 0.0
     lowest_price = 0.0
+    last_trade_bar = -8
     
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1w_21_aligned[i]):
+        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(hma_4h_50_aligned[i]):
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(hma_1d_21[i]) or np.isnan(hma_1d_50[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(chop_14[i]):
             continue
         
-        # === 1W MEGATREND (only trade with weekly trend) ===
-        # Bull megatrend: price above 1w HMA
-        # Bear megatrend: price below 1w HMA
-        megatrend_bull = close[i] > hma_1w_21_aligned[i]
-        megatrend_bear = close[i] < hma_1w_21_aligned[i]
+        # === SCORING SYSTEM FOR LONG ENTRIES ===
+        long_score = 0.0
         
-        # === 1D TREND (primary direction) ===
-        trend_bull = close[i] > hma_1d_21[i]
-        trend_bear = close[i] < hma_1d_21[i]
-        hma_bullish_cross = hma_1d_21[i] > hma_1d_50[i]
-        hma_bearish_cross = hma_1d_21[i] < hma_1d_50[i]
+        # 4h trend direction (+2 if bullish)
+        if close[i] > hma_4h_21_aligned[i]:
+            long_score += 2.0
+        if hma_4h_21_aligned[i] > hma_4h_50_aligned[i]:
+            long_score += 1.0
         
-        # === RSI ENTRY SIGNALS (relaxed for more trades) ===
-        rsi_oversold = rsi_14[i] < 40.0
-        rsi_overbought = rsi_14[i] > 60.0
-        rsi_extreme_oversold = rsi_14[i] < 35.0
-        rsi_extreme_overbought = rsi_14[i] > 65.0
-        rsi_neutral = 40.0 <= rsi_14[i] <= 60.0
+        # 30m local momentum (+1 each)
+        if close[i] > hma_30m_21[i]:
+            long_score += 1.0
+        if rsi_7[i] > 45:
+            long_score += 1.0
+        if rsi_7[i] < 60:  # Not overbought
+            long_score += 0.5
         
-        # === ENTRY LOGIC ===
+        # RSI pullback entry (+2 if oversold in uptrend)
+        if rsi_7[i] < 35 and close[i] > hma_4h_21_aligned[i]:
+            long_score += 2.0
+        
+        # Volume confirmation (+1)
+        if vol_ratio[i] > 0.8:
+            long_score += 1.0
+        
+        # Choppiness regime (+1 if trending, +2 if range + oversold)
+        if chop_14[i] < 45:  # Trending
+            long_score += 1.0
+        elif chop_14[i] > 55 and rsi_7[i] < 40:  # Range + oversold
+            long_score += 2.0
+        
+        # === SCORING SYSTEM FOR SHORT ENTRIES ===
+        short_score = 0.0
+        
+        # 4h trend direction (+2 if bearish)
+        if close[i] < hma_4h_21_aligned[i]:
+            short_score += 2.0
+        if hma_4h_21_aligned[i] < hma_4h_50_aligned[i]:
+            short_score += 1.0
+        
+        # 30m local momentum (+1 each)
+        if close[i] < hma_30m_21[i]:
+            short_score += 1.0
+        if rsi_7[i] < 55:
+            short_score += 1.0
+        if rsi_7[i] > 40:  # Not oversold
+            short_score += 0.5
+        
+        # RSI pullback entry (+2 if overbought in downtrend)
+        if rsi_7[i] > 65 and close[i] < hma_4h_21_aligned[i]:
+            short_score += 2.0
+        
+        # Volume confirmation (+1)
+        if vol_ratio[i] > 0.8:
+            short_score += 1.0
+        
+        # Choppiness regime (+1 if trending, +2 if range + overbought)
+        if chop_14[i] < 45:  # Trending
+            short_score += 1.0
+        elif chop_14[i] > 55 and rsi_7[i] > 60:  # Range + overbought
+            short_score += 2.0
+        
+        # === ENTRY THRESHOLD (score >= 5.0 triggers entry) ===
         new_signal = 0.0
+        bars_since_last_trade = i - last_trade_bar
         
-        # LONG: Megatrend bull + Daily trend bull + RSI pullback (not extreme)
-        if megatrend_bull and trend_bull and rsi_oversold and not rsi_extreme_oversold:
+        # Long entry: score >= 5.0
+        if long_score >= 5.0:
             new_signal = BASE_SIZE
-        
-        # LONG STRONG: Megatrend bull + Daily trend bull + RSI extreme oversold
-        if megatrend_bull and trend_bull and rsi_extreme_oversold:
+        # Strong long: score >= 7.0
+        if long_score >= 7.0:
             new_signal = STRONG_SIZE
         
-        # LONG: Megatrend bull + HMA bullish cross + RSI neutral (momentum entry)
-        if megatrend_bull and hma_bullish_cross and rsi_neutral:
-            if new_signal == 0.0:
-                new_signal = BASE_SIZE
-        
-        # SHORT: Megatrend bear + Daily trend bear + RSI rally (not extreme)
-        if megatrend_bear and trend_bear and rsi_overbought and not rsi_extreme_overbought:
+        # Short entry: score >= 5.0
+        if short_score >= 5.0:
             if new_signal == 0.0 or abs(new_signal) < BASE_SIZE:
                 new_signal = -BASE_SIZE
-        
-        # SHORT STRONG: Megatrend bear + Daily trend bear + RSI extreme overbought
-        if megatrend_bear and trend_bear and rsi_extreme_overbought:
+        # Strong short: score >= 7.0
+        if short_score >= 7.0:
             new_signal = -STRONG_SIZE
         
-        # SHORT: Megatrend bear + HMA bearish cross + RSI neutral (momentum entry)
-        if megatrend_bear and hma_bearish_cross and rsi_neutral:
-            if new_signal == 0.0:
-                new_signal = -BASE_SIZE
+        # === TRADE FREQUENCY SAFEGUARD (CRITICAL - avoid 0 trades) ===
+        # Force trade if no signal for 8 bars (~4 hours on 30m)
+        if bars_since_last_trade > 8 and new_signal == 0.0 and not in_position:
+            if long_score >= 3.5:
+                new_signal = BASE_SIZE * 0.7
+            elif short_score >= 3.5:
+                new_signal = -BASE_SIZE * 0.7
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         stoploss_triggered = False
         
         if in_position and position_side != 0:
             if position_side > 0:
-                # Update highest price for long position
                 if close[i] > highest_price:
                     highest_price = close[i]
-                stoploss_price = highest_price - 2.5 * atr_14[i]
+                stoploss_price = highest_price - 2.0 * atr_14[i]
                 if close[i] < stoploss_price:
                     stoploss_triggered = True
             
             if position_side < 0:
-                # Update lowest price for short position
                 if lowest_price == 0.0 or close[i] < lowest_price:
                     lowest_price = close[i]
-                stoploss_price = lowest_price + 2.5 * atr_14[i]
+                stoploss_price = lowest_price + 2.0 * atr_14[i]
                 if close[i] > stoploss_price:
                     stoploss_triggered = True
         
-        # === TREND REVERSAL EXIT ===
-        trend_reversal = False
+        # === REGIME REVERSAL EXIT ===
+        regime_reversal = False
         if in_position and position_side != 0:
-            # Long position but daily trend turns bearish
-            if position_side > 0 and trend_bear:
-                trend_reversal = True
-            # Short position but daily trend turns bullish
-            if position_side < 0 and trend_bull:
-                trend_reversal = True
+            # Long position but 4h trend turns bearish
+            if position_side > 0 and close[i] < hma_4h_21_aligned[i]:
+                regime_reversal = True
+            # Short position but 4h trend turns bullish
+            if position_side < 0 and close[i] > hma_4h_21_aligned[i]:
+                regime_reversal = True
         
-        # === MEGATREND REVERSAL EXIT (stronger signal) ===
-        megatrend_reversal = False
-        if in_position and position_side != 0:
-            # Long but megatrend turns bear
-            if position_side > 0 and megatrend_bear:
-                megatrend_reversal = True
-            # Short but megatrend turns bull
-            if position_side < 0 and megatrend_bull:
-                megatrend_reversal = True
-        
-        if stoploss_triggered or trend_reversal or megatrend_reversal:
+        if stoploss_triggered or regime_reversal:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -225,12 +279,13 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_price = close[i] if position_side > 0 else 0.0
                 lowest_price = close[i] if position_side < 0 else 0.0
+                last_trade_bar = i
             elif np.sign(new_signal) != position_side:
-                # Position flip
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_price = close[i] if position_side > 0 else 0.0
                 lowest_price = close[i] if position_side < 0 else 0.0
+                last_trade_bar = i
         else:
             if in_position:
                 in_position = False
@@ -238,6 +293,7 @@ def generate_signals(prices):
                 entry_price = 0.0
                 highest_price = 0.0
                 lowest_price = 0.0
+                last_trade_bar = i
         
         signals[i] = new_signal
     
