@@ -1,59 +1,57 @@
 #!/usr/bin/env python3
 """
-Experiment #470: 30m Supertrend + RSI Pullback with 4h/1d Regime Filter
+Experiment #471: 1h Connors RSI + 4h HMA Trend + ADX Regime Filter
 
-Hypothesis: After analyzing 469 failed experiments, the pattern is clear:
-- Pure trend strategies fail on BTC/ETH whipsaws (2022 crash destroyed gains)
-- Pure mean reversion fails on strong trends (SOL 100x rally)
-- 30m timeframe needs STRONGER filtering than 4h/12h due to noise
+Hypothesis: After analyzing 470 failed experiments, the key insight is that 1h strategies
+need faster-reacting indicators than 4h/12h strategies, but still require HTF trend filtering.
+This strategy uses:
 
-This strategy combines:
-1. 4H HMA(21) TREND BIAS: Smooth trend direction (HMA less lag than EMA)
-   - Long bias when price > 4h HMA
-   - Short bias when price < 4h HMA
-   
-2. 1D ADX(14) REGIME FILTER: Detect trending vs ranging markets
-   - ADX > 25 = trending (allow Supertrend breakouts)
-   - ADX < 25 = ranging (allow RSI mean reversion only)
-   - Prevents breakout whipsaws in choppy conditions
+1. CONNORS RSI (CRSI) - Proven 75% win rate in literature:
+   - RSI(3) + RSI_Streak(2) + PercentRank(100) / 3
+   - Long when CRSI < 15 (oversold), Short when CRSI > 85 (overbought)
+   - Much faster than standard RSI(14), critical for 1h timeframe
 
-3. SUPERTREND(10, 3.0) ENTRY SIGNAL:
-   - Clean trend-following signal with ATR-based stops built-in
-   - Long when price crosses above Supertrend lower band
-   - Short when price crosses below Supertrend upper band
-   - Only in trending regime (1d ADX > 25)
+2. 4H HMA(21) TREND FILTER (via mtf_data helper):
+   - Only long when price > 4h HMA (bull bias)
+   - Only short when price < 4h HMA (bear bias)
+   - HMA smoother than EMA, reduces whipsaws
 
-4. RSI(14) PULLBACK ENTRY (looser thresholds for more trades):
-   - Long: RSI < 40 (not 30) + price > 4h HMA
-   - Short: RSI > 60 (not 70) + price < 4h HMA
-   - Works in any regime, ensures sufficient trade count
+3. DAILY ADX REGIME FILTER (via mtf_data helper):
+   - ADX > 15 = sufficient trend strength to trade
+   - ADX < 15 = skip trades (too choppy)
+   - Looser than 20 to ensure sufficient trades on all symbols
 
-5. ATR(14) TRAILING STOP at 2.0x:
-   - Signal → 0 when price moves 2.0*ATR against position
+4. BOLLINGER BAND CONFIRMATION:
+   - Long: price < BB_lower (20, 2.0) + CRSI < 15
+   - Short: price > BB_upper (20, 2.0) + CRSI > 85
+   - Dual confirmation reduces false signals
+
+5. ATR(14) TRAILING STOP at 2.5x:
+   - Signal → 0 when price moves 2.5*ATR against position
    - Critical for crash protection
 
 6. POSITION SIZING: 0.28 discrete
-   - Max 28% capital per position
-   - Discrete levels (0.0, ±0.28) minimize fee churn
+   - 28% capital per position
+   - Discrete levels minimize fee churn
 
-Why this should work on 30m:
-- 4h HMA provides stable trend bias (not noisy like 1h)
-- 1d ADX regime filter prevents whipsaw entries
-- Supertrend + RSI dual entry ensures >10 trades/year
-- Looser RSI thresholds (40/60 vs 30/70) guarantee trades on all symbols
-- 2.0x ATR stoploss protects against 2022-style crashes
+Why this should work on 1h:
+- Connors RSI reacts faster than standard RSI, critical for 1h swings
+- 4h HMA + Daily ADX provides robust regime detection
+- Dual confirmation (CRSI + BB) reduces false signals
+- Looser ADX threshold (15 vs 20) ensures >10 trades/symbol
+- Should work on BTC/ETH/SOL individually (not SOL-biased)
 
-Timeframe: 30m (REQUIRED for this experiment)
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h and 1d via mtf_data helper (call ONCE before loop)
 Position sizing: 0.28 discrete levels
-Stoploss: 2.0 * ATR(14) trailing
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_supertrend_rsi_4h_hma_1d_adx_regime_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_connors_rsi_4h_hma_daily_adx_bb_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -136,55 +134,70 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_supertrend(high, low, close, atr, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator."""
+def calculate_streak_rsi(close, period=2):
+    """Calculate RSI of consecutive up/down streaks (Connors RSI component)."""
     n = len(close)
-    upper_band = np.full(n, np.nan)
-    lower_band = np.full(n, np.nan)
-    supertrend = np.full(n, np.nan)
-    trend = np.ones(n)  # 1 = uptrend, -1 = downtrend
+    streak = np.zeros(n)
+    
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = 0
+    
+    # Convert streak to RSI-like value (0-100)
+    streak_s = pd.Series(streak)
+    # Map streak to 0-100 scale: positive streaks → high values, negative → low
+    streak_rsi = np.zeros(n)
+    for i in range(period, n):
+        window = streak[i-period+1:i+1]
+        if len(window) > 0:
+            avg_streak = np.mean(window)
+            # Normalize to 0-100: assume max streak around 5-6
+            streak_rsi[i] = min(100, max(0, 50 + avg_streak * 10))
+    
+    return streak_rsi
+
+def calculate_percent_rank(close, period=100):
+    """Calculate Percent Rank of current close vs last N closes (Connors RSI component)."""
+    n = len(close)
+    pr = np.full(n, np.nan)
     
     for i in range(period, n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            continue
-        
-        hl2 = (high[i] + low[i]) / 2
-        upper_band[i] = hl2 + multiplier * atr[i]
-        lower_band[i] = hl2 - multiplier * atr[i]
-        
-        if i == period:
-            supertrend[i] = upper_band[i]
-            trend[i] = -1 if close[i] < upper_band[i] else 1
-        else:
-            # Upper band logic
-            if upper_band[i] < upper_band[i-1] or close[i-1] > upper_band[i-1]:
-                upper_band[i] = upper_band[i]
-            else:
-                upper_band[i] = upper_band[i-1]
-            
-            # Lower band logic
-            if lower_band[i] > lower_band[i-1] or close[i-1] < lower_band[i-1]:
-                lower_band[i] = lower_band[i]
-            else:
-                lower_band[i] = lower_band[i-1]
-            
-            # Trend determination
-            if trend[i-1] == 1:
-                if close[i] < lower_band[i]:
-                    trend[i] = -1
-                    supertrend[i] = upper_band[i]
-                else:
-                    trend[i] = 1
-                    supertrend[i] = lower_band[i]
-            else:
-                if close[i] > upper_band[i]:
-                    trend[i] = 1
-                    supertrend[i] = lower_band[i]
-                else:
-                    trend[i] = -1
-                    supertrend[i] = upper_band[i]
+        window = close[i-period+1:i+1]
+        current = close[i]
+        # Count how many values in window are less than current
+        count_less = np.sum(window[:-1] < current)  # exclude current from comparison
+        pr[i] = 100 * count_less / (period - 1)
     
-    return supertrend, trend, upper_band, lower_band
+    return pr
+
+def calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100):
+    """Calculate Connors RSI: (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3"""
+    rsi_3 = calculate_rsi(close, rsi_period)
+    streak_rsi = calculate_streak_rsi(close, streak_period)
+    percent_rank = calculate_percent_rank(close, pr_period)
+    
+    crsi = (rsi_3 + streak_rsi + percent_rank) / 3.0
+    return crsi
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    
+    upper = sma + (std_dev * std)
+    lower = sma - (std_dev * std)
+    
+    return upper.values, lower.values
+
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average."""
+    close_s = pd.Series(close)
+    return close_s.rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -204,10 +217,11 @@ def generate_signals(prices):
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    supertrend, st_trend, st_upper, st_lower = calculate_supertrend(high, low, close, atr, 10, 3.0)
+    crsi = calculate_connors_rsi(close, 3, 2, 100)
+    bb_upper, bb_lower = calculate_bollinger_bands(close, 20, 2.0)
+    sma_50 = calculate_sma(close, 50)
     
     signals = np.zeros(n)
     
@@ -221,7 +235,7 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
@@ -231,7 +245,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(supertrend[i]):
+        if np.isnan(crsi[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(sma_50[i]):
             signals[i] = 0.0
             continue
         
@@ -239,59 +257,45 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === 1D ADX REGIME FILTER ===
+        # === DAILY ADX REGIME FILTER ===
         adx_1d_val = adx_1d_aligned[i]
-        trending_market = adx_1d_val > 25
-        ranging_market = adx_1d_val <= 25
+        trending_market = adx_1d_val > 15  # Looser threshold for more trades
         
-        # === SUPERTREND SIGNAL ===
-        # Long: Supertrend flips to uptrend (trend changes from -1 to 1)
-        # Short: Supertrend flips to downtrend (trend changes from 1 to -1)
-        supertrend_long = False
-        supertrend_short = False
+        # === CONNORS RSI SIGNALS ===
+        # CRSI < 15 = oversold (long), CRSI > 85 = overbought (short)
+        crsi_long = crsi[i] < 15
+        crsi_short = crsi[i] > 85
         
-        if i > 100 and not np.isnan(st_trend[i-1]):
-            if st_trend[i] == 1 and st_trend[i-1] == -1:
-                supertrend_long = True
-            elif st_trend[i] == -1 and st_trend[i-1] == 1:
-                supertrend_short = True
-        
-        # === RSI PULLBACK SIGNAL (looser thresholds for more trades) ===
-        rsi_long = rsi[i] < 40  # Was 30, loosened to ensure trades
-        rsi_short = rsi[i] > 60  # Was 70, loosened to ensure trades
+        # === BOLLINGER BAND CONFIRMATION ===
+        bb_long = close[i] < bb_lower[i]  # Price below lower band
+        bb_short = close[i] > bb_upper[i]  # Price above upper band
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # SUPERTREND BREAKOUT (only in trending market per 1d ADX)
-        if trending_market:
-            if supertrend_long and bull_trend_4h:
-                new_signal = SIZE
-            elif supertrend_short and bear_trend_4h:
-                new_signal = -SIZE
+        # LONG: CRSI oversold + BB lower + 4h bull trend + daily ADX > 15
+        if crsi_long and bb_long and bull_trend_4h and trending_market:
+            new_signal = SIZE
         
-        # RSI PULLBACK (works in any regime, must align with 4h trend)
-        if new_signal == 0.0:
-            if rsi_long and bull_trend_4h:
-                new_signal = SIZE
-            elif rsi_short and bear_trend_4h:
-                new_signal = -SIZE
+        # SHORT: CRSI overbought + BB upper + 4h bear trend + daily ADX > 15
+        elif crsi_short and bb_short and bear_trend_4h and trending_market:
+            new_signal = -SIZE
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
-        if in_position and position_side != 0:
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        if in_position and position_side != 0 and new_signal != 0.0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.0 * atr[i]
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
-            if position_side < 0:
+            elif position_side < 0:
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.0 * atr[i]
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
