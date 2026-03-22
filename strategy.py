@@ -1,35 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #546: 1d HMA-KAMA Crossover with Weekly Trend Bias and Volatility Regime
+Experiment #547: 15m Volume-Confirmed RSI with 4h HMA Trend Bias
 
-Hypothesis: After 500+ failed experiments, the key insight for daily timeframe is:
-1. 1d captures major crypto cycles (2021 bull, 2022 crash, 2023-24 recovery)
-2. HMA-KAMA crossover provides smoother trend signal than EMA (less whipsaw)
-3. Weekly HMA bias prevents counter-trend entries (critical for 2022 crash)
-4. Bollinger Band Width regime filter avoids entering during extreme volatility
-5. RSI momentum filter ensures we enter on confirmation, not just crossover
-6. Fewer but higher-quality trades = better risk-adjusted returns on daily
+Hypothesis: After analyzing 500+ failed experiments, the key insight is:
+1. 15m timeframe needs STRONG filters to avoid noise (most 15m strategies failed)
+2. Volume confirmation (taker_buy_volume ratio) filters false breakouts - UNIQUE EDGE
+3. 4h HMA trend bias prevents counter-trend entries (proven in best strategies)
+4. RSI(7) extremes with volume confirmation = high probability mean reversion
+5. Asymmetric sizing: larger positions when 4h trend confirms, smaller when against
+6. Tight 2*ATR stoploss for 15m (faster timeframe needs tighter stops)
 
-Why this should work on 1d:
-- 1d has 1 bar/day = ~365 bars/year = very manageable trade frequency
-- HMA(21) + KAMA(40) crossover = ~20-40 day trend changes = captures major moves
-- 1w HMA via mtf_data helper provides proper HTF alignment
-- BB Width < 70th percentile = avoid extreme volatility periods
-- RSI(14) between 35-65 = avoid overbought/oversold extremes
-- 2.5*ATR stoploss protects against 2022-style crashes
-- Discrete sizing (0.30) limits drawdown during crashes
+Why this should work on 15m:
+- Volume ratio shows institutional flow direction (unique data column available)
+- 4h HMA is available via mtf_data helper with proper alignment
+- RSI(7) is faster than RSI(14), catches 15m swings better
+- Asymmetric sizing reduces risk when trading against HTF trend
+- Fewer but higher quality trades = less fee drag
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.30 discrete (max 0.40)
-Stoploss: 2.5 * ATR(14) trailing
+Timeframe: 15m (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.20-0.30 discrete (max 0.40)
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_kama_crossover_weekly_bias_bb_regime_rsi_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_volume_rsi_4h_hma_asymmetric_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -52,90 +50,59 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_kama(close, period=40, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average (KAMA)."""
-    close_s = pd.Series(close)
-    
-    # Efficiency Ratio
-    change = np.abs(close_s - close_s.shift(period))
-    volatility = np.abs(close_s - close_s.shift(1)).rolling(window=period, min_periods=period).sum()
-    er = change / volatility.replace(0, np.inf)
-    er = er.fillna(0)
-    
-    # Smoothing Constant
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    
-    # KAMA calculation
-    kama = np.zeros(len(close))
-    kama[period-1] = close_s.iloc[period-1]
-    for i in range(period, len(close)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close_s.iloc[i] - kama[i-1])
-    
-    return kama
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI (Relative Strength Index)."""
+def calculate_rsi(close, period=7):
+    """Calculate RSI with configurable period."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
-    
     avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
     rs = avg_gain / avg_loss.replace(0, np.inf)
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50)
-    
     return rsi.values
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands and Band Width."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    band_width = (upper - lower) / sma * 100  # as percentage
-    
-    return upper.values, lower.values, band_width.values
+def calculate_volume_ratio(taker_buy_volume, volume):
+    """Calculate taker buy volume ratio (institutional flow indicator)."""
+    ratio = taker_buy_volume / np.maximum(volume, 1)
+    return ratio
 
-def calculate_bb_percentile(band_width, lookback=100):
-    """Calculate Bollinger Band Width percentile over lookback period."""
-    bw_s = pd.Series(band_width)
-    bw_percentile = bw_s.rolling(window=lookback, min_periods=lookback).apply(
-        lambda x: (x < x.iloc[-1]).sum() / len(x) * 100 if len(x) == lookback else np.nan
-    )
-    return bw_percentile.values
+def calculate_zscore(values, period=20):
+    """Calculate rolling z-score for normalization."""
+    values_s = pd.Series(values)
+    rolling_mean = values_s.rolling(window=period, min_periods=period).mean()
+    rolling_std = values_s.rolling(window=period, min_periods=period).std()
+    zscore = (values_s - rolling_mean) / np.maximum(rolling_std, 1e-10)
+    return zscore.values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    hma_21 = calculate_hma(close, 21)
-    kama_40 = calculate_kama(close, 40)
-    rsi_14 = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2.0)
-    bb_percentile = calculate_bb_percentile(bb_width, 100)
+    rsi_7 = calculate_rsi(close, 7)
+    vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
+    vol_ratio_zscore = calculate_zscore(vol_ratio, 50)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.30
+    SIZE_BASE = 0.20
+    SIZE_CONFIRMED = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -144,64 +111,65 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_21[i]) or np.isnan(kama_40[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(vol_ratio_zscore[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(bb_percentile[i]):
-            signals[i] = 0.0
-            continue
+        # === 4H HMA TREND BIAS ===
+        bull_bias = close[i] > hma_4h_aligned[i]
+        bear_bias = close[i] < hma_4h_aligned[i]
         
-        # === WEEKLY HMA TREND BIAS ===
-        bull_bias = close[i] > hma_1w_aligned[i]
-        bear_bias = close[i] < hma_1w_aligned[i]
+        # === VOLUME CONFIRMATION ===
+        # High taker buy ratio = bullish institutional flow
+        # Low taker buy ratio = bearish institutional flow
+        vol_bullish = vol_ratio[i] > 0.55  # More than 55% taker buys
+        vol_bearish = vol_ratio[i] < 0.45  # Less than 45% taker buys
         
-        # === HMA-KAMA CROSSOVER ===
-        hma_above_kama = hma_21[i] > kama_40[i]
-        hma_below_kama = hma_21[i] < kama_40[i]
+        # Volume z-score confirmation (extreme volume = stronger signal)
+        vol_extreme = np.abs(vol_ratio_zscore[i]) > 1.0
         
-        # Previous bar crossover detection
-        prev_hma_above_kama = hma_21[i-1] > kama_40[i-1] if i > 0 else False
-        prev_hma_below_kama = hma_21[i-1] < kama_40[i-1] if i > 0 else False
+        # === RSI EXTREMES (faster period for 15m) ===
+        rsi_oversold = rsi_7[i] < 25  # Faster than RSI(14)<30
+        rsi_overbought = rsi_7[i] > 75  # Faster than RSI(14)>70
         
-        crossover_long = hma_above_kama and not prev_hma_above_kama
-        crossover_short = hma_below_kama and not prev_hma_below_kama
-        
-        # === RSI MOMENTUM FILTER (loose thresholds for more trades) ===
-        rsi_ok_long = 35 <= rsi_14[i] <= 70  # Not overbought
-        rsi_ok_short = 30 <= rsi_14[i] <= 65  # Not oversold
-        
-        # === BOLLINGER BAND WIDTH REGIME (avoid extreme volatility) ===
-        bb_regime_ok = bb_percentile[i] < 75  # Not in top 25% volatility
-        
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC WITH ASYMMETRIC SIZING ===
         new_signal = 0.0
         
-        # Long: HMA crosses above KAMA + weekly bullish bias + RSI ok + BB regime ok
-        if crossover_long and bull_bias and rsi_ok_long and bb_regime_ok:
-            new_signal = SIZE
+        # Long: RSI oversold + volume bullish + 4h trend confirmation
+        if rsi_oversold and vol_bullish:
+            if bull_bias:
+                # 4h trend confirms = larger position
+                new_signal = SIZE_CONFIRMED
+            else:
+                # Trading against 4h trend = smaller position (mean reversion only)
+                new_signal = SIZE_BASE
         
-        # Short: HMA crosses below KAMA + weekly bearish bias + RSI ok + BB regime ok
-        elif crossover_short and bear_bias and rsi_ok_short and bb_regime_ok:
-            new_signal = -SIZE
+        # Short: RSI overbought + volume bearish + 4h trend confirmation
+        elif rsi_overbought and vol_bearish:
+            if bear_bias:
+                # 4h trend confirms = larger position
+                new_signal = -SIZE_CONFIRMED
+            else:
+                # Trading against 4h trend = smaller position (mean reversion only)
+                new_signal = -SIZE_BASE
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr_14[i]
+                stoploss_price = highest_close - 2.0 * atr_14[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -209,24 +177,25 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr_14[i]
+                stoploss_price = lowest_close + 2.0 * atr_14[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if weekly HMA flips against position
+        # Exit if 4h HMA flips strongly against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_bias:
+            hma_distance = (close[i] - hma_4h_aligned[i]) / hma_4h_aligned[i]
+            if position_side > 0 and hma_distance < -0.02:  # Price 2% below 4h HMA
                 new_signal = 0.0
-            if position_side < 0 and bull_bias:
+            if position_side < 0 and hma_distance > 0.02:  # Price 2% above 4h HMA
                 new_signal = 0.0
         
-        # === CROSSOVER REVERSAL EXIT ===
-        # Exit if crossover goes against position
+        # === RSI NORMALIZATION EXIT ===
+        # Exit when RSI returns to neutral (mean reversion complete)
         if in_position and new_signal != 0.0:
-            if position_side > 0 and hma_below_kama:
+            if position_side > 0 and rsi_7[i] > 55:  # Long exit when RSI recovers
                 new_signal = 0.0
-            if position_side < 0 and hma_above_kama:
+            if position_side < 0 and rsi_7[i] < 45:  # Short exit when RSI recovers
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
