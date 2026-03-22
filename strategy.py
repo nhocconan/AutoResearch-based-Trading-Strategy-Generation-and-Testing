@@ -1,98 +1,64 @@
 #!/usr/bin/env python3
 """
-Experiment #032: 30m RSI Mean Reversion + 4h HMA Trend + Vol Regime
-Hypothesis: 30m timeframe captures intraday mean reversion while 4h HMA filters counter-trend trades.
-Volatility regime (ATR ratio) identifies expansion phases where mean reversion works best.
-Relaxed RSI thresholds (35/65) ensure sufficient trade frequency (>10 trades/symbol).
-Position sizing: 0.25 base, 0.30 max, discrete levels to minimize fee churn.
-Stoploss: 2.5*ATR trailing stop to limit drawdown in 2022-style crashes.
-Timeframe: 30m (REQUIRED), HTF: 4h via mtf_data helper (call ONCE before loop).
-Key innovation: ATR ratio > 1.3 indicates vol expansion = better mean reversion opportunities.
+Experiment #033: 1h Fisher Transform + 4h HMA Trend + Volume Confirmation
+Hypothesis: Ehlers Fisher Transform excels at catching reversals in bear/range markets (research-backed).
+Combined with 4h HMA trend filter to avoid counter-trend trades. Volume spike confirmation filters false signals.
+ATR trailing stop at 2.5*ATR limits drawdown. Volume-weighted position sizing adjusts to market conditions.
+Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper.
+Position sizing: 0.25 base, 0.35 on high volume, discrete levels to minimize fee churn.
+Key innovation: Fisher Transform crosses are more reliable than RSI in bear markets, especially with volume confirmation.
+This addresses the 2022 crash problem - Fisher catches reversals early while HMA keeps us aligned with major trend.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_rsi_4h_hma_vol_regime_v2"
-timeframe = "30m"
+name = "mtf_1h_fisher_4h_hma_vol_confirm_v1"
+timeframe = "1h"
 leverage = 1.0
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI using standard Wilder's smoothing."""
+def calculate_fisher_transform(high, low, close, period=9):
+    """
+    Ehlers Fisher Transform - converts price to Gaussian distribution for clearer signals.
+    Long when Fisher crosses above -1.5, short when crosses below +1.5.
+    Particularly effective in bear/range markets for catching reversals.
+    """
     n = len(close)
-    rsi = np.zeros(n)
-    rsi[:] = np.nan
+    fisher = np.zeros(n)
+    fisher[:] = np.nan
+    fisher_prev = np.zeros(n)
+    fisher_prev[:] = np.nan
     
-    if n < period + 1:
-        return rsi
+    # Calculate median price
+    median = (high + low) / 2.0
     
-    # Calculate price changes
-    delta = np.diff(close)
-    
-    # Separate gains and losses
-    gains = np.zeros(n - 1)
-    losses = np.zeros(n - 1)
-    gains[delta > 0] = delta[delta > 0]
-    losses[delta < 0] = -delta[delta < 0]
-    
-    # Initial average using simple mean
-    avg_gain = np.mean(gains[:period])
-    avg_loss = np.mean(losses[:period])
-    
-    # Set first valid RSI
-    if avg_loss == 0:
-        rsi[period] = 100.0
-    else:
-        rs = avg_gain / avg_loss
-        rsi[period] = 100 - (100 / (1 + rs))
-    
-    # Wilder's smoothing for remaining values
-    for i in range(period + 1, n):
-        avg_gain = (avg_gain * (period - 1) + gains[i - 1]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i - 1]) / period
-        
-        if avg_loss == 0:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain / avg_loss
-            rsi[i] = 100 - (100 / (1 + rs))
-    
-    return rsi
-
-def calculate_atr(high, low, close, period=14):
-    """Calculate ATR using Wilder's smoothing."""
-    n = len(close)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr = np.zeros(n)
-    atr[:] = np.nan
-    
-    if n < period:
-        return atr
-    
-    # Initial ATR using simple mean
-    atr[period - 1] = np.mean(tr[:period])
-    
-    # Wilder's smoothing
     for i in range(period, n):
-        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+        # Find highest high and lowest low over period
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        
+        # Avoid division by zero
+        if highest_high == lowest_low:
+            fisher[i] = 0.0
+            fisher_prev[i] = fisher[i-1] if i > 0 else 0.0
+            continue
+        
+        # Normalize price to -1 to +1 range
+        normalized = 2.0 * (median[i] - lowest_low) / (highest_high - lowest_low) - 1.0
+        
+        # Clamp to avoid extreme values
+        normalized = np.clip(normalized, -0.999, 0.999)
+        
+        # Apply Fisher transform
+        fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
+        
+        # Smooth with previous value
+        if i > 0 and not np.isnan(fisher[i-1]):
+            fisher[i] = 0.7 * fisher[i] + 0.3 * fisher_prev[i-1]
+        
+        fisher_prev[i] = fisher[i]
     
-    return atr
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and bandwidth."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma
-    bandwidth[np.isnan(bandwidth)] = 0.0
-    return upper, lower, bandwidth, sma
+    return fisher, fisher_prev
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -104,10 +70,47 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_atr(high, low, close, period=14):
+    """Calculate ATR using Wilder's smoothing."""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_volume_spike(volume, period=20):
+    """Detect volume spikes relative to recent average."""
+    vol_s = pd.Series(volume)
+    vol_avg = vol_s.rolling(window=period, min_periods=period).mean().values
+    vol_std = vol_s.rolling(window=period, min_periods=period).std().values
+    vol_zscore = (volume - vol_avg) / (vol_std + 1e-10)
+    vol_zscore[np.isnan(vol_zscore)] = 0.0
+    return vol_zscore, vol_avg
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI for additional confirmation."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
+
+def calculate_ema(close, period):
+    """Calculate EMA."""
+    close_s = pd.Series(close)
+    return close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -119,27 +122,21 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
+    fisher, fisher_prev = calculate_fisher_transform(high, low, close, period=9)
     atr = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
+    vol_zscore, vol_avg = calculate_volume_spike(volume, 20)
     rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_bandwidth, bb_sma = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    
-    # EMA trend filters
-    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # ATR ratio for volatility regime (vol expansion = better mean reversion)
-    atr_ratio = atr_7 / atr_30
-    atr_ratio[np.isnan(atr_ratio)] = 1.0
-    atr_ratio[np.isinf(atr_ratio)] = 1.0
+    ema_21 = calculate_ema(close, 21)
+    ema_50 = calculate_ema(close, 50)
+    ema_200 = calculate_ema(close, 200)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels to minimize fee churn (Rule 4)
     SIZE_BASE = 0.25
-    SIZE_MAX = 0.30
+    SIZE_HIGH = 0.35
+    SIZE_EXIT = 0.0
     
     # Track positions for stoploss
     position_side = 0
@@ -147,6 +144,10 @@ def generate_signals(prices):
     trailing_stop = 0.0
     highest_close = 0.0
     lowest_close = 0.0
+    
+    # Fisher crossing thresholds
+    FISHER_LONG_THRESHOLD = -1.5
+    FISHER_SHORT_THRESHOLD = 1.5
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -158,65 +159,55 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]):
+        if np.isnan(fisher[i]) or np.isnan(fisher_prev[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_bandwidth[i]) or np.isnan(bb_sma[i]):
-            signals[i] = 0.0
-            continue
-        
-        # 4h trend bias (HTF)
+        # 4h trend bias (HTF) - primary filter
         bull_trend = close[i] > hma_4h_aligned[i]
         bear_trend = close[i] < hma_4h_aligned[i]
         
-        # Volatility regime: expansion = better mean reversion
-        vol_expansion = atr_ratio[i] > 1.2
+        # Fisher Transform signals
+        fisher_cross_up = fisher_prev[i] < FISHER_LONG_THRESHOLD and fisher[i] >= FISHER_LONG_THRESHOLD
+        fisher_cross_down = fisher_prev[i] > FISHER_SHORT_THRESHOLD and fisher[i] <= FISHER_SHORT_THRESHOLD
         
-        # RSI signals (relaxed thresholds for trade frequency)
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
-        rsi_extreme_oversold = rsi[i] < 30
-        rsi_extreme_overbought = rsi[i] > 70
+        # Volume confirmation (spike = real move)
+        vol_confirmed = vol_zscore[i] > 0.5  # Above average volume
         
-        # Price position vs Bollinger Bands
-        price_near_lower = close[i] < bb_lower[i] * 1.01  # Within 1% of lower band
-        price_near_upper = close[i] > bb_upper[i] * 0.99  # Within 1% of upper band
-        price_below_bb_lower = close[i] < bb_lower[i]
-        price_above_bb_upper = close[i] > bb_upper[i]
+        # RSI confirmation (avoid extreme overbought/oversold counter-trend)
+        rsi_not_extreme_long = rsi[i] < 70  # Not overbought for long
+        rsi_not_extreme_short = rsi[i] > 30  # Not oversold for short
         
-        # EMA trend confirmation
-        ema_bullish = close[i] > ema_50[i]
-        ema_bearish = close[i] < ema_50[i]
+        # EMA trend confirmation on 1h
+        ema_bullish = close[i] > ema_21[i] and close[i] > ema_50[i]
+        ema_bearish = close[i] < ema_21[i] and close[i] < ema_50[i]
+        
+        # Price above/below 200 EMA for major trend
+        above_200 = close[i] > ema_200[i]
+        below_200 = close[i] < ema_200[i]
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Primary: RSI oversold + price near/below lower BB + 4h bull trend
-        if rsi_oversold and price_near_lower and bull_trend:
+        # Primary: Fisher cross up + 4h bull trend + volume confirmed
+        if fisher_cross_up and bull_trend and vol_confirmed:
+            new_signal = SIZE_HIGH if vol_zscore[i] > 1.0 else SIZE_BASE
+        # Secondary: Fisher cross up + 4h bull trend + RSI confirmation + above 200 EMA
+        elif fisher_cross_up and bull_trend and rsi_not_extreme_long and above_200:
             new_signal = SIZE_BASE
-        # Strong: RSI extreme oversold + 4h bull trend (ignore BB)
-        elif rsi_extreme_oversold and bull_trend:
-            new_signal = SIZE_MAX
-        # Vol expansion: RSI oversold + vol expansion + 4h bull trend
-        elif rsi_oversold and vol_expansion and bull_trend:
-            new_signal = SIZE_BASE
-        # EMA confirmation: RSI oversold + price below BB + EMA bullish
-        elif rsi_oversold and price_below_bb_lower and ema_bullish:
+        # Tertiary: Fisher cross up + EMA bullish + volume confirmed (trend continuation)
+        elif fisher_cross_up and ema_bullish and vol_confirmed:
             new_signal = SIZE_BASE
         
         # === SHORT ENTRY ===
-        # Primary: RSI overbought + price near/above upper BB + 4h bear trend
-        if rsi_overbought and price_near_upper and bear_trend:
+        # Primary: Fisher cross down + 4h bear trend + volume confirmed
+        if fisher_cross_down and bear_trend and vol_confirmed:
+            new_signal = -SIZE_HIGH if vol_zscore[i] > 1.0 else -SIZE_BASE
+        # Secondary: Fisher cross down + 4h bear trend + RSI confirmation + below 200 EMA
+        elif fisher_cross_down and bear_trend and rsi_not_extreme_short and below_200:
             new_signal = -SIZE_BASE
-        # Strong: RSI extreme overbought + 4h bear trend (ignore BB)
-        elif rsi_extreme_overbought and bear_trend:
-            new_signal = -SIZE_MAX
-        # Vol expansion: RSI overbought + vol expansion + 4h bear trend
-        elif rsi_overbought and vol_expansion and bear_trend:
-            new_signal = -SIZE_BASE
-        # EMA confirmation: RSI overbought + price above BB + EMA bearish
-        elif rsi_overbought and price_above_bb_upper and ema_bearish:
+        # Tertiary: Fisher cross down + EMA bearish + volume confirmed (trend continuation)
+        elif fisher_cross_down and ema_bearish and vol_confirmed:
             new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -226,7 +217,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR)
+            # Calculate trailing stop (2.5*ATR for more room)
             current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -241,7 +232,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR)
+            # Calculate trailing stop (2.5*ATR for more room)
             current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
