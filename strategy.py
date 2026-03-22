@@ -1,40 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #505: 15m Multi-Timeframe with 4h HMA Trend + RSI Pullback + Volume
+Experiment #506: 30m Trend-Following with 4h HMA Bias + 1d ADX Regime Filter
 
-Hypothesis: After 499 failed experiments, the key insight is that 15m strategies fail
-because they're either too strict (0 trades) or too loose (whipsaw losses). This strategy:
+Hypothesis: After 505 experiments, the clear pattern is that MEAN REVERSION on 
+shorter timeframes (15m/30m/1h) fails due to fee drag and whipsaws. The winning 
+approach is TREND-FOLLOWING with HTF confirmation. This strategy implements:
 
-1. 4H HMA(21) TREND BIAS (via mtf_data helper):
-   - Long only when price > 4h HMA (trend-aligned entries)
-   - Short only when price < 4h HMA (trend-aligned entries)
-   - Proven to 2x Sharpe in previous successful strategies
+1. 4H HMA(21) TREND BIAS (via mtf_data helper - call ONCE):
+   - Long only when price > 4h HMA (bullish HTF trend)
+   - Short only when price < 4h HMA (bearish HTF trend)
+   - HMA is smoother than EMA, less whipsaw
 
-2. 15M RSI(14) PULLBACK ENTRY:
-   - Long: RSI < 40 (looser than 30 to ensure trades)
-   - Short: RSI > 60 (looser than 70 to ensure trades)
-   - Pullback entries in direction of HTF trend
+2. 1D ADX(14) REGIME FILTER (via mtf_data helper - call ONCE):
+   - Only trade when 1d ADX > 20 (trending market)
+   - Skip trades when ADX < 20 (choppy/ranging - avoid fee drain)
+   - Critical filter that was missing in failed 30m strategies
 
-3. VOLUME CONFIRMATION:
-   - Volume > 1.2 * SMA(volume, 20) confirms interest
-   - Reduces false breakouts in low-volume periods
+3. 30M DONCHIAN(20) BREAKOUT ENTRY:
+   - Long: price breaks above Donchian upper + 4h HMA bullish + 1d ADX > 20
+   - Short: price breaks below Donchian lower + 4h HMA bearish + 1d ADX > 20
+   - Breakout entries catch sustained moves, not mean-reversion whipsaws
 
 4. ATR(14) TRAILING STOP at 2.5x:
-   - Tighter stop for 15m timeframe volatility
+   - Tighter stop for 30m timeframe (vs 3.0x on daily)
    - Signal → 0 when price moves 2.5*ATR against position
 
 5. POSITION SIZING: 0.25 discrete
-   - Conservative for 15m noise
-   - Discrete levels minimize fee churn
+   - Conservative for 30m volatility
+   - Discrete levels (0.0, ±0.25) minimize fee churn
 
-Why this should work on 15m:
-- 4h trend filter prevents counter-trend trades (major failure mode)
-- Looser RSI thresholds (40/60) ensure sufficient trades
-- Volume filter reduces whipsaws in choppy periods
-- Should generate 50-100 trades/year per symbol
+Why this should work on 30m (unlike failed #494, #500, #505):
+- TREND-FOLLOWING not mean-reversion (mean-rev killed by fees on 30m)
+- Dual HTF filter (4h trend + 1d regime) prevents false breakouts
+- ADX > 20 filter avoids trading in choppy markets (major failure cause)
+- Should generate 40-80 trades/year per symbol (enough for Sharpe)
+- All symbols should profit (not SOL-only bias)
 
-Timeframe: 15m (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
+Timeframe: 30m (REQUIRED for this experiment)
+HTF: 4h HMA + 1d ADX via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
@@ -42,8 +45,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_4h_hma_rsi_pullback_volume_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_4h_hma_1d_adx_donchian_breakout_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -66,51 +69,90 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index (ADX)."""
+    n = len(close)
+    adx = np.full(n, np.nan)
     
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    for i in range(period, n):
+        if tr_s[i] > 1e-10:
+            plus_di = 100 * plus_dm_s[i] / tr_s[i]
+            minus_di = 100 * minus_dm_s[i] / tr_s[i]
+            di_sum = plus_di + minus_di
+            if di_sum > 1e-10:
+                dx = 100 * np.abs(plus_di - minus_di) / di_sum
+            else:
+                dx = 0
+        else:
+            dx = 0
+        
+        if i == period:
+            adx[i] = dx
+        else:
+            adx[i] = ((adx[i-1] * (period - 1)) + dx) / period
+    
+    return adx
 
-def calculate_sma(values, period=20):
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel."""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = high[i-period+1:i+1].max()
+        lower[i] = low[i-period+1:i+1].min()
+    
+    return upper, lower
+
+def calculate_sma(close, period=50):
     """Calculate Simple Moving Average."""
-    values_s = pd.Series(values)
-    return values_s.rolling(window=period, min_periods=period).mean().values
-
-def calculate_ema(close, period=21):
-    """Calculate Exponential Moving Average."""
     close_s = pd.Series(close)
-    return close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+    return close_s.rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    # 4h for trend bias
     df_4h = get_htf_data(prices, '4h')
-    
-    # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    
-    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # 1d for regime filter (ADX)
+    df_1d = get_htf_data(prices, '1d')
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    volume_sma = calculate_sma(volume, 20)
-    ema_21 = calculate_ema(close, 21)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    sma_50 = calculate_sma(close, 50)
     
     signals = np.zeros(n)
     
@@ -134,11 +176,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(volume_sma[i]) or np.isnan(ema_21[i]):
+        if np.isnan(adx_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if volume_sma[i] == 0 or volume_sma[i] != volume_sma[i]:
+        if np.isnan(sma_50[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
@@ -146,27 +188,23 @@ def generate_signals(prices):
         bull_trend = close[i] > hma_4h_aligned[i]
         bear_trend = close[i] < hma_4h_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > 1.2 * volume_sma[i]
+        # === 1D ADX REGIME FILTER ===
+        trending_market = adx_1d_aligned[i] > 20.0
+        
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
+        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # LONG: 4h bullish + RSI pullback + volume confirmation
-        if bull_trend:
-            if rsi[i] < 40 and volume_confirmed:
-                new_signal = SIZE
-            elif rsi[i] < 45:
-                # Looser entry without volume for more trades
-                new_signal = SIZE
+        # Long entry: bullish 4h trend + trending market + Donchian breakout
+        if bull_trend and trending_market and breakout_long:
+            new_signal = SIZE
         
-        # SHORT: 4h bearish + RSI rally + volume confirmation
-        if bear_trend:
-            if rsi[i] > 60 and volume_confirmed:
-                new_signal = -SIZE
-            elif rsi[i] > 55:
-                # Looser entry without volume for more trades
-                new_signal = -SIZE
+        # Short entry: bearish 4h trend + trending market + Donchian breakout
+        if bear_trend and trending_market and breakout_short:
+            new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -194,16 +232,10 @@ def generate_signals(prices):
             if position_side < 0 and bull_trend:
                 new_signal = 0.0
         
-        # === EMA CROSSOVER EXIT ===
-        # Exit long if price crosses below EMA21
-        if in_position and position_side > 0:
-            if close[i] < ema_21[i] and i > 0 and close[i-1] >= ema_21[i-1]:
-                new_signal = 0.0
-        
-        # Exit short if price crosses above EMA21
-        if in_position and position_side < 0:
-            if close[i] > ema_21[i] and i > 0 and close[i-1] <= ema_21[i-1]:
-                new_signal = 0.0
+        # === REGIME EXIT ===
+        # Exit if market becomes choppy (ADX drops below 18)
+        if in_position and adx_1d_aligned[i] < 18.0:
+            new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
