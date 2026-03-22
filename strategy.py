@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #161: 12h Donchian Breakout + 1d HMA Trend Filter + ADX Confirmation
+Experiment #162: 1d HMA Trend + Weekly Bias + MACD Momentum + BB Regime Filter
 
-Hypothesis: 12h timeframe captures medium-term trend moves while avoiding the 
-noise of lower timeframes. Donchian(20) breakout provides clear entry signals 
-that work well in trending markets. 1d HMA provides stable trend bias to avoid 
-counter-trend breakouts. ADX(14) > 20 filters out choppy periods where breakouts 
-fail. This combination should work better than mean-reversion on 12h (see #149, #155).
+Hypothesis: Daily timeframe captures sustained trend moves while weekly HMA provides
+stable higher-timeframe bias. MACD histogram momentum confirms entry timing. Bollinger
+Band width detects regime (trend vs range) to adjust entry thresholds. This should
+work better than pure mean-reversion on 1d (see #150, #156 which failed).
 
-Why 12h might work:
-- Slower than 15m/30m/1h strategies that have been failing recently
-- Fewer but higher-quality trades (lower fee drag)
-- Donchian breakouts excel in sustained trends (2021 bull, 2025 recovery)
-- 1d HTF filter prevents false breakouts against major trend
+Why 1d might work now:
+- Slower timeframe = fewer false signals, lower fee drag
+- Weekly HTF filter prevents counter-trend entries during major reversals
+- MACD momentum adds timing precision to HMA trend signals
+- BB regime filter adapts to market conditions (trend vs range)
+- Conservative position sizing (0.25-0.35) limits drawdown during 2022 crash
 
 Learning from failures:
-- #149, #155 (12h RSI mean reversion): Negative Sharpe - mean reversion fails on 12h
-- #150 (1d EMA): Negative Sharpe - too slow, misses moves
-- Need trend-following on 12h, not mean reversion
-- Must ensure ≥10 trades per symbol (don't over-filter)
+- #150 (1d EMA): Negative Sharpe - too simple, no regime filter
+- #156 (1d regime adaptive): Negative Sharpe - over-filtered, too few trades
+- Need balance: enough filters to avoid whipsaws, but not so many that trades=0
+- Ensure ≥10 trades per symbol by keeping entry thresholds reasonable
 
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d via mtf_data helper (call ONCE before loop)
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25-0.35 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
@@ -29,8 +29,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1d_hma_adx_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_hma_1w_bias_macd_bb_regime_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -43,46 +43,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    n = len(close)
-    
-    # Calculate True Range and Directional Movement
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
-    
-    # Smooth with Wilder's method (EMA with span=period)
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Avoid division by zero
-    tr_s = np.where(tr_s == 0, 1e-10, tr_s)
-    
-    plus_di = 100 * plus_dm_s / tr_s
-    minus_di = 100 * minus_dm_s / tr_s
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
-
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -93,17 +53,37 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low over period)."""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    
-    for i in range(period-1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram."""
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and bandwidth."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / (sma + 1e-10)
+    return upper, lower, sma, bandwidth
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI using standard formula."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -112,18 +92,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    adx = calculate_adx(high, low, close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    hma_1d = calculate_hma(close, 21)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
+    bb_upper, bb_lower, bb_sma, bb_bandwidth = calculate_bollinger_bands(close, 20, 2.0)
+    rsi = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     
@@ -144,40 +126,75 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(hma_1d[i]) or np.isnan(macd_hist[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(bb_bandwidth[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 1d HMA = higher timeframe trend bias
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
+        # 1w HMA = higher timeframe trend bias (very stable)
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
         
-        # === TREND STRENGTH FILTER ===
-        # ADX > 20 = trending market (breakouts more likely to succeed)
-        trend_strength = adx[i] > 20
+        # 1d HMA = primary trend direction
+        bull_trend_1d = close[i] > hma_1d[i]
+        bear_trend_1d = close[i] < hma_1d[i]
         
-        # === DONCHIAN BREAKOUT SIGNAL ===
-        # Break above upper = long signal
-        # Break below lower = short signal
-        breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
+        # === REGIME DETECTION via Bollinger Bandwidth ===
+        # Low bandwidth = range/compression (expect breakout)
+        # High bandwidth = trend/volatile (expect continuation)
+        bb_percentile = np.nanpercentile(bb_bandwidth[max(0,i-100):i+1], 50)
+        is_range_regime = bb_bandwidth[i] < bb_percentile * 0.8
+        is_trend_regime = bb_bandwidth[i] > bb_percentile * 1.2
+        
+        # === MACD MOMENTUM CONFIRMATION ===
+        # MACD histogram crossing above zero = bullish momentum
+        # MACD histogram crossing below zero = bearish momentum
+        macd_bullish = macd_hist[i] > 0 and macd_hist[i-1] <= 0
+        macd_bearish = macd_hist[i] < 0 and macd_hist[i-1] >= 0
+        macd_positive = macd_hist[i] > 0
+        macd_negative = macd_hist[i] < 0
+        
+        # === RSI FILTER (not too strict) ===
+        # RSI > 45 = not oversold (for longs)
+        # RSI < 55 = not overbought (for shorts)
+        rsi_ok_long = rsi[i] > 40
+        rsi_ok_short = rsi[i] < 60
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS ===
-        # 1d bullish + ADX trending + Donchian breakout
-        if bull_trend_1d and trend_strength and breakout_long:
-            new_signal = SIZE_BASE
+        # Primary: 1d bullish + 1w bullish + MACD positive + RSI ok
+        # Secondary: Range regime allows entry at BB lower
+        long_condition_1 = bull_trend_1d and bull_trend_1w and macd_positive and rsi_ok_long
+        long_condition_2 = bull_trend_1d and macd_bullish and close[i] <= bb_lower[i] * 1.01
+        
+        if long_condition_1 or long_condition_2:
+            # Stronger signal if both 1d and 1w agree
+            if bull_trend_1d and bull_trend_1w:
+                new_signal = SIZE_STRONG
+            else:
+                new_signal = SIZE_BASE
         
         # === SHORT ENTRY CONDITIONS ===
-        # 1d bearish + ADX trending + Donchian breakout
-        if bear_trend_1d and trend_strength and breakout_short:
-            new_signal = -SIZE_BASE
+        # Primary: 1d bearish + 1w bearish + MACD negative + RSI ok
+        # Secondary: Range regime allows entry at BB upper
+        short_condition_1 = bear_trend_1d and bear_trend_1w and macd_negative and rsi_ok_short
+        short_condition_2 = bear_trend_1d and macd_bearish and close[i] >= bb_upper[i] * 0.99
+        
+        if short_condition_1 or short_condition_2:
+            # Stronger signal if both 1d and 1w agree
+            if bear_trend_1d and bear_trend_1w:
+                new_signal = -SIZE_STRONG
+            else:
+                new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Update trailing highs/lows for active positions
