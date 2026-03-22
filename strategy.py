@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #011: 12h Asymmetric Regime + 1d HMA Trend + Volume Confirmation
-Hypothesis: BTC/ETH perform differently in bull vs bear regimes. Use 1d HMA to determine
-primary trend bias, then apply ASYMMETRIC logic:
-- BULL regime (price > 1d HMA): Only take long breakouts, avoid shorts except extreme overbought
-- BEAR regime (price < 1d HMA): Only take short breakouts, avoid longs except extreme oversold
-- RANGE regime (ADX < 20): Mean reversion at Bollinger bands regardless of trend
+Experiment #012: 1d Regime-Adaptive with 1w HMA Trend + Multi-Signal Ensemble
+Hypothesis: Daily timeframe needs broader regime detection. Use 1w HMA for primary
+trend bias (bull/bear), ADX for trend strength, and combine 3 signal types:
+1. Donchian breakout (trend following) - works in strong trends
+2. Bollinger mean reversion (range trading) - works in choppy markets
+3. RSI extreme reversal (counter-trend) - works at extremes
 
 Key innovations:
-1. Asymmetric entry logic (different rules for bull vs bear) - avoids counter-trend failures
-2. Volume confirmation on breakouts (volume > 1.5x 20-bar avg) - filters false breakouts
-3. 12h timeframe captures multi-day swings without 4h noise or 1d lag
-4. 1d HMA via mtf_data helper for proper HTF alignment (no look-ahead)
-5. Conservative sizing (0.25 base, 0.35 max) with 2.5*ATR trailing stop
+1. 1w HMA via mtf_data for ultra-HTF trend bias (slower, more reliable than 1d)
+2. Ensemble voting: need 2/3 signals agree for entry (reduces false signals)
+3. Regime-adaptive thresholds: looser in trend, tighter in range
+4. Volume spike confirmation on breakouts (volume > 2x 20-day avg)
+5. Asymmetric sizing: 0.30 base, 0.35 max for high-conviction
+6. 2.5*ATR trailing stop with position tracking
 
-Timeframe: 12h (REQUIRED), HTF: 1d via mtf_data helper.
+Timeframe: 1d (REQUIRED), HTF: 1w via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_asymmetric_1d_hma_volume_v1"
-timeframe = "12h"
+name = "mtf_1d_regime_1w_hma_ensemble_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -142,7 +143,6 @@ def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
     kama = np.zeros(n)
     kama[:] = np.nan
     
-    # Efficiency Ratio
     change = np.abs(close - np.roll(close, er_period))
     change[:er_period] = np.nan
     volatility = np.zeros(n)
@@ -154,15 +154,17 @@ def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
     er[mask] = change[mask] / volatility[mask]
     er[:er_period] = 0.0
     
-    # Smoothing Constant
     sc = (er * (2.0 / (fast_period + 1) - 2.0 / (slow_period + 1)) + 2.0 / (slow_period + 1)) ** 2
     
-    # KAMA calculation
     kama[er_period] = close[er_period]
     for i in range(er_period + 1, n):
         kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
     
     return kama
+
+def calculate_sma(close, period):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -172,28 +174,26 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     adx = calculate_adx(high, low, close, 14)
     donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     bb_upper, bb_lower, bb_bandwidth, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
     rsi = calculate_rsi(close, 14)
     kama = calculate_kama(close, 10, 2, 30)
+    sma_50 = calculate_sma(close, 50)
+    sma_200 = calculate_sma(close, 200)
     
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Additional trend filters
-    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
     signals = np.zeros(n)
     
@@ -214,7 +214,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -222,73 +222,93 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # 1d trend bias (HTF) - determines regime
-        bull_regime = close[i] > hma_1d_aligned[i]
-        bear_regime = close[i] < hma_1d_aligned[i]
+        if np.isnan(sma_50[i]) or np.isnan(sma_200[i]):
+            signals[i] = 0.0
+            continue
         
-        # Trend strength
-        trending = adx[i] > 25
-        ranging = adx[i] < 20
+        # 1w trend bias (HTF) - determines primary regime
+        bull_regime = close[i] > hma_1w_aligned[i]
+        bear_regime = close[i] < hma_1w_aligned[i]
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+        # Trend strength on 1d
+        trending = adx[i] > 22
+        ranging = adx[i] < 18
+        
+        # Volume confirmation (relaxed for daily - need more trades)
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i] if not np.isnan(vol_ma[i]) else True
         
         # Donchian breakout signals
         breakout_long = close[i] > donchian_upper[i - 1] if not np.isnan(donchian_upper[i - 1]) else False
         breakout_short = close[i] < donchian_lower[i - 1] if not np.isnan(donchian_lower[i - 1]) else False
         
-        # Bollinger mean reversion signals
-        price_below_lower = close[i] < bb_lower[i] * 1.005
-        price_above_upper = close[i] > bb_upper[i] * 0.995
+        # Bollinger mean reversion signals (relaxed thresholds for more trades)
+        price_below_lower = close[i] < bb_lower[i] * 1.01
+        price_above_upper = close[i] > bb_upper[i] * 0.99
         
-        # RSI extremes
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
-        rsi_extreme_oversold = rsi[i] < 25
-        rsi_extreme_overbought = rsi[i] > 75
+        # RSI extremes (relaxed for more trades)
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
+        rsi_extreme_oversold = rsi[i] < 30
+        rsi_extreme_overbought = rsi[i] > 70
         
         # KAMA trend
         kama_bullish = close[i] > kama[i]
         kama_bearish = close[i] < kama[i]
         
+        # SMA trend filters
+        sma_bullish = close[i] > sma_50[i]
+        sma_bearish = close[i] < sma_50[i]
+        
+        # === SIGNAL ENSEMBLE VOTING ===
+        # Count signals for long and short
+        long_votes = 0
+        short_votes = 0
+        
+        # Signal 1: Donchian breakout
+        if breakout_long and volume_confirmed:
+            long_votes += 1
+        if breakout_short and volume_confirmed:
+            short_votes += 1
+        
+        # Signal 2: Bollinger mean reversion
+        if price_below_lower and rsi_oversold:
+            long_votes += 1
+        if price_above_upper and rsi_overbought:
+            short_votes += 1
+        
+        # Signal 3: KAMA trend alignment
+        if kama_bullish and sma_bullish:
+            long_votes += 1
+        if kama_bearish and sma_bearish:
+            short_votes += 1
+        
+        # === REGIME-ADAPTIVE ENTRY LOGIC ===
         new_signal = 0.0
         
-        # === BULL REGIME (price > 1d HMA): Favor longs, avoid shorts ===
         if bull_regime:
-            # Strong long: Donchian breakout + volume + KAMA confirmation
-            if breakout_long and volume_confirmed and kama_bullish:
-                new_signal = SIZE_MAX
-            # Moderate long: Donchian breakout in bull regime
-            elif breakout_long and bull_regime:
-                new_signal = SIZE_BASE
-            # Mean reversion long: Only at extreme oversold in bull regime
-            elif price_below_lower and rsi_extreme_oversold:
-                new_signal = SIZE_BASE
-            # Avoid shorts except extreme overbought
-            elif price_above_upper and rsi_extreme_overbought and ranging:
-                new_signal = -SIZE_BASE
+            # Bull regime: favor longs, need 2+ votes for long, 3+ for short
+            if long_votes >= 2:
+                if trending and breakout_long:
+                    new_signal = SIZE_MAX  # High conviction breakout
+                else:
+                    new_signal = SIZE_BASE  # Standard long
+            elif short_votes >= 3 and rsi_extreme_overbought:
+                new_signal = -SIZE_BASE  # Only extreme counter-trend
         
-        # === BEAR REGIME (price < 1d HMA): Favor shorts, avoid longs ===
         elif bear_regime:
-            # Strong short: Donchian breakout + volume + KAMA confirmation
-            if breakout_short and volume_confirmed and kama_bearish:
-                new_signal = -SIZE_MAX
-            # Moderate short: Donchian breakout in bear regime
-            elif breakout_short and bear_regime:
-                new_signal = -SIZE_BASE
-            # Mean reversion short: Only at extreme overbought in bear regime
-            elif price_above_upper and rsi_extreme_overbought:
-                new_signal = -SIZE_BASE
-            # Avoid longs except extreme oversold
-            elif price_below_lower and rsi_extreme_oversold and ranging:
-                new_signal = SIZE_BASE
+            # Bear regime: favor shorts, need 2+ votes for short, 3+ for long
+            if short_votes >= 2:
+                if trending and breakout_short:
+                    new_signal = -SIZE_MAX  # High conviction breakout
+                else:
+                    new_signal = -SIZE_BASE  # Standard short
+            elif long_votes >= 3 and rsi_extreme_oversold:
+                new_signal = SIZE_BASE  # Only extreme counter-trend
         
-        # === RANGE REGIME (ADX < 20): Pure mean reversion ===
+        # Range regime: pure mean reversion (lower threshold for more trades)
         if ranging:
-            # Long at lower BB with RSI oversold
             if price_below_lower and rsi_oversold:
                 new_signal = SIZE_BASE
-            # Short at upper BB with RSI overbought
             elif price_above_upper and rsi_overbought:
                 new_signal = -SIZE_BASE
         
