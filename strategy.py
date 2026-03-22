@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #033: 1h Fisher Transform + 4h HMA Trend + Volume Confirmation
+Experiment #035: 12h Fisher Transform + 1d HMA Trend + Choppiness Regime
 Hypothesis: Ehlers Fisher Transform excels at catching reversals in bear/range markets (research-backed).
-Combined with 4h HMA trend filter to avoid counter-trend trades. Volume spike confirmation filters false signals.
-ATR trailing stop at 2.5*ATR limits drawdown. Volume-weighted position sizing adjusts to market conditions.
-Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper.
-Position sizing: 0.25 base, 0.35 on high volume, discrete levels to minimize fee churn.
-Key innovation: Fisher Transform crosses are more reliable than RSI in bear markets, especially with volume confirmation.
-This addresses the 2022 crash problem - Fisher catches reversals early while HMA keeps us aligned with major trend.
+Combined with 1d HMA for trend bias and Choppiness Index to detect regime (trend vs range).
+12h timeframe provides fewer but higher-quality signals, reducing fee drag.
+Position sizing: 0.25 base, discrete levels (0.0, ±0.25, ±0.30) with 2.5*ATR stoploss.
+Key innovation: Fisher cross -1.5/+1.5 triggers are frequent enough to ensure trades,
+while Choppiness filter avoids whipsaw in unclear regimes. 1d HTF ensures we trade with macro trend.
+Timeframe: 12h (REQUIRED), HTF: 1d via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_fisher_4h_hma_vol_confirm_v1"
-timeframe = "1h"
+name = "mtf_12h_fisher_1d_hma_chop_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_fisher_transform(high, low, close, period=9):
     """
-    Ehlers Fisher Transform - converts price to Gaussian distribution for clearer signals.
-    Long when Fisher crosses above -1.5, short when crosses below +1.5.
-    Particularly effective in bear/range markets for catching reversals.
+    Ehlers Fisher Transform - normalizes price to Gaussian distribution.
+    Catches reversals when Fisher crosses extreme levels (-1.5, +1.5).
+    Works well in bear markets where trend strategies fail.
     """
     n = len(close)
     fisher = np.zeros(n)
@@ -34,41 +34,57 @@ def calculate_fisher_transform(high, low, close, period=9):
     
     for i in range(period, n):
         # Find highest high and lowest low over period
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
+        highest = np.max(high[i - period + 1:i + 1])
+        lowest = np.min(low[i - period + 1:i + 1])
         
         # Avoid division by zero
-        if highest_high == lowest_low:
-            fisher[i] = 0.0
-            fisher_prev[i] = fisher[i-1] if i > 0 else 0.0
+        if highest == lowest:
             continue
         
-        # Normalize price to -1 to +1 range
-        normalized = 2.0 * (median[i] - lowest_low) / (highest_high - lowest_low) - 1.0
+        # Normalize price to 0-1 range
+        value = (median[i] - lowest) / (highest - lowest)
         
         # Clamp to avoid extreme values
-        normalized = np.clip(normalized, -0.999, 0.999)
+        value = np.clip(value, 0.001, 0.999)
         
-        # Apply Fisher transform
-        fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
+        # Fisher transform
+        fisher[i] = 0.5 * np.log((1 + value) / (1 - value))
         
-        # Smooth with previous value
-        if i > 0 and not np.isnan(fisher[i-1]):
-            fisher[i] = 0.7 * fisher[i] + 0.3 * fisher_prev[i-1]
-        
-        fisher_prev[i] = fisher[i]
+        if i > period:
+            fisher_prev[i] = fisher[i - 1]
     
     return fisher, fisher_prev
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend with less lag."""
-    close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP) - measures market choppiness vs trending.
+    CHOP > 61.8 = ranging market (favor mean reversion)
+    CHOP < 38.2 = trending market (favor trend following)
+    """
+    n = len(close)
+    chop = np.zeros(n)
+    chop[:] = np.nan
+    
+    for i in range(period, n):
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        
+        if highest_high == lowest_low:
+            chop[i] = 50.0
+            continue
+        
+        # Sum of ATR over period
+        atr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr1 = high[j] - low[j]
+            tr2 = abs(high[j] - close[j - 1]) if j > 0 else tr1
+            tr3 = abs(low[j] - close[j - 1]) if j > 0 else tr1
+            atr_sum += max(tr1, tr2, tr3)
+        
+        # CHOP formula
+        chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+    
+    return chop
 
 def calculate_atr(high, low, close, period=14):
     """Calculate ATR using Wilder's smoothing."""
@@ -80,63 +96,45 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_volume_spike(volume, period=20):
-    """Detect volume spikes relative to recent average."""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean().values
-    vol_std = vol_s.rolling(window=period, min_periods=period).std().values
-    vol_zscore = (volume - vol_avg) / (vol_std + 1e-10)
-    vol_zscore[np.isnan(vol_zscore)] = 0.0
-    return vol_zscore, vol_avg
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI for additional confirmation."""
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-def calculate_ema(close, period):
-    """Calculate EMA."""
-    close_s = pd.Series(close)
-    return close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
-    fisher, fisher_prev = calculate_fisher_transform(high, low, close, period=9)
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    vol_zscore, vol_avg = calculate_volume_spike(volume, 20)
-    rsi = calculate_rsi(close, 14)
-    ema_21 = calculate_ema(close, 21)
-    ema_50 = calculate_ema(close, 50)
-    ema_200 = calculate_ema(close, 200)
+    fisher, fisher_prev = calculate_fisher_transform(high, low, close, period=9)
+    chop = calculate_choppiness_index(high, low, close, period=14)
+    
+    # Additional trend filter
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels to minimize fee churn (Rule 4)
     SIZE_BASE = 0.25
-    SIZE_HIGH = 0.35
-    SIZE_EXIT = 0.0
+    SIZE_MAX = 0.30
     
     # Track positions for stoploss
     position_side = 0
@@ -145,17 +143,13 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    # Fisher crossing thresholds
-    FISHER_LONG_THRESHOLD = -1.5
-    FISHER_SHORT_THRESHOLD = 1.5
-    
-    for i in range(100, n):
+    for i in range(250, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -163,51 +157,56 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # 4h trend bias (HTF) - primary filter
-        bull_trend = close[i] > hma_4h_aligned[i]
-        bear_trend = close[i] < hma_4h_aligned[i]
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
+            continue
+        
+        # 1d trend bias (HTF)
+        bull_trend = close[i] > hma_1d_aligned[i]
+        bear_trend = close[i] < hma_1d_aligned[i]
+        
+        # Choppiness regime
+        range_regime = chop[i] > 55  # Modified threshold for more signals
+        trend_regime = chop[i] < 45  # Modified threshold for more signals
         
         # Fisher Transform signals
-        fisher_cross_up = fisher_prev[i] < FISHER_LONG_THRESHOLD and fisher[i] >= FISHER_LONG_THRESHOLD
-        fisher_cross_down = fisher_prev[i] > FISHER_SHORT_THRESHOLD and fisher[i] <= FISHER_SHORT_THRESHOLD
+        fisher_cross_up = fisher_prev[i] < -1.5 and fisher[i] >= -1.5
+        fisher_cross_down = fisher_prev[i] > 1.5 and fisher[i] <= 1.5
+        fisher_oversold = fisher[i] < -1.8
+        fisher_overbought = fisher[i] > 1.8
         
-        # Volume confirmation (spike = real move)
-        vol_confirmed = vol_zscore[i] > 0.5  # Above average volume
-        
-        # RSI confirmation (avoid extreme overbought/oversold counter-trend)
-        rsi_not_extreme_long = rsi[i] < 70  # Not overbought for long
-        rsi_not_extreme_short = rsi[i] > 30  # Not oversold for short
-        
-        # EMA trend confirmation on 1h
-        ema_bullish = close[i] > ema_21[i] and close[i] > ema_50[i]
-        ema_bearish = close[i] < ema_21[i] and close[i] < ema_50[i]
-        
-        # Price above/below 200 EMA for major trend
-        above_200 = close[i] > ema_200[i]
-        below_200 = close[i] < ema_200[i]
+        # EMA trend confirmation
+        ema_bullish = close[i] > ema_50[i] and close[i] > ema_200[i]
+        ema_bearish = close[i] < ema_50[i] and close[i] < ema_200[i]
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Primary: Fisher cross up + 4h bull trend + volume confirmed
-        if fisher_cross_up and bull_trend and vol_confirmed:
-            new_signal = SIZE_HIGH if vol_zscore[i] > 1.0 else SIZE_BASE
-        # Secondary: Fisher cross up + 4h bull trend + RSI confirmation + above 200 EMA
-        elif fisher_cross_up and bull_trend and rsi_not_extreme_long and above_200:
+        # Primary: Fisher cross up + 1d bull trend (trend following)
+        if fisher_cross_up and bull_trend:
+            new_signal = SIZE_MAX
+        # Secondary: Fisher oversold + range regime (mean reversion)
+        elif fisher_oversold and range_regime:
             new_signal = SIZE_BASE
-        # Tertiary: Fisher cross up + EMA bullish + volume confirmed (trend continuation)
-        elif fisher_cross_up and ema_bullish and vol_confirmed:
+        # Tertiary: Fisher cross up + EMA bullish (momentum)
+        elif fisher_cross_up and ema_bullish:
+            new_signal = SIZE_BASE
+        # Quaternary: Fisher oversold + bull trend (pullback entry)
+        elif fisher_oversold and bull_trend:
             new_signal = SIZE_BASE
         
         # === SHORT ENTRY ===
-        # Primary: Fisher cross down + 4h bear trend + volume confirmed
-        if fisher_cross_down and bear_trend and vol_confirmed:
-            new_signal = -SIZE_HIGH if vol_zscore[i] > 1.0 else -SIZE_BASE
-        # Secondary: Fisher cross down + 4h bear trend + RSI confirmation + below 200 EMA
-        elif fisher_cross_down and bear_trend and rsi_not_extreme_short and below_200:
+        # Primary: Fisher cross down + 1d bear trend (trend following)
+        if fisher_cross_down and bear_trend:
+            new_signal = -SIZE_MAX
+        # Secondary: Fisher overbought + range regime (mean reversion)
+        elif fisher_overbought and range_regime:
             new_signal = -SIZE_BASE
-        # Tertiary: Fisher cross down + EMA bearish + volume confirmed (trend continuation)
-        elif fisher_cross_down and ema_bearish and vol_confirmed:
+        # Tertiary: Fisher cross down + EMA bearish (momentum)
+        elif fisher_cross_down and ema_bearish:
+            new_signal = -SIZE_BASE
+        # Quaternary: Fisher overbought + bear trend (pullback entry)
+        elif fisher_overbought and bear_trend:
             new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -217,7 +216,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for more room)
+            # Calculate trailing stop (2.5*ATR for 12h timeframe)
             current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -232,7 +231,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for more room)
+            # Calculate trailing stop (2.5*ATR for 12h timeframe)
             current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
