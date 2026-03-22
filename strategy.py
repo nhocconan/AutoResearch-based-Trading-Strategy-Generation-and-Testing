@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #164: 30m BB-KC Squeeze + 4h HMA Trend + ADX Confirmation + ATR Stop
+Experiment #165: 1h Regime-Adaptive Strategy with 4h HMA Trend + BB/RSI Entry
 
-Hypothesis: Bollinger Band / Keltner Channel squeeze identifies low-volatility 
-compression periods that precede explosive moves. Combined with 4h HMA trend 
-filter and ADX confirmation, this should capture high-probability breakouts 
-on 30m timeframe. This is DIFFERENT from failed RSI/EMA strategies (#152, #157, #163).
+Hypothesis: 1h timeframe captures intraday trends while avoiding noise of lower TFs.
+Key insight from failures: pure trend-following fails in 2022 crash and 2025 bear market.
+Pure mean-reversion fails in strong trends. Solution: REGIME-ADAPTIVE approach.
 
-Why this might work on 30m:
-- BB-KC squeeze is a proven volatility contraction pattern (John Carter's TTM Squeeze)
-- 30m captures intraday moves without excessive noise of 5m/15m
-- 4h HMA provides stable trend bias (proven in current best strategy)
-- ADX > 20 filters choppy periods where squeezes fail to breakout
-- ATR-based stoploss protects against false breakouts
+Regime Detection:
+- ADX(14) > 25 = TREND regime → follow 4h HMA direction with breakout entries
+- ADX(14) < 20 = RANGE regime → mean revert at Bollinger Band extremes
 
-Learning from failures:
-- #152, #157, #163: RSI-based strategies failed on 30m/15m
-- #158: Simple EMA crossover failed on 30m
-- Need volatility-based entry, not momentum-based
-- Squeeze patterns work in both bull and bear markets
+Entry Logic:
+- TREND regime: Enter on pullback to EMA21 in direction of 4h HMA
+- RANGE regime: Enter when RSI extreme ( <30 or >70) + price at BB band
 
-Timeframe: 30m (REQUIRED for this experiment)
+Why this might work:
+- Adapts to market conditions (trend vs range)
+- 4h HMA provides stable trend bias (proven in #162 best strategy)
+- RSI+BB combination catches reversals in bear/range markets (2025)
+- ATR stoploss protects from large drawdowns
+
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20-0.35 discrete levels
+Position sizing: 0.25-0.35 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_bbkc_squeeze_4h_hma_adx_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_regime_adaptive_4h_hma_bb_rsi_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -96,32 +96,27 @@ def calculate_bollinger_bands(close, period=20, std_mult=2.0):
     std = close_s.rolling(window=period, min_periods=period).std().values
     upper = sma + std_mult * std
     lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma * 100  # Normalized bandwidth
-    return upper, lower, sma, bandwidth
+    return upper, lower, sma
 
-def calculate_keltner_channels(high, low, close, period=20, atr_mult=1.5, atr_period=14):
-    """Calculate Keltner Channels."""
+def calculate_rsi(close, period=14):
+    """Calculate RSI (Relative Strength Index)."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
+
+def calculate_ema(close, period=21):
+    """Calculate Exponential Moving Average."""
     close_s = pd.Series(close)
     ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
-    atr = calculate_atr(high, low, close, atr_period)
-    upper = ema + atr_mult * atr
-    lower = ema - atr_mult * atr
-    return upper, lower, ema
-
-def calculate_bb_percentile(bandwidth, lookback=30):
-    """Calculate bandwidth percentile over lookback period."""
-    n = len(bandwidth)
-    percentile = np.zeros(n)
-    
-    for i in range(lookback-1, n):
-        window = bandwidth[i-lookback+1:i+1]
-        valid = window[~np.isnan(window)]
-        if len(valid) > 0:
-            percentile[i] = np.sum(valid < bandwidth[i]) / len(valid) * 100
-        else:
-            percentile[i] = 50.0
-    
-    return percentile
+    return ema
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -138,16 +133,12 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     adx = calculate_adx(high, low, close, 14)
-    
-    # Bollinger Bands
-    bb_upper, bb_lower, bb_mid, bb_bandwidth = calculate_bollinger_bands(close, 20, 2.0)
-    bb_percentile = calculate_bb_percentile(bb_bandwidth, 30)
-    
-    # Keltner Channels
-    kc_upper, kc_lower, kc_mid = calculate_keltner_channels(high, low, close, 20, 1.5, 14)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
+    rsi = calculate_rsi(close, 14)
+    ema21 = calculate_ema(close, 21)
     
     signals = np.zeros(n)
     
@@ -172,63 +163,46 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(bb_bandwidth[i]) or np.isnan(kc_upper[i]):
+        if np.isnan(adx[i]) or np.isnan(bb_upper[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias
+        # === REGIME DETECTION ===
+        # ADX > 25 = TREND regime, ADX < 20 = RANGE regime
+        trend_regime = adx[i] > 25
+        range_regime = adx[i] < 20
+        
+        # === 4H TREND BIAS ===
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === VOLATILITY SQUEEZE DETECTION ===
-        # BB inside KC = squeeze (low volatility compression)
-        squeeze_on = (bb_upper[i] < kc_upper[i]) and (bb_lower[i] > kc_lower[i])
-        
-        # Bandwidth at low percentile = extreme compression
-        squeeze_extreme = bb_percentile[i] < 20  # Bottom 20% of bandwidth
-        
-        # === TREND STRENGTH FILTER ===
-        # ADX > 18 = trending market (breakouts more likely to succeed)
-        # Using 18 instead of 20 for more trades on 30m
-        trend_strength = adx[i] > 18
-        
-        # === BREAKOUT SIGNAL ===
-        # Price closes above BB upper = bullish breakout
-        # Price closes below BB lower = bearish breakout
-        breakout_long = close[i] > bb_upper[i-1]
-        breakout_short = close[i] < bb_lower[i-1]
-        
-        # === MOMENTUM CONFIRMATION ===
-        # Price above KC mid = bullish momentum
-        # Price below KC mid = bearish momentum
-        momentum_long = close[i] > kc_mid[i]
-        momentum_short = close[i] < kc_mid[i]
-        
+        # === ENTRY CONDITIONS ===
         new_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS ===
-        # 4h bullish + (squeeze + breakout OR extreme squeeze + momentum) + ADX
-        if bull_trend_4h and trend_strength and momentum_long:
-            if squeeze_on and breakout_long:
+        # TREND REGIME: Follow 4h trend on pullback to EMA21
+        if trend_regime:
+            # Long: 4h bullish + pullback to EMA21
+            if bull_trend_4h and close[i] <= ema21[i] * 1.002 and close[i] > bb_lower[i]:
                 new_signal = SIZE_BASE
-            elif squeeze_extreme and breakout_long:
-                new_signal = SIZE_STRONG
-        
-        # === SHORT ENTRY CONDITIONS ===
-        # 4h bearish + (squeeze + breakout OR extreme squeeze + momentum) + ADX
-        if bear_trend_4h and trend_strength and momentum_short:
-            if squeeze_on and breakout_short:
+            
+            # Short: 4h bearish + pullback to EMA21
+            if bear_trend_4h and close[i] >= ema21[i] * 0.998 and close[i] < bb_upper[i]:
                 new_signal = -SIZE_BASE
-            elif squeeze_extreme and breakout_short:
-                new_signal = -SIZE_STRONG
+        
+        # RANGE REGIME: Mean revert at BB extremes with RSI confirmation
+        elif range_regime:
+            # Long: RSI oversold + price at lower BB
+            if rsi[i] < 35 and close[i] <= bb_lower[i] * 1.001:
+                new_signal = SIZE_BASE
+            
+            # Short: RSI overbought + price at upper BB
+            if rsi[i] > 65 and close[i] >= bb_upper[i] * 0.999:
+                new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
-        # Update trailing highs/lows for active positions
         if in_position and position_side > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
-            # Trailing stop: 2.5 * ATR below highest close
             stoploss_price = highest_close - 2.5 * atr[i]
             if close[i] < stoploss_price:
                 new_signal = 0.0  # Stoploss hit
@@ -236,13 +210,11 @@ def generate_signals(prices):
         if in_position and position_side < 0:
             if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
-            # Trailing stop: 2.5 * ATR above lowest close
             stoploss_price = lowest_close + 2.5 * atr[i]
             if close[i] > stoploss_price:
                 new_signal = 0.0  # Stoploss hit
         
         # Update position tracking
-        # Entering new position
         if new_signal != 0.0 and not in_position:
             in_position = True
             position_side = np.sign(new_signal)
@@ -250,14 +222,12 @@ def generate_signals(prices):
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
-        # Reversing position
         elif new_signal != 0.0 and in_position and np.sign(new_signal) != position_side:
             position_side = np.sign(new_signal)
             entry_price = close[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
-        # Exiting position
         elif new_signal == 0.0 and in_position:
             in_position = False
             position_side = 0
