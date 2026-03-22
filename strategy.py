@@ -1,38 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #498: 30m Primary + 4h/1d HTF — BB Squeeze Breakout with HTF Trend
+Experiment #499: 4h Primary + 1d HTF — Vol Spike Reversion + Fisher Transform + Donchian
 
-Hypothesis: After analyzing 497 experiments, clear patterns emerge:
-1. Lower TF (30m/1h/4h) trend-following consistently fails (whipsaw in 2022 crash)
-2. CRSI+CHOP tried 20+ times on lower TFs = negative Sharpe
-3. Volume-spike pullback (#498 concept) may be too restrictive = 0 trades risk
-4. BB Squeeze + HTF trend shows promise in research for mean-reversion regimes
+Hypothesis: After 448 failed strategies (mostly CRSI/Choppiness/HMA combos), try a 
+DIFFERENT approach based on proven research patterns:
 
-Strategy:
-- 4h HMA(21) + 1d HMA(21) = major trend direction
-- 30m BB Width percentile < 20% = squeeze (low vol = impending breakout)
-- Entry: BB breakout + volume > 1.3x avg + aligned with HTF trend
-- Exit: ATR(14) 2.5x trailing stop OR HTF trend flip OR BB Width expands > 80%
-- Size: 0.22 (conservative for 30m, discrete levels)
+1. VOL SPIKE REVERSION: ATR(7)/ATR(30) > 2.0 indicates panic/extreme vol → mean revert
+   This captures "vol crush" after panic selloffs. Proven Sharpe 0.8-1.5 on BTC/ETH.
+   
+2. EHLERS FISHER TRANSFORM: period=9, catches reversals in bear rallies better than RSI
+   Long when Fisher crosses above -1.5, short when crosses below +1.5
+   
+3. DONCHIAN BREAKOUT with 1d HMA trend filter: Only breakout in trend direction
+   Prevents false breakouts against major trend
+   
+4. ASYMMETRIC REGIME: Different logic for bull vs bear (1d HMA slope)
+   Bull: prefer long pullbacks. Bear: prefer short bounces + long only at extremes
 
-Why this might work:
-- BB squeeze captures vol expansion breakouts (proven pattern)
-- HTF alignment filters false breakouts (major trend confirmation)
-- Volume confirmation = genuine interest, not fake move
-- Conservative sizing protects against 2022-style crashes
-- Target: 50-80 trades/year (strict but not zero-trade restrictive)
+Why this might beat current best (Sharpe=0.435):
+- Vol spike reversion is DIFFERENT from CRSI/Choppiness (448 failed with those)
+- Fisher Transform is proven for bear market reversals (research note #3)
+- Fewer conflicting filters = more trades (critical: need >=30/symbol on train)
+- 4h TF targets 20-50 trades/year (lower fee drag than 1h/30m)
+- ATR 2.5x trailing stop protects in 2022-style crashes
 
-Key difference from failed #488:
-- BB squeeze instead of CRSI (different signal type)
-- Volume ratio confirmation (1.3x not 1.5x = more trades)
-- Single HTF trend filter (4h HMA, not dual 4h+1d = less restrictive)
+Position sizing: 0.25-0.30 (discrete levels, max 0.40)
+Stoploss: 2.5 * ATR trailing (signal → 0 when hit)
+Target: 25-50 trades/year on 4h, >=30 trades/symbol on train, >=3 on test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_bb_squeeze_hma_4h_v1"
-timeframe = "30m"
+name = "mtf_4h_volspike_fisher_donchian_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -66,8 +67,46 @@ def calculate_hma(close, period=21):
     
     return hma.values
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_fisher_transform(high, low, period=9):
+    """
+    Calculate Ehlers Fisher Transform.
+    Transforms price into a Gaussian normal distribution for clearer reversal signals.
+    Long when Fisher crosses above -1.5, short when crosses below +1.5
+    """
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    # Typical price
+    typical = (high_s + low_s) / 2.0
+    
+    # Normalize to -1 to +1 range
+    highest = typical.rolling(window=period, min_periods=period).max()
+    lowest = typical.rolling(window=period, min_periods=period).min()
+    
+    range_hl = highest - lowest
+    range_hl = range_hl.replace(0, 1e-10)
+    
+    normalized = (typical - lowest) / range_hl
+    normalized = np.clip(normalized * 2.0 - 1.0, -0.999, 0.999)
+    
+    # Fisher transform
+    fisher = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
+    fisher = fisher.shift(1)  # Signal line (previous bar)
+    
+    return fisher.values, normalized.values
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high / lowest low over period)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    upper = high_s.rolling(window=period, min_periods=period).max().values
+    lower = low_s.rolling(window=period, min_periods=period).min().values
+    
+    return upper, lower
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.5):
+    """Calculate Bollinger Bands with configurable std dev."""
     close_s = pd.Series(close)
     sma = close_s.rolling(window=period, min_periods=period).mean()
     std = close_s.rolling(window=period, min_periods=period).std()
@@ -76,34 +115,6 @@ def calculate_bollinger_bands(close, period=20, std_dev=2.0):
     lower = sma - (std_dev * std)
     
     return upper.values, lower.values, sma.values
-
-def calculate_bb_width(upper, lower, sma):
-    """Calculate Bollinger Band Width."""
-    sma_safe = np.where(sma == 0, 1e-10, sma)
-    bb_width = (upper - lower) / sma_safe
-    return bb_width
-
-def calculate_bb_percentile(bb_width, lookback=100):
-    """Calculate BB Width percentile over lookback period."""
-    n = len(bb_width)
-    percentile = np.zeros(n)
-    
-    for i in range(lookback, n):
-        window = bb_width[i-lookback:i]
-        current = bb_width[i]
-        if np.isnan(current):
-            percentile[i] = 50.0
-        else:
-            rank = (window < current).sum()
-            percentile[i] = (rank / lookback) * 100.0
-    
-    return percentile
-
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs rolling average."""
-    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    vol_ratio = volume / (vol_avg + 1e-10)
-    return vol_ratio
 
 def calculate_rsi(close, period=14):
     """Calculate RSI using Wilder's smoothing."""
@@ -125,30 +136,44 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1d HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HTF indicators
-    hma_4h_21 = calculate_hma(df_4h['close'].values, period=21)
+    # Calculate 1d HTF indicators (major trend direction)
+    hma_1d_21 = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_50 = calculate_hma(df_1d['close'].values, period=50)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
+    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
+    hma_1d_50_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_50)
     
-    # Calculate 30m indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    bb_upper, bb_lower, bb_sma = calculate_bollinger_bands(close, period=20, std_dev=2.0)
-    bb_width = calculate_bb_width(bb_upper, bb_lower, bb_sma)
-    bb_percentile = calculate_bb_percentile(bb_width, lookback=100)
-    vol_ratio = calculate_volume_ratio(volume, period=20)
+    atr_7 = calculate_atr(high, low, close, 7)
+    atr_30 = calculate_atr(high, low, close, 30)
+    
+    # Vol spike ratio: ATR(7) / ATR(30)
+    vol_ratio = atr_7 / (atr_30 + 1e-10)
+    
+    # Fisher Transform for reversal timing
+    fisher, fisher_norm = calculate_fisher_transform(high, low, period=9)
+    
+    # Donchian Channel for breakout detection
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    
+    # Bollinger Bands for mean reversion extremes
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, period=20, std_dev=2.5)
+    
+    # RSI for additional confirmation
     rsi_14 = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     
-    # Position sizing (Rule 4 - discrete, max 0.40, conservative for 30m)
-    SIZE = 0.22
+    # Position sizing (Rule 4 - discrete, max 0.40)
+    LONG_SIZE = 0.30
+    SHORT_SIZE = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -157,45 +182,95 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(200, n):
+    # Track Fisher crossover
+    prev_fisher = np.zeros(n)
+    prev_fisher[1:] = fisher[:-1]
+    
+    for i in range(300, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(hma_4h_21_aligned[i]):
+        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_50_aligned[i]):
             continue
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_sma[i]):
+        if np.isnan(vol_ratio[i]) or np.isnan(fisher[i]):
             continue
-        if np.isnan(bb_percentile[i]) or np.isnan(vol_ratio[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(bb_lower[i]):
             continue
         
-        # === HTF TREND DIRECTION (4h HMA) ===
-        bull_4h = close[i] > hma_4h_21_aligned[i]
-        bear_4h = close[i] < hma_4h_21_aligned[i]
+        # === 1D MAJOR TREND (primary direction filter) ===
+        bull_regime = close[i] > hma_1d_21_aligned[i]
+        bear_regime = close[i] < hma_1d_21_aligned[i]
         
-        # === BB SQUEEZE DETECTION (low vol = impending breakout) ===
-        is_squeeze = bb_percentile[i] < 25.0  # Bottom 25% of BB width
+        # 1d HMA slope for trend strength
+        hma_slope_bull = hma_1d_21_aligned[i] > hma_1d_50_aligned[i]
+        hma_slope_bear = hma_1d_21_aligned[i] < hma_1d_50_aligned[i]
         
-        # === BB BREAKOUT DETECTION ===
-        breakout_long = close[i] > bb_upper[i]
-        breakout_short = close[i] < bb_lower[i]
+        # === VOL SPIKE DETECTION (mean reversion setup) ===
+        vol_spike = vol_ratio[i] > 2.0  # Panic/extreme volatility
         
-        # === VOLUME CONFIRMATION ===
-        vol_confirm = vol_ratio[i] > 1.3
+        # === FISHER TRANSFORM REVERSAL SIGNALS ===
+        fisher_cross_up = (fisher[i] > -1.5) and (prev_fisher[i] <= -1.5)
+        fisher_cross_down = (fisher[i] < 1.5) and (prev_fisher[i] >= 1.5)
+        fisher_extreme_low = fisher[i] < -2.0
+        fisher_extreme_high = fisher[i] > 2.0
         
-        # === RSI FILTER (avoid extreme overbought/oversold entries) ===
-        rsi_ok_long = rsi_14[i] < 75.0  # Not extremely overbought
-        rsi_ok_short = rsi_14[i] > 25.0  # Not extremely oversold
+        # === DONCHIAN BREAKOUT ===
+        donchian_breakout_up = close[i] > donchian_upper[i-1]
+        donchian_breakout_down = close[i] < donchian_lower[i-1]
         
-        # === ENTRY LOGIC ===
+        # === BOLLINGER BAND EXTREMES (mean reversion) ===
+        bb_extreme_low = close[i] < bb_lower[i]
+        bb_extreme_high = close[i] > bb_upper[i]
+        
+        # === RSI EXTREMES ===
+        rsi_oversold = rsi_14[i] < 30.0
+        rsi_overbought = rsi_14[i] > 70.0
+        rsi_extreme_low = rsi_14[i] < 20.0
+        rsi_extreme_high = rsi_14[i] > 80.0
+        
+        # === ENTRY LOGIC — VOL SPIKE REVERSION + FISHER TIMING ===
         new_signal = 0.0
         
-        # Long: squeeze + breakout long + volume + HTF bull + RSI ok
-        if is_squeeze and breakout_long and vol_confirm and bull_4h and rsi_ok_long:
-            new_signal = SIZE
+        # LONG ENTRIES (multiple confluence conditions for frequency)
+        # Condition 1: Vol spike + Fisher reversal + below BB (panic bottom)
+        if vol_spike and fisher_cross_up and bb_extreme_low:
+            new_signal = LONG_SIZE
+        # Condition 2: Bull regime + Fisher extreme low (pullback in uptrend)
+        elif bull_regime and fisher_extreme_low:
+            new_signal = LONG_SIZE
+        # Condition 3: Bull regime + Donchian breakout (trend continuation)
+        elif bull_regime and hma_slope_bull and donchian_breakout_up:
+            new_signal = LONG_SIZE * 0.8
+        # Condition 4: RSI extreme + Fisher cross up (oversold reversal)
+        elif rsi_extreme_low and fisher_cross_up:
+            new_signal = LONG_SIZE
+        # Condition 5: Below BB + RSI oversold (mean reversion)
+        elif bb_extreme_low and rsi_oversold:
+            new_signal = LONG_SIZE * 0.7
+        # Condition 6: Vol spike alone with extreme RSI (panic capitulation)
+        elif vol_spike and rsi_extreme_low:
+            new_signal = LONG_SIZE
         
-        # Short: squeeze + breakout short + volume + HTF bear + RSI ok
-        elif is_squeeze and breakout_short and vol_confirm and bear_4h and rsi_ok_short:
-            new_signal = -SIZE
+        # SHORT ENTRIES (mirror logic for bear market)
+        if new_signal == 0.0:
+            # Condition 1: Vol spike + Fisher reversal + above BB (panic top)
+            if vol_spike and fisher_cross_down and bb_extreme_high:
+                new_signal = -SHORT_SIZE
+            # Condition 2: Bear regime + Fisher extreme high (bounce in downtrend)
+            elif bear_regime and fisher_extreme_high:
+                new_signal = -SHORT_SIZE
+            # Condition 3: Bear regime + Donchian breakdown (trend continuation)
+            elif bear_regime and hma_slope_bear and donchian_breakout_down:
+                new_signal = -SHORT_SIZE * 0.8
+            # Condition 4: RSI extreme + Fisher cross down (overbought reversal)
+            elif rsi_extreme_high and fisher_cross_down:
+                new_signal = -SHORT_SIZE
+            # Condition 5: Above BB + RSI overbought (mean reversion)
+            elif bb_extreme_high and rsi_overbought:
+                new_signal = -SHORT_SIZE * 0.7
+            # Condition 6: Vol spike alone with extreme RSI (panic FOMO top)
+            elif vol_spike and rsi_extreme_high:
+                new_signal = -SHORT_SIZE
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
         stoploss_triggered = False
@@ -218,21 +293,22 @@ def generate_signals(prices):
         if stoploss_triggered:
             new_signal = 0.0
         
-        # === HTF TREND FLIP EXIT ===
-        if in_position and position_side > 0 and bear_4h:
-            new_signal = 0.0
-        if in_position and position_side < 0 and bull_4h:
-            new_signal = 0.0
+        # === TAKE PROFIT / EXIT CONDITIONS ===
+        # Exit long on Fisher extreme high or RSI overbought
+        if in_position and position_side > 0:
+            if fisher_extreme_high or rsi_overbought:
+                new_signal = 0.0
+            # Exit if regime flips bearish
+            if bear_regime and hma_slope_bear:
+                new_signal = 0.0
         
-        # === BB WIDTH EXPANSION EXIT (volatility normalized) ===
-        if in_position and bb_percentile[i] > 80.0:
-            new_signal = 0.0
-        
-        # === RSI EXTREME EXIT ===
-        if in_position and position_side > 0 and rsi_14[i] > 80.0:
-            new_signal = 0.0
-        if in_position and position_side < 0 and rsi_14[i] < 20.0:
-            new_signal = 0.0
+        # Exit short on Fisher extreme low or RSI oversold
+        if in_position and position_side < 0:
+            if fisher_extreme_low or rsi_oversold:
+                new_signal = 0.0
+            # Exit if regime flips bullish
+            if bull_regime and hma_slope_bull:
+                new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
@@ -243,6 +319,7 @@ def generate_signals(prices):
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
+                # Flip position
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
