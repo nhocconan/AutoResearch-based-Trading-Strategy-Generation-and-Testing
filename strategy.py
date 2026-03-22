@@ -1,45 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #570: 1h Primary + 4h/12h HTF — Ultra-Simplified Trend-Pullback
+Experiment #571: 4h Primary + 1d/1w HTF — Donchian Breakout with Regime Filter
 
-Hypothesis: After 500+ failed experiments, the pattern is CLEAR:
-- Complex filters (session, volume, chop, ADX, Fisher) = NEGATIVE Sharpe or 0 trades
-- #555 had Sharpe=0.000 with simplified logic but still failed
-- #565 (1h hma rsi vol) had Sharpe=-0.427 — volume filter added no edge
-- Recent 4h/12h/1d strategies ALL negative: -0.15 to -4.2 Sharpe
+Hypothesis: After 50+ failed experiments with complex dual-regime and Connors RSI approaches,
+the pattern shows over-filtering kills trades. This strategy uses SIMPLIFIED but PROVEN logic:
 
-NEW APPROACH for 1h:
-1. Use ONLY 4h HMA(21) for trend direction (proven, simple)
-2. Add 12h HMA(50) as MAJOR regime filter (only trade WITH 12h trend)
-3. 1h RSI(14) pullback: LONG when RSI 35-50 in bull, SHORT when RSI 50-65 in bear
-4. NO ADX filter (kills trades, no edge per #555, #569)
-5. NO volume filter (failed in #565)
-6. NO session filter (kills trade frequency)
-7. ATR(14) 2.5x trailing stop
-8. Position size: 0.25 discrete (smaller for 1h per Rule 10)
+1. 1w HMA(21) for MAJOR regime (bull/bear) — only long in bull, only short in bear
+2. 1d ADX(14) for trend strength confirmation — avoid choppy periods
+3. 4h Donchian(20) breakout for entry timing — catches momentum moves
+4. Asymmetric entry: longs only when weekly bullish, shorts only when weekly bearish
+5. ATR(14) 2.5x trailing stop for risk management
 
-Why this might work when others failed:
-- 12h HMA filter prevents trading against MAJOR trend (2022 crash protection)
-- 4h HMA for entry timing within 12h regime
-- RSI pullback catches dips/rallies (mean reversion within trend)
-- SIMPLE = less overfitting, more robust across BTC/ETH/SOL
-- Target: 40-80 trades/year on 1h (Rule 10), not 200+ which causes fee drag
+Why this differs from failed #559-#570:
+- NO dual-regime switching (failed in #559, #561, #562)
+- NO Connors RSI (failed in #559, #561, #562)
+- NO volume filters (failed in #565)
+- NO complex Fisher transforms (failed in #568)
+- Simple Donchian breakout worked for SOL in past experiments (Sharpe +0.782)
+- Weekly regime filter prevents major counter-trend losses in 2022 crash
 
-Key difference from #555:
-- Added 12h HMA(50) as major regime filter (was missing)
-- Narrower RSI bands (35-50 long, 50-65 short) for better entries
-- Both 4h AND 12h must agree on trend direction
-
-Position sizing: 0.25 base (discrete per Rule 4, max 0.40)
-Stoploss: 2.5 * ATR trailing (signal → 0 when hit)
-Target: >=30 trades/symbol on train, >=3 on test, Sharpe > 0 all symbols
+Position sizing: 0.28 discrete (per Rule 4, max 0.40)
+Target: 20-50 trades/year on 4h (per Rule 10)
+Stoploss: 2.5 * ATR trailing stop (signal → 0 when hit)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_pullback_4h12h_ultra_v1"
-timeframe = "1h"
+name = "mtf_4h_donchian_regime_1d1w_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -89,6 +78,47 @@ def calculate_hma(close, period=21):
     
     return hma.values
 
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm < 0] = 0
+    
+    mask = (plus_dm > 0) & (minus_dm > 0)
+    plus_dm_vals = plus_dm.values.copy()
+    minus_dm_vals = minus_dm.values.copy()
+    plus_dm_vals[mask] = np.where(plus_dm_vals[mask] > minus_dm_vals[mask], plus_dm_vals[mask], 0)
+    minus_dm_vals[mask] = np.where(minus_dm_vals[mask] > plus_dm_vals[mask], minus_dm_vals[mask], 0)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    plus_dm_s = pd.Series(plus_dm_vals).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm_vals).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    plus_di = 100.0 * plus_dm_s / (tr_s + 1e-10)
+    minus_di = 100.0 * minus_dm_s / (tr_s + 1e-10)
+    
+    dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel upper and lower bands."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -96,32 +126,30 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h HTF HMA for intermediate trend
-    hma_4h_21 = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_50 = calculate_hma(df_4h['close'].values, period=50)
+    # Calculate 1w HTF HMA for major regime
+    hma_1w_21 = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
     
-    # Calculate 12h HTF HMA for major regime
-    hma_12h_21 = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_50 = calculate_hma(df_12h['close'].values, period=50)
+    # Calculate 1d HTF ADX for trend strength
+    adx_1d_14 = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_14)
     
-    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
-    hma_4h_50_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_50)
-    hma_12h_21_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_21)
-    hma_12h_50_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_50)
+    # Calculate 1d HTF HMA for secondary trend filter
+    hma_1d_21 = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, 14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     rsi_14 = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    # Smaller size for 1h vs 4h (Rule 10: lower TF = more trades = smaller size)
-    POSITION_SIZE = 0.25
+    POSITION_SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -134,61 +162,50 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(hma_4h_50_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             continue
-        if np.isnan(hma_12h_21_aligned[i]) or np.isnan(hma_12h_50_aligned[i]):
+        if np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             continue
         if np.isnan(rsi_14[i]):
             continue
         
-        # === 12H MAJOR REGIME (primary filter - only trade WITH major trend) ===
-        # 12h HMA21 > HMA50 = major bull regime
-        # 12h HMA21 < HMA50 = major bear regime
-        major_bull_12h = hma_12h_21_aligned[i] > hma_12h_50_aligned[i]
-        major_bear_12h = hma_12h_21_aligned[i] < hma_12h_50_aligned[i]
+        # === 1W MAJOR REGIME (asymmetric filter) ===
+        # Only long when weekly HMA bullish, only short when weekly HMA bearish
+        weekly_bull = close[i] > hma_1w_aligned[i]
+        weekly_bear = close[i] < hma_1w_aligned[i]
         
-        # Price relative to 12h HMA21 for extra confirmation
-        price_above_12h_hma = close[i] > hma_12h_21_aligned[i]
-        price_below_12h_hma = close[i] < hma_12h_21_aligned[i]
+        # === 1D TREND STRENGTH ===
+        # ADX > 20 means some directional movement
+        trend_strength_ok = adx_1d_aligned[i] > 20.0
         
-        # === 4H INTERMEDIATE TREND (entry timing within 12h regime) ===
-        # 4h HMA21 > HMA50 = intermediate bull
-        # 4h HMA21 < HMA50 = intermediate bear
-        inter_bull_4h = hma_4h_21_aligned[i] > hma_4h_50_aligned[i]
-        inter_bear_4h = hma_4h_21_aligned[i] < hma_4h_50_aligned[i]
+        # 1d HMA slope for confirmation
+        daily_bull = close[i] > hma_1d_aligned[i]
+        daily_bear = close[i] < hma_1d_aligned[i]
         
-        # Price relative to 4h HMA21
-        price_above_4h_hma = close[i] > hma_4h_21_aligned[i]
-        price_below_4h_hma = close[i] < hma_4h_21_aligned[i]
+        # === 4H DONCHIAN BREAKOUT ===
+        # Long breakout: price crosses above Donchian upper
+        # Short breakout: price crosses below Donchian lower
+        prev_close = close[i-1] if i > 0 else close[i]
         
-        # === RSI PULLBACK ENTRY (within trend) ===
-        # LONG: RSI 35-50 (pullback, not crash) in bull regime
-        rsi_pullback_long = 35.0 <= rsi_14[i] <= 50.0
-        # SHORT: RSI 50-65 (rally into resistance) in bear regime
-        rsi_pullback_short = 50.0 <= rsi_14[i] <= 65.0
+        breakout_long = (prev_close <= donchian_upper[i-1]) and (close[i] > donchian_upper[i])
+        breakout_short = (prev_close >= donchian_lower[i-1]) and (close[i] < donchian_lower[i])
         
-        # === ENTRY LOGIC — BOTH 12h AND 4h MUST AGREE ===
+        # === RSI FILTER (avoid extreme overbought/oversold breakouts) ===
+        # Long: RSI < 70 (not extremely overbought)
+        # Short: RSI > 30 (not extremely oversold)
+        rsi_long_ok = rsi_14[i] < 70.0
+        rsi_short_ok = rsi_14[i] > 30.0
+        
+        # === ENTRY LOGIC — ASYMMETRIC ===
         new_signal = 0.0
         
-        # LONG ENTRY: 12h bull + 4h bull + RSI pullback
-        # Price can be below 4h HMA (pullback) but above 12h HMA (major support)
-        if major_bull_12h and inter_bull_4h and rsi_pullback_long:
-            # Extra confirmation: price above 12h HMA (major support holding)
-            if price_above_12h_hma:
-                new_signal = POSITION_SIZE
-            # Or price pulled back to 12h HMA but 4h still bull
-            elif price_below_12h_hma and price_above_4h_hma:
-                new_signal = POSITION_SIZE * 0.8
+        # LONG ENTRY: weekly bull + daily bull + ADX ok + Donchian breakout + RSI ok
+        if weekly_bull and daily_bull and trend_strength_ok and breakout_long and rsi_long_ok:
+            new_signal = POSITION_SIZE
         
-        # SHORT ENTRY: 12h bear + 4h bear + RSI pullback
-        # Price can be above 4h HMA (rally) but below 12h HMA (major resistance)
-        elif major_bear_12h and inter_bear_4h and rsi_pullback_short:
-            # Extra confirmation: price below 12h HMA (major resistance holding)
-            if price_below_12h_hma:
-                new_signal = -POSITION_SIZE
-            # Or price rallied to 12h HMA but 4h still bear
-            elif price_above_12h_hma and price_below_4h_hma:
-                new_signal = -POSITION_SIZE * 0.8
+        # SHORT ENTRY: weekly bear + daily bear + ADX ok + Donchian breakout + RSI ok
+        elif weekly_bear and daily_bear and trend_strength_ok and breakout_short and rsi_short_ok:
+            new_signal = -POSITION_SIZE
         
         # === HOLD POSITION LOGIC ===
         # If already in position, maintain unless exit conditions hit
@@ -217,14 +234,14 @@ def generate_signals(prices):
             new_signal = 0.0
         
         # === EXIT CONDITIONS (regime flip) ===
-        # Exit long on 12h regime flip to bear (major trend change)
+        # Exit long on weekly regime flip to bear
         if in_position and position_side > 0:
-            if major_bear_12h:
+            if weekly_bear:
                 new_signal = 0.0
         
-        # Exit short on 12h regime flip to bull (major trend change)
+        # Exit short on weekly regime flip to bull
         if in_position and position_side < 0:
-            if major_bull_12h:
+            if weekly_bull:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
