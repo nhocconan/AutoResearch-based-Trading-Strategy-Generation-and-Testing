@@ -1,37 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #121: 15m Supertrend + 4h HMA Trend Filter + RSI Pullback + ATR Stop
+Experiment #122: 30m RSI Mean Reversion + 4h HMA Trend Filter + ATR Stop
 
-Hypothesis: After 120 experiments, the winning pattern is clear:
-- Multi-timeframe trend following works (exp #118 Sharpe=0.478)
-- Fast timeframes (15m) need HTF filter to avoid whipsaws
-- Supertrend captures trend direction with built-in ATR stop
-- RSI pullback entries improve entry timing vs pure breakout
-- 4h HMA provides stable trend bias without lag of daily
+Hypothesis: After 121 experiments, most trend-following strategies fail on BTC/ETH
+due to 2022 crash whipsaws and 2025 bear market. This strategy uses:
+- 30m RSI(14) mean reversion: enters at extremes (RSI<30 long, RSI>70 short)
+- 4h HMA(21) trend filter: only long when price>4h_HMA, only short when price<4h_HMA
+- Choppiness Index(14) regime filter: high CHOP>61.8 = range (favor mean reversion),
+  low CHOP<38.2 = trend (reduce position size or skip mean reversion)
+- ATR(14) trailing stop at 2.5*ATR to protect against reversals
+- Discrete position sizing (0.20/0.30) to minimize fee churn
 
-Why 15m might work when 12h/1d failed:
-- More trades (100+ per year vs 20-40)
-- Captures intraday moves that daily misses
-- 4h filter prevents counter-trend trades in 2022 crash
-- RSI pullback = better risk/reward than chasing breakouts
+Why 30m works better than 15m/1h for this approach:
+- 30m captures intraday swings without 15m noise
+- More trades than 4h/12h (ensures ≥10 trades per symbol)
+- RSI mean reversion works in both bull and bear markets
+- 4h HMA filter prevents counter-trend trades during crashes
 
-Key differences from failed 15m strategies (#109, #115):
-- Simpler logic (no regime switching, no Choppiness)
-- HTF filter is mandatory (4h HMA), not optional
-- RSI for pullback (40-60 zone), not extremes (30/70)
-- Discrete position sizing to reduce fee churn
-
-Timeframe: 15m (REQUIRED for this experiment)
+Timeframe: 30m (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.35 discrete levels
-Stoploss: Supertrend flip OR 2.5*ATR trailing
+Position sizing: 0.20-0.30 discrete levels
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_supertrend_4h_hma_rsi_pullback_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_rsi_meanrev_4h_hma_chop_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -44,37 +40,21 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator."""
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
+def calculate_rsi(close, period=14):
+    """Calculate RSI using Wilder's smoothing."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    supertrend = np.zeros(n)
-    supertrend[:] = np.nan
-    direction = np.zeros(n)  # 1 = bullish, -1 = bearish
+    gain_s = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    loss_s = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    hl2 = (high + low) / 2
-    
-    for i in range(period, n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            continue
-        
-        upper_band = hl2[i] + multiplier * atr[i]
-        lower_band = hl2[i] - multiplier * atr[i]
-        
-        if i == period:
-            supertrend[i] = upper_band
-            direction[i] = 1
-        else:
-            # Determine direction
-            if close[i] > supertrend[i-1]:
-                supertrend[i] = lower_band
-                direction[i] = 1
-            else:
-                supertrend[i] = upper_band
-                direction[i] = -1
-    
-    return supertrend, direction
+    rs = np.zeros(len(close))
+    mask = loss_s > 0
+    rs[mask] = gain_s[mask] / loss_s[mask]
+    rsi = 100 - (100 / (1 + rs))
+    rsi[loss_s == 0] = 100.0
+    return rsi
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -86,20 +66,35 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI indicator."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    CHOP > 61.8 = range/choppy market
+    CHOP < 38.2 = trending market
+    """
+    n = len(close)
+    chop = np.zeros(n)
+    chop[:] = np.nan
     
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    # Calculate ATR for each bar
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
     
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
-    return rsi
+    for i in range(period, n):
+        atr_sum = np.sum(atr_s.values[i - period + 1:i + 1])
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 0 and atr_sum > 0:
+            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -116,16 +111,16 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
     rsi = calculate_rsi(close, 14)
+    chop = calculate_choppiness(high, low, close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.35
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -144,7 +139,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(supertrend[i]) or np.isnan(st_direction[i]):
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
@@ -153,49 +148,46 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === SUPERTREND DIRECTION ===
-        st_bullish = st_direction[i] == 1
-        st_bearish = st_direction[i] == -1
+        # === CHOPPINESS REGIME FILTER ===
+        # High CHOP = range market (favor mean reversion)
+        # Low CHOP = trending market (reduce mean reversion signals)
+        choppy_market = not np.isnan(chop[i]) and chop[i] > 55.0
+        trending_market = not np.isnan(chop[i]) and chop[i] < 45.0
         
-        # === RSI PULLBACK ZONE (not extremes) ===
-        # For longs: RSI pulled back to 40-55 zone in uptrend
-        rsi_pullback_long = 38 <= rsi[i] <= 58
-        # For shorts: RSI rallied to 42-62 zone in downtrend
-        rsi_pullback_short = 42 <= rsi[i] <= 62
+        # === RSI MEAN REVERSION SIGNALS ===
+        # Long: RSI oversold (<30) + 4h bullish trend
+        rsi_oversold = rsi[i] < 30
+        # Short: RSI overbought (>70) + 4h bearish trend
+        rsi_overbought = rsi[i] > 70
+        
+        # === POSITION SIZE ADJUSTMENT BASED ON REGIME ===
+        # In choppy market: full size (mean reversion works best)
+        # In trending market: half size or skip (mean reversion risky)
+        if choppy_market:
+            size_mult = 1.0
+        elif trending_market:
+            size_mult = 0.5  # Reduce size in trending market
+        else:
+            size_mult = 0.75  # Neutral regime
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS ===
-        # Strong: 4h bullish + Supertrend bullish + RSI pullback
-        if bull_trend_4h and st_bullish and rsi_pullback_long:
-            new_signal = SIZE_STRONG
-        # Moderate: 4h bullish + Supertrend bullish (ensure trades)
-        elif bull_trend_4h and st_bullish:
-            new_signal = SIZE_BASE
-        # Weak: Supertrend bullish only (ensure trades on all symbols)
-        elif st_bullish:
-            new_signal = SIZE_BASE
+        if rsi_oversold and bull_trend_4h:
+            new_signal = SIZE_STRONG * size_mult
+        elif rsi_oversold:
+            # Weaker signal without trend confirmation
+            new_signal = SIZE_BASE * size_mult
         
         # === SHORT ENTRY CONDITIONS ===
-        # Strong: 4h bearish + Supertrend bearish + RSI pullback
-        if bear_trend_4h and st_bearish and rsi_pullback_short:
-            new_signal = -SIZE_STRONG
-        # Moderate: 4h bearish + Supertrend bearish (ensure trades)
-        elif bear_trend_4h and st_bearish:
-            new_signal = -SIZE_BASE
-        # Weak: Supertrend bearish only (ensure trades on all symbols)
-        elif st_bearish:
-            new_signal = -SIZE_BASE
+        if rsi_overbought and bear_trend_4h:
+            new_signal = -SIZE_STRONG * size_mult
+        elif rsi_overbought:
+            # Weaker signal without trend confirmation
+            new_signal = -SIZE_BASE * size_mult
         
-        # === STOPLOSS LOGIC (Rule 6) ===
-        # Supertrend flip = automatic exit signal
-        if in_position and position_side > 0 and st_bearish:
-            new_signal = 0.0  # Supertrend flipped bearish
-        
-        if in_position and position_side < 0 and st_bullish:
-            new_signal = 0.0  # Supertrend flipped bullish
-        
-        # ATR trailing stop for active positions
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # Update trailing highs/lows for active positions
         if in_position and position_side > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
@@ -211,6 +203,15 @@ def generate_signals(prices):
             stoploss_price = lowest_close + 2.5 * atr[i]
             if close[i] > stoploss_price:
                 new_signal = 0.0  # Stoploss hit
+        
+        # === RSI EXIT CONDITIONS ===
+        # Exit long when RSI becomes overbought (>70)
+        if in_position and position_side > 0 and rsi_overbought:
+            new_signal = 0.0
+        
+        # Exit short when RSI becomes oversold (<30)
+        if in_position and position_side < 0 and rsi_oversold:
+            new_signal = 0.0
         
         # Update position tracking
         # Entering new position
