@@ -1,33 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #529: 15m RSI Mean Reversion with 4h HMA Trend Filter
+Experiment #530: 30m KAMA Adaptive Crossover with 4h Trend Filter
 
-Hypothesis: After 500+ failed experiments, the pattern shows complex regime-switching
-strategies fail. For 15m timeframe, the winning approach is:
-1. Fast RSI(7) for quick mean reversion signals on 15m
-2. 4h HMA(21) for directional bias - only trade with HTF trend
-3. Bollinger Band confirmation - enter when price touches bands
-4. Loose RSI thresholds (25/75) to ensure ≥10 trades per symbol
-5. 2*ATR stoploss - tighter for 15m noise
+Hypothesis: After 500+ failed experiments, the key insight is that FIXED-period MAs (EMA/HMA)
+fail because they don't adapt to changing volatility. KAMA (Kaufman Adaptive Moving Average)
+automatically adjusts smoothing based on market efficiency - smooth in noise, fast in trends.
 
-Why this should work:
-- 15m captures intraday mean reversion (faster than 1h/4h)
-- 4h trend filter prevents counter-trend trades (major failure mode)
-- RSI(7) is more sensitive than RSI(14) for 15m timeframe
-- BB confirmation adds volatility context
-- Simple logic = more trades = statistical significance
+Why KAMA should work on 30m:
+1. 30m has mixed regime (trending + ranging) - KAMA adapts to both
+2. 4h KAMA trend filter prevents counter-trend trades (major loss source)
+3. Loose RSI filter (30-70) ensures enough trades (>10/symbol/year)
+4. 2.0*ATR stoploss appropriate for 30m volatility (tighter than 12h's 2.5*ATR)
+5. Position size 0.25 conservative for 30m's higher frequency
 
-Timeframe: 15m (REQUIRED for this experiment)
+Key differences from failed strategies:
+- KAMA instead of HMA/EMA (adaptive smoothing)
+- Single HTF (4h) not dual (reduces complexity)
+- Very loose RSI thresholds (avoid 0-trade problem)
+- Simple logic: trend + momentum + not extreme
+
+Timeframe: 30m (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete (conservative for 15m noise)
+Position sizing: 0.25 discrete
 Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_rsi_meanrev_4h_hma_bb_confirm_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_kama_adaptive_4h_trend_rsi_loose_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -40,18 +42,47 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend with less lag."""
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts smoothing based on market efficiency ratio.
+    Smooths during noise, responds quickly during trends.
+    
+    Formula:
+    ER = |Close - Close[n]| / Sum(|Close[i] - Close[i-1]|)
+    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    KAMA = KAMA_prev + SC * (Close - KAMA_prev)
+    """
     close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
+    
+    # Change over period
+    change = np.abs(close_s - close_s.shift(period))
+    
+    # Sum of absolute price changes (volatility)
+    volatility = np.abs(close_s.diff()).rolling(window=period, min_periods=period).sum()
+    
+    # Efficiency Ratio (0 to 1)
+    er = change / volatility.replace(0, np.inf)
+    er = er.fillna(0)
+    
+    # Smoothing constants
+    fast_sc = 2 / (fast + 1)
+    slow_sc = 2 / (slow + 1)
+    
+    # Smoothing Constant (adaptive)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros(len(close))
+    kama[period-1] = close[period-1]  # Initialize
+    
+    for i in range(period, len(close)):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
-def calculate_rsi(close, period=7):
-    """Calculate Relative Strength Index with fast period for 15m."""
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -64,15 +95,6 @@ def calculate_rsi(close, period=7):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    return upper.values, lower.values, sma.values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -82,16 +104,19 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
     
-    # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    # Calculate HTF KAMA for trend direction
+    kama_4h = calculate_kama(df_4h['close'].values, period=10)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_7 = calculate_rsi(close, 7)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
+    rsi_14 = calculate_rsi(close, 14)
+    
+    # Dual KAMA on 30m (fast/slow for crossover)
+    kama_fast = calculate_kama(close, period=6, fast=2, slow=30)
+    kama_slow = calculate_kama(close, period=14, fast=2, slow=30)
     
     signals = np.zeros(n)
     
@@ -111,46 +136,36 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(kama_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
             signals[i] = 0.0
             continue
         
-        # === 4h HMA TREND BIAS ===
-        bull_bias = close[i] > hma_4h_aligned[i]
-        bear_bias = close[i] < hma_4h_aligned[i]
+        # === 4h KAMA TREND BIAS ===
+        bull_bias = close[i] > kama_4h_aligned[i]
+        bear_bias = close[i] < kama_4h_aligned[i]
         
-        # === 15m RSI MEAN REVERSION ===
-        rsi_oversold = rsi_7[i] <= 25
-        rsi_overbought = rsi_7[i] >= 75
-        rsi_neutral = (rsi_7[i] > 35) and (rsi_7[i] < 65)
+        # === 30m KAMA CROSSOVER ===
+        kama_bullish = kama_fast[i] > kama_slow[i]
+        kama_bearish = kama_fast[i] < kama_slow[i]
         
-        # === BOLLINGER BAND CONFIRMATION ===
-        at_lower_band = close[i] <= bb_lower[i] * 1.001
-        at_upper_band = close[i] >= bb_upper[i] * 0.999
+        # === RSI FILTER (VERY LOOSE to ensure trades) ===
+        rsi_ok_long = rsi_14[i] < 70  # Don't buy when extremely overbought
+        rsi_ok_short = rsi_14[i] > 30  # Don't sell when extremely oversold
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # Long: RSI oversold + at lower BB + 4h bullish bias
-        if rsi_oversold and at_lower_band and bull_bias:
+        # Long: 30m KAMA bullish + 4h bullish + RSI not extreme
+        if kama_bullish and bull_bias and rsi_ok_long:
             new_signal = SIZE
         
-        # Short: RSI overbought + at upper BB + 4h bearish bias
-        elif rsi_overbought and at_upper_band and bear_bias:
+        # Short: 30m KAMA bearish + 4h bearish + RSI not extreme
+        elif kama_bearish and bear_bias and rsi_ok_short:
             new_signal = -SIZE
-        
-        # === EXIT ON RSI REVERSION ===
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and rsi_7[i] > 55:
-                # Long position: exit when RSI recovers above 55
-                new_signal = 0.0
-            if position_side < 0 and rsi_7[i] < 45:
-                # Short position: exit when RSI drops below 45
-                new_signal = 0.0
         
         # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side != 0:
@@ -171,11 +186,11 @@ def generate_signals(prices):
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if 4h HMA flips against position
+        # Exit if 30m KAMA flips against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_bias:
+            if position_side > 0 and kama_bearish:
                 new_signal = 0.0
-            if position_side < 0 and bull_bias:
+            if position_side < 0 and kama_bullish:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
