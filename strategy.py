@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #004: 4h Mean Reversion with 1d HMA Trend Bias
-Hypothesis: 4h timeframe captures multi-day swings better than lower TFs. 
-Using 1d HMA as regime filter avoids counter-trend trades that destroyed #001-#003.
-Entry on RSI extremes (mean reversion) but ONLY with daily trend direction.
-This combines the best of both worlds: trend filter prevents whipsaw, RSI extremes catch pullbacks.
-Key insight: BTC/ETH 2022 crash needs short bias, 2021 bull needs long bias. 1d HMA provides this.
-Position sizing: 0.30 discrete, stoploss at 2.5*ATR trailing. Target 30-50 trades/year on 4h.
-Timeframe: 4h (REQUIRED), HTF: 1d via mtf_data helper.
+Experiment #005: 12h Multi-Timeframe Trend-Follow with 1d HMA Bias
+Hypothesis: 12h timeframe captures intermediate trends while 1d HMA provides regime filter.
+Key insight: Previous failures used overly complex regime detection (Choppiness) or too-strict conditions (Vol Breakout = 0 trades).
+This strategy uses simpler logic: 1d HMA for trend bias, 12h EMA pullback entries, RSI confirmation, ATR stops.
+Position sizing: 0.25-0.30 discrete levels to minimize fee churn while controlling drawdown.
+Timeframe: 12h (REQUIRED for exp#005), HTF: 1d via mtf_data helper.
+Why this might work: 12h has fewer whipsaws than 1h/4h, 1d HMA smoother than 4h for regime detection.
+Must generate 10+ trades on train, 3+ on test - entry conditions loosened vs failed experiments.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_rsi_meanrev_1d_hma_v1"
-timeframe = "4h"
+name = "mtf_12h_trend_1d_hma_rsi_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -68,20 +68,42 @@ def calculate_sma(close, period):
     """Calculate SMA."""
     return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma
-
 def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion signals."""
+    """Calculate Z-score for mean reversion filter."""
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     zscore = (close - sma) / (std + 1e-10)
     return zscore
+
+def calculate_supertrend(high, low, close, period=10, mult=3.0):
+    """Calculate Supertrend for trend direction."""
+    atr = calculate_atr(high, low, close, period)
+    hl2 = (high + low) / 2
+    
+    upper = hl2 + mult * atr
+    lower = hl2 - mult * atr
+    
+    supertrend = np.zeros(len(close))
+    trend = np.ones(len(close))  # 1 = bullish, -1 = bearish
+    
+    supertrend[0] = upper[0]
+    for i in range(1, len(close)):
+        if trend[i-1] == 1:
+            if close[i] < lower[i]:
+                trend[i] = -1
+                supertrend[i] = upper[i]
+            else:
+                trend[i] = 1
+                supertrend[i] = max(lower[i], supertrend[i-1])
+        else:
+            if close[i] > upper[i]:
+                trend[i] = 1
+                supertrend[i] = lower[i]
+            else:
+                trend[i] = -1
+                supertrend[i] = min(upper[i], supertrend[i-1])
+    
+    return supertrend, trend
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -94,35 +116,30 @@ def generate_signals(prices):
     
     # Calculate HTF indicators
     hma_1d = calculate_hma(df_1d['close'].values, 21)
-    ema_1d_50 = calculate_ema(df_1d['close'].values, 50)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    rsi_7 = calculate_rsi(close, 7)  # Faster RSI for entries
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
     ema_200 = calculate_ema(close, 200)
     sma_200 = calculate_sma(close, 200)
-    
-    # Bollinger Bands for mean reversion
-    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
-    
-    # Z-score for extreme mean reversion
     zscore = calculate_zscore(close, 20)
     
-    # HMA on 4h for faster trend
-    hma_4h = calculate_hma(close, 21)
+    # Supertrend for trend confirmation
+    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
+    
+    # HMA on 12h for faster trend
+    hma_12h = calculate_hma(close, 21)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.30
-    SIZE_HALF = 0.15
+    SIZE_BASE = 0.25
+    SIZE_HALF = 0.125
     
     # Track positions for stoploss
     position_side = 0
@@ -137,7 +154,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(ema_1d_50_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -145,80 +162,85 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # 1d trend bias (HTF) - this is the main regime filter
-        bull_trend_1d = close[i] > hma_1d_aligned[i] and close[i] > ema_1d_50_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i] and close[i] < ema_1d_50_aligned[i]
+        # 1d trend bias (HTF) - main regime filter
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # 4h trend confirmation
-        bull_trend_4h = close[i] > ema_50[i] and ema_21[i] > ema_50[i]
-        bear_trend_4h = close[i] < ema_50[i] and ema_21[i] < ema_50[i]
+        # 12h trend confirmation
+        bull_trend_12h = close[i] > ema_50[i] and ema_21[i] > ema_50[i]
+        bear_trend_12h = close[i] < ema_50[i] and ema_21[i] < ema_50[i]
         
-        # Long-term trend filter (only trade with 200 EMA direction)
+        # Supertrend confirmation
+        st_bullish = st_trend[i] == 1
+        st_bearish = st_trend[i] == -1
+        
+        # Long-term trend filter
         above_200 = not np.isnan(sma_200[i]) and close[i] > sma_200[i]
         below_200 = not np.isnan(sma_200[i]) and close[i] < sma_200[i]
         
-        # RSI extreme conditions for mean reversion
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
-        rsi_extreme_oversold = rsi_7[i] < 25
-        rsi_extreme_overbought = rsi_7[i] > 75
+        # RSI conditions - LOOSENED for more trades
+        rsi_pullback_long = 30 < rsi[i] < 60  # Wider range for more entries
+        rsi_bounce_short = 40 < rsi[i] < 70
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
         
-        # Bollinger Band extremes
-        price_at_bb_lower = close[i] <= bb_lower[i] * 1.002
-        price_at_bb_upper = close[i] >= bb_upper[i] * 0.998
+        # Z-score filter - avoid extreme entries
+        zscore_neutral = abs(zscore[i]) < 2.0
         
-        # Z-score extremes
-        zscore_extreme_low = zscore[i] < -1.5
-        zscore_extreme_high = zscore[i] > 1.5
+        # HMA crossover on 12h
+        hma_cross_long = False
+        hma_cross_short = False
+        if i >= 1 and not np.isnan(hma_12h[i]) and not np.isnan(hma_12h[i-1]):
+            hma_cross_long = hma_12h[i] > ema_50[i] and hma_12h[i-1] <= ema_50[i-1]
+            hma_cross_short = hma_12h[i] < ema_50[i] and hma_12h[i-1] >= ema_50[i-1]
         
-        # HMA crossover on 4h
-        hma_cross_long = i >= 1 and hma_4h[i] > ema_50[i] and hma_4h[i-1] <= ema_50[i-1]
-        hma_cross_short = i >= 1 and hma_4h[i] < ema_50[i] and hma_4h[i-1] >= ema_50[i-1]
-        
-        # Price momentum (RSI rising/falling)
-        rsi_rising = i >= 2 and rsi[i] > rsi[i-2]
-        rsi_falling = i >= 2 and rsi[i] < rsi[i-2]
+        # Price pullback to EMA21
+        price_near_ema21_long = close[i] <= ema_21[i] * 1.02 and close[i] >= ema_21[i] * 0.98
+        price_near_ema21_short = close[i] >= ema_21[i] * 0.98 and close[i] <= ema_21[i] * 1.02
         
         # Price action: higher low for long, lower high for short
-        higher_low = i >= 3 and low[i] > low[i-3]
-        lower_high = i >= 3 and high[i] < high[i-3]
+        higher_low = False
+        lower_high = False
+        if i >= 3:
+            higher_low = low[i] > low[i-3]
+            lower_high = high[i] < high[i-3]
         
         new_signal = 0.0
         
         # === LONG ENTRIES (only when 1d bullish) ===
         if bull_trend_1d:
-            # Primary: RSI oversold + price at BB lower (mean reversion in uptrend)
-            if rsi_oversold and price_at_bb_lower and above_200:
+            # Primary: Pullback to EMA21 with RSI confirmation
+            if price_near_ema21_long and rsi_pullback_long and above_200:
                 new_signal = SIZE_BASE
             
-            # Secondary: Z-score extreme low + RSI rising (reversal confirmation)
-            elif zscore_extreme_low and rsi_rising and bull_trend_4h:
+            # Secondary: HMA crossover with 1d confirmation
+            elif hma_cross_long and bull_trend_1d and st_bullish:
                 new_signal = SIZE_BASE
             
-            # Tertiary: RSI extreme oversold on 7-period (fast mean reversion)
-            elif rsi_extreme_oversold and bull_trend_1d:
+            # Tertiary: RSI oversold bounce in uptrend
+            elif rsi_oversold and bull_trend_12h and zscore_neutral:
                 new_signal = SIZE_HALF
             
-            # HMA crossover with trend confirmation
-            elif hma_cross_long and bull_trend_1d and above_200:
+            # Momentum: Higher low with trend
+            elif higher_low and bull_trend_12h and rsi[i] > 45:
                 new_signal = SIZE_HALF
         
         # === SHORT ENTRIES (only when 1d bearish) ===
         elif bear_trend_1d:
-            # Primary: RSI overbought + price at BB upper (mean reversion in downtrend)
-            if rsi_overbought and price_at_bb_upper and below_200:
+            # Primary: Bounce to EMA21 with RSI confirmation
+            if price_near_ema21_short and rsi_bounce_short and below_200:
                 new_signal = -SIZE_BASE
             
-            # Secondary: Z-score extreme high + RSI falling (reversal confirmation)
-            elif zscore_extreme_high and rsi_falling and bear_trend_4h:
+            # Secondary: HMA crossover with 1d confirmation
+            elif hma_cross_short and bear_trend_1d and st_bearish:
                 new_signal = -SIZE_BASE
             
-            # Tertiary: RSI extreme overbought on 7-period (fast mean reversion)
-            elif rsi_extreme_overbought and bear_trend_1d:
+            # Tertiary: RSI overbought rejection in downtrend
+            elif rsi_overbought and bear_trend_12h and zscore_neutral:
                 new_signal = -SIZE_HALF
             
-            # HMA crossover with trend confirmation
-            elif hma_cross_short and bear_trend_1d and below_200:
+            # Momentum: Lower high with trend
+            elif lower_high and bear_trend_12h and rsi[i] < 55:
                 new_signal = -SIZE_HALF
         
         # === STOPLOSS LOGIC (Rule 6) ===
