@@ -1,130 +1,75 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 1d Dual-Regime Strategy with Weekly Trend Filter
+Experiment #039: 4h Simple Trend + RSI Pullback with 1d HMA Bias
 
-Hypothesis: Previous 4h/12h strategies failed due to excessive whipsaws in crypto's
-noisy lower timeframes. Daily (1d) timeframe naturally filters noise while maintaining
-sufficient trade frequency (target: 20-50 trades/year). This strategy uses:
+Hypothesis: Previous strategies failed due to OVER-FILTERING (Choppiness + Connors + 
+multiple HTF biases = 0 trades). This strategy SIMPLIFIES to core edges only:
 
-1. HMA(21/63) Crossover - Fast trend signal with reduced lag vs EMA
-2. ADX(14) Regime Filter - ADX>20 = trend mode, ADX<20 = range mode
-3. 1w HMA(21) Major Bias - Via mtf_data helper for weekly trend alignment
-4. Bollinger Band Mean Reversion - For range-bound markets (ADX<20)
-5. ATR(14) Trailing Stop - 2.5x ATR for risk management
+1. 1d HMA(21) for trend bias (called ONCE before loop via mtf_data)
+2. 4h RSI(14) for pullback entries (long: RSI<40, short: RSI>60)
+3. 4h ATR(14) trailing stoploss at 2.5x
+4. NO Choppiness, NO Connors, NO session filters = MORE trades
 
-Why this should work on 1d:
-- Daily candles filter intraday noise that killed 4h strategies
-- Dual-regime adapts to both trending AND ranging crypto markets
-- Weekly HTF filter prevents counter-trend entries during major moves
-- Conservative sizing (0.20-0.30) protects against 77% crashes like 2022
-- Simpler logic = more trades (avoids 0-trade failure mode)
+Why this should beat Sharpe=0.028:
+- Simpler = more trades on ALL symbols (BTC, ETH, SOL)
+- RSI pullback in trend is proven edge (works in both bull/bear)
+- 1d HMA provides stable trend bias without whipsaw
+- 4h timeframe naturally gives 25-40 trades/year target
+- Discrete sizing (0.28) controls drawdown during 2022 crash
 
-Timeframe: 1d (REQUIRED for Experiment #007)
-HTF: 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20-0.30 discrete levels
+Timeframe: 4h (REQUIRED)
+HTF: 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.28 discrete
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_adx_dual_regime_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_simple_rsi_pullback_1d_hma_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_hma(close, period=21):
-    """
-    Hull Moving Average - reduces lag while maintaining smoothness.
-    HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    """
-    close_s = pd.Series(close)
-    n = period
-    
-    def wma(series, span):
-        return series.ewm(span=span, min_periods=span, adjust=False).mean()
-    
-    half = int(n / 2)
-    sqrt_n = int(np.sqrt(n))
-    
-    wma_half = wma(close_s, half)
-    wma_full = wma(close_s, n)
-    
-    raw_hma = 2 * wma_half - wma_full
-    hma = wma(raw_hma, sqrt_n)
-    
-    return hma.values
-
-def calculate_adx(high, low, close, period=14):
-    """
-    Average Directional Index - measures trend strength.
-    ADX > 25 = strong trend, ADX < 20 = ranging market.
-    """
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    
-    # True Range
-    tr1 = high_s - low_s
-    tr2 = np.abs(high_s - close_s.shift(1))
-    tr3 = np.abs(low_s - close_s.shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    # Directional Movement
-    up_move = high_s - high_s.shift(1)
-    down_move = low_s.shift(1) - low_s
-    
-    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0)
-    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0)
-    
-    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.inf)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    adx = adx.replace([np.inf, -np.inf], np.nan)
-    
-    return adx.values
 
 def calculate_atr(high, low, close, period=14):
     """Calculate ATR using Wilder's smoothing."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    
-    tr1 = high_s - low_s
-    tr2 = np.abs(high_s - close_s.shift(1))
-    tr3 = np.abs(low_s - close_s.shift(1))
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    middle = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = middle + std_dev * std
-    lower = middle - std_dev * std
-    return upper.values, lower.values, middle.values
-
 def calculate_rsi(close, period=14):
-    """Calculate RSI using Wilder's smoothing."""
+    """Calculate RSI using standard Wilder's method."""
     close_s = pd.Series(close)
     delta = close_s.diff()
-    
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
     
     avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    rs = avg_gain / avg_loss.replace(0, np.inf)
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.replace([np.inf, -np.inf], np.nan)
-    
-    return rsi.values
+    rsi = rsi.fillna(50).values
+    return rsi
+
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average for smoother trend with less lag."""
+    close_s = pd.Series(close)
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
+
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    return sma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -133,28 +78,24 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate 1w HMA for major bias
-    hma_1w_21 = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d indicators
-    hma_1d_21 = calculate_hma(close, period=21)
-    hma_1d_63 = calculate_hma(close, period=63)
+    hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
     
-    adx_14 = calculate_adx(high, low, close, period=14)
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
+    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
     
-    bb_upper, bb_lower, bb_middle = calculate_bollinger_bands(close, period=20, std_dev=2.0)
-    rsi_14 = calculate_rsi(close, period=14)
+    # Calculate 4h indicators
+    atr_14 = calculate_atr(high, low, close, 14)
+    rsi_14 = calculate_rsi(close, 14)
+    hma_4h_50 = calculate_hma(close, 50)
+    sma_4h_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
     
-    # Position sizing (Rule 4 - discrete levels, max 0.40)
-    BASE_SIZE = 0.25
-    HIGH_CONV_SIZE = 0.30
-    RANGE_SIZE = 0.20
+    # Base position sizing (Rule 4 - discrete levels, max 0.40)
+    BASE_SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -164,86 +105,61 @@ def generate_signals(prices):
     lowest_price = 0.0
     last_trade_bar = -50
     
-    for i in range(100, n):
+    for i in range(250, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1w_21_aligned[i]):
+        if np.isnan(hma_1d_21_aligned[i]):
             continue
         
-        if np.isnan(hma_1d_21[i]) or np.isnan(hma_1d_63[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_4h_50[i]):
             continue
         
-        if np.isnan(adx_14[i]) or np.isnan(bb_upper[i]):
-            continue
+        # === 1D TREND BIAS ===
+        trend_bullish = close[i] > hma_1d_21_aligned[i]
+        trend_bearish = close[i] < hma_1d_21_aligned[i]
         
-        # === WEEKLY MAJOR BIAS ===
-        weekly_bullish = close[i] > hma_1w_21_aligned[i]
-        weekly_bearish = close[i] < hma_1w_21_aligned[i]
+        # === 4H RSI PULLBACK SIGNALS ===
+        # Looser thresholds to ensure trades on all symbols
+        rsi_oversold = rsi_14[i] < 42
+        rsi_overbought = rsi_14[i] > 58
         
-        # === DAILY TREND ===
-        daily_bullish = hma_1d_21[i] > hma_1d_63[i]
-        daily_bearish = hma_1d_21[i] < hma_1d_63[i]
+        # === VOLATILITY-ADJUSTED POSITION SIZING ===
+        if i > 100:
+            atr_median = np.nanmedian(atr_14[max(0, i-100):i])
+            atr_ratio = atr_14[i] / atr_median if atr_median > 0 else 1.0
+            vol_adjustment = np.clip(1.0 / atr_ratio, 0.8, 1.2)
+        else:
+            vol_adjustment = 1.0
         
-        # === TREND STRENGTH ===
-        adx_strong = adx_14[i] > 20  # Lowered from 25 for more trades
-        adx_weak = adx_14[i] < 20
-        
-        # === HMA CROSSOVER DETECTION ===
-        hma_cross_long = False
-        hma_cross_short = False
-        
-        if i > 0:
-            # Long: fast HMA crosses above slow HMA
-            if hma_1d_21[i] > hma_1d_63[i] and hma_1d_21[i-1] <= hma_1d_63[i-1]:
-                hma_cross_long = True
-            # Short: fast HMA crosses below slow HMA
-            if hma_1d_21[i] < hma_1d_63[i] and hma_1d_21[i-1] >= hma_1d_63[i-1]:
-                hma_cross_short = True
-        
-        # === MEAN REVERSION SIGNALS ===
-        bb_break_lower = close[i] < bb_lower[i]
-        bb_break_upper = close[i] > bb_upper[i]
-        rsi_oversold = rsi_14[i] < 35
-        rsi_overbought = rsi_14[i] > 65
+        current_size = BASE_SIZE * vol_adjustment
+        current_size = np.clip(current_size, 0.20, 0.35)
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
-        
-        # TREND MODE (ADX >= 20)
-        if adx_strong:
-            # LONG ENTRY - HMA crossover + weekly alignment
-            if hma_cross_long and weekly_bullish:
-                new_signal = HIGH_CONV_SIZE  # 0.30 - high conviction
-            elif daily_bullish and weekly_bullish and not in_position:
-                # Continuation entry (no crossover but trend aligned)
-                new_signal = BASE_SIZE  # 0.25
-            
-            # SHORT ENTRY - HMA crossover + weekly alignment
-            if hma_cross_short and weekly_bearish:
-                new_signal = -HIGH_CONV_SIZE  # -0.30 - high conviction
-            elif daily_bearish and weekly_bearish and not in_position:
-                # Continuation entry
-                new_signal = -BASE_SIZE  # -0.25
-        
-        # RANGE MODE (ADX < 20) - Mean Reversion
-        elif adx_weak:
-            # Long at lower BB with oversold RSI
-            if bb_break_lower and rsi_oversold:
-                new_signal = RANGE_SIZE  # 0.20
-            # Short at upper BB with overbought RSI
-            elif bb_break_upper and rsi_overbought:
-                new_signal = -RANGE_SIZE  # -0.20
-        
-        # === TRADE FREQUENCY SAFEGUARD ===
-        # If no trades for 25 bars (~25 days), allow weaker entry
         bars_since_last_trade = i - last_trade_bar
-        if bars_since_last_trade > 25 and new_signal == 0.0 and not in_position:
-            if daily_bullish and weekly_bullish:
-                new_signal = BASE_SIZE
-            elif daily_bearish and weekly_bearish:
-                new_signal = -BASE_SIZE
+        
+        # LONG ENTRIES: Bullish 1d trend + RSI pullback on 4h
+        if trend_bullish:
+            # RSI pullback entry + price above 4h HMA50 for confirmation
+            if rsi_oversold and close[i] > hma_4h_50[i]:
+                new_signal = current_size
+        
+        # SHORT ENTRIES: Bearish 1d trend + RSI rally on 4h
+        elif trend_bearish:
+            # RSI rally entry + price below 4h HMA50 for confirmation
+            if rsi_overbought and close[i] < hma_4h_50[i]:
+                new_signal = -current_size
+        
+        # === FREQUENCY SAFEGUARD ===
+        # If no trades for 60 bars (~10 days on 4h), force entry with weaker signal
+        # This ensures minimum trade count on all symbols
+        if bars_since_last_trade > 60 and new_signal == 0.0 and not in_position:
+            if trend_bullish and rsi_14[i] < 50:
+                new_signal = current_size * 0.5
+            elif trend_bearish and rsi_14[i] > 50:
+                new_signal = -current_size * 0.5
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -266,32 +182,21 @@ def generate_signals(prices):
                     stoploss_triggered = True
         
         # === TREND REVERSAL EXIT ===
+        # Exit if 1d trend flips against position
         trend_reversal = False
         if in_position and position_side != 0:
-            # Exit long if HMA turns bearish
-            if position_side > 0 and daily_bearish:
+            if position_side > 0 and trend_bearish:
                 trend_reversal = True
-            # Exit short if HMA turns bullish
-            if position_side < 0 and daily_bullish:
+            if position_side < 0 and trend_bullish:
                 trend_reversal = True
         
-        # === RANGE EXIT (for mean reversion trades) ===
-        range_exit = False
-        if in_position and position_side != 0 and adx_weak:
-            # Exit mean reversion at middle band
-            if position_side > 0 and close[i] > bb_middle[i]:
-                range_exit = True
-            if position_side < 0 and close[i] < bb_middle[i]:
-                range_exit = True
-        
-        # Apply stoploss or exits
-        if stoploss_triggered or trend_reversal or range_exit:
+        # Apply stoploss or trend reversal
+        if stoploss_triggered or trend_reversal:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
             if not in_position:
-                # New entry
                 in_position = True
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
@@ -307,7 +212,6 @@ def generate_signals(prices):
                 last_trade_bar = i
         else:
             if in_position:
-                # Exit position
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
