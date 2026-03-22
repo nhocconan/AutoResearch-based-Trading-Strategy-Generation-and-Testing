@@ -1,41 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #601: 15m Mean Reversion with 4h Trend Filter + RSI Extremes
+Experiment #602: 30m Multi-Signal Ensemble (Fisher + Z-score + 4h HMA + ADX Regime)
 
-Hypothesis: After 532+ failures, the key insight is that 15m timeframe is ideal for
-mean reversion strategies (captures noise/intraday swings) but needs HTF trend filter
-to avoid counter-trend trades. This strategy combines:
+Hypothesis: After 533+ failures, the winning pattern is combining:
+1. Fisher Transform for reversal detection (works in bear markets, catches bottoms)
+2. Z-score mean reversion (proven edge in range/bear periods)
+3. 4h HMA trend bias (multi-timeframe confirmation, proven in #593)
+4. ADX regime with hysteresis (avoid whipsaw in transition zones)
+5. Asymmetric entries: more aggressive longs in bull, more shorts in bear
 
-1. 4h HMA(21) for trend bias (HTF via mtf_data helper - call ONCE before loop)
-2. 15m RSI(7) for fast mean reversion signals (lower period = more trades)
-3. 15m Bollinger Bands(20, 2.0) for entry confirmation at extremes
-4. 15m ATR(14) for stoploss (2.0x ATR trailing)
-5. Looser thresholds to ensure 10+ trades per symbol (Rule 9 - CRITICAL)
+Why this should beat previous 30m attempts (#590 Sharpe=-2.712, #596 Sharpe=-2.865):
+- Previous used simple EMA crossover (always fails on BTC/ETH)
+- This uses Fisher Transform (non-linear, catches reversals better)
+- Z-score filter prevents entering against extreme moves
+- ADX hysteresis (25/18) reduces false regime switches
+- Looser entry thresholds ensure >=10 trades per symbol
 
-Why this should work on 15m:
-- 15m captures intraday mean reversion (price oscillates around HTF trend)
-- RSI(7) is faster than RSI(14) = more signals on 15m
-- 4h HMA filter prevents trading against major trend
-- BB confirmation ensures entries at statistical extremes
-- Conservative sizing (0.25) controls drawdown during 2022 crash
-
-Key differences from failed strategies:
-- RSI(7) not RSI(14) = more trades on 15m timeframe
-- BB touch not BB break = earlier entries, more signals
-- No ADX filter = avoids filtering out valid mean reversion trades
-- Looser RSI thresholds (25/75 not 20/80) = ensures trade count
-
-Timeframe: 15m (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (get_htf_data called ONCE before loop)
-Position sizing: 0.25 discrete (max 0.40)
-Stoploss: 2.0 * ATR(14) trailing
+Timeframe: 30m (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25-0.30 discrete (max 0.40)
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_meanrev_4h_hma_rsi7_bb_extremes_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_fisher_zscore_4h_hma_adx_regime_ensemble_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -58,8 +49,34 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=7):
-    """Calculate RSI (Relative Strength Index) - faster period for 15m."""
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    tr1 = high_s - low_s
+    tr2 = np.abs(high_s - close_s.shift(1))
+    tr3 = np.abs(low_s - close_s.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    up_move = high_s - high_s.shift(1)
+    down_move = low_s.shift(1) - low_s
+    
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    
+    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.inf)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    return adx.values
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI (Relative Strength Index)."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -73,22 +90,45 @@ def calculate_rsi(close, period=7):
     
     return rsi.values
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_fisher_transform(high, low, period=9):
+    """
+    Calculate Ehlers Fisher Transform.
+    Transforms price into a Gaussian distribution for better reversal signals.
+    Long when Fisher crosses above -1.5, Short when crosses below +1.5
+    """
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    # Median price
+    median = (high_s + low_s) / 2
+    
+    # Normalize price to -1 to +1 range
+    highest = median.rolling(window=period, min_periods=period).max()
+    lowest = median.rolling(window=period, min_periods=period).min()
+    
+    range_val = highest - lowest
+    range_val = range_val.replace(0, np.inf)
+    
+    # Normalized value
+    norm = (median - lowest) / range_val
+    norm = norm.clip(0.001, 0.999)  # Avoid log(0)
+    
+    # Fisher transform
+    fisher = 0.5 * np.log((1 + norm) / (1 - norm))
+    
+    # Signal line (previous fisher)
+    fisher_signal = fisher.shift(1)
+    
+    return fisher.values, fisher_signal.values
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion detection."""
     close_s = pd.Series(close)
     sma = close_s.rolling(window=period, min_periods=period).mean()
     std = close_s.rolling(window=period, min_periods=period).std()
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    
-    return upper.values, lower.values, sma.values
-
-def calculate_percent_b(close, bb_upper, bb_lower):
-    """Calculate %B position within Bollinger Bands."""
-    bb_range = bb_upper - bb_lower
-    percent_b = (close - bb_lower) / bb_range.replace(0, np.inf)
-    return percent_b
+    std = std.replace(0, np.inf)
+    zscore = (close_s - sma) / std
+    return zscore.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -105,22 +145,27 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_7 = calculate_rsi(close, 7)  # Faster RSI for more 15m signals
-    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
-    percent_b = calculate_percent_b(close, bb_upper, bb_lower)
+    adx_14 = calculate_adx(high, low, close, 14)
+    rsi_14 = calculate_rsi(close, 14)
+    fisher, fisher_signal = calculate_fisher_transform(high, low, 9)
+    zscore_20 = calculate_zscore(close, 20)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.25
+    SIZE = 0.28
     
-    # Track position state for stoploss (Rule 6)
+    # Track position state for stoploss (separate from signal)
     in_position = False
     position_side = 0
     highest_close = 0.0
     lowest_close = 0.0
+    entry_price = 0.0
+    
+    # ADX regime state with hysteresis
+    in_trend_regime = False
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -130,55 +175,79 @@ def generate_signals(prices):
         if np.isnan(hma_4h_aligned[i]):
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(adx_14[i]) or np.isnan(rsi_14[i]):
             continue
+        
+        if np.isnan(fisher[i]) or np.isnan(fisher_signal[i]):
+            continue
+        
+        if np.isnan(zscore_20[i]):
+            continue
+        
+        # === ADX REGIME WITH HYSTERESIS ===
+        # Enter trend regime when ADX > 25, exit when < 18
+        if adx_14[i] > 25:
+            in_trend_regime = True
+        elif adx_14[i] < 18:
+            in_trend_regime = False
         
         # === 4H HMA TREND BIAS ===
         bull_bias = close[i] > hma_4h_aligned[i]
         bear_bias = close[i] < hma_4h_aligned[i]
         
-        # === 15M RSI EXTREMES (faster period = more signals) ===
-        rsi_oversold = rsi_7[i] < 30  # Looser than 20 for more trades
-        rsi_overbought = rsi_7[i] > 70  # Looser than 80 for more trades
+        # === FISHER TRANSFORM SIGNALS ===
+        # Long: Fisher crosses above -1.5 (oversold reversal)
+        fisher_long = (fisher_signal[i] < -1.5) and (fisher[i] > -1.5)
+        # Short: Fisher crosses below +1.5 (overbought reversal)
+        fisher_short = (fisher_signal[i] > 1.5) and (fisher[i] < 1.5)
         
-        # === BOLLINGER BAND CONFIRMATION ===
-        near_bb_lower = close[i] <= bb_lower[i] * 1.002  # At or below lower band
-        near_bb_upper = close[i] >= bb_upper[i] * 0.998  # At or above upper band
+        # === Z-SCORE MEAN REVERSION ===
+        # Extreme oversold (long opportunity)
+        zscore_oversold = zscore_20[i] < -1.5
+        # Extreme overbought (short opportunity)
+        zscore_overbought = zscore_20[i] > 1.5
         
-        # === %B CONFIRMATION (extreme positions) ===
-        percent_b_low = percent_b[i] < 0.1  # Bottom 10% of BB range
-        percent_b_high = percent_b[i] > 0.9  # Top 10% of BB range
+        # === RSI CONFIRMATION ===
+        rsi_oversold = rsi_14[i] < 40
+        rsi_overbought = rsi_14[i] > 60
         
-        # === ENTRY LOGIC - Mean Reversion with HTF Filter ===
+        # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # LONG: RSI oversold + BB lower + 4h trend not strongly bearish
-        # Allow counter-trend longs when RSI is very extreme (RSI < 20)
-        if rsi_oversold and (near_bb_lower or percent_b_low):
-            if bull_bias:
-                # With trend: standard entry
+        # MODE 1: TREND REGIME (ADX > 25) - Follow 4h HMA bias with Fisher entry
+        if in_trend_regime:
+            # Long: Bullish 4h bias + Fisher reversal from oversold
+            if bull_bias and fisher_long and rsi_oversold:
                 new_signal = SIZE
-            elif rsi_7[i] < 20:
-                # Very oversold: allow counter-trend (mean reversion)
-                new_signal = SIZE
-            elif bear_bias and rsi_7[i] < 25:
-                # Mildly oversold in bear: smaller position
-                new_signal = SIZE * 0.6
-        
-        # SHORT: RSI overbought + BB upper + 4h trend not strongly bullish
-        # Allow counter-trend shorts when RSI is very extreme (RSI > 80)
-        if rsi_overbought and (near_bb_upper or percent_b_high):
-            if bear_bias:
-                # With trend: standard entry
+            
+            # Short: Bearish 4h bias + Fisher reversal from overbought
+            elif bear_bias and fisher_short and rsi_overbought:
                 new_signal = -SIZE
-            elif rsi_7[i] > 80:
-                # Very overbought: allow counter-trend (mean reversion)
-                new_signal = -SIZE
-            elif bull_bias and rsi_7[i] > 75:
-                # Mildly overbought in bull: smaller position
-                new_signal = -SIZE * 0.6
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # MODE 2: RANGE REGIME (ADX < 18) - Z-score mean reversion
+        else:
+            # Long: Z-score oversold + RSI confirmation + not strongly bearish
+            if zscore_oversold and rsi_oversold:
+                if not bear_bias or adx_14[i] < 22:
+                    new_signal = SIZE
+            
+            # Short: Z-score overbought + RSI confirmation + not strongly bullish
+            elif zscore_overbought and rsi_overbought:
+                if not bull_bias or adx_14[i] < 22:
+                    new_signal = -SIZE
+        
+        # MODE 3: TRANSITION (18 <= ADX <= 25) - Conservative entries only
+        # Only enter if strong confluence (both Fisher and Z-score agree)
+        if not in_trend_regime and adx_14[i] >= 18:
+            # Strong long signal
+            if fisher_long and zscore_oversold and bull_bias:
+                new_signal = SIZE * 0.7  # Reduced size in transition
+            
+            # Strong short signal
+            elif fisher_short and zscore_overbought and bear_bias:
+                new_signal = -SIZE * 0.7
+        
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
         
         if in_position and position_side != 0:
@@ -186,7 +255,7 @@ def generate_signals(prices):
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.0 * atr_14[i]
+                stoploss_price = highest_close - 2.5 * atr_14[i]
                 if close[i] < stoploss_price:
                     stoploss_triggered = True
             
@@ -194,22 +263,20 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.0 * atr_14[i]
+                stoploss_price = lowest_close + 2.5 * atr_14[i]
                 if close[i] > stoploss_price:
                     stoploss_triggered = True
         
-        # === MEAN REVERSION EXIT (RSI crosses back to neutral) ===
-        mean_reversion_exit = False
+        # === TREND REVERSAL EXIT ===
+        trend_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and rsi_7[i] > 55:
-                # Long exit when RSI recovers to neutral
-                mean_reversion_exit = True
-            if position_side < 0 and rsi_7[i] < 45:
-                # Short exit when RSI recovers to neutral
-                mean_reversion_exit = True
+            if position_side > 0 and bear_bias and adx_14[i] > 20:
+                trend_reversal = True
+            if position_side < 0 and bull_bias and adx_14[i] > 20:
+                trend_reversal = True
         
-        # Apply stoploss or mean reversion exit
-        if stoploss_triggered or mean_reversion_exit:
+        # Apply stoploss or trend reversal
+        if stoploss_triggered or trend_reversal:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -220,11 +287,13 @@ def generate_signals(prices):
                 position_side = np.sign(new_signal)
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
+                entry_price = close[i]
             elif np.sign(new_signal) != position_side:
                 # Position flip
                 position_side = np.sign(new_signal)
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
+                entry_price = close[i]
         else:
             if in_position:
                 # Exit position
@@ -232,6 +301,7 @@ def generate_signals(prices):
                 position_side = 0
                 highest_close = 0.0
                 lowest_close = 0.0
+                entry_price = 0.0
         
         signals[i] = new_signal
     
