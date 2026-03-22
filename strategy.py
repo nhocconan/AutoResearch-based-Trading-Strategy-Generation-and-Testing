@@ -1,39 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #213: 1h MACD Momentum + 4h HMA Trend + BB Squeeze + Volume Filter
+Experiment #214: 4h DEMA Crossover + 1d/1w HMA Confluence + Volume + ATR Stop
 
-Hypothesis: 1h timeframe needs STRONGER filtering than 4h due to more noise.
-This strategy combines:
-1. 4h HMA(21) as primary trend filter (HTF bias - call ONCE before loop)
-2. 1h MACD histogram momentum for entry timing (faster signal)
-3. Bollinger Band Width squeeze detection (low vol = breakout potential)
-4. Volume confirmation (taker_buy_volume ratio > 0.55 for longs)
-5. ATR(14) trailing stop at 2.5x for risk management
+Hypothesis: 4h timeframe captures multi-day swings with less noise than 15m/1h.
+DEMA (Double EMA) reacts faster than regular EMA, catching trend changes earlier.
+Using BOTH 1d AND 1w HMA for confluence creates stronger HTF bias filter.
+Volume ratio confirms breakout validity (avoid fake breakouts on low volume).
+ATR trailing stop protects against reversals.
 
-Why this might work on 1h:
-- 4h HMA provides stable trend bias (proven in current best strategy)
-- MACD histogram captures momentum shifts faster than EMA crossover
-- BB squeeze identifies consolidation before breakouts (reduces whipsaws)
-- Volume filter confirms genuine moves vs fake breakouts
-- Conservative sizing (0.25) controls 2022-style crash drawdown
+Why this might beat current best (mtf_4h_kama_1d_hma_adx_atr_v1, Sharpe=0.478):
+- DEMA vs KAMA: DEMA has less lag, catches moves 1-2 bars earlier
+- Dual HTF filter (1d + 1w): Stronger trend confluence than single 1d HMA
+- Volume confirmation: Filters false breakouts that hurt pure price strategies
+- ADX > 15 (not 20+): Lower threshold ensures enough trades on 4h timeframe
+- Conservative sizing (0.30): Controls DD in 2022-style crashes
 
-Learning from failures:
-- #201 (1h KAMA): Sharpe=-1.202 - KAMA alone too slow for 1h noise
-- #207 (1h RSI mean-rev): Sharpe=-9.084 - mean-rev fails on 1h crypto
-- #211 (15m MACD): Sharpe=-2.490 - too fast, needs stronger HTF filter
-- Current best uses 4h+1d, this uses 1h+4h (faster but filtered)
-
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels (max 0.30)
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
+Position sizing: 0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_macd_4h_hma_bb_squeeze_vol_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_dema_1d_1w_hma_vol_adx_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -46,29 +38,41 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD (Moving Average Convergence Divergence)."""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
-    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
-
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    return upper.values, lower.values, sma.values, std.values
-
-def calculate_bb_width(upper, lower, sma):
-    """Calculate Bollinger Band Width (normalized)."""
-    width = (upper - lower) / sma
-    return width
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    n = len(close)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+    
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    tr_s = np.where(tr_s == 0, 1e-10, tr_s)
+    
+    plus_di = 100 * plus_dm_s / tr_s
+    minus_di = 100 * minus_dm_s / tr_s
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -80,53 +84,67 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_ema(close, period=21):
-    """Calculate Exponential Moving Average."""
+def calculate_dema(close, period=21):
+    """Calculate Double Exponential Moving Average (less lag than EMA)."""
     close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    return ema.values
+    ema1 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    dema = 2 * ema1 - ema2
+    return dema.values
 
-def calculate_volume_ratio(taker_buy_volume, volume):
-    """Calculate taker buy volume ratio."""
-    ratio = taker_buy_volume / (volume + 1e-10)
-    return ratio
+def calculate_rsi(close, period=14):
+    """Calculate RSI (Relative Strength Index)."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi.values
+
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs moving average."""
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    vol_ratio = volume / (vol_ma.values + 1e-10)
+    return vol_ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
-    taker_buy_vol = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
-    bb_upper, bb_lower, bb_sma, bb_std = calculate_bollinger_bands(close, 20, 2.0)
-    bb_width = calculate_bb_width(bb_upper, bb_lower, bb_sma)
-    ema_21 = calculate_ema(close, 21)
-    ema_50 = calculate_ema(close, 50)
-    vol_ratio = calculate_volume_ratio(taker_buy_vol, volume)
-    
-    # Calculate BB Width percentile for squeeze detection (rolling 100 periods)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=100).apply(
-        lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min() + 1e-10), raw=False
-    ).values
+    adx = calculate_adx(high, low, close, 14)
+    dema_fast = calculate_dema(close, 8)
+    dema_slow = calculate_dema(close, 21)
+    rsi = calculate_rsi(close, 14)
+    vol_ratio = calculate_volume_ratio(volume, 20)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25
-    SIZE_MAX = 0.30
+    SIZE_BASE = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -140,123 +158,110 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(macd_hist[i]) or np.isnan(bb_width[i]) or np.isnan(bb_width_percentile[i]):
+        if np.isnan(adx[i]) or np.isnan(dema_fast[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias (STRONG filter for 1h)
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # Both 1d AND 1w HMA must agree for strong confluence
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
         
-        # === BB SQUEEZE DETECTION ===
-        # BB Width percentile < 0.3 = low volatility (squeeze = breakout potential)
-        bb_squeeze = bb_width_percentile[i] < 0.3
+        # Strong bullish: both 1d and 1w agree
+        strong_bull_trend = bull_trend_1d and bull_trend_1w
+        # Strong bearish: both 1d and 1w agree
+        strong_bear_trend = bear_trend_1d and bear_trend_1w
+        # Weaker signal: only 1d agrees (still tradable but smaller size)
+        weak_bull_trend = bull_trend_1d and not bull_trend_1w
+        weak_bear_trend = bear_trend_1d and not bear_trend_1w
         
-        # === MACD MOMENTUM ===
-        # MACD histogram crossing above 0 = bullish momentum
-        # MACD histogram crossing below 0 = bearish momentum
-        macd_bullish = macd_hist[i] > 0 and macd_hist[i-1] <= 0  # Fresh cross
-        macd_bearish = macd_hist[i] < 0 and macd_hist[i-1] >= 0  # Fresh cross
+        # === TREND STRENGTH FILTER ===
+        # ADX > 15 = trending market (lower threshold for 4h to ensure trades)
+        trend_strength = adx[i] > 15
         
-        # MACD histogram positive/negative (sustained momentum)
-        macd_hist_positive = macd_hist[i] > 0
-        macd_hist_negative = macd_hist[i] < 0
+        # === DEMA CROSSOVER ===
+        # Fast DEMA crosses above slow DEMA = bullish
+        # Fast DEMA crosses below slow DEMA = bearish
+        dema_bullish = dema_fast[i] > dema_slow[i]
+        dema_bearish = dema_fast[i] < dema_slow[i]
         
-        # === EMA CONFIRMATION ===
-        # EMA21 > EMA50 = bullish trend structure
-        # EMA21 < EMA50 = bearish trend structure
-        ema_bullish = ema_21[i] > ema_50[i]
-        ema_bearish = ema_21[i] < ema_50[i]
+        # Check for actual crossover (not just above/below)
+        dema_cross_long = dema_fast[i] > dema_slow[i] and dema_fast[i-1] <= dema_slow[i-1]
+        dema_cross_short = dema_fast[i] < dema_slow[i] and dema_fast[i-1] >= dema_slow[i-1]
         
         # === VOLUME CONFIRMATION ===
-        # Taker buy ratio > 0.55 = buying pressure
-        # Taker buy ratio < 0.45 = selling pressure
-        vol_bullish = vol_ratio[i] > 0.55
-        vol_bearish = vol_ratio[i] < 0.45
+        # Volume ratio > 1.2 = above average volume (confirms breakout)
+        volume_confirmed = vol_ratio[i] > 1.2
         
-        # === PRICE POSITION IN BB ===
-        # Price near upper band = bullish
-        # Price near lower band = bearish
-        price_position = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i] + 1e-10)
-        price_upper = price_position > 0.6
-        price_lower = price_position < 0.4
+        # === RSI MOMENTUM ===
+        # RSI > 45 = not oversold (for longs)
+        # RSI < 55 = not overbought (for shorts)
+        rsi_ok_long = rsi[i] > 45
+        rsi_ok_short = rsi[i] < 55
         
         new_signal = 0.0
         
         # === ENTRY CONDITIONS ===
-        # Long: 4h bullish + (BB squeeze OR MACD fresh cross) + volume/price confirmation
-        # More flexible to ensure enough trades on 1h
-        if bull_trend_4h:
-            # Primary entry: BB squeeze + MACD momentum + volume
-            if bb_squeeze and macd_hist_positive:
-                if vol_bullish or price_upper or ema_bullish:
-                    new_signal = SIZE_BASE
-            
-            # Secondary entry: MACD fresh cross (momentum shift)
-            if macd_bullish:
-                if vol_bullish or ema_bullish:
-                    new_signal = SIZE_BASE
+        # Long: Strong HTF trend OR (weak HTF + crossover) + ADX + volume + RSI
+        if strong_bull_trend and trend_strength and dema_bullish:
+            if volume_confirmed and rsi_ok_long:
+                new_signal = SIZE_BASE
+            elif dema_cross_long and rsi_ok_long:
+                # Crossover entry even without volume spike
+                new_signal = SIZE_BASE * 0.7  # Smaller size on crossover alone
         
-        # Short: 4h bearish + (BB squeeze OR MACD fresh cross) + volume/price confirmation
-        if bear_trend_4h:
-            # Primary entry: BB squeeze + MACD momentum + volume
-            if bb_squeeze and macd_hist_negative:
-                if vol_bearish or price_lower or ema_bearish:
-                    new_signal = -SIZE_BASE
-            
-            # Secondary entry: MACD fresh cross (momentum shift)
-            if macd_bearish:
-                if vol_bearish or ema_bearish:
-                    new_signal = -SIZE_BASE
+        if weak_bull_trend and trend_strength and dema_cross_long:
+            if rsi_ok_long:
+                new_signal = SIZE_BASE * 0.5  # Even smaller on weak trend
+        
+        # Short: Strong HTF trend OR (weak HTF + crossover) + ADX + volume + RSI
+        if strong_bear_trend and trend_strength and dema_bearish:
+            if volume_confirmed and rsi_ok_short:
+                new_signal = -SIZE_BASE
+            elif dema_cross_short and rsi_ok_short:
+                new_signal = -SIZE_BASE * 0.7
+        
+        if weak_bear_trend and trend_strength and dema_cross_short:
+            if rsi_ok_short:
+                new_signal = -SIZE_BASE * 0.5
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
-        # Check stoploss on EXISTING position before considering new entry
         if in_position:
             if position_side > 0:
-                # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                # Trailing stop: 2.5 * ATR below highest close
                 stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
-                    new_signal = 0.0  # Stoploss overrides entry signal
+                    new_signal = 0.0
             
             if position_side < 0:
-                # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                # Trailing stop: 2.5 * ATR above lowest close
                 stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
-                    new_signal = 0.0  # Stoploss overrides entry signal
+                    new_signal = 0.0
         
         # === UPDATE POSITION TRACKING FOR NEXT BAR ===
         if new_signal != 0.0:
             if not in_position:
-                # Entering new position
                 in_position = True
                 position_side = np.sign(new_signal)
-                entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
-                # Reversing position
                 position_side = np.sign(new_signal)
-                entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
-            # else: maintaining same position direction
         else:
-            # Exiting position (signal-based or stoploss)
             if in_position:
                 in_position = False
                 position_side = 0
-                entry_price = 0.0
                 highest_close = 0.0
                 lowest_close = 0.0
         
