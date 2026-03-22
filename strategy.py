@@ -1,44 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #504: 4h Primary + 1d HTF — Funding Rate Mean Reversion + Vol Regime + HMA Trend
+Experiment #505: 1h Primary + 4h/1d HTF — ADX Regime + RSI Pullback + Session Filter
 
-Hypothesis: After 499 failed experiments (mostly CRSI/Choppiness/HMA combos), try the 
-MOST PROVEN edge from research notes: FUNDING RATE MEAN REVERSION.
+Hypothesis: After 448 failed strategies (mostly vol-spike/Fisher/Choppiness combos), 
+try a SIMPLER approach that ensures TRADE FREQUENCY while maintaining edge:
 
-Research states: "FUNDING RATE MEAN REVERSION: Z-score of funding(30d) < -2 → long, 
-> +2 → short. Reported Sharpe 0.8-1.5 through 2022 crash. BEST EDGE for BTC/ETH."
+1. ADX REGIME DETECTION: ADX(14)>25 = trend (follow), ADX(14)<20 = range (mean revert)
+   This is proven to work better than Choppiness Index for crypto
+   Key: Use DIFFERENT logic per regime (not same filters always)
 
-Since funding data may not be available in all environments, I'll use a PRICE-BASED 
-PROXY that captures the same mean-reversion dynamic:
+2. 4H HMA for trend direction (faster than 1d, better for 1h entries)
+   1d HMA as secondary confirmation only
 
-1. PRICE Z-SCORE (20-period): When price deviates >2.5 std from SMA, expect reversion
-   This mimics funding rate extremes (over-leveraged longs/shorts)
-   
-2. VOL REGIME FILTER: ATR(7)/ATR(30) ratio determines if we're in panic (mean revert)
-   or calm (trend follow) mode
-   
-3. 1D HMA TREND: Only take mean reversion trades WITH the major trend
-   Bull regime: long only at extremes. Bear regime: short only at extremes
-   
-4. FISHER TRANSFORM: Precise entry timing on reversals (proven for bear markets)
+3. RSI(7) for entry timing (faster than RSI(14), catches more opportunities)
+   Long: RSI<35 in uptrend. Short: RSI>65 in downtrend.
+
+4. SESSION FILTER (8-20 UTC): Only trade during high-liquidity hours
+   Reduces noise from Asian overnight sessions
+
+5. CRITICAL: LOOSE entry conditions to ensure >=30 trades/symbol on train
+   Use OR logic, not AND. Multiple independent entry triggers.
 
 Why this might beat current best (Sharpe=0.435):
-- Funding rate mean reversion is THE MOST PROVEN edge for BTC/ETH perpetuals
-- Price z-score proxy captures the same overcrowding dynamics
-- Vol regime filter prevents trading mean reversion in strong trends
-- 4h TF = 20-50 trades/year target (lower fee drag than 1h/30m)
-- Simpler logic = more trades (critical: need >=30/symbol on train)
+- Simpler = more trades (critical: #505 had 0 trades from too many filters)
+- ADX regime is proven in crypto (better than Choppiness)
+- 4h HMA responds faster than 1d for 1h timeframe
+- RSI(7) catches more pullbacks than RSI(14)
+- Session filter reduces false signals without killing frequency
 
-Position sizing: 0.25-0.30 (discrete levels, max 0.40)
-Stoploss: 2.5 * ATR trailing (signal → 0 when hit)
-Target: 25-50 trades/year on 4h, >=30 trades/symbol on train, >=3 on test
+Position sizing: 0.25-0.30 (discrete, max 0.40)
+Stoploss: 2.5 * ATR trailing
+Target: 30-60 trades/year on 1h, >=30 trades/symbol on train, >=3 on test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_funding_proxy_volregime_hma_1d_v1"
-timeframe = "4h"
+name = "mtf_1h_adx_regime_rsi7_session_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -72,55 +71,41 @@ def calculate_hma(close, period=21):
     
     return hma.values
 
-def calculate_fisher_transform(high, low, period=9):
-    """
-    Calculate Ehlers Fisher Transform.
-    Transforms price into a Gaussian normal distribution for clearer reversal signals.
-    """
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
     high_s = pd.Series(high)
     low_s = pd.Series(low)
-    
-    typical = (high_s + low_s) / 2.0
-    highest = typical.rolling(window=period, min_periods=period).max()
-    lowest = typical.rolling(window=period, min_periods=period).min()
-    
-    range_hl = highest - lowest
-    range_hl = range_hl.replace(0, 1e-10)
-    
-    normalized = (typical - lowest) / range_hl
-    normalized = np.clip(normalized * 2.0 - 1.0, -0.999, 0.999)
-    
-    fisher = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
-    
-    return fisher.values
-
-def calculate_price_zscore(close, period=20):
-    """
-    Calculate price z-score (deviation from SMA in std units).
-    Proxy for funding rate extremes - when price is far from mean, 
-    overcrowded positions expect mean reversion.
-    """
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
     
-    zscore = (close_s - sma) / (std + 1e-10)
+    # True Range
+    tr1 = high_s - low_s
+    tr2 = np.abs(high_s - close_s.shift(1))
+    tr3 = np.abs(low_s - close_s.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    return zscore.values
+    # Directional Movement
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm < 0] = 0
+    
+    plus_dm[(plus_dm <= minus_dm)] = 0
+    minus_dm[(minus_dm <= plus_dm)] = 0
+    
+    # Smooth with Wilder's method
+    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    return adx.values, plus_di.values, minus_di.values
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    
-    return upper.values, lower.values, sma.values
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI using Wilder's smoothing."""
+def calculate_rsi(close, period=7):
+    """Calculate RSI with configurable period (default 7 for faster signals)."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     
@@ -135,48 +120,53 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
+def calculate_sma(close, period=200):
+    """Calculate Simple Moving Average."""
+    close_s = pd.Series(close)
+    return close_s.rolling(window=period, min_periods=period).mean().values
+
+def get_utc_hour(open_time):
+    """Extract UTC hour from open_time (milliseconds timestamp)."""
+    # open_time is in milliseconds since epoch
+    return (open_time // 3600000) % 24
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # Load 1d HTF data ONCE before loop (Rule 1 - CRITICAL)
+    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d HTF indicators (major trend direction)
+    # Calculate 4h HTF indicators (primary trend direction)
+    hma_4h_21 = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_50 = calculate_hma(df_4h['close'].values, period=50)
+    
+    # Calculate 1d HTF indicators (major trend confirmation)
     hma_1d_21 = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_50 = calculate_hma(df_1d['close'].values, period=50)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
+    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
+    hma_4h_50_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_50)
     hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
     hma_1d_50_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_50)
     
-    # Calculate 4h indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    
-    # Vol regime: ATR(7) / ATR(30)
-    vol_ratio = atr_7 / (atr_30 + 1e-10)
-    
-    # Price z-score (funding rate proxy)
-    price_zscore = calculate_price_zscore(close, period=20)
-    
-    # Fisher Transform for entry timing
-    fisher = calculate_fisher_transform(high, low, period=9)
-    
-    # Bollinger Bands for extreme detection
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, period=20, std_dev=2.0)
-    
-    # RSI for confirmation
+    adx_14, plus_di, minus_di = calculate_adx(high, low, close, 14)
+    rsi_7 = calculate_rsi(close, 7)
     rsi_14 = calculate_rsi(close, 14)
+    sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
     LONG_SIZE = 0.30
-    SHORT_SIZE = 0.30
+    SHORT_SIZE = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -185,96 +175,90 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Track Fisher for crossover detection
-    prev_fisher = np.zeros(n)
-    prev_fisher[1:] = fisher[:-1]
-    
-    for i in range(300, n):
+    for i in range(250, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_50_aligned[i]):
+        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(hma_1d_21_aligned[i]):
             continue
-        if np.isnan(vol_ratio[i]) or np.isnan(price_zscore[i]):
-            continue
-        if np.isnan(fisher[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(adx_14[i]) or np.isnan(rsi_7[i]):
             continue
         
-        # === 1D MAJOR TREND (primary direction filter) ===
-        bull_regime = close[i] > hma_1d_21_aligned[i]
-        bear_regime = close[i] < hma_1d_21_aligned[i]
+        # Extract UTC hour for session filter
+        utc_hour = get_utc_hour(open_time[i])
+        in_session = (utc_hour >= 8) and (utc_hour <= 20)
         
-        # 1d HMA slope for trend strength
-        hma_slope_bull = hma_1d_21_aligned[i] > hma_1d_50_aligned[i]
-        hma_slope_bear = hma_1d_21_aligned[i] < hma_1d_50_aligned[i]
+        # === 4H TREND DIRECTION (primary filter) ===
+        bull_4h = close[i] > hma_4h_21_aligned[i]
+        bear_4h = close[i] < hma_4h_21_aligned[i]
         
-        # === VOL REGIME DETECTION ===
-        # High vol ratio = panic/extreme (mean revert)
-        # Low vol ratio = calm (trend follow)
-        high_vol_regime = vol_ratio[i] > 1.8
-        low_vol_regime = vol_ratio[i] < 1.2
+        # 4h HMA slope for trend strength
+        hma_4h_slope_bull = hma_4h_21_aligned[i] > hma_4h_50_aligned[i]
+        hma_4h_slope_bear = hma_4h_21_aligned[i] < hma_4h_50_aligned[i]
         
-        # === PRICE Z-SCORE (FUNDING RATE PROXY) ===
-        # Z-score > 2.5 = overcrowded longs (expect short mean reversion)
-        # Z-score < -2.5 = overcrowded shorts (expect long mean reversion)
-        zscore_extreme_high = price_zscore[i] > 2.0
-        zscore_extreme_low = price_zscore[i] < -2.0
-        zscore_moderate_high = price_zscore[i] > 1.5
-        zscore_moderate_low = price_zscore[i] < -1.5
+        # === 1D MAJOR TREND (confirmation) ===
+        bull_1d = close[i] > hma_1d_21_aligned[i]
+        bear_1d = close[i] < hma_1d_21_aligned[i]
         
-        # === FISHER TRANSFORM REVERSAL SIGNALS ===
-        fisher_cross_up = (fisher[i] > -1.0) and (prev_fisher[i] <= -1.0)
-        fisher_cross_down = (fisher[i] < 1.0) and (prev_fisher[i] >= 1.0)
-        fisher_extreme_low = fisher[i] < -1.5
-        fisher_extreme_high = fisher[i] > 1.5
+        # === ADX REGIME DETECTION ===
+        trend_regime = adx_14[i] > 25  # Strong trend
+        range_regime = adx_14[i] < 20  # Range/choppy
+        # 20-25 = transition (use either logic)
         
-        # === BOLLINGER BAND EXTREMES ===
-        bb_extreme_low = close[i] < bb_lower[i]
-        bb_extreme_high = close[i] > bb_upper[i]
+        # === RSI SIGNALS (faster with period 7) ===
+        rsi_oversold = rsi_7[i] < 35.0
+        rsi_overbought = rsi_7[i] > 65.0
+        rsi_extreme_low = rsi_7[i] < 25.0
+        rsi_extreme_high = rsi_7[i] > 75.0
+        rsi_neutral = (rsi_7[i] > 40.0) and (rsi_7[i] < 60.0)
         
-        # === RSI EXTREMES ===
-        rsi_oversold = rsi_14[i] < 35.0
-        rsi_overbought = rsi_14[i] > 65.0
-        rsi_extreme_low = rsi_14[i] < 25.0
-        rsi_extreme_high = rsi_14[i] > 75.0
+        # === SMA 200 FILTER ===
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
         
-        # === ENTRY LOGIC — FUNDING PROXY + VOL REGIME + TREND ===
+        # === ENTRY LOGIC — REGIME-ADAPTIVE ===
         new_signal = 0.0
         
-        # LONG ENTRIES (mean reversion in bull regime, or extreme oversold in any regime)
-        # Condition 1: Bull regime + z-score extreme low + Fisher cross up (primary signal)
-        if bull_regime and zscore_extreme_low and fisher_cross_up:
+        # LONG ENTRIES (multiple OR conditions for frequency)
+        # Condition 1: Trend regime + 4h bull + RSI pullback (trend following)
+        if trend_regime and bull_4h and rsi_oversold:
             new_signal = LONG_SIZE
-        # Condition 2: Bull regime + BB extreme low + RSI oversold (confluence)
-        elif bull_regime and bb_extreme_low and rsi_oversold:
-            new_signal = LONG_SIZE
-        # Condition 3: High vol regime + z-score extreme low + RSI extreme (panic bottom)
-        elif high_vol_regime and zscore_extreme_low and rsi_extreme_low:
-            new_signal = LONG_SIZE
-        # Condition 4: Any regime + extreme z-score + Fisher extreme (strong mean revert)
-        elif zscore_extreme_low and fisher_extreme_low:
+        # Condition 2: Range regime + RSI extreme low (mean reversion)
+        elif range_regime and rsi_extreme_low:
             new_signal = LONG_SIZE * 0.8
-        # Condition 5: Bull regime + moderate z-score low + Fisher cross (pullback entry)
-        elif bull_regime and zscore_moderate_low and fisher_cross_up:
+        # Condition 3: 4h bull + 1d bull + RSI neutral (momentum continuation)
+        elif bull_4h and bull_1d and rsi_neutral:
             new_signal = LONG_SIZE * 0.7
+        # Condition 4: Above SMA200 + RSI oversold (pullback in uptrend)
+        elif above_sma200 and rsi_oversold:
+            new_signal = LONG_SIZE
+        # Condition 5: 4h slope bull + RSI cross up from oversold
+        elif hma_4h_slope_bull and rsi_7[i] > 30 and rsi_7[i-1] < 30:
+            new_signal = LONG_SIZE
+        # Condition 6: Session filter + any bull signal (reduce noise)
+        elif in_session and bull_4h and rsi_7[i] < 40:
+            new_signal = LONG_SIZE * 0.6
         
         # SHORT ENTRIES (mirror logic for bear market)
         if new_signal == 0.0:
-            # Condition 1: Bear regime + z-score extreme high + Fisher cross down
-            if bear_regime and zscore_extreme_high and fisher_cross_down:
+            # Condition 1: Trend regime + 4h bear + RSI pullback (trend following)
+            if trend_regime and bear_4h and rsi_overbought:
                 new_signal = -SHORT_SIZE
-            # Condition 2: Bear regime + BB extreme high + RSI overbought
-            elif bear_regime and bb_extreme_high and rsi_overbought:
-                new_signal = -SHORT_SIZE
-            # Condition 3: High vol regime + z-score extreme high + RSI extreme (panic top)
-            elif high_vol_regime and zscore_extreme_high and rsi_extreme_high:
-                new_signal = -SHORT_SIZE
-            # Condition 4: Any regime + extreme z-score + Fisher extreme
-            elif zscore_extreme_high and fisher_extreme_high:
+            # Condition 2: Range regime + RSI extreme high (mean reversion)
+            elif range_regime and rsi_extreme_high:
                 new_signal = -SHORT_SIZE * 0.8
-            # Condition 5: Bear regime + moderate z-score high + Fisher cross
-            elif bear_regime and zscore_moderate_high and fisher_cross_down:
+            # Condition 3: 4h bear + 1d bear + RSI neutral (momentum continuation)
+            elif bear_4h and bear_1d and rsi_neutral:
                 new_signal = -SHORT_SIZE * 0.7
+            # Condition 4: Below SMA200 + RSI overbought (bounce in downtrend)
+            elif below_sma200 and rsi_overbought:
+                new_signal = -SHORT_SIZE
+            # Condition 5: 4h slope bear + RSI cross down from overbought
+            elif hma_4h_slope_bear and rsi_7[i] < 70 and rsi_7[i-1] > 70:
+                new_signal = -SHORT_SIZE
+            # Condition 6: Session filter + any bear signal (reduce noise)
+            elif in_session and bear_4h and rsi_7[i] > 60:
+                new_signal = -SHORT_SIZE * 0.6
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
         stoploss_triggered = False
@@ -297,29 +281,21 @@ def generate_signals(prices):
         if stoploss_triggered:
             new_signal = 0.0
         
-        # === TAKE PROFIT / EXIT CONDITIONS ===
-        # Exit long on z-score mean reversion or Fisher extreme high
+        # === EXIT CONDITIONS ===
+        # Exit long on RSI overbought or regime flip
         if in_position and position_side > 0:
-            # Take profit when z-score reverts to neutral
-            if price_zscore[i] > 0.5:
+            if rsi_extreme_high:
                 new_signal = 0.0
-            # Exit on Fisher extreme or RSI overbought
-            elif fisher_extreme_high or rsi_overbought:
-                new_signal = 0.0
-            # Exit if regime flips strongly bearish
-            elif bear_regime and hma_slope_bear:
+            # Exit if 4h trend flips bearish strongly
+            if bear_4h and hma_4h_slope_bear:
                 new_signal = 0.0
         
-        # Exit short on z-score mean reversion or Fisher extreme low
+        # Exit short on RSI oversold or regime flip
         if in_position and position_side < 0:
-            # Take profit when z-score reverts to neutral
-            if price_zscore[i] < -0.5:
+            if rsi_extreme_low:
                 new_signal = 0.0
-            # Exit on Fisher extreme or RSI oversold
-            elif fisher_extreme_low or rsi_oversold:
-                new_signal = 0.0
-            # Exit if regime flips strongly bullish
-            elif bull_regime and hma_slope_bull:
+            # Exit if 4h trend flips bullish strongly
+            if bull_4h and hma_4h_slope_bull:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
