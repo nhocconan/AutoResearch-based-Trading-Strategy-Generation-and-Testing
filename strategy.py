@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #076: 4h Supertrend with 1d HMA Trend Filter + RSI Pullback
-Hypothesis: 4h timeframe with simpler conditions will generate more trades than complex regime strategies.
-Key insight: Previous 4h strategies failed due to too many filters (0 trades or negative Sharpe).
+Experiment #077: 12h Donchian Breakout with 1d HMA Trend Filter + RSI Confirmation
+Hypothesis: 12h timeframe is slow enough for trend-following breakouts to work without whipsaw.
+Donchian(20) breakouts capture sustained moves, 1d HMA provides trend bias, RSI avoids extremes.
+Key insight: Previous 12h strategies failed due to too many conflicting filters or mean-reversion focus.
+12h is ideal for breakout strategies - fewer false signals than lower TFs, more trades than 1d.
 This strategy uses:
-- Supertrend(10, 3) as primary signal generator
-- 1d HMA(21) for trend bias only (not hard filter)
-- RSI(14) pullback entries (35-65 range, not extremes)
-- ATR trailing stop for risk management
-- Conservative position sizing (0.25-0.30)
-Why this might work: Fewer conditions = more trades. Supertrend works well on 4h+.
-1d HMA provides gentle trend bias without killing trade frequency.
-RSI pullback ensures we enter on dips in uptrend, not chasing breakouts.
-Timeframe: 4h (REQUIRED), HTF: 1d via mtf_data helper (call ONCE before loop).
+- Donchian(20) breakout for entry signals (price breaks 20-bar high/low)
+- 1d HMA(21) for trend bias (long only above, short only below)
+- RSI(14) filter (30-70 range, avoid extreme overbought/oversold entries)
+- ATR(14) trailing stop at 2.5x for risk management
+- Conservative position sizing (0.25-0.30 discrete levels)
+Why this might work: Donchian breakouts work well on slower timeframes (12h+).
+1d HMA provides gentle trend filter without killing trade frequency.
+RSI ensures we're not buying tops or selling bottoms. Fewer filters = more trades.
+Timeframe: 12h (REQUIRED), HTF: 1d via mtf_data helper (call ONCE before loop).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_supertrend_1d_hma_rsi_pullback_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_1d_hma_rsi_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -65,54 +67,22 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+def calculate_donchian(high, low, period=20):
     """
-    Calculate Supertrend indicator.
-    Returns: supertrend_line, supertrend_direction (1=below price=bullish, -1=above price=bearish)
+    Calculate Donchian Channel.
+    Returns: upper_band (highest high), lower_band (lowest low)
     """
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
     
-    # Calculate HL2 (median price)
-    hl2 = (high + low) / 2
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    # Upper and lower bands
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Supertrend values
-    supertrend = np.zeros(n)
-    supertrend[:] = np.nan
-    direction = np.zeros(n)  # 1 = bullish (price above ST), -1 = bearish
-    
-    for i in range(period, n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            continue
-            
-        # Initial values
-        if i == period:
-            supertrend[i] = upper_band[i]
-            direction[i] = -1
-        else:
-            # Update bands based on previous direction
-            if direction[i-1] == 1:  # Previously bullish
-                lower_band[i] = max(lower_band[i], supertrend[i-1])
-                if close[i] < lower_band[i]:
-                    supertrend[i] = upper_band[i]
-                    direction[i] = -1
-                else:
-                    supertrend[i] = lower_band[i]
-                    direction[i] = 1
-            else:  # Previously bearish
-                upper_band[i] = min(upper_band[i], supertrend[i-1])
-                if close[i] > upper_band[i]:
-                    supertrend[i] = lower_band[i]
-                    direction[i] = 1
-                else:
-                    supertrend[i] = upper_band[i]
-                    direction[i] = -1
-    
-    return supertrend, direction
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA."""
@@ -133,14 +103,14 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
     
-    # Supertrend
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
+    # Donchian channels
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     signals = np.zeros(n)
     
@@ -165,74 +135,80 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(ema_21[i]) or np.isnan(supertrend[i]):
+        if np.isnan(rsi[i]) or np.isnan(ema_21[i]) or np.isnan(donchian_upper[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 1d HMA = intermediate trend bias (soft filter, not hard)
+        # 1d HMA = intermediate trend bias
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === SUPERTREND SIGNAL ===
-        st_bullish = st_direction[i] == 1
-        st_bearish = st_direction[i] == -1
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        # Long: price breaks above Donchian upper
+        donchian_breakout_long = close[i] > donchian_upper[i - 1] if i > 0 else False
+        # Short: price breaks below Donchian lower
+        donchian_breakout_short = close[i] < donchian_lower[i - 1] if i > 0 else False
         
         # === EMA ALIGNMENT ===
         ema_bullish = ema_21[i] > ema_50[i]
         ema_bearish = ema_21[i] < ema_50[i]
         
-        # === RSI PULLBACK (not extreme, just healthy pullback) ===
-        # For longs: RSI between 35-55 (pullback in uptrend)
-        # For shorts: RSI between 45-65 (pullback in downtrend)
-        rsi_pullback_long = 35 <= rsi[i] <= 55
-        rsi_pullback_short = 45 <= rsi[i] <= 65
+        # === RSI FILTER (avoid extreme entries) ===
+        # For longs: RSI not overbought (< 70), preferably > 40
+        rsi_ok_long = 35 <= rsi[i] <= 70
+        # For shorts: RSI not oversold (> 30), preferably < 60
+        rsi_ok_short = 30 <= rsi[i] <= 65
         
         # RSI momentum confirmation
-        rsi_momentum_long = rsi[i] > 40
-        rsi_momentum_short = rsi[i] < 60
+        rsi_momentum_long = rsi[i] > 45
+        rsi_momentum_short = rsi[i] < 55
         
         new_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS (simpler, more permissive) ===
+        # === LONG ENTRY CONDITIONS ===
         
-        # Path 1: Supertrend bullish + 1d trend bias + RSI pullback
-        if st_bullish and bull_trend_1d:
-            if rsi_pullback_long or rsi_momentum_long:
-                if ema_bullish:
+        # Path 1: Donchian breakout + 1d trend bullish + RSI OK
+        if donchian_breakout_long and bull_trend_1d:
+            if rsi_ok_long:
+                if ema_bullish and rsi_momentum_long:
                     new_signal = SIZE_STRONG
                 else:
                     new_signal = SIZE_BASE
         
-        # Path 2: Supertrend flip to bullish (stronger signal)
-        if i > 100 and st_direction[i] == 1 and st_direction[i-1] == -1:
-            if bull_trend_1d:
-                new_signal = SIZE_STRONG
+        # Path 2: Price above 1d HMA + EMA bullish + RSI momentum (trend continuation)
+        if bull_trend_1d and ema_bullish:
+            if rsi[i] > 50 and rsi[i] < 65:
+                if close[i] > ema_21[i]:
+                    new_signal = SIZE_BASE
         
-        # Path 3: Simple trend continuation (ensure trades happen)
-        if st_bullish and bull_trend_1d:
-            if rsi[i] > 45 and rsi[i] < 65:
-                new_signal = SIZE_BASE
+        # Path 3: Simple breakout with trend confirmation (ensure trades happen)
+        if donchian_breakout_long:
+            if bull_trend_1d or ema_bullish:
+                if rsi[i] > 40 and rsi[i] < 75:
+                    new_signal = SIZE_BASE
         
-        # === SHORT ENTRY CONDITIONS (simpler, more permissive) ===
+        # === SHORT ENTRY CONDITIONS ===
         
-        # Path 1: Supertrend bearish + 1d trend bias + RSI pullback
-        if st_bearish and bear_trend_1d:
-            if rsi_pullback_short or not rsi_momentum_long:
-                if ema_bearish:
+        # Path 1: Donchian breakout + 1d trend bearish + RSI OK
+        if donchian_breakout_short and bear_trend_1d:
+            if rsi_ok_short:
+                if ema_bearish and rsi_momentum_short:
                     new_signal = -SIZE_STRONG
                 else:
                     new_signal = -SIZE_BASE
         
-        # Path 2: Supertrend flip to bearish (stronger signal)
-        if i > 100 and st_direction[i] == -1 and st_direction[i-1] == 1:
-            if bear_trend_1d:
-                new_signal = -SIZE_STRONG
+        # Path 2: Price below 1d HMA + EMA bearish + RSI momentum (trend continuation)
+        if bear_trend_1d and ema_bearish:
+            if rsi[i] < 50 and rsi[i] > 35:
+                if close[i] < ema_21[i]:
+                    new_signal = -SIZE_BASE
         
-        # Path 3: Simple trend continuation (ensure trades happen)
-        if st_bearish and bear_trend_1d:
-            if rsi[i] > 35 and rsi[i] < 55:
-                new_signal = -SIZE_BASE
+        # Path 3: Simple breakout with trend confirmation (ensure trades happen)
+        if donchian_breakout_short:
+            if bear_trend_1d or ema_bearish:
+                if rsi[i] > 25 and rsi[i] < 60:
+                    new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) ===
         # Long position stoploss
