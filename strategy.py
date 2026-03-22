@@ -1,34 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #360: 1h Primary + 4h/12h HTF — Regime-Adaptive Trend/MR Hybrid
+Experiment #361: 4h Primary + 1d HTF — Simplified Trend-Follow with RSI Pullback
 
-Hypothesis: After analyzing 359 failed experiments, the pattern is clear:
-1. 1h timeframe needs VERY strict filters to avoid fee drag (>100 trades/yr = death)
-2. Single-regime strategies fail because crypto alternates trend/chop frequently
-3. SOLUTION: Choppiness Index detects regime → switch between trend-follow and mean-revert
-4. 4h HMA(21) for major trend bias (proven in exp #349, #356)
-5. 1h RSI(14) for entry timing within HTF trend
-6. Volume confirmation (0.8x avg) to filter false breakouts
-7. Session filter (8-20 UTC) avoids low-liquidity whipsaws
-8. Asymmetric sizing: longs 0.25-0.30, shorts 0.15-0.20 (crypto long bias)
-9. ATR trailing stop 2.5x to cut losers quickly
+Hypothesis: After 360 experiments, the clearest pattern is:
+1. Complex dual-regime strategies OVERFIT and fail (exp #352-356 all negative Sharpe)
+2. SIMPLER trend-follow with pullback entries works best (current best: Sharpe=0.435)
+3. 4h timeframe generates 20-50 trades/year — optimal frequency for fee/capture balance
+4. 1d HMA(21) for major trend bias (not 1w which is too slow for 4h entries)
+5. 4h RSI(14) pullback entries in trend direction (buy dips in uptrend, sell rallies in downtrend)
+6. ATR(14) trailing stop at 2.5x to cut losers quickly
+7. Asymmetric sizing: longs 0.25-0.30, shorts 0.15-0.20 (crypto long bias)
 
 Why this might beat current best (Sharpe=0.435):
-- Regime detection prevents trend strategies from dying in chop (2022 crash lesson)
-- Mean-reversion works in bear/range markets (2025 test period)
-- 1h TF with HTF filter = optimal trade frequency (30-60/year)
-- Volume + session filters reduce false signals significantly
+- Simpler logic = less overfitting, more robust across BTC/ETH/SOL
+- 4h TF captures trends better than 12h/1d while avoiding 15m/30m fee drag
+- RSI pullback entries improve entry timing vs pure breakout
+- 1d HTF provides strong trend filter without lag of 1w
 
 Position sizing: 0.25-0.30 longs, 0.15-0.20 shorts
 Stoploss: 2.5 * ATR trailing
-Target: 30-60 trades/year on 1h
+Target: 25-45 trades/year on 4h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_regime_chop_rsi_4h12h_vol_session_v1"
-timeframe = "1h"
+name = "mtf_4h_hma_rsi_pullback_1d_simp_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -78,90 +76,54 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP = 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    CHOP > 61.8 = choppy/ranging market (mean-revert)
-    CHOP < 38.2 = trending market (trend-follow)
-    """
-    atr_vals = calculate_atr(high, low, close, period)
-    
-    atr_sum = pd.Series(atr_vals).rolling(window=period, min_periods=period).sum().values
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    price_range = highest_high - lowest_low
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
-        chop = 100.0 * np.log10(atr_sum / (price_range + 1e-10)) / np.log10(period)
-    
-    chop = np.clip(chop, 0, 100)
-    chop[np.isnan(chop)] = 50.0
-    
-    return chop
-
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    return upper, lower, sma
-
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs moving average."""
-    vol_s = pd.Series(volume)
-    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)
-    return vol_ratio
-
-def calculate_session_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds)."""
-    # open_time is in milliseconds
-    hours = (open_time // 3600000) % 24
-    return hours
+    
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    
+    tr1 = high_s - low_s
+    tr2 = (high_s - close_s.shift(1)).abs()
+    tr3 = (low_s - close_s.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    plus_di = 100.0 * plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr
+    minus_di = 100.0 * minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr
+    
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    return adx.values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h HTF indicators (major trend direction)
-    hma_4h_21 = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_48 = calculate_hma(df_4h['close'].values, period=48)
-    
-    # Calculate 12h HTF indicators (major regime)
-    hma_12h_21 = calculate_hma(df_12h['close'].values, period=21)
+    # Calculate 1d HTF indicators (major trend direction)
+    hma_1d_21 = calculate_hma(df_1d['close'].values, period=21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
-    hma_4h_48_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_48)
-    hma_12h_21_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_21)
+    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    atr_30 = calculate_atr(high, low, close, 30)
-    chop_14 = calculate_choppiness(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
-    rsi_7 = calculate_rsi(close, 7)
-    
-    # Bollinger Bands
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, period=20, std_dev=2.0)
-    
-    # Volume ratio
-    vol_ratio = calculate_volume_ratio(volume, period=20)
-    
-    # Session hours
-    session_hours = calculate_session_hour(open_time)
+    hma_4h_21 = calculate_hma(close, period=21)
+    hma_4h_8 = calculate_hma(close, period=8)
+    adx_14 = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     
@@ -185,143 +147,83 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(hma_12h_21_aligned[i]):
+        if np.isnan(hma_1d_21_aligned[i]):
             continue
         
-        if np.isnan(chop_14[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_4h_21[i]):
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(vol_ratio[i]):
-            continue
+        # === 1D MAJOR TREND REGIME (primary direction filter) ===
+        # Price above 1d HMA = bull bias (favor longs)
+        # Price below 1d HMA = bear bias (favor shorts)
+        regime_bull = close[i] > hma_1d_21_aligned[i]
+        regime_bear = close[i] < hma_1d_21_aligned[i]
         
-        # === 4H MAJOR TREND REGIME (primary direction filter) ===
-        trend_4h_bull = close[i] > hma_4h_21_aligned[i]
-        trend_4h_bear = close[i] < hma_4h_21_aligned[i]
+        # === 4H LOCAL TREND CONFIRMATION ===
+        hma_bullish = hma_4h_8[i] > hma_4h_21[i]
+        hma_bearish = hma_4h_8[i] < hma_4h_21[i]
         
-        # 4h HMA slope confirmation
-        if i > 1 and not np.isnan(hma_4h_21_aligned[i-1]):
-            hma_4h_slope_bull = hma_4h_21_aligned[i] > hma_4h_21_aligned[i-1]
-            hma_4h_slope_bear = hma_4h_21_aligned[i] < hma_4h_21_aligned[i-1]
-        else:
-            hma_4h_slope_bull = trend_4h_bull
-            hma_4h_slope_bear = trend_4h_bear
+        # === TREND STRENGTH (ADX) ===
+        adx_strong = adx_14[i] > 25.0
+        adx_weak = adx_14[i] < 20.0
         
-        # === 12H MAJOR REGIME (higher timeframe bias) ===
-        trend_12h_bull = close[i] > hma_12h_21_aligned[i]
-        trend_12h_bear = close[i] < hma_12h_21_aligned[i]
-        
-        # === CHOPPINESS REGIME (determines strategy type) ===
-        # CHOP > 55 = choppy (mean-revert)
-        # CHOP < 45 = trending (trend-follow)
-        # 45-55 = neutral (use trend-follow with tighter stops)
-        choppy_regime = chop_14[i] > 55.0
-        trending_regime = chop_14[i] < 45.0
-        neutral_regime = not choppy_regime and not trending_regime
-        
-        # === VOLATILITY REGIME (ATR ratio) ===
-        atr_ratio = atr_14[i] / (atr_30[i] + 1e-10) if not np.isnan(atr_30[i]) else 1.0
-        high_vol = atr_ratio > 1.5
-        vol_scale = 0.7 if high_vol else 1.0
-        
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = vol_ratio[i] > 0.8
-        
-        # === SESSION FILTER (8-20 UTC only) ===
-        in_session = 8 <= session_hours[i] <= 20
-        
-        # === 1H LOCAL MOMENTUM ===
+        # === RSI PULLBACK SIGNALS ===
+        # In uptrend: buy RSI pullback to 40-50
+        # In downtrend: sell RSI rally to 50-60
+        rsi_pullback_long = 35.0 < rsi_14[i] < 55.0
+        rsi_pullback_short = 45.0 < rsi_14[i] < 65.0
         rsi_oversold = rsi_14[i] < 35.0
         rsi_overbought = rsi_14[i] > 65.0
-        rsi_neutral = 40.0 < rsi_14[i] < 60.0
         
-        # RSI(7) for faster signals
-        rsi7_oversold = rsi_7[i] < 25.0
-        rsi7_overbought = rsi_7[i] > 75.0
+        # === VOLATILITY FILTER (avoid low vol chop) ===
+        atr_30 = calculate_atr(high, low, close, 30)
+        atr_ratio = atr_14[i] / (atr_30[i] + 1e-10) if not np.isnan(atr_30[i]) else 1.0
+        vol_ok = atr_ratio > 0.7  # Avoid extremely low vol
         
-        # === BOLLINGER BAND POSITION ===
-        bb_lower_touch = close[i] <= bb_lower[i] * 1.002
-        bb_upper_touch = close[i] >= bb_upper[i] * 0.998
-        bb_mid_above = close[i] > bb_mid[i]
-        bb_mid_below = close[i] < bb_mid[i]
-        
-        # === ENTRY LOGIC - DUAL REGIME ===
+        # === ENTRY LOGIC — SIMPLIFIED TREND-FOLLOW WITH PULLBACK ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # Only trade during high-liquidity session
-        if not in_session:
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-                entry_price = 0.0
-                highest_price = 0.0
-                lowest_price = 0.0
-                last_trade_bar = i
-            continue
+        # === LONG ENTRIES ===
+        if regime_bull:
+            # Strong long: 1d bull + 4h HMA bullish + RSI pullback + ADX strong
+            if hma_bullish and rsi_pullback_long and adx_strong and vol_ok:
+                new_signal = LONG_STRONG
+            # Base long: 1d bull + RSI pullback (weaker conditions)
+            elif rsi_pullback_long and vol_ok:
+                new_signal = LONG_BASE
+            # Oversold bounce in bull regime
+            elif rsi_oversold and hma_bullish:
+                new_signal = LONG_BASE
         
-        # === CHOPPY REGIME: MEAN-REVERSION (Bollinger + RSI) ===
-        if choppy_regime:
-            # Long: RSI oversold + price at BB lower + volume confirmed
-            if rsi_oversold and bb_lower_touch and volume_confirmed:
-                if trend_4h_bull or trend_12h_bull:
-                    new_signal = LONG_BASE * vol_scale
-                else:
-                    new_signal = LONG_BASE * 0.5 * vol_scale
-            
-            # Short: RSI overbought + price at BB upper + volume confirmed
-            if rsi_overbought and bb_upper_touch and volume_confirmed:
-                if new_signal == 0.0:
-                    if trend_4h_bear or trend_12h_bear:
-                        new_signal = -SHORT_BASE * vol_scale
-                    else:
-                        new_signal = -SHORT_BASE * 0.5 * vol_scale
+        # === SHORT ENTRIES ===
+        elif regime_bear:
+            # Strong short: 1d bear + 4h HMA bearish + RSI rally + ADX strong
+            if hma_bearish and rsi_pullback_short and adx_strong and vol_ok:
+                new_signal = -SHORT_STRONG
+            # Base short: 1d bear + RSI rally (weaker conditions)
+            elif rsi_pullback_short and vol_ok:
+                new_signal = -SHORT_BASE
+            # Overbought rejection in bear regime
+            elif rsi_overbought and hma_bearish:
+                new_signal = -SHORT_BASE
         
-        # === TRENDING REGIME: TREND-FOLLOW (HTF trend + RSI pullback) ===
-        elif trending_regime:
-            # Long: 4h bull + RSI pullback to 40-50 + volume confirmed
-            if trend_4h_bull and hma_4h_slope_bull:
-                if 40.0 <= rsi_14[i] <= 55.0 and volume_confirmed:
-                    new_signal = LONG_STRONG * vol_scale
-                elif rsi_14[i] < 45.0 and volume_confirmed:
-                    new_signal = LONG_BASE * vol_scale
-            
-            # Short: 4h bear + RSI rally to 45-60 + volume confirmed
-            if trend_4h_bear and hma_4h_slope_bear:
-                if new_signal == 0.0:
-                    if 45.0 <= rsi_14[i] <= 60.0 and volume_confirmed:
-                        new_signal = -SHORT_STRONG * vol_scale
-                    elif rsi_14[i] > 55.0 and volume_confirmed:
-                        new_signal = -SHORT_BASE * vol_scale
+        # === NEUTRAL/TRANSITION REGIME ===
+        # When 1d HMA is flat or price oscillating around it
+        if not regime_bull and not regime_bear:
+            # Only trade strong RSI extremes with local trend confirmation
+            if rsi_oversold and hma_bullish:
+                new_signal = LONG_BASE * 0.7
+            elif rsi_overbought and hma_bearish:
+                new_signal = -SHORT_BASE * 0.7
         
-        # === NEUTRAL REGIME: HYBRID (both strategies with stricter filters) ===
-        elif neutral_regime:
-            # Mean-reversion with trend bias
-            if rsi_oversold and bb_lower_touch and trend_4h_bull:
-                new_signal = LONG_BASE * vol_scale
-            elif rsi_overbought and bb_upper_touch and trend_4h_bear:
-                if new_signal == 0.0:
-                    new_signal = -SHORT_BASE * vol_scale
-            
-            # Trend-follow with RSI confirmation
-            if trend_4h_bull and rsi_14[i] > 50.0 and volume_confirmed:
-                if new_signal == 0.0:
-                    new_signal = LONG_BASE * 0.8 * vol_scale
-            if trend_4h_bear and rsi_14[i] < 50.0 and volume_confirmed:
-                if new_signal == 0.0:
-                    new_signal = -SHORT_BASE * 0.8 * vol_scale
-        
-        # === FREQUENCY SAFEGUARD (ensure 30+ trades/year on 1h) ===
-        # Force trade if no signal for 48 bars (~2 days on 1h)
-        if bars_since_last_trade > 48 and new_signal == 0.0 and not in_position:
-            if trend_4h_bull and rsi_14[i] < 45.0:
-                new_signal = LONG_BASE * 0.5 * vol_scale
-            elif trend_4h_bear and rsi_14[i] > 55.0:
-                new_signal = -SHORT_BASE * 0.5 * vol_scale
-            elif rsi7_oversold and trend_12h_bull:
-                new_signal = LONG_BASE * 0.5 * vol_scale
-            elif rsi7_overbought and trend_12h_bear:
-                new_signal = -SHORT_BASE * 0.5 * vol_scale
+        # === FREQUENCY SAFEGUARD (ensure 25+ trades/year on 4h) ===
+        # Force trade if no signal for 15 bars (~2.5 days on 4h)
+        if bars_since_last_trade > 15 and new_signal == 0.0 and not in_position:
+            if regime_bull and rsi_14[i] < 50.0:
+                new_signal = LONG_BASE * 0.5
+            elif regime_bear and rsi_14[i] > 50.0:
+                new_signal = -SHORT_BASE * 0.5
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -352,9 +254,9 @@ def generate_signals(prices):
         # === REGIME REVERSAL EXIT ===
         regime_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and trend_4h_bear and close[i] < hma_4h_21_aligned[i]:
+            if position_side > 0 and regime_bear and close[i] < hma_4h_21[i]:
                 regime_reversal = True
-            if position_side < 0 and trend_4h_bull and close[i] > hma_4h_21_aligned[i]:
+            if position_side < 0 and regime_bull and close[i] > hma_4h_21[i]:
                 regime_reversal = True
         
         if stoploss_triggered or rsi_exit or regime_reversal:
@@ -365,13 +267,13 @@ def generate_signals(prices):
             if abs(new_signal) < 0.10:
                 new_signal = 0.0
             elif new_signal > 0.28:
-                new_signal = LONG_STRONG * vol_scale
+                new_signal = LONG_STRONG
             elif new_signal > 0:
-                new_signal = LONG_BASE * vol_scale
+                new_signal = LONG_BASE
             elif new_signal < -0.18:
-                new_signal = -SHORT_STRONG * vol_scale
+                new_signal = -SHORT_STRONG
             else:
-                new_signal = -SHORT_BASE * vol_scale
+                new_signal = -SHORT_BASE
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
