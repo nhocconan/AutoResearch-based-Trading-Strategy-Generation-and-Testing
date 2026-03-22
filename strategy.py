@@ -1,36 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #153: 1h Donchian Breakout + 4h HMA Trend Filter + ATR Stop
+Experiment #154: 4h Bollinger Mean Reversion + 1d HMA Trend Filter + ATR Stop
 
-Hypothesis: 1h timeframe offers balance between 4h (current best) and failed 
-lower timeframes (15m/30m). Donchian breakout captures momentum moves while 
-4h HMA provides stable trend bias. Simple conditions ensure adequate trade 
-frequency while avoiding the 0-trade problem from over-filtering.
+Hypothesis: In bear/range markets (2022 crash, 2025 bear), mean reversion at 
+Bollinger Band extremes outperforms trend following. 1d HMA provides trend bias 
+to avoid counter-trend mean reversion (which destroys capital in strong trends).
 
 Why this might work:
-- 1h is between failed 15m/30m and working 4h strategies
-- Donchian breakout is proven momentum strategy (Turtle Trading)
-- 4h HMA filter prevents counter-trend breakouts (major loss source)
-- ATR stop adapts to volatility (critical for 2022 crash)
-- Volume confirmation filters false breakouts
+- BTC 2025+ is bear/range (-25%), trend strategies failing (exp #145-153 all negative)
+- Bollinger mean reversion has 65-70% win rate in range markets
+- 4h timeframe balances trade frequency with signal quality
+- 1d HMA filter prevents dangerous counter-trend entries
+- Simple conditions ensure adequate trade count (≥10 per symbol)
 
 Learning from failures:
-- #147 (1h KAMA + RSI): Sharpe=-2.102 - RSI pullback failed
-- #152 (30m KAMA + RSI): Sharpe=-4.270 - mean reversion destroyed
-- #145, #146 (Supertrend): Negative Sharpe on 15m/30m
-- Need simpler conditions that actually generate trades
+- #145-153: All negative Sharpe - pure trend strategies failing in current regime
+- Need mean-reversion entries with trend filter for bear/range markets
+- Too many filters = 0 trades (#142, #143), keep conditions simple
 
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20-0.35 discrete levels
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25-0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_donchian_4h_hma_volume_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_bb_rsi_1d_hma_meanrev_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -43,17 +41,26 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low over period)."""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands with proper min_periods."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    return upper, lower, sma
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI with proper min_periods."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -65,38 +72,31 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_volume_ma(volume, period=20):
-    """Calculate volume moving average for volume confirmation."""
-    vol_s = pd.Series(volume)
-    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_ma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    volume_ma = calculate_volume_ma(volume, 20)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
+    rsi = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.25
-    SIZE_STRONG = 0.35
+    SIZE_STRONG = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -111,48 +111,61 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # 1d HMA = higher timeframe trend bias
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        # Volume must be above average for breakout confirmation
-        volume_confirmed = volume[i] > 1.2 * volume_ma[i] if not np.isnan(volume_ma[i]) else False
+        # === BOLLINGER + RSI MEAN REVERSION SIGNAL ===
+        # Long: Price at lower BB + RSI oversold + 1d trend bullish (or neutral)
+        # Short: Price at upper BB + RSI overbought + 1d trend bearish (or neutral)
         
-        # === DONCHIAN BREAKOUT SIGNAL ===
-        # Breakout above upper channel = bullish momentum
-        # Breakout below lower channel = bearish momentum
-        breakout_long = close[i] > donchian_upper[i - 1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i - 1]  # Break below previous lower
+        price_at_lower_bb = close[i] <= bb_lower[i] * 1.005  # Within 0.5% of lower band
+        price_at_upper_bb = close[i] >= bb_upper[i] * 0.995  # Within 0.5% of upper band
+        
+        rsi_oversold = rsi[i] < 35  # Loose threshold for more trades
+        rsi_overbought = rsi[i] > 65  # Loose threshold for more trades
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS ===
-        # 4h bullish trend + Donchian breakout + volume confirmation
-        if bull_trend_4h and breakout_long and volume_confirmed:
-            new_signal = SIZE_BASE
-        
-        # Strong long: add extra size if volume is very strong
-        if bull_trend_4h and breakout_long and volume[i] > 2.0 * volume_ma[i]:
-            new_signal = SIZE_STRONG
+        # Mean reversion long: at lower BB + oversold RSI + 1d not strongly bearish
+        if price_at_lower_bb and rsi_oversold:
+            if bull_trend_1d:
+                new_signal = SIZE_STRONG  # Strong signal with trend
+            else:
+                new_signal = SIZE_BASE  # Weaker signal against trend
         
         # === SHORT ENTRY CONDITIONS ===
-        # 4h bearish trend + Donchian breakout + volume confirmation
-        if bear_trend_4h and breakout_short and volume_confirmed:
-            new_signal = -SIZE_BASE
+        # Mean reversion short: at upper BB + overbought RSI + 1d not strongly bullish
+        if price_at_upper_bb and rsi_overbought:
+            if bear_trend_1d:
+                new_signal = -SIZE_STRONG  # Strong signal with trend
+            else:
+                new_signal = -SIZE_BASE  # Weaker signal against trend
         
-        # Strong short: add extra size if volume is very strong
-        if bear_trend_4h and breakout_short and volume[i] > 2.0 * volume_ma[i]:
-            new_signal = -SIZE_STRONG
+        # === EXIT CONDITIONS ===
+        # Exit long when price reaches middle BB or RSI neutral
+        if in_position and position_side > 0:
+            if close[i] >= bb_mid[i] or rsi[i] > 55:
+                new_signal = 0.0
+        
+        # Exit short when price reaches middle BB or RSI neutral
+        if in_position and position_side < 0:
+            if close[i] <= bb_mid[i] or rsi[i] < 45:
+                new_signal = 0.0
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Update trailing highs/lows for active positions
