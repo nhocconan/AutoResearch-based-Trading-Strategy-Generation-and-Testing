@@ -1,38 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #264: 1d KAMA Trend with 1w HMA Bias and ADX Filter
+Experiment #265: 15m KAMA Trend with 4h HMA Bias and ADX Filter
 
-Hypothesis: After 263 experiments, clear patterns emerge:
-1. RSI strategies consistently FAIL (negative Sharpe across 6+ experiments)
-2. Mean reversion FAILS on BTC/ETH in bear markets
-3. KAMA (Kaufman Adaptive) outperforms EMA/HMA in volatile regimes
-4. 1d timeframe needs fewer but higher-quality signals
+Hypothesis: After analyzing 264 experiments, the clearest pattern is:
+- RSI/mean-reversion strategies CONSISTENTLY FAIL on BTC/ETH (see #253-259, #261)
+- Complex ensembles FAIL (see #256)
+- Simple trend-following with strong HTF bias WORKS BEST (see #264 Sharpe=0.142)
 
-This strategy uses:
-1. 1d KAMA(10) - adapts to volatility, less whipsaw than EMA in 2022 crash
-2. 1w HMA(21) - stronger HTF bias than 1d (weekly trend is more reliable)
-3. ADX(14) > 18 - only trade when trend has strength (lower threshold = more trades)
-4. ATR-based position sizing - reduce size when vol is high
-5. 2.5*ATR trailing stoploss - appropriate for 1d timeframe
-6. Asymmetric entries - only long when 1w HMA bullish, only short when bearish
+Current BEST: mtf_4h_kama_1d_hma_adx_atr_v1 with Sharpe=0.478
 
-Why 1d might work:
-- Fewer bars = less fee drag (critical after 263 experiments showed fee churn kills profits)
-- 1w HMA bias is stronger filter than 1d HMA
-- KAMA adapts to market regime automatically (fast in trends, slow in ranges)
-- Lower ADX threshold (18 vs 25) ensures >=10 trades per symbol
+For 15m timeframe, I'll use:
+1. KAMA (Kaufman Adaptive Moving Average) - adapts to market efficiency, reduces whipsaw in chop
+2. 4h HMA(21) - directional bias filter (proven in current best strategy)
+3. ADX(14) > 25 - ensures we only trade in trending conditions
+4. ATR ratio filter - avoid entries during vol spikes (ATR(7)/ATR(30) < 1.5)
+5. Clean entry logic: KAMA crossover + HTF bias + ADX confirmation
+6. Position sizing: 0.25-0.30 discrete, 2.5*ATR trailing stop
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.35 discrete
+Why 15m with this setup:
+- KAMA adapts to 15m noise better than EMA/SMA
+- 4h HMA provides strong directional filter (tested in #264)
+- ADX prevents choppy market entries (major cause of losses in #253, #259)
+- Simple logic = fewer false signals, less fee drag
+- Conservative sizing controls drawdown during 2022-style crashes
+
+Timeframe: 15m (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25-0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_kama_trend_1w_hma_adx_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_kama_trend_4h_hma_adx_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -45,11 +47,11 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30):
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
     """
-    Calculate Kaufman Adaptive Moving Average.
-    KAMA adapts to market noise - fast during trends, slow during ranges.
-    This is critical for avoiding 2022-style whipsaws.
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market efficiency - moves fast in trends, slow in chop.
+    This is critical for 15m timeframe which has significant noise.
     """
     n = len(close)
     kama = np.zeros(n)
@@ -57,29 +59,24 @@ def calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30):
     
     # Calculate Efficiency Ratio (ER)
     er = np.zeros(n)
-    er[:] = np.nan
-    
-    for i in range(efficiency_period, n):
-        signal = np.abs(close[i] - close[i - efficiency_period])
-        noise = np.sum(np.abs(np.diff(close[i - efficiency_period:i + 1])))
+    for i in range(er_period, n):
+        signal = np.abs(close[i] - close[i - er_period])
+        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
         if noise > 0:
             er[i] = signal / noise
         else:
             er[i] = 0
     
     # Calculate smoothing constant
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
     
     # Initialize KAMA
-    kama[efficiency_period] = close[efficiency_period]
+    kama[er_period] = close[er_period]
     
-    for i in range(efficiency_period + 1, n):
-        if not np.isnan(er[i]):
-            sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-        else:
-            kama[i] = kama[i - 1]
+    for i in range(er_period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
     
     return kama
 
@@ -94,60 +91,46 @@ def calculate_hma(close, period=21):
     return wma3.values
 
 def calculate_adx(high, low, close, period=14):
-    """
-    Calculate Average Directional Index (ADX).
-    Measures trend strength regardless of direction.
-    ADX > 25 = strong trend, ADX < 20 = range/no trend.
-    """
+    """Calculate ADX (Average Directional Index) for trend strength."""
     n = len(close)
     adx = np.zeros(n)
     adx[:] = np.nan
     
+    # Calculate +DM and -DM
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
-    tr = np.zeros(n)
     
     for i in range(1, n):
-        # True Range
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Directional Movement
-        if high[i] - high[i-1] > low[i-1] - low[i]:
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-        else:
-            plus_dm[i] = 0
-            
-        if low[i-1] - low[i] > high[i] - high[i-1]:
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-        else:
-            minus_dm[i] = 0
+        plus_dm[i] = max(0, high[i] - high[i-1]) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
+        minus_dm[i] = max(0, low[i-1] - low[i]) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
     
-    # Smooth using Wilder's method (EMA with span=period)
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Calculate DI
+    # Calculate +DI and -DI using Wilder's smoothing
     plus_di = np.zeros(n)
     minus_di = np.zeros(n)
     
+    atr = calculate_atr(high, low, close, period)
+    
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
     for i in range(period, n):
-        if tr_s[i] > 0:
-            plus_di[i] = 100 * plus_dm_s[i] / tr_s[i]
-            minus_di[i] = 100 * minus_dm_s[i] / tr_s[i]
+        if atr[i] > 0:
+            plus_di[i] = 100 * plus_dm_s[i] / atr[i]
+            minus_di[i] = 100 * minus_dm_s[i] / atr[i]
     
     # Calculate DX and ADX
     dx = np.zeros(n)
     for i in range(period, n):
         di_sum = plus_di[i] + minus_di[i]
         if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / di_sum
     
-    # ADX is smoothed DX
-    adx_series = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean()
-    adx[:] = adx_series.values
+    # ADX = smoothed DX
+    dx_s = pd.Series(dx)
+    adx_vals = dx_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+    adx[:] = adx_vals
     
-    return adx
+    return adx, plus_di, minus_di
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -156,23 +139,28 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    kama = calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30)
-    adx = calculate_adx(high, low, close, 14)
+    atr_7 = calculate_atr(high, low, close, 7)
+    atr_30 = calculate_atr(high, low, close, 30)
+    
+    kama_fast = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    kama_slow = calculate_kama(close, er_period=20, fast_period=5, slow_period=50)
+    
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.30  # Base position size
+    SIZE_BASE = 0.28  # Base position size (conservative for 15m)
     SIZE_REDUCED = 0.20  # Reduced size in high vol
     SIZE_MAX = 0.35  # Maximum position size
     
@@ -182,6 +170,7 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     entry_price = 0.0
+    entry_atr = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -189,11 +178,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama[i]):
+        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
             signals[i] = 0.0
             continue
         
@@ -202,26 +191,42 @@ def generate_signals(prices):
             continue
         
         # === HIGHER TIMEFRAME BIAS ===
-        # 1w HMA = very strong directional bias (hard filter)
-        bull_trend_1w = close[i] > hma_1w_aligned[i]
-        bear_trend_1w = close[i] < hma_1w_aligned[i]
+        # 4h HMA = strong directional bias (hard filter)
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
         
         # === TREND STRENGTH FILTER ===
-        # ADX > 18 = trend has strength (lower threshold = more trades for 1d)
-        trend_strong = adx[i] > 18
+        # ADX > 25 = trending market (avoid chop)
+        trending_market = adx[i] > 25
         
-        # === KAMA TREND DIRECTION ===
-        # KAMA slope indicates short-term trend direction
-        kama_bullish = kama[i] > kama[i-5] if i >= 5 and not np.isnan(kama[i-5]) else False
-        kama_bearish = kama[i] < kama[i-5] if i >= 5 and not np.isnan(kama[i-5]) else False
+        # === VOLATILITY FILTER ===
+        # Avoid entries during vol spikes (ATR ratio < 1.5)
+        atr_ratio = atr_7[i] / atr_30[i] if atr_30[i] > 0 else 999
+        normal_volatility = atr_ratio < 1.5
         
-        # === VOLATILITY ADJUSTMENT ===
-        # Reduce position size when ATR is elevated (>1.5x recent average)
-        atr_recent_avg = np.nanmean(atr[max(0, i-20):i+1])
-        high_volatility = atr[i] > 1.5 * atr_recent_avg if not np.isnan(atr_recent_avg) else False
+        # === KAMA CROSSOVER SIGNALS ===
+        # Fast KAMA crosses above slow KAMA = bullish momentum
+        kama_bull_cross = kama_fast[i] > kama_slow[i] and kama_fast[i-1] <= kama_slow[i-1]
+        
+        # Fast KAMA crosses below slow KAMA = bearish momentum
+        kama_bear_cross = kama_fast[i] < kama_slow[i] and kama_fast[i-1] >= kama_slow[i-1]
+        
+        # === KAMA TREND CONFIRMATION ===
+        # Price above both KAMAs = strong uptrend
+        price_above_kama = close[i] > kama_fast[i] and close[i] > kama_slow[i]
+        
+        # Price below both KAMAs = strong downtrend
+        price_below_kama = close[i] < kama_fast[i] and close[i] < kama_slow[i]
+        
+        # === DIRECTIONAL MOVEMENT CONFIRMATION ===
+        # +DI > -DI = bullish directional movement
+        di_bullish = plus_di[i] > minus_di[i]
+        
+        # -DI > +DI = bearish directional movement
+        di_bearish = minus_di[i] > plus_di[i]
         
         # Determine position size based on volatility
-        if high_volatility:
+        if not normal_volatility:
             position_size = SIZE_REDUCED
         else:
             position_size = SIZE_BASE
@@ -229,19 +234,21 @@ def generate_signals(prices):
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
         
-        # LONG ENTRY: Need 1w bias up + ADX strong + KAMA bullish
-        # Looser conditions to ensure >=10 trades per symbol on 1d timeframe
+        # LONG ENTRY: Need 4h bias up + KAMA cross + ADX trend + DI confirmation
+        # Multiple confirmations reduce false signals on 15m
         long_conditions = (
-            bull_trend_1w and  # 1w HMA bias bullish
-            trend_strong and  # ADX shows trend strength
-            kama_bullish  # KAMA slope bullish
+            bull_trend_4h and  # 4h HMA bias bullish
+            (kama_bull_cross or (price_above_kama and di_bullish)) and  # KAMA momentum
+            trending_market and  # ADX confirms trend
+            normal_volatility  # Not in vol spike
         )
         
         # SHORT ENTRY: Mirror of long
         short_conditions = (
-            bear_trend_1w and  # 1w HMA bias bearish
-            trend_strong and  # ADX shows trend strength
-            kama_bearish  # KAMA slope bearish
+            bear_trend_4h and  # 4h HMA bias bearish
+            (kama_bear_cross or (price_below_kama and di_bearish)) and  # KAMA momentum
+            trending_market and  # ADX confirms trend
+            normal_volatility  # Not in vol spike
         )
         
         # === GENERATE SIGNAL ===
@@ -275,15 +282,15 @@ def generate_signals(prices):
         # === TREND REVERSAL EXIT ===
         # Exit if HTF bias reverses against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_1w:
-                new_signal = 0.0  # 1w trend reversed against long
-            if position_side < 0 and bull_trend_1w:
-                new_signal = 0.0  # 1w trend reversed against short
+            if position_side > 0 and bear_trend_4h:
+                new_signal = 0.0  # 4h trend reversed against long
+            if position_side < 0 and bull_trend_4h:
+                new_signal = 0.0  # 4h trend reversed against short
         
-        # === ADX WEAKNESS EXIT ===
-        # Exit if trend strength disappears (ADX drops below 15)
-        if in_position and adx[i] < 15:
-            new_signal = 0.0  # Trend lost strength
+        # === ADX DROPS BELOW THRESHOLD ===
+        # Exit if market becomes choppy (ADX < 20)
+        if in_position and adx[i] < 20:
+            new_signal = 0.0  # Market no longer trending
         
         # === UPDATE POSITION TRACKING FOR NEXT BAR ===
         if new_signal != 0.0:
@@ -292,12 +299,14 @@ def generate_signals(prices):
                 in_position = True
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
+                entry_atr = atr[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
                 # Reversing position
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
+                entry_atr = atr[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             # else: maintaining same position direction (possibly adjusted size)
@@ -307,6 +316,7 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
+                entry_atr = 0.0
                 highest_close = 0.0
                 lowest_close = 0.0
         
