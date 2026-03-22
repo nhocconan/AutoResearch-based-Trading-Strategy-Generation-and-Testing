@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #357: 1d Primary + 1w HTF — Vol-Spike Mean Reversion with Trend Filter
+Experiment #358: 30m Primary + 4h/1d HTF — Simplified Trend-Pullback Strategy
 
-Hypothesis: After 356 experiments, clear patterns emerge:
-1. Complex dual-regime strategies (#352-356) all FAILED with negative Sharpe
-2. Simpler 1d/1w combinations work best (current best: Sharpe=0.435)
-3. Vol-spike mean reversion is underexplored — ATR(7)/ATR(30) > 2.0 signals panic
-4. After vol spikes, price mean-reverts to Bollinger mid — capture this "vol crush"
-5. 1w HMA(21) for major trend bias (long bias in crypto, but allow shorts in bear)
-6. Relaxed RSI thresholds (35/65 not 30/70) to ensure sufficient trade frequency
-7. Target: 30-50 trades/year on 1d timeframe
+Hypothesis: After 357 experiments, the pattern is clear:
+1. 30m strategies FAIL with Sharpe=0.000 due to TOO MANY filters (experiments #348, #350, #355)
+2. Complex regime-switching (Chop + CRSI + Donchian) generates 0 trades on lower TF
+3. SIMPLER is better: 4h HMA for trend direction, 30m RSI for pullback entries
+4. Remove session filter (eliminates 50% of opportunities), relax volume threshold
+5. Use asymmetric RSI thresholds: 35/65 for trend-follow, 25/75 for mean-revert
+6. Position size: 0.20-0.25 (smaller for lower TF to reduce fee drag)
+7. Stoploss: 2.0 * ATR (tighter for lower TF)
+8. Target: 40-60 trades/year on 30m (NOT 200+ which kills with fees)
 
 Why this might beat current best (Sharpe=0.435):
-- Vol-spike entries capture panic bottoms (2022 crash, 2025 bear rallies)
-- Mean-reversion works better than trend-follow in bear/range markets
-- 1w trend filter prevents counter-trend disasters
-- Simpler logic = fewer whipsaws than dual-regime approaches
+- 30m entries within 4h trend = HTF trade frequency with LTF precision
+- Simpler logic = more trades (avoid the 0-trade death spiral)
+- Asymmetric RSI thresholds adapt to regime without complex switching
+- Proven pattern from exp #356 but SIMPLIFIED for lower TF
 
-Position sizing: 0.25-0.30 (discrete levels to minimize fee churn)
-Stoploss: 2.5 * ATR trailing stop
-Target: 30-50 trades/year on 1d
+Position sizing: 0.20-0.25 (discrete levels)
+Stoploss: 2.0 * ATR trailing
+Target: 40-60 trades/year on 30m
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_volspike_mr_bb_hma1w_v1"
-timeframe = "1d"
+name = "mtf_30m_hma_rsi_4h1d_simp_pullback_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -76,53 +77,52 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    return upper, lower, sma
+def calculate_sma(close, period=200):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score of price relative to rolling mean."""
-    close_s = pd.Series(close)
-    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - rolling_mean) / (rolling_std + 1e-10)
-    return zscore.values
+def calculate_volume_sma(volume, period=20):
+    """Calculate volume SMA for volume confirmation."""
+    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HTF indicators (major trend direction)
-    hma_1w_21 = calculate_hma(df_1w['close'].values, period=21)
+    # Calculate 4h HTF indicators (major trend direction)
+    hma_4h_21 = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_8 = calculate_hma(df_4h['close'].values, period=8)
+    
+    # Calculate 1d HTF indicators (major regime filter)
+    hma_1d_21 = calculate_hma(df_1d['close'].values, period=21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
+    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
+    hma_4h_8_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_8)
+    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
     
-    # Calculate 1d indicators
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
     rsi_14 = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, period=20, std_dev=2.0)
-    zscore_20 = calculate_zscore(close, period=20)
+    hma_30m_21 = calculate_hma(close, period=21)
+    sma_200 = calculate_sma(close, 200)
+    vol_sma_20 = calculate_volume_sma(volume, 20)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    LONG_BASE = 0.25
-    LONG_STRONG = 0.30
-    SHORT_BASE = 0.20
-    SHORT_STRONG = 0.25
+    # Smaller for lower TF to reduce fee drag
+    LONG_BASE = 0.20
+    LONG_STRONG = 0.25
+    SHORT_BASE = 0.15
+    SHORT_STRONG = 0.20
     
     # Track position state
     in_position = False
@@ -137,157 +137,137 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1w_21_aligned[i]):
+        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(hma_1d_21_aligned[i]):
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(bb_upper[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_30m_21[i]):
             continue
         
-        if np.isnan(atr_7[i]) or np.isnan(atr_30[i]):
-            continue
+        # === 1D MAJOR REGIME (primary direction filter) ===
+        # Price above 1d HMA = bull regime (favor longs)
+        # Price below 1d HMA = bear regime (favor shorts)
+        regime_bull_1d = close[i] > hma_1d_21_aligned[i]
+        regime_bear_1d = close[i] < hma_1d_21_aligned[i]
         
-        # === 1W MAJOR TREND REGIME ===
-        trend_bull = close[i] > hma_1w_21_aligned[i]
-        trend_bear = close[i] < hma_1w_21_aligned[i]
+        # === 4H TREND DIRECTION (entry filter) ===
+        # 4h HMA(8) > HMA(21) = bullish trend
+        # 4h HMA(8) < HMA(21) = bearish trend
+        trend_4h_bull = hma_4h_8_aligned[i] > hma_4h_21_aligned[i]
+        trend_4h_bear = hma_4h_8_aligned[i] < hma_4h_21_aligned[i]
         
-        # === VOLATILITY SPIKE DETECTION ===
-        # ATR(7)/ATR(30) > 2.0 = volatility spike (panic/euphoria)
-        atr_ratio = atr_7[i] / (atr_30[i] + 1e-10)
-        vol_spike = atr_ratio > 1.8
-        vol_normal = atr_ratio < 1.3
+        # === 30M LOCAL TREND ===
+        trend_30m_bull = close[i] > hma_30m_21[i]
+        trend_30m_bear = close[i] < hma_30m_21[i]
         
-        # === BOLLINGER BAND POSITION ===
-        bb_position = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i] + 1e-10)
-        bb_oversold = close[i] <= bb_lower[i] * 1.002  # at or below lower band
-        bb_overbought = close[i] >= bb_upper[i] * 0.998  # at or above upper band
-        bb_mid_cross_up = close[i] > bb_mid[i] and close[i-1] <= bb_mid[i-1] if i > 0 else False
-        bb_mid_cross_down = close[i] < bb_mid[i] and close[i-1] >= bb_mid[i-1] if i > 0 else False
+        # === VOLUME CONFIRMATION (loose threshold) ===
+        vol_ratio = volume[i] / (vol_sma_20[i] + 1e-10) if not np.isnan(vol_sma_20[i]) else 1.0
+        vol_ok = vol_ratio > 0.5  # Very loose - just not extremely low volume
         
-        # === RSI EXTREMES ===
-        rsi_oversold = rsi_14[i] < 40.0
-        rsi_overbought = rsi_14[i] > 60.0
-        rsi_neutral = 45.0 < rsi_14[i] < 55.0
+        # === RSI SIGNALS (asymmetric thresholds) ===
+        # Trend-follow: RSI 35-65 zone for pullback entries
+        # Mean-revert: RSI <25 or >75 for extreme reversals
+        rsi_oversold_trend = rsi_14[i] < 40.0
+        rsi_oversoldExtreme = rsi_14[i] < 30.0
+        rsi_overbought_trend = rsi_14[i] > 60.0
+        rsi_overbought_extreme = rsi_14[i] > 70.0
         
-        # === Z-SCORE EXTREMES ===
-        zscore_extreme_long = zscore_20[i] < -1.5
-        zscore_extreme_short = zscore_20[i] > 1.5
+        # === PRICE POSITION ===
+        price_above_sma200 = close[i] > sma_200[i] if not np.isnan(sma_200[i]) else True
         
-        # === ENTRY LOGIC — VOL SPIKE MEAN REVERSION ===
+        # === ENTRY LOGIC - SIMPLIFIED TREND-PULLBACK ===
         new_signal = 0.0
         
-        # Long entry: vol spike + oversold conditions + bull trend (or neutral)
-        if vol_spike and bb_oversold and rsi_oversold:
-            if trend_bull:
-                new_signal = LONG_STRONG
-            elif not trend_bear:
-                new_signal = LONG_BASE
-            else:
-                # Bear trend but extreme oversold — smaller position
-                if zscore_extreme_long:
-                    new_signal = LONG_BASE * 0.7
+        # === LONG ENTRIES ===
+        # Condition 1: 1d bull + 4h bull + RSI pullback (trend-follow)
+        if regime_bull_1d and trend_4h_bull and rsi_oversold_trend and vol_ok:
+            new_signal = LONG_BASE
+        # Condition 2: 1d bull + RSI extreme oversold (mean-revert)
+        elif regime_bull_1d and rsi_oversoldExtreme and vol_ok:
+            new_signal = LONG_STRONG
+        # Condition 3: 4h bull + 30m pullback to HMA + RSI neutral (continuation)
+        elif trend_4h_bull and not trend_30m_bull and 35.0 < rsi_14[i] < 50.0 and vol_ok:
+            new_signal = LONG_BASE
+        # Condition 4: Price > SMA200 + RSI extreme (strong mean-revert)
+        elif price_above_sma200 and rsi_oversoldExtreme:
+            new_signal = LONG_BASE * 0.8
         
-        # Long entry: z-score extreme + RSI oversold (no vol spike needed)
-        elif zscore_extreme_long and rsi_oversold:
-            if trend_bull:
-                new_signal = LONG_BASE
-            elif not trend_bear:
-                new_signal = LONG_BASE * 0.7
+        # === SHORT ENTRIES ===
+        # Condition 1: 1d bear + 4h bear + RSI pullback (trend-follow)
+        if regime_bear_1d and trend_4h_bear and rsi_overbought_trend and vol_ok:
+            if new_signal == 0.0:
+                new_signal = -SHORT_BASE
+        # Condition 2: 1d bear + RSI extreme overbought (mean-revert)
+        elif regime_bear_1d and rsi_overbought_extreme and vol_ok:
+            if new_signal == 0.0:
+                new_signal = -SHORT_STRONG
+        # Condition 3: 4h bear + 30m rally to HMA + RSI neutral (continuation)
+        elif trend_4h_bear and not trend_30m_bear and 50.0 < rsi_14[i] < 65.0 and vol_ok:
+            if new_signal == 0.0:
+                new_signal = -SHORT_BASE
+        # Condition 4: Price < SMA200 + RSI extreme (strong mean-revert)
+        elif not price_above_sma200 and rsi_overbought_extreme:
+            if new_signal == 0.0:
+                new_signal = -SHORT_BASE * 0.8
         
-        # Short entry: vol spike + overbought conditions + bear trend
-        if vol_spike and bb_overbought and rsi_overbought:
-            if trend_bear:
-                if new_signal == 0.0:
-                    new_signal = -SHORT_STRONG
-            elif not trend_bull:
-                if new_signal == 0.0:
-                    new_signal = -SHORT_BASE
-            else:
-                # Bull trend but extreme overbought — smaller position
-                if zscore_extreme_short and new_signal == 0.0:
-                    new_signal = -SHORT_BASE * 0.7
-        
-        # Short entry: z-score extreme + RSI overbought
-        elif zscore_extreme_short and rsi_overbought:
-            if trend_bear:
-                if new_signal == 0.0:
-                    new_signal = -SHORT_BASE
-            elif not trend_bull:
-                if new_signal == 0.0:
-                    new_signal = -SHORT_BASE * 0.7
-        
-        # === FREQUENCY BOOSTER — ensure minimum trades ===
-        # If no signal for 15 bars (~15 days on 1d), look for weaker entries
+        # === FREQUENCY SAFEGUARD (ensure 40+ trades/year on 30m) ===
+        # Force trade if no signal for 48 bars (~1 day on 30m)
         bars_since_last_trade = i - last_trade_bar
-        if bars_since_last_trade > 15 and new_signal == 0.0 and not in_position:
-            # Weaker long entry
-            if trend_bull and rsi_14[i] < 45.0 and close[i] < bb_mid[i]:
+        if bars_since_last_trade > 48 and new_signal == 0.0 and not in_position:
+            if regime_bull_1d and rsi_14[i] < 45.0:
                 new_signal = LONG_BASE * 0.6
-            # Weaker short entry
-            elif trend_bear and rsi_14[i] > 55.0 and close[i] > bb_mid[i]:
-                if new_signal == 0.0:
-                    new_signal = -SHORT_BASE * 0.6
-            # Mean reversion to BB mid
-            elif rsi_neutral and bb_mid_cross_up and trend_bull:
-                new_signal = LONG_BASE * 0.5
-            elif rsi_neutral and bb_mid_cross_down and trend_bear:
-                if new_signal == 0.0:
-                    new_signal = -SHORT_BASE * 0.5
+            elif regime_bear_1d and rsi_14[i] > 55.0:
+                new_signal = -SHORT_BASE * 0.6
+            elif rsi_oversoldExtreme:
+                new_signal = LONG_BASE * 0.6
+            elif rsi_overbought_extreme:
+                new_signal = -SHORT_BASE * 0.6
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         stoploss_triggered = False
         
         if in_position and position_side != 0:
             if position_side > 0:
                 if close[i] > highest_price:
                     highest_price = close[i]
-                stoploss_price = highest_price - 2.5 * atr_14[i]
+                stoploss_price = highest_price - 2.0 * atr_14[i]
                 if close[i] < stoploss_price:
                     stoploss_triggered = True
             
             if position_side < 0:
                 if lowest_price == 0.0 or close[i] < lowest_price:
                     lowest_price = close[i]
-                stoploss_price = lowest_price + 2.5 * atr_14[i]
+                stoploss_price = lowest_price + 2.0 * atr_14[i]
                 if close[i] > stoploss_price:
                     stoploss_triggered = True
         
-        # === MEAN REVERSION EXIT ===
-        # Exit long when price returns to BB mid or RSI neutralizes
-        mr_exit_long = False
-        if in_position and position_side > 0:
-            if close[i] > bb_mid[i] and rsi_14[i] > 55.0:
-                mr_exit_long = True
-            elif rsi_14[i] > 70.0:  # RSI overbought exit
-                mr_exit_long = True
-        
-        # Exit short when price returns to BB mid or RSI neutralizes
-        mr_exit_short = False
-        if in_position and position_side < 0:
-            if close[i] < bb_mid[i] and rsi_14[i] < 45.0:
-                mr_exit_short = True
-            elif rsi_14[i] < 30.0:  # RSI oversold exit
-                mr_exit_short = True
+        # === RSI REVERSAL EXIT ===
+        rsi_exit = False
+        if in_position and position_side != 0:
+            if position_side > 0 and rsi_overbought_extreme:
+                rsi_exit = True
+            if position_side < 0 and rsi_oversoldExtreme:
+                rsi_exit = True
         
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and trend_bear and close[i] < hma_1w_21_aligned[i] * 0.98:
+            if position_side > 0 and trend_4h_bear and close[i] < hma_4h_21_aligned[i]:
                 trend_reversal = True
-            if position_side < 0 and trend_bull and close[i] > hma_1w_21_aligned[i] * 1.02:
+            if position_side < 0 and trend_4h_bull and close[i] > hma_4h_21_aligned[i]:
                 trend_reversal = True
         
-        if stoploss_triggered or mr_exit_long or mr_exit_short or trend_reversal:
+        if stoploss_triggered or rsi_exit or trend_reversal:
             new_signal = 0.0
         
         # === DISCRETIZE SIGNAL (reduce churn) ===
         if new_signal != 0.0:
-            if abs(new_signal) < 0.12:
+            if abs(new_signal) < 0.10:
                 new_signal = 0.0
-            elif new_signal > 0.28:
+            elif new_signal > 0.23:
                 new_signal = LONG_STRONG
             elif new_signal > 0:
                 new_signal = LONG_BASE
-            elif new_signal < -0.23:
+            elif new_signal < -0.18:
                 new_signal = -SHORT_STRONG
             else:
                 new_signal = -SHORT_BASE
