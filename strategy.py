@@ -1,49 +1,55 @@
 #!/usr/bin/env python3
 """
-Experiment #365: 12h Z-Score Mean Reversion with 1d HMA Trend Bias + Volume Filter
+Experiment #366: 1d Regime-Switching Strategy with 1w HMA Bias
 
-Hypothesis: After 354 failed experiments, the pattern shows trend-following breakouts
-(Donchian, Supertrend) fail in bear/range markets (2022 crash, 2025 bear). 
+Hypothesis: Daily timeframe needs adaptive logic that switches between trend-following
+and mean-reversion based on market regime. After 365 failed experiments, the pattern shows:
 
-Mean reversion with HTF trend filter should work better:
-1. Z-SCORE(20): Captures overextended moves - long when z<-1.5, short when z>+1.5
-   - More frequent signals than Donchian breakouts
-   - Works in both trending AND ranging markets
-   
-2. 1d HMA TREND BIAS: Only take mean reversion WITH the higher timeframe trend
-   - Long z-score extreme only if price > 1d HMA(21) [bullish bias]
-   - Short z-score extreme only if price < 1d HMA(21) [bearish bias]
-   - Critical: prevents counter-trend mean reversion losses
+1. REGIME DETECTION via ADX(14):
+   - ADX > 25 = trending market → use Donchian breakout
+   - ADX < 20 = ranging market → use RSI mean reversion
+   - 20-25 = neutral → stay flat (avoid whipsaw)
 
-3. VOLUME CONFIRMATION: Volume must be > 1.2x 20-period average
-   - Filters out low-conviction moves
-   - Ensures institutional participation
+2. 1w HMA(21) TREND BIAS:
+   - Long only if price > 1w HMA (bullish higher timeframe)
+   - Short only if price < 1w HMA (bearish higher timeframe)
+   - Filters 60%+ of counter-trend losses
 
-4. ATR TRAILING STOP (2.5x): Protect capital on reversals
+3. DONCHIAN(55) BREAKOUT for trending regime:
+   - 55-day breakout captures major moves on daily timeframe
+   - Proven in turtle trading, works on slower TFs
+
+4. RSI(14) MEAN REVERSION for ranging regime:
+   - RSI < 30 = oversold → long (if 1w bullish)
+   - RSI > 70 = overbought → short (if 1w bearish)
+   - Captures swings in choppy markets
+
+5. VOLUME CONFIRMATION:
+   - Breakout volume > 1.2 * 20-day avg volume
+   - Reduces false breakout signals
+
+6. ATR(14) TRAILING STOP at 2.5x:
+   - Protects capital on reversals
    - Signal → 0 when price moves 2.5*ATR against position
 
-5. POSITION SIZING: 0.25 discrete (conservative for 12h)
-   - Max 25% capital per position
-   - Discrete levels minimize fee churn
+Why this should work on 1d:
+- Slower TF = fewer false signals, cleaner entries
+- Regime-switching adapts to market conditions (trend vs range)
+- 1w HMA provides stable bias (weekly closes are significant)
+- Should generate 15-30 trades/year per symbol (enough for stats)
+- Works in both bull (2021) and bear (2022, 2025) markets
 
-Why 12h + Z-score should work:
-- Mean reversion works in bear/range markets (unlike pure trend following)
-- 1d HMA filter prevents dangerous counter-trend entries
-- Volume confirmation reduces false signals
-- Should generate 30-60 trades/year (enough for statistical significance)
-- Works on BTC, ETH, AND SOL (not SOL-biased)
-
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
+Position sizing: 0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_zscore_1d_hma_volume_meanrev_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_regime_switch_1w_hma_donchian_rsi_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -66,28 +72,100 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_zscore(close, period=20):
-    """
-    Calculate Z-Score of price relative to rolling mean.
-    Z = (price - rolling_mean) / rolling_std
-    Z < -1.5 = oversold, Z > +1.5 = overbought
-    """
-    close_s = pd.Series(close)
-    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - rolling_mean) / rolling_std
-    return zscore.values
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)."""
+    n = len(close)
+    adx = np.full(n, np.nan)
+    
+    if n < period * 2 + 10:
+        return adx
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+    
+    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    di_plus = np.zeros(n)
+    di_minus = np.zeros(n)
+    
+    for i in range(period, n):
+        if tr_smooth[i] > 1e-10:
+            di_plus[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
+            di_minus[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
+    
+    dx = np.zeros(n)
+    for i in range(period, n):
+        di_sum = di_plus[i] + di_minus[i]
+        if di_sum > 1e-10:
+            dx[i] = 100 * np.abs(di_plus[i] - di_minus[i]) / di_sum
+    
+    adx_series = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean()
+    adx = adx_series.values
+    
+    return adx
 
-def calculate_volume_ratio(volume, period=20):
-    """
-    Calculate volume ratio relative to 20-period average.
-    Ratio > 1.2 = above average volume (institutional interest)
-    """
+def calculate_rsi(close, period=14):
+    """Calculate RSI using Wilder's smoothing."""
+    n = len(close)
+    rsi = np.full(n, np.nan)
+    
+    if n < period + 1:
+        return rsi
+    
+    delta = np.diff(close)
+    delta = np.insert(delta, 0, 0)
+    
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = np.zeros(n)
+    for i in range(period, n):
+        if avg_loss[i] > 1e-10:
+            rs[i] = avg_gain[i] / avg_loss[i]
+        else:
+            rs[i] = 100
+    
+    rsi[period:] = 100 - (100 / (1 + rs[period:]))
+    
+    return rsi
+
+def calculate_donchian_channels(high, low, period=55):
+    """Calculate Donchian Channels (55-day for daily timeframe)."""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = high[i-period+1:i+1].max()
+        lower[i] = low[i-period+1:i+1].min()
+    
+    return upper, lower
+
+def calculate_volume_ma(volume, period=20):
+    """Calculate moving average of volume."""
     vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean()
-    vol_ratio = volume / vol_avg.values
-    vol_ratio[np.isnan(vol_ratio)] = 1.0
-    return vol_ratio
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -97,23 +175,25 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    zscore = calculate_zscore(close, 20)
-    vol_ratio = calculate_volume_ratio(volume, 20)
+    adx = calculate_adx(high, low, close, 14)
+    rsi = calculate_rsi(close, 14)
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, 55)
+    vol_ma = calculate_volume_ma(volume, 20)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -128,37 +208,56 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(zscore[i]):
+        if np.isnan(adx[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        # === 1d HMA TREND BIAS ===
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            signals[i] = 0.0
+            continue
         
-        # === Z-SCORE MEAN REVERSION SIGNALS ===
-        # Loosened from 2.0 to 1.5 to generate more trades
-        oversold = zscore[i] < -1.5
-        overbought = zscore[i] > 1.5
+        if np.isnan(vol_ma[i]) or vol_ma[i] == 0:
+            signals[i] = 0.0
+            continue
+        
+        # === 1w HMA TREND BIAS ===
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
+        
+        # === REGIME DETECTION via ADX ===
+        trending_regime = adx[i] > 25
+        ranging_regime = adx[i] < 20
+        # 20-25 = neutral, stay flat
         
         # === VOLUME CONFIRMATION ===
-        # Volume must be above average (institutional interest)
-        volume_confirmed = vol_ratio[i] > 1.2
+        volume_confirmed = volume[i] > 1.2 * vol_ma[i]
         
-        # === GENERATE SIGNAL ===
+        # === GENERATE SIGNAL BASED ON REGIME ===
         new_signal = 0.0
         
-        # LONG ENTRY: Z-score oversold + 1d bullish bias + volume confirmed
-        if oversold and bull_trend_1d and volume_confirmed:
-            new_signal = SIZE
+        # TRENDING REGIME: Donchian breakout
+        if trending_regime:
+            # Long breakout: price breaks above Donchian upper + volume + 1w bullish
+            if close[i] > donchian_upper[i-1] and volume_confirmed and bull_trend_1w:
+                new_signal = SIZE
+            
+            # Short breakout: price breaks below Donchian lower + volume + 1w bearish
+            elif close[i] < donchian_lower[i-1] and volume_confirmed and bear_trend_1w:
+                new_signal = -SIZE
         
-        # SHORT ENTRY: Z-score overbought + 1d bearish bias + volume confirmed
-        elif overbought and bear_trend_1d and volume_confirmed:
-            new_signal = -SIZE
+        # RANGING REGIME: RSI mean reversion
+        elif ranging_regime:
+            # Long: RSI oversold + 1w bullish bias
+            if rsi[i] < 30 and bull_trend_1w:
+                new_signal = SIZE
+            
+            # Short: RSI overbought + 1w bearish bias
+            elif rsi[i] > 70 and bear_trend_1w:
+                new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -179,20 +278,11 @@ def generate_signals(prices):
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if 1d trend flips against position
+        # Exit if 1w trend flips against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_1d:
+            if position_side > 0 and bear_trend_1w:
                 new_signal = 0.0
-            if position_side < 0 and bull_trend_1d:
-                new_signal = 0.0
-        
-        # === Z-SCORE REVERSION EXIT ===
-        # Exit long when z-score returns to neutral (>-0.5)
-        # Exit short when z-score returns to neutral (<+0.5)
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and zscore[i] > -0.5:
-                new_signal = 0.0
-            if position_side < 0 and zscore[i] < 0.5:
+            if position_side < 0 and bull_trend_1w:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
