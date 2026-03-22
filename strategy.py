@@ -1,32 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #501: 1h Fisher Transform + 4h HMA Trend + ADX Hysteresis
+Experiment #502: 4h Multi-Regime with Dual HTF Trend Bias
 
-Hypothesis: After 500 failed experiments, the key insight is that 1h timeframe needs:
-1. Fisher Transform (Ehlers) for reversal detection - works well in bear/range markets
-2. 4h HMA(21) for robust trend bias without whipsaw
-3. ADX hysteresis (25 enter, 18 exit) to prevent signal churn
-4. Volume confirmation to filter false breakouts
-5. Asymmetric logic: long on dips in bull, short on rallies in bear
+Hypothesis: After analyzing 501 failed experiments, the key insight is that 4h strategies
+fail when they're EITHER pure trend-following OR pure mean-reversion. The solution is
+REGIME-ADAPTIVE logic that switches between the two based on HTF signals.
 
-Why this should work on 1h:
-- Fisher Transform normalizes price to -1.5 to +1.5 range, catching reversals
-- 4h HMA provides stable trend bias (proven in successful strategies)
-- ADX hysteresis reduces trade frequency but improves quality
-- Volume ratio > 1.2 confirms genuine moves
-- Should generate 30-50 trades/year per symbol (enough for Sharpe)
+This strategy combines:
+1. WEEKLY HMA(21) - Major trend bias (bull/bear market identification)
+2. DAILY ADX(14) - Trend strength filter (trending vs ranging)
+3. 4H RSI(7) - Fast entry timing with looser thresholds (35/65) for MORE trades
+4. 4H BOLLINGER BANDS - Mean-reversion overlay when ADX low
+5. 4H ATR(14) - Dynamic stoploss at 2.5x
 
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.30 discrete levels
+Key innovations vs failed strategies:
+- LOOSER RSI thresholds (35/65 vs 30/70) to ensure >=10 trades/symbol
+- DUAL HTF filter (1w + 1d) for robust regime detection
+- ADAPTIVE logic: trend-follow when ADX>25, mean-revert when ADX<20
+- Position size 0.25 (conservative for 4h volatility)
+- Stoploss 2.5*ATR (tighter than 3.0 to cut losses faster)
+
+Why 4h works:
+- Captures multi-day trends without 1d lag
+- Enough bars for statistical significance (45K+ bars in train)
+- Less noise than 15m/1h, more signals than 1d
+
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_fisher_4h_hma_adx_hysteresis_volume_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_dual_htf_regime_adaptive_rsi7_bb_adx_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -95,51 +104,8 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
-def calculate_fisher_transform(high, low, period=9):
-    """
-    Calculate Ehlers Fisher Transform.
-    Normalizes price to -1.5 to +1.5 range for reversal detection.
-    Long when Fisher crosses above -1.5, short when crosses below +1.5.
-    """
-    n = len(high)
-    fisher = np.full(n, np.nan)
-    trigger = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        # Calculate typical price
-        hl2 = (high[i-period+1:i+1].max() + low[i-period+1:i+1].min()) / 2.0
-        
-        # Normalize to -1 to +1 range
-        highest = high[i-period+1:i+1].max()
-        lowest = low[i-period+1:i+1].min()
-        
-        if highest - lowest > 1e-10:
-            normalized = 2.0 * (hl2 - lowest) / (highest - lowest) - 1.0
-            normalized = max(-0.999, min(0.999, normalized))  # Clamp to avoid log errors
-            
-            # Fisher transform
-            fisher_val = 0.5 * np.log((1 + normalized) / (1 - normalized))
-            
-            # Smooth with EMA
-            if i == period:
-                fisher[i] = fisher_val
-            else:
-                fisher[i] = 0.67 * fisher[i-1] + 0.33 * fisher_val
-            
-            # Trigger line (1-period lag)
-            trigger[i] = fisher[i-1] if i > period else fisher_val
-    
-    return fisher, trigger
-
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio relative to rolling average."""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean()
-    vol_ratio = vol_s / vol_avg.replace(0, np.inf)
-    return vol_ratio.values
-
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
+def calculate_rsi(close, period=7):
+    """Calculate Relative Strength Index with fast period for more signals."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -152,48 +118,57 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_sma(close, period=200):
-    """Calculate Simple Moving Average."""
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
     close_s = pd.Series(close)
-    return close_s.rolling(window=period, min_periods=period).mean().values
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return sma.values, upper.values, lower.values
+
+def calculate_ema(close, period=21):
+    """Calculate Exponential Moving Average."""
+    close_s = pd.Series(close)
+    return close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    ema_1d = calculate_ema(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    adx = calculate_adx(high, low, close, 14)
-    fisher, fisher_trigger = calculate_fisher_transform(high, low, 9)
-    vol_ratio = calculate_volume_ratio(volume, 20)
-    rsi = calculate_rsi(close, 14)
-    sma_200 = calculate_sma(close, 200)
+    rsi = calculate_rsi(close, 7)  # Fast RSI for more signals
+    sma_bb, bb_upper, bb_lower = calculate_bollinger(close, 20, 2.0)
+    ema_21 = calculate_ema(close, 21)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25
-    SIZE_MAX = 0.30
+    SIZE = 0.25
     
-    # Track position state for stoploss and ADX hysteresis
+    # Track position state for stoploss
     in_position = False
     position_side = 0
     highest_close = 0.0
     lowest_close = 0.0
     entry_price = 0.0
-    adx_active = False  # ADX hysteresis state
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -201,87 +176,62 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(adx_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(fisher_trigger[i]):
+        if np.isnan(rsi[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(vol_ratio[i]) or np.isnan(rsi[i]):
+        if np.isnan(ema_21[i]) or np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_200[i]):
-            signals[i] = 0.0
-            continue
+        # === WEEKLY HMA TREND BIAS ===
+        bull_regime = close[i] > hma_1w_aligned[i]
+        bear_regime = close[i] < hma_1w_aligned[i]
         
-        # === 4H HMA TREND BIAS ===
-        bull_regime = close[i] > hma_4h_aligned[i]
-        bear_regime = close[i] < hma_4h_aligned[i]
+        # === DAILY ADX TREND STRENGTH ===
+        trending_market = adx_1d_aligned[i] > 25
+        ranging_market = adx_1d_aligned[i] < 20
         
-        # === ADX HYSTERESIS (25 enter, 18 exit) ===
-        if not adx_active and adx[i] > 25:
-            adx_active = True
-        elif adx_active and adx[i] < 18:
-            adx_active = False
+        # === DAILY EMA CONFIRMATION ===
+        daily_bull = close[i] > ema_1d_aligned[i]
+        daily_bear = close[i] < ema_1d_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = vol_ratio[i] > 1.2
-        
-        # === FISHER TRANSFORM SIGNALS ===
-        fisher_long = fisher[i] > -1.5 and fisher_trigger[i] < -1.5
-        fisher_short = fisher[i] < 1.5 and fisher_trigger[i] > 1.5
-        
-        # Fisher crossover signals
-        fisher_cross_up = fisher[i] > fisher_trigger[i] and fisher[i-1] <= fisher_trigger[i-1] if i > 0 else False
-        fisher_cross_down = fisher[i] < fisher_trigger[i] and fisher[i-1] >= fisher_trigger[i-1] if i > 0 else False
-        
-        # === ASYMMETRIC ENTRY LOGIC ===
+        # === ADAPTIVE ENTRY LOGIC ===
         new_signal = 0.0
         
-        # BULL REGIME: Favor long entries on dips
-        if bull_regime:
-            # Primary: Fisher cross up + volume confirmation
-            if fisher_cross_up and volume_confirmed:
-                new_signal = SIZE_BASE
-            
-            # Secondary: RSI oversold + above SMA200
-            elif rsi[i] < 35 and close[i] > sma_200[i]:
-                new_signal = SIZE_BASE
-            
-            # Tertiary: Fisher extreme oversold
-            elif fisher[i] < -1.8:
-                new_signal = SIZE_BASE * 0.8
+        # BULL REGIME: Favor long entries
+        if bull_regime and daily_bull:
+            if trending_market:
+                # Trend-following long: RSI pullback to EMA
+                if rsi[i] < 45 and close[i] > ema_21[i]:
+                    new_signal = SIZE
+            elif ranging_market:
+                # Mean-reversion long: RSI oversold + near BB lower
+                if rsi[i] < 35 and close[i] < bb_lower[i] * 1.01:
+                    new_signal = SIZE
+            else:
+                # Neutral: simple RSI long
+                if rsi[i] < 40:
+                    new_signal = SIZE
         
-        # BEAR REGIME: Favor short entries on rallies
-        if bear_regime:
-            # Primary: Fisher cross down + volume confirmation
-            if fisher_cross_down and volume_confirmed:
-                new_signal = -SIZE_BASE
-            
-            # Secondary: RSI overbought + below SMA200
-            elif rsi[i] > 65 and close[i] < sma_200[i]:
-                new_signal = -SIZE_BASE
-            
-            # Tertiary: Fisher extreme overbought
-            elif fisher[i] > 1.8:
-                new_signal = -SIZE_BASE * 0.8
-        
-        # === ADX FILTER (only allow trades when ADX active) ===
-        # But allow mean-reversion trades even when ADX low
-        if adx_active:
-            # Trending market - allow full size
-            pass
-        else:
-            # Ranging market - reduce size for mean-reversion only
-            if new_signal != 0.0:
-                # Only allow if Fisher is at extreme (mean-reversion)
-                if abs(fisher[i]) < 1.5:
-                    new_signal = 0.0
-                else:
-                    new_signal = new_signal * 0.7  # Reduce size in range
+        # BEAR REGIME: Favor short entries
+        if bear_regime and daily_bear:
+            if trending_market:
+                # Trend-following short: RSI rally to EMA
+                if rsi[i] > 55 and close[i] < ema_21[i]:
+                    new_signal = -SIZE
+            elif ranging_market:
+                # Mean-reversion short: RSI overbought + near BB upper
+                if rsi[i] > 65 and close[i] > bb_upper[i] * 0.99:
+                    new_signal = -SIZE
+            else:
+                # Neutral: simple RSI short
+                if rsi[i] > 60:
+                    new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -302,7 +252,7 @@ def generate_signals(prices):
                     new_signal = 0.0
         
         # === REGIME REVERSAL EXIT ===
-        # Exit if 4h trend flips against position
+        # Exit if weekly trend flips against position
         if in_position and new_signal != 0.0:
             if position_side > 0 and bear_regime:
                 new_signal = 0.0
