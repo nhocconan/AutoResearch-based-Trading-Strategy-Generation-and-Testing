@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #022: 12h Donchian Breakout + 1d/1w HMA Trend + ADX Filter
+Experiment #022: 12h KAMA Trend + RSI Momentum with 1d/1w Triple Bias
 
-Hypothesis: 12h primary timeframe with Donchian(20) breakouts filtered by 1d HMA trend
-and ADX strength will capture sustained moves while avoiding whipsaw. Key features:
-1. Donchian(20) breakout for entry timing (proven on SOL in exp history)
-2. 1d HMA(21) + 1w HMA(21) for multi-level trend confirmation
-3. ADX(14) > 20 to ensure trending conditions (avoid range chop)
-4. RSI(14) filter: 35-65 range to avoid overextended entries
-5. ATR(14) trailing stoploss at 2.5x
-6. Position sizing: 0.25 base, discrete levels (0.20, 0.25, 0.30)
+Hypothesis: Previous HMA-based strategies failed due to lag in choppy markets.
+KAMA (Kaufman Adaptive Moving Average) adapts to volatility - fast in trends,
+slow in ranges. Combined with triple HTF bias (1d + 1w), this should:
+1. Filter out counter-trend trades in 2022 crash and 2025 bear
+2. Generate more trades than pure breakout strategies (addressing 0-trade failures)
+3. Use RSI momentum (not extreme pullback) for better entry timing
+4. Choppiness Index to reduce trades in range markets (fee savings)
 
-Why this should work:
-- 12h TF targets 20-50 trades/year (optimal fee efficiency)
-- Donchian breakouts capture momentum without lag
-- 1d + 1w HMA dual filter prevents counter-trend trades
-- ADX filter avoids range-bound whipsaw (major failure mode)
-- RSI filter prevents chasing overextended moves
-- All symbols should generate trades (BTC/ETH/SOL)
+Key innovations vs failed experiments:
+- KAMA instead of HMA (adaptive to volatility, less whipsaw)
+- Triple HTF bias (1d + 1w) for stronger trend confirmation
+- RSI momentum zone (40-60) instead of extreme pullback (more trades)
+- Choppiness filter to avoid range chop (reduces fee drag)
+- 2.0 ATR stoploss (tighter than 2.5, protects capital)
 
 Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20-0.30 discrete
-Stoploss: 2.5 * ATR(14)
+Position sizing: 0.25 base, discrete levels
+Stoploss: 2.0 * ATR(14) trailing
+Target: 20-50 trades/year, Sharpe > 0.028 (beat current best)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_hma_adx_1d_1w_v1"
+name = "mtf_12h_kama_rsi_momentum_1d1w_bias_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -42,81 +41,94 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI using Wilder's smoothing."""
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)
-    
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    gain_avg = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    loss_avg = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    loss_avg = np.where(loss_avg == 0, 1e-10, loss_avg)
-    rs = gain_avg / loss_avg
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.clip(rsi, 0, 100)
-    return rsi
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
+def calculate_kama(close, fast_period=2, slow_period=30, smoothing_period=10):
+    """
+    Calculate Kaufman Adaptive Moving Average.
+    KAMA adapts to market noise - fast during trends, slow during ranges.
+    Based on Perry Kaufman's "Trading Systems and Methods".
+    """
+    close_s = pd.Series(close)
     n = len(close)
     
-    # Calculate DM and TR
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
+    # Efficiency Ratio (ER): measures trend direction vs noise
+    change = np.abs(close - np.roll(close, slow_period))
+    change[0:slow_period] = np.abs(close[0:slow_period] - close[0])
+    
+    volatility = np.abs(close - np.roll(close, 1))
+    volatility[0] = change[0]
+    volatility_sum = pd.Series(volatility).rolling(window=slow_period, min_periods=slow_period).sum().values
+    
+    er = change / (volatility_sum + 1e-10)
+    er = np.clip(er, 0, 1)
+    
+    # Smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
     
     for i in range(1, n):
-        plus_move = high[i] - high[i-1]
-        minus_move = low[i-1] - low[i]
-        
-        if plus_move > minus_move and plus_move > 0:
-            plus_dm[i] = plus_move
-        if minus_move > plus_move and minus_move > 0:
-            minus_dm[i] = minus_move
-        
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    tr[0] = high[0] - low[0]
-    
-    # Smooth with Wilder's method
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Calculate DI and ADX
-    tr_s = np.where(tr_s == 0, 1e-10, tr_s)
-    plus_di = 100 * (plus_dm_s / tr_s)
-    minus_di = 100 * (minus_dm_s / tr_s)
-    
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
+    return kama
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend with less lag."""
+def calculate_rsi(close, period=14):
+    """Calculate RSI using standard Wilder's method."""
     close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    return rsi
 
-def calculate_donchian_channels(high, low, period=20):
-    """Calculate Donchian Channel upper and lower bands."""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = choppy/range market
+    CHOP < 38.2 = trending market
+    Based on E.W. Dreiss formula.
+    """
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
+    # Highest high and lowest low over period
+    hh = high_s.rolling(window=period, min_periods=period).max()
+    ll = low_s.rolling(window=period, min_periods=period).min()
     
-    return upper, lower
+    # ATR over period
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    
+    # CHOP formula
+    chop = 100 * np.log10((atr_sum + 1e-10) / (hh - ll + 1e-10)) / np.log10(period)
+    chop = np.clip(chop, 0, 100)
+    
+    return chop
+
+def calculate_bollinger(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    middle = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
+    
+    return upper.values, lower.values, middle.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -128,26 +140,28 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d indicators
-    hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
+    # Calculate 1D indicators
+    kama_1d_30 = calculate_kama(df_1d['close'].values, fast_period=2, slow_period=30, smoothing_period=10)
     
-    # Calculate 1w indicators
-    hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
+    # Calculate 1W indicators
+    kama_1w_30 = calculate_kama(df_1w['close'].values, fast_period=2, slow_period=30, smoothing_period=10)
+    
+    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
+    kama_1d_30_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_30)
+    kama_1w_30_aligned = align_htf_to_ltf(prices, df_1w, kama_1w_30)
     
     # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, 14)
+    kama_12h_fast = calculate_kama(close, fast_period=2, slow_period=10, smoothing_period=5)
+    kama_12h_slow = calculate_kama(close, fast_period=2, slow_period=30, smoothing_period=10)
     rsi_14 = calculate_rsi(close, 14)
-    adx_14 = calculate_adx(high, low, close, 14)
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, 20)
+    chop_14 = calculate_choppiness(high, low, close, 14)
+    bb_upper, bb_lower, bb_middle = calculate_bollinger(close, 20, 2.0)
     
     signals = np.zeros(n)
     
-    # Position sizing (Rule 4 - discrete levels, max 0.40)
-    BASE_SIZE = 0.25
-    MIN_SIZE = 0.20
-    MAX_SIZE = 0.30
+    # Base position sizing (Rule 4 - discrete levels, max 0.40)
+    BASE_SIZE = 0.27
     
     # Track position state for stoploss
     in_position = False
@@ -155,100 +169,134 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_price = 0.0
     lowest_price = 0.0
-    last_trade_bar = -100
+    last_trade_bar = -50
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1w_21_aligned[i]):
+        if np.isnan(kama_1d_30_aligned[i]) or np.isnan(kama_1w_30_aligned[i]):
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(adx_14[i]):
+        if np.isnan(kama_12h_fast[i]) or np.isnan(kama_12h_slow[i]):
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(chop_14[i]):
             continue
         
-        # === HTF TREND BIAS (1d + 1w) ===
-        # Both HTFs must agree for strong bias
-        htf_bullish = (close[i] > hma_1d_21_aligned[i]) and (close[i] > hma_1w_21_aligned[i])
-        htf_bearish = (close[i] < hma_1d_21_aligned[i]) and (close[i] < hma_1w_21_aligned[i])
+        # === 1D TREND BIAS ===
+        daily_bullish = close[i] > kama_1d_30_aligned[i]
+        daily_bearish = close[i] < kama_1d_30_aligned[i]
         
-        # === TREND STRENGTH (ADX) ===
-        trending = adx_14[i] > 20  # Minimum trend strength
-        strong_trend = adx_14[i] > 25  # Strong trend for larger position
+        # === 1W TREND BIAS (stronger filter) ===
+        weekly_bullish = close[i] > kama_1w_30_aligned[i]
+        weekly_bearish = close[i] < kama_1w_30_aligned[i]
         
-        # === RSI FILTER (avoid overextended) ===
-        rsi_ok_long = 35 <= rsi_14[i] <= 65  # Not overbought
-        rsi_ok_short = 35 <= rsi_14[i] <= 65  # Not oversold
+        # === 12H KAMA TREND ===
+        kama_bullish = kama_12h_fast[i] > kama_12h_slow[i]
+        kama_bearish = kama_12h_fast[i] < kama_12h_slow[i]
         
-        # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
+        # === CHOPPINESS REGIME FILTER ===
+        # CHOP < 50 = trending (allow trades), CHOP > 61.8 = choppy (reduce size)
+        is_trending = chop_14[i] < 50
+        is_choppy = chop_14[i] > 61.8
         
-        # === POSITION SIZING ===
-        current_size = BASE_SIZE
-        if strong_trend:
-            current_size = 0.30
+        # === VOLATILITY-ADJUSTED POSITION SIZING ===
+        if i > 100:
+            atr_median = np.nanmedian(atr_14[max(0, i-100):i])
+            atr_ratio = atr_14[i] / atr_median if atr_median > 0 else 1.0
+            vol_adjustment = np.clip(1.0 / atr_ratio, 0.7, 1.3)
         else:
-            current_size = 0.25
+            vol_adjustment = 1.0
+        
+        # Reduce size in choppy markets
+        if is_choppy:
+            vol_adjustment *= 0.6
+        
+        current_size = BASE_SIZE * vol_adjustment
+        current_size = np.clip(current_size, 0.18, 0.35)
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRY: HTF bullish + trend + RSI ok + Donchian breakout
-        if htf_bullish and trending and rsi_ok_long and breakout_long:
-            new_signal = current_size
+        # LONG: 12h KAMA bullish + 1d bias bullish + RSI momentum + trending regime
+        # Require at least 1d bias, prefer 1w bias too
+        if kama_bullish and daily_bullish:
+            # RSI momentum zone (not extreme, just positive momentum)
+            if 42 <= rsi_14[i] <= 65:
+                # Prefer trending regime, but allow in neutral
+                if is_trending or (not is_choppy):
+                    # Extra confirmation: price above BB middle
+                    if close[i] > bb_middle[i]:
+                        new_signal = current_size
+            
+            # Breakout entry: price breaks above BB upper with momentum
+            if close[i] > bb_upper[i] and rsi_14[i] > 50 and rsi_14[i] < 75:
+                if is_trending:
+                    new_signal = current_size
         
-        # SHORT ENTRY: HTF bearish + trend + RSI ok + Donchian breakout
-        elif htf_bearish and trending and rsi_ok_short and breakout_short:
-            new_signal = -current_size
+        # SHORT: 12h KAMA bearish + 1d bias bearish + RSI momentum + trending regime
+        elif kama_bearish and daily_bearish:
+            # RSI momentum zone (not extreme, just negative momentum)
+            if 35 <= rsi_14[i] <= 58:
+                # Prefer trending regime, but allow in neutral
+                if is_trending or (not is_choppy):
+                    # Extra confirmation: price below BB middle
+                    if close[i] < bb_middle[i]:
+                        new_signal = -current_size
+            
+            # Breakdown entry: price breaks below BB lower with momentum
+            if close[i] < bb_lower[i] and rsi_14[i] < 50 and rsi_14[i] > 25:
+                if is_trending:
+                    new_signal = -current_size
         
         # === FREQUENCY SAFEGUARD ===
-        # If no trades for 72 bars (~36 days on 12h), allow weaker entry
-        if bars_since_last_trade > 72 and new_signal == 0.0 and not in_position:
-            if htf_bullish and rsi_14[i] < 55 and breakout_long:
-                new_signal = current_size * 0.8
-            elif htf_bearish and rsi_14[i] > 45 and breakout_short:
-                new_signal = -current_size * 0.8
+        # If no trades for 35 bars (~18 days on 12h), allow weaker entry
+        if bars_since_last_trade > 35 and new_signal == 0.0 and not in_position:
+            if kama_bullish and daily_bullish and rsi_14[i] > 45:
+                new_signal = current_size * 0.7
+            elif kama_bearish and daily_bearish and rsi_14[i] < 55:
+                new_signal = -current_size * 0.7
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         stoploss_triggered = False
         
         if in_position and position_side != 0:
             if position_side > 0:
                 if close[i] > highest_price:
                     highest_price = close[i]
-                stoploss_price = highest_price - 2.5 * atr_14[i]
+                stoploss_price = highest_price - 2.0 * atr_14[i]
                 if close[i] < stoploss_price:
                     stoploss_triggered = True
             
             if position_side < 0:
                 if lowest_price == 0.0 or close[i] < lowest_price:
                     lowest_price = close[i]
-                stoploss_price = lowest_price + 2.5 * atr_14[i]
+                stoploss_price = lowest_price + 2.0 * atr_14[i]
                 if close[i] > stoploss_price:
                     stoploss_triggered = True
         
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and htf_bearish:
+            if position_side > 0 and kama_bearish:
                 trend_reversal = True
-            if position_side < 0 and htf_bullish:
+            if position_side < 0 and kama_bullish:
                 trend_reversal = True
         
-        # === ADX WEAKNESS EXIT ===
-        adx_weak = False
+        # === DAILY BIAS REVERSAL EXIT ===
+        # Exit if 1d bias flips against position
+        bias_reversal = False
         if in_position and position_side != 0:
-            if adx_14[i] < 18:  # Trend losing strength
-                adx_weak = True
+            if position_side > 0 and daily_bearish:
+                bias_reversal = True
+            if position_side < 0 and daily_bullish:
+                bias_reversal = True
         
-        # Apply stoploss or reversals
-        if stoploss_triggered or trend_reversal or adx_weak:
+        # Apply stoploss or exits
+        if stoploss_triggered or trend_reversal or bias_reversal:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
