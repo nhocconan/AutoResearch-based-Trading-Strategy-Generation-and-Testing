@@ -1,39 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #330: 1d Trend-Following with 1w Meta-Trend and Regime Filter
+Experiment #331: 15m EMA Crossover with Dual HTF Bias and Volume Confirmation
 
-Hypothesis: After 283 failed strategies, the pattern is clear:
-1. Mean reversion fails catastrophically on crypto (Sharpe -3 to -15)
-2. Simple trend-following with HTF bias works best
-3. 1d timeframe needs wider stops and fewer but higher-quality trades
-4. Regime filter (Choppiness Index) prevents whipsaw in ranging markets
+Hypothesis: After #319 failed (Supertrend+RSI Sharpe=-3.653), the 15m timeframe needs
+a DIFFERENT approach. Analysis shows:
+1. 15m is too noisy for pure mean-reversion (CRSI failed at Sharpe=-3.901)
+2. Trend-following with HTF bias works better on faster timeframes
+3. Volume confirmation filters out false breakouts common on 15m
+4. Dual HTF (1h + 4h) provides stronger directional filter than single HTF
 
-This strategy combines:
-1. 1w HMA(21) for meta-trend direction (only trade WITH meta-trend)
-2. 1d EMA(8)/EMA(21) crossover for entry timing
-3. Choppiness Index(14) regime filter: CHOP<45 = trending, CHOP>55 = range
-4. ADX(14)>18 for trend strength confirmation
-5. ATR(14)*3 trailing stoploss (wider for daily volatility)
-6. Position sizing: 0.25 base, 0.35 with strong trend + regime confirm
+This strategy uses:
+1. 4h HMA(21) for PRIMARY trend bias (proven edge from best strategies)
+2. 1h HMA(21) for SECONDARY trend confirmation (reduces whipsaw)
+3. EMA(8)/EMA(21) crossover on 15m for entry timing
+4. Volume > SMA20(volume) for breakout confirmation (filters noise)
+5. ADX(14)>15 for minimal trend strength (looser than failed strategies)
+6. ATR(14) trailing stoploss at 2.0x (tighter for 15m timeframe)
 
-Why this should work on 1d:
-- Daily bars filter out intraday noise
-- 1w meta-trend prevents counter-trend trades in strong moves
-- CHOP filter avoids entering during choppy consolidation
-- Wider ATR stop (3x vs 2.5x) reduces premature exits on daily volatility
-- Discrete sizing minimizes fee churn on signal changes
+Key differences from failed #319:
+- Removed Supertrend (failed on 15m)
+- Removed RSI pullback (failed on 15m)
+- Added volume confirmation (critical for 15m noise filtering)
+- Dual HTF bias instead of single HTF (stronger filter)
+- Looser ADX threshold (15 vs 25) for more trades
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.35 discrete levels
-Stoploss: 3.0 * ATR(14) trailing
+Timeframe: 15m (REQUIRED for this experiment)
+HTF: 1h and 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.20-0.30 discrete levels
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_trend_1w_hma_chop_regime_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_ema_crossover_dual_htf_volume_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -93,63 +94,43 @@ def calculate_adx(high, low, close, period=14):
     
     return adx.values
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
-    CHOP > 61.8 = ranging market
-    CHOP < 38.2 = trending market
-    """
-    n = len(close)
-    chop = np.zeros(n)
-    
-    # Calculate ATR for each bar
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i-period+1:i+1])
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        range_val = highest_high - lowest_low
-        
-        if range_val > 0 and atr_sum > 0:
-            chop[i] = 100 * np.log10(atr_sum / range_val) / np.log10(period)
-        else:
-            chop[i] = 50  # neutral
-    
-    return chop
+def calculate_volume_sma(volume, period=20):
+    """Calculate SMA of volume for volume confirmation."""
+    vol_s = pd.Series(volume)
+    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_1h = calculate_hma(df_1h['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
     ema_fast = calculate_ema(close, 8)
     ema_slow = calculate_ema(close, 21)
     adx = calculate_adx(high, low, close, 14)
-    chop = calculate_choppiness(high, low, close, 14)
+    vol_sma = calculate_volume_sma(volume, 20)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.35
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -164,74 +145,69 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]):
+        if np.isnan(hma_1h_aligned[i]) or np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(chop[i]):
+        if np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]):
             signals[i] = 0.0
             continue
         
-        # === HIGHER TIMEFRAME META-TREND ===
-        # 1w HMA = meta-trend direction (REQUIRED - only trade WITH meta-trend)
-        bull_meta_trend = close[i] > hma_1w_aligned[i]
-        bear_meta_trend = close[i] < hma_1w_aligned[i]
+        if np.isnan(adx[i]) or np.isnan(vol_sma[i]):
+            signals[i] = 0.0
+            continue
         
-        # === REGIME FILTER (Choppiness Index) ===
-        # CHOP < 45 = trending market (allow entries)
-        # CHOP > 55 = ranging market (reduce size or skip)
-        # CHOP 45-55 = neutral
-        trending_regime = chop[i] < 45
-        ranging_regime = chop[i] > 55
+        # === HIGHER TIMEFRAME BIAS ===
+        # 4h HMA = PRIMARY directional bias (REQUIRED for entry)
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        
+        # 1h HMA = SECONDARY trend confirmation (REQUIRED for entry)
+        bull_trend_1h = close[i] > hma_1h_aligned[i]
+        bear_trend_1h = close[i] < hma_1h_aligned[i]
         
         # === TREND STRENGTH ===
-        # ADX > 18 = trending (moderate threshold for trade generation)
-        trending = adx[i] > 18
+        # ADX > 15 = minimal trending (loose for trade generation on 15m)
+        trending = adx[i] > 15
         strong_trend = adx[i] > 25
         
+        # === VOLUME CONFIRMATION ===
+        # Volume must be above 20-period SMA (filters false breakouts)
+        volume_confirmed = volume[i] > vol_sma[i]
+        
         # === EMA CROSSOVER ===
-        # Fast EMA crosses above slow EMA = bullish
+        # Fast EMA above slow EMA = bullish state
         ema_bullish = ema_fast[i] > ema_slow[i]
-        # Fast EMA crosses below slow EMA = bearish
+        # Fast EMA below slow EMA = bearish state
         ema_bearish = ema_fast[i] < ema_slow[i]
         
-        # Check for actual crossover (not just state)
-        ema_cross_bull = ema_bullish and (i > 0 and ema_fast[i-1] <= ema_slow[i-1])
-        ema_cross_bear = ema_bearish and (i > 0 and ema_fast[i-1] >= ema_slow[i-1])
-        
-        # Also allow entry if already in trend state (not just crossover)
-        ema_trend_bull = ema_bullish
-        ema_trend_bear = ema_bearish
-        
-        # === DETERMINE POSITION SIZE ===
-        # Base size with strong confirmation = SIZE_STRONG
-        # Base size without strong confirm = SIZE_BASE
-        # Ranging regime = reduce to SIZE_BASE or skip
-        if ranging_regime:
-            position_size = SIZE_BASE * 0.5  # reduce in choppy markets
-        elif strong_trend and trending_regime:
-            position_size = SIZE_STRONG
-        else:
-            position_size = SIZE_BASE
-        
-        # === ENTRY CONDITIONS ===
+        # === ENTRY CONDITIONS (LOOSE for >=10 trades per symbol) ===
         new_signal = 0.0
+        position_size = SIZE_BASE
         
-        # LONG: 1w meta-trend up + EMA bullish + ADX trending + not ranging
-        # Relaxed: allow entry in neutral regime too
+        # Boost size if strong trend + both HTF aligned
+        if strong_trend and bull_trend_4h and bull_trend_1h:
+            position_size = SIZE_STRONG
+        elif strong_trend and bear_trend_4h and bear_trend_1h:
+            position_size = SIZE_STRONG
+        
+        # LONG: 4h bias up + 1h bias up + EMA bullish + ADX trending + volume confirmed
+        # Both HTF must align (dual filter reduces whipsaw)
         long_conditions = (
-            bull_meta_trend and
-            ema_trend_bull and
+            bull_trend_4h and
+            bull_trend_1h and
+            ema_bullish and
             trending and
-            not ranging_regime
+            volume_confirmed
         )
         
-        # SHORT: 1w meta-trend down + EMA bearish + ADX trending + not ranging
+        # SHORT: 4h bias down + 1h bias down + EMA bearish + ADX trending + volume confirmed
         short_conditions = (
-            bear_meta_trend and
-            ema_trend_bear and
+            bear_trend_4h and
+            bear_trend_1h and
+            ema_bearish and
             trending and
-            not ranging_regime
+            volume_confirmed
         )
         
         # === GENERATE SIGNAL ===
@@ -241,36 +217,44 @@ def generate_signals(prices):
         if short_conditions:
             new_signal = -position_size
         
-        # === STOPLOSS LOGIC (Rule 6) - 3.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
+                # Update highest close for long positions
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 3.0 * atr[i]
+                stoploss_price = highest_close - 2.0 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
             if position_side < 0:
+                # Update lowest close for short positions
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 3.0 * atr[i]
+                stoploss_price = lowest_close + 2.0 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === META-TREND REVERSAL EXIT ===
-        # Exit if 1w HMA flips against position
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_meta_trend:
+        # === HTF TREND REVERSAL EXIT ===
+        # Exit long if 4h trend turns bearish
+        if in_position and position_side > 0 and new_signal != 0.0:
+            if bear_trend_4h:
                 new_signal = 0.0
-            if position_side < 0 and bull_meta_trend:
+        
+        # Exit short if 4h trend turns bullish
+        if in_position and position_side < 0 and new_signal != 0.0:
+            if bull_trend_4h:
                 new_signal = 0.0
         
         # === EMA REVERSAL EXIT ===
-        # Exit if EMA crossover flips against position
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and ema_bearish:
+        # Exit long if EMA turns bearish
+        if in_position and position_side > 0 and new_signal != 0.0:
+            if ema_bearish:
                 new_signal = 0.0
-            if position_side < 0 and ema_bullish:
+        
+        # Exit short if EMA turns bullish
+        if in_position and position_side < 0 and new_signal != 0.0:
+            if ema_bullish:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -282,6 +266,7 @@ def generate_signals(prices):
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
+                # Position flip
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
