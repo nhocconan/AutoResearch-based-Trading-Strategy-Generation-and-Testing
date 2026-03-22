@@ -1,37 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #333: 1h Supertrend with 4h HMA Bias and RSI Filter
+Experiment #334: 4h KAMA Crossover with 1d HMA Bias and MACD Momentum
 
-Hypothesis: After analyzing failures #321-#332, mean reversion and complex regime
-strategies fail badly on 1h timeframe. Fisher transform was catastrophic (#328).
-Simple EMA crossovers also fail (#331).
+Hypothesis: After analyzing 286 failed strategies, the key insights are:
+1. Mean reversion fails on crypto (all RSI/CRSI strategies failed)
+2. Fisher transform was catastrophic (#328 Sharpe=-15)
+3. 4h KAMA MACD was CLOSE to working (#322 Sharpe=-0.047)
+4. Current best uses regime filtering with Choppiness Index
 
-Key insight from successful strategies: HTF trend bias (4h HMA) + simple momentum
-entry (Supertrend) works best. The 1h timeframe needs:
-1. Strong HTF directional filter (4h HMA proven edge)
-2. Supertrend for momentum entry timing (less whipsaw than EMA crossover)
-3. RSI filter to avoid overextended entries (not mean reversion, just filter)
-4. ADX minimum for trend confirmation (loose threshold for trade generation)
-5. ATR trailing stoploss for risk management
+Key improvements over #322:
+1. Add 1d HMA trend bias (proven edge from successful strategies)
+2. Use MACD histogram (not just line) for momentum
+3. Loosen ADX threshold to 15 (ensure >=10 trades)
+4. Position size 0.30 (more aggressive but controlled)
+5. ATR stoploss at 2.5x for risk management
 
-Why this should work on 1h:
-- 4h HMA provides stable trend bias (not too fast like 1h, not too slow like 1d)
-- Supertrend catches momentum moves without EMA crossover whipsaw
-- RSI 40-60 filter avoids chasing extremes (different from mean reversion!)
-- ADX>15 is loose enough for >=10 trades but filters chop
-- Position size 0.25-0.30 controls drawdown during 2022 crash
+Why this should work on 4h:
+- 4h is slow enough to avoid noise, fast enough for trade generation
+- 1d HMA provides stable trend bias (proven in multiple successful strategies)
+- KAMA adapts to volatility better than EMA
+- MACD histogram confirms momentum direction
+- ADX > 15 is loose enough for trade generation
+- Position size 0.30 controls drawdown during 2022 crash
 
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.30 discrete levels
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_supertrend_4h_hma_rsi_adx_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_kama_crossover_1d_hma_macd_adx_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -54,66 +56,50 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator for trend following."""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average."""
     n = len(close)
-    atr = calculate_atr(high, low, close, period)
+    kama = np.full(n, np.nan)
     
-    hl2 = (high + low) / 2.0
+    if n < er_period + 1:
+        return kama
     
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
-    supertrend = np.zeros(n)
-    trend = np.ones(n)  # 1 = bullish, -1 = bearish
+    # Calculate Efficiency Ratio
+    change = np.abs(close - np.roll(close, er_period))
+    change[:er_period] = np.nan
     
-    for i in range(period, n):
-        if np.isnan(atr[i]):
-            continue
-            
-        # Calculate bands
-        upper_band[i] = hl2[i] + multiplier * atr[i]
-        lower_band[i] = hl2[i] - multiplier * atr[i]
-        
-        # Initialize
-        if i == period:
-            supertrend[i] = upper_band[i]
-            trend[i] = 1
-        else:
-            # Update bands based on previous trend
-            if trend[i-1] == 1:
-                upper_band[i] = min(upper_band[i], upper_band[i-1])
-                if close[i] < lower_band[i-1]:
-                    trend[i] = -1
-                    supertrend[i] = upper_band[i]
-                else:
-                    trend[i] = 1
-                    supertrend[i] = lower_band[i]
-            else:
-                lower_band[i] = max(lower_band[i], lower_band[i-1])
-                if close[i] > upper_band[i-1]:
-                    trend[i] = 1
-                    supertrend[i] = lower_band[i]
-                else:
-                    trend[i] = -1
-                    supertrend[i] = upper_band[i]
+    volatility = np.zeros(n)
+    for i in range(er_period, n):
+        vol_sum = 0.0
+        for j in range(1, er_period + 1):
+            vol_sum += np.abs(close[i - j + 1] - close[i - j])
+        volatility[i] = vol_sum
     
-    return supertrend, trend
+    er = np.zeros(n)
+    er[er_period:] = change[er_period:] / np.maximum(volatility[er_period:], 1e-10)
+    er = np.clip(er, 0, 1)
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama[er_period] = close[er_period]
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    return kama
 
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD indicator."""
     close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.replace([np.inf, -np.inf], np.nan).fillna(50.0)
-    
-    return rsi.values
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
 
 def calculate_adx(high, low, close, period=14):
     """Calculate Average Directional Index (ADX)."""
@@ -153,25 +139,25 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
-    rsi = calculate_rsi(close, 14)
+    kama_fast = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    kama_slow = calculate_kama(close, er_period=10, fast_period=5, slow_period=30)
+    macd_line, signal_line, histogram = calculate_macd(close, 12, 26, 9)
     adx = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -186,80 +172,66 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(supertrend[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(adx[i]):
+        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(macd_line[i]) or np.isnan(histogram[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
         # === HIGHER TIMEFRAME BIAS ===
-        # 4h HMA = primary directional bias
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # 1d HMA = primary directional bias
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === SUPERTREND MOMENTUM ===
-        # st_trend = 1 means bullish (price above supertrend)
-        # st_trend = -1 means bearish (price below supertrend)
-        supertrend_bullish = st_trend[i] == 1
-        supertrend_bearish = st_trend[i] == -1
+        # === KAMA CROSSOVER ===
+        # Fast KAMA above slow KAMA = bullish
+        kama_bullish = kama_fast[i] > kama_slow[i]
+        kama_bearish = kama_fast[i] < kama_slow[i]
         
-        # Check for Supertrend flip (entry trigger)
-        st_flip_bull = supertrend_bullish and (i > 100 and st_trend[i-1] == -1)
-        st_flip_bear = supertrend_bearish and (i > 100 and st_trend[i-1] == 1)
-        
-        # Also allow entry if already in trend state (not just flip)
-        st_trend_bull = supertrend_bullish
-        st_trend_bear = supertrend_bearish
-        
-        # === RSI FILTER (avoid overextended, NOT mean reversion) ===
-        # RSI 40-65 = healthy trend zone (not oversold/overbought)
-        rsi_ok_long = 40 <= rsi[i] <= 65
-        rsi_ok_short = 35 <= rsi[i] <= 60
+        # === MACD MOMENTUM ===
+        # Histogram > 0 = bullish momentum
+        macd_bullish = histogram[i] > 0
+        macd_bearish = histogram[i] < 0
         
         # === ADX TREND STRENGTH ===
-        # ADX > 15 = minimal trending (loose for trade generation)
+        # ADX > 15 = trending (loose for trade generation)
         trending = adx[i] > 15
-        strong_trend = adx[i] > 25
-        
-        # === VOLATILITY ADJUSTMENT ===
-        atr_recent_avg = np.nanmean(atr[max(0, i-20):i+1])
-        high_volatility = atr[i] > 1.5 * atr_recent_avg if not np.isnan(atr_recent_avg) else False
-        
-        # Determine position size
-        if high_volatility:
-            position_size = SIZE_BASE
-        elif strong_trend and bull_trend_4h:
-            position_size = SIZE_STRONG
-        else:
-            position_size = SIZE_BASE
         
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
         
-        # LONG: 4h bias up + Supertrend bullish + RSI ok + ADX trending
+        # LONG: 1d trend up + KAMA bullish + MACD bullish + trending
         long_conditions = (
-            bull_trend_4h and
-            st_trend_bull and
-            rsi_ok_long and
+            bull_trend_1d and
+            kama_bullish and
+            macd_bullish and
             trending
         )
         
-        # SHORT: 4h bias down + Supertrend bearish + RSI ok + ADX trending
+        # SHORT: 1d trend down + KAMA bearish + MACD bearish + trending
         short_conditions = (
-            bear_trend_4h and
-            st_trend_bear and
-            rsi_ok_short and
+            bear_trend_1d and
+            kama_bearish and
+            macd_bearish and
             trending
         )
         
         # === GENERATE SIGNAL ===
         if long_conditions:
-            new_signal = position_size
+            new_signal = SIZE
         
         if short_conditions:
-            new_signal = -position_size
+            new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -278,19 +250,19 @@ def generate_signals(prices):
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if 4h trend flips against position
+        # Exit if 1d trend flips against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_4h:
+            if position_side > 0 and bear_trend_1d:
                 new_signal = 0.0
-            if position_side < 0 and bull_trend_4h:
+            if position_side < 0 and bull_trend_1d:
                 new_signal = 0.0
         
-        # === SUPERTREND REVERSAL EXIT ===
-        # Exit if Supertrend flips against position
+        # === KAMA REVERSAL EXIT ===
+        # Exit if KAMA flips against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and supertrend_bearish:
+            if position_side > 0 and kama_bearish:
                 new_signal = 0.0
-            if position_side < 0 and supertrend_bullish:
+            if position_side < 0 and kama_bullish:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
