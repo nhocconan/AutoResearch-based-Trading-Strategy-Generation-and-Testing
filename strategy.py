@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #183: 1h Volatility Spike Mean Reversion + 4h HMA Trend Filter + BB Regime
+Experiment #184: 4h KAMA Trend + 1d HMA Filter + RSI Pullback + CHOP Regime + ATR Stop
 
-Hypothesis: 1h timeframe is ideal for volatility spike mean reversion. After panic
-sell-offs (vol spike), price tends to revert to mean within 12-48 hours. Combined
-with 4h HMA trend filter to avoid counter-trend trades, and Bollinger Band regime
-to identify oversold/overbought conditions. This should work better than pure
-trend-following on 1h which has failed repeatedly (Sharpe -1.375, -0.061).
+Hypothesis: 4h timeframe with KAMA (adaptive to volatility) captures trends better than 
+static EMAs. Key innovation: Choppiness Index (CHOP) regime filter to distinguish 
+trending vs ranging markets and apply different logic. 1d HMA provides stable HTF bias.
+RSI pullback entries (not breakouts) reduce whipsaws. Conservative sizing (0.25) 
+controls drawdown.
 
-Why 1h might work for vol spike reversion:
-- 1h captures panic moves faster than 4h/12h
-- Vol spike (ATR7/ATR30 > 2.0) signals exhaustion, not continuation
-- BB(20, 2.5) extremes = oversold/overbought on 1h
-- 4h HMA filter prevents fighting major trend
-- More trades than 4h/12h strategies (need >=10 trades per symbol)
+Why this might work on 4h:
+- KAMA adapts smoothing based on market efficiency (fast in trends, slow in ranges)
+- CHOP > 61.8 = range (use mean reversion), CHOP < 38.2 = trend (use trend following)
+- 1d HMA filter prevents counter-trend trades
+- RSI pullback (30-70) entries are more reliable than breakouts
+- ATR 2.5x stoploss protects against reversals
+- Discrete signal levels minimize fee churn
 
 Learning from failures:
-- #171 (1h KAMA): Sharpe=-1.375 - trend following whipsaws on 1h
-- #177 (1h KAMA+Donchian): Sharpe=-0.061 - breakout logic fails on 1h noise
-- #175 (15m pullback): Sharpe=-4.690 - too much noise on lower TF
-- Mean reversion CAN work on 1h IF filtered by vol spike + HTF trend
-- Need flexible entry conditions to ensure trade count
+- #178 (4h Donchian): Sharpe=-0.989 - breakouts whipsaw in 4h noise
+- #181 (15m CRSI): Sharpe=-5.141 - mean reversion alone fails
+- #183 (1h vol spike): Sharpe=-3.477 - vol filters too restrictive
+- Pure trend following fails in ranges, pure mean reversion fails in trends
+- Need REGIME-ADAPTIVE logic (CHOP index)
 
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h HMA via mtf_data helper (call ONCE before loop)
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
@@ -31,8 +32,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_vol_spike_4h_hma_bb_meanrev_v1"
-timeframe = "1h"
+name = "mtf_4h_kama_1d_hma_chop_regime_rsi_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -45,14 +46,73 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    return upper.values, lower.values, sma.values
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    n = len(close)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+    
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    tr_s = np.where(tr_s == 0, 1e-10, tr_s)
+    
+    plus_di = 100 * plus_dm_s / tr_s
+    minus_di = 100 * minus_dm_s / tr_s
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average."""
+    n = len(close)
+    kama = np.zeros(n)
+    
+    # Direction = abs(close - close[n-periods ago])
+    # Noise = sum of abs(close[i] - close[i-1])
+    
+    for i in range(er_period, n):
+        direction = np.abs(close[i] - close[i - er_period])
+        noise = np.sum(np.abs(np.diff(close[i-er_period:i+1])))
+        
+        if noise == 0:
+            er = 1.0
+        else:
+            er = direction / noise
+        
+        # Smoothing constant
+        fast_sc = 2.0 / (fast_period + 1)
+        slow_sc = 2.0 / (slow_period + 1)
+        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+        
+        if i == er_period:
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+    
+    # Fill initial values
+    kama[:er_period] = close[:er_period]
+    
+    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -79,19 +139,49 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
+def calculate_chop(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR(1), n) / (Highest High(n) - Lowest Low(n))) / LOG10(n)
+    
+    CHOP > 61.8 = choppy/ranging market (mean reversion favorable)
+    CHOP < 38.2 = trending market (trend following favorable)
+    """
+    n = len(close)
+    chop = np.zeros(n)
+    
+    # Calculate ATR(1) = True Range for each bar
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    for i in range(period, n):
+        # Sum of ATR(1) over period
+        atr_sum = np.sum(tr[i-period+1:i+1])
+        
+        # Highest High and Lowest Low over period
+        hh = np.max(high[i-period+1:i+1])
+        ll = np.min(low[i-period+1:i+1])
+        
+        range_hl = hh - ll
+        
+        if range_hl > 0:
+            chop[i] = 100 * np.log10(atr_sum / range_hl) / np.log10(period)
+        else:
+            chop[i] = 100  # Max choppy if no range
+    
+    # Fill initial values
+    chop[:period] = chop[period] if period < n else 50
+    
+    return chop
+
 def calculate_ema(close, period=21):
     """Calculate Exponential Moving Average."""
     close_s = pd.Series(close)
     ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     return ema.values
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score of price relative to rolling mean."""
-    close_s = pd.Series(close)
-    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - rolling_mean) / (rolling_std + 1e-10)
-    return zscore.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -100,123 +190,129 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
-    # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
-    atr_14 = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.5)
+    # Calculate 4h indicators
+    atr = calculate_atr(high, low, close, 14)
+    adx = calculate_adx(high, low, close, 14)
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     rsi = calculate_rsi(close, 14)
+    chop = calculate_chop(high, low, close, 14)
     ema_21 = calculate_ema(close, 21)
-    zscore = calculate_zscore(close, 20)
+    ema_50 = calculate_ema(close, 50)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.25
+    SIZE_HALF = 0.15
     
-    # Track position state for stoploss
+    # Track position state for stoploss and take profit
     in_position = False
     position_side = 0
+    entry_price = 0.0
     highest_close = 0.0
     lowest_close = 0.0
+    tp_hit = False
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] == 0:
+        if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(atr_7[i]) or np.isnan(atr_30[i]) or atr_30[i] == 0:
+        if np.isnan(adx[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(rsi[i]):
-            signals[i] = 0.0
-            continue
+        # === HIGHER TIMEFRAME TREND BIAS ===
+        # 1d HMA = higher timeframe trend direction
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === VOLATILITY SPIKE DETECTION ===
-        # ATR(7) / ATR(30) > 2.0 = volatility spike (panic/exhaustion)
-        vol_spike_ratio = atr_7[i] / (atr_30[i] + 1e-10)
-        vol_spike = vol_spike_ratio > 2.0
+        # === REGIME DETECTION (Choppiness Index) ===
+        # CHOP > 61.8 = ranging market (mean reversion favorable)
+        # CHOP < 38.2 = trending market (trend following favorable)
+        # 38.2 - 61.8 = transition zone (use trend following with caution)
+        is_choppy = chop[i] > 55  # Slightly lower threshold to catch more ranges
+        is_trending = chop[i] < 45  # Slightly higher threshold to catch more trends
         
-        # === 4H TREND BIAS ===
-        # Price > 4h HMA = bullish bias (only take longs or wait)
-        # Price < 4h HMA = bearish bias (only take shorts or wait)
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # === TREND STRENGTH FILTER ===
+        # ADX > 18 = sufficient trend strength (lower for 4h to ensure trades)
+        trend_strength = adx[i] > 18
         
-        # === BOLLINGER BAND EXTREMES ===
-        # Price at lower BB = oversold (long opportunity)
-        # Price at upper BB = overbought (short opportunity)
-        at_lower_bb = close[i] <= bb_lower[i]
-        at_upper_bb = close[i] >= bb_upper[i]
+        # === KAMA TREND DIRECTION ===
+        # Price above KAMA = bullish, below = bearish
+        kama_bullish = close[i] > kama[i]
+        kama_bearish = close[i] < kama[i]
         
-        # === RSI EXTREMES ===
-        # RSI < 30 = oversold
-        # RSI > 70 = overbought
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # === EMA STRUCTURE ===
+        ema_bullish = ema_21[i] > ema_50[i]
+        ema_bearish = ema_21[i] < ema_50[i]
         
-        # === Z-SCORE EXTREMES ===
-        # Z-score < -2 = significantly below mean
-        # Z-score > +2 = significantly above mean
-        zscore_low = zscore[i] < -2.0
-        zscore_high = zscore[i] > 2.0
+        # === RSI PULLBACK CONDITIONS ===
+        # In uptrend: RSI pulling back to 40-50 zone = buy opportunity
+        # In downtrend: RSI bouncing to 50-60 zone = sell opportunity
+        rsi_pullback_long = 35 < rsi[i] < 55
+        rsi_pullback_short = 45 < rsi[i] < 65
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
         
         new_signal = 0.0
         
-        # === ENTRY CONDITIONS ===
-        # Long: Vol spike OR (at lower BB + RSI oversold) + 4h trend bullish
-        # More flexible to ensure enough trades
-        long_conditions = 0
-        if vol_spike and at_lower_bb:
-            long_conditions += 2
-        elif vol_spike:
-            long_conditions += 1
-        elif at_lower_bb and rsi_oversold:
-            long_conditions += 1
-        elif at_lower_bb and zscore_low:
-            long_conditions += 1
+        # === REGIME-ADAPTIVE ENTRY LOGIC ===
         
-        if bull_trend_4h and long_conditions >= 1:
-            new_signal = SIZE_BASE
+        # --- TRENDING REGIME (CHOP < 45) ---
+        if is_trending:
+            # Long: 1d bullish + KAMA bullish + ADX strong + RSI not overbought
+            if bull_trend_1d and kama_bullish and trend_strength:
+                if rsi_pullback_long or (rsi_oversold and ema_bullish):
+                    new_signal = SIZE_BASE
+            
+            # Short: 1d bearish + KAMA bearish + ADX strong + RSI not oversold
+            if bear_trend_1d and kama_bearish and trend_strength:
+                if rsi_pullback_short or (rsi_overbought and ema_bearish):
+                    new_signal = -SIZE_BASE
         
-        # Short: Vol spike OR (at upper BB + RSI overbought) + 4h trend bearish
-        short_conditions = 0
-        if vol_spike and at_upper_bb:
-            short_conditions += 2
-        elif vol_spike:
-            short_conditions += 1
-        elif at_upper_bb and rsi_overbought:
-            short_conditions += 1
-        elif at_upper_bb and zscore_high:
-            short_conditions += 1
+        # --- CHOPPY/RANGING REGIME (CHOP > 55) ---
+        elif is_choppy:
+            # Mean reversion: buy oversold, sell overbought
+            # Only trade with 1d trend bias for safety
+            
+            if bull_trend_1d and rsi_oversold:
+                new_signal = SIZE_BASE
+            
+            if bear_trend_1d and rsi_overbought:
+                new_signal = -SIZE_BASE
         
-        if bear_trend_4h and short_conditions >= 1:
-            new_signal = -SIZE_BASE
+        # --- TRANSITION ZONE (45 <= CHOP <= 55) ---
+        else:
+            # Conservative: only trade strong signals with all confirmations
+            if bull_trend_1d and kama_bullish and ema_bullish and rsi_oversold:
+                new_signal = SIZE_BASE
+            
+            if bear_trend_1d and kama_bearish and ema_bearish and rsi_overbought:
+                new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Check stoploss on EXISTING position before considering new entry
-        if in_position:
+        if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
                 # Trailing stop: 2.5 * ATR below highest close
-                stoploss_price = highest_close - 2.5 * atr_14[i]
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
             
@@ -225,9 +321,24 @@ def generate_signals(prices):
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
                 # Trailing stop: 2.5 * ATR above lowest close
-                stoploss_price = lowest_close + 2.5 * atr_14[i]
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
+        
+        # === TAKE PROFIT LOGIC ===
+        # Reduce position to half at 2R profit, let rest run with trailing stop
+        if in_position and not tp_hit:
+            if position_side > 0:
+                profit = close[i] - entry_price
+                if profit >= 2.0 * atr[i]:
+                    new_signal = SIZE_HALF if new_signal > 0 else new_signal
+                    tp_hit = True
+            
+            if position_side < 0:
+                profit = entry_price - close[i]
+                if profit >= 2.0 * atr[i]:
+                    new_signal = -SIZE_HALF if new_signal < 0 else new_signal
+                    tp_hit = True
         
         # === UPDATE POSITION TRACKING FOR NEXT BAR ===
         if new_signal != 0.0:
@@ -238,13 +349,17 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
+                tp_hit = False
             elif np.sign(new_signal) != position_side:
                 # Reversing position
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
-            # else: maintaining same position direction
+                tp_hit = False
+            elif abs(new_signal) < abs(position_side * SIZE_BASE):
+                # Partial exit (take profit already hit)
+                tp_hit = True
         else:
             # Exiting position (signal-based or stoploss)
             if in_position:
@@ -253,6 +368,7 @@ def generate_signals(prices):
                 entry_price = 0.0
                 highest_close = 0.0
                 lowest_close = 0.0
+                tp_hit = False
         
         signals[i] = new_signal
     
