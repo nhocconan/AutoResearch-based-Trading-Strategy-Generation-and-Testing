@@ -1,51 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #374: 30m Regime-Adaptive Strategy with 4h HMA Trend Bias
+Experiment #375: 1h Keltner Squeeze Breakout with 4h HMA Trend + Volume Filter
 
-Hypothesis: After analyzing 373 failed experiments, the pattern is clear - static
-strategies fail because they don't adapt to market regime. For 30m timeframe:
+Hypothesis: After 374 failed experiments, the key insight is that successful strategies need:
+1. Higher timeframe trend filter (4h HMA proven in best strategies)
+2. Different channel type (Keltner vs Bollinger/Donchian - less tested)
+3. Volume confirmation (filters false breakouts)
+4. ADX regime filter (avoid chop)
+5. Proper stoploss (ATR trailing)
 
-1. CHOPPINESS INDEX (CHOP) regime detection:
-   - CHOP > 61.8 = ranging market → mean reversion at Bollinger bands
-   - CHOP < 38.2 = trending market → momentum pullback entries
-   - This meta-filter switches strategy logic based on market state
+Why 1h Keltner might work:
+- Keltner Channels (EMA + ATR bands) are less tested than Bollinger/Donchian
+- Volume confirmation adds edge (most failed strategies ignore volume)
+- 4h HMA provides stable trend bias (proven in mtf_4h_regime_chop best strategy)
+- 1h timeframe captures intraday moves without excessive noise
+- Should generate 30-60 trades/year (enough for stats, not too many for fees)
 
-2. 4h HMA(21) trend bias (via mtf_data helper):
-   - Long only when price > 4h HMA (bullish HTF trend)
-   - Short only when price < 4h HMA (bearish HTF trend)
-   - Filters 60%+ of counter-trend trades that fail
-
-3. Regime-specific entries:
-   - TREND regime (CHOP < 38.2): Enter on RSI(7) pullback to 35-45 (long) or 55-65 (short)
-   - RANGE regime (CHOP > 61.8): Enter at Bollinger band extremes (price < lower or > upper)
-   - ADX > 18 confirms trend strength for trend regime entries
-
-4. ATR(14) trailing stop (2.5x):
-   - Signal → 0 when price moves 2.5*ATR against position
-   - Protects capital on reversals
-
-5. Position sizing: 0.25 discrete (conservative for 30m volatility)
-   - Max 25% capital per position
-   - Discrete levels minimize fee churn
-
-Why 30m should work:
-- Faster than 4h/12h strategies (more trade opportunities)
-- Slower than 5m/15m (less noise, fewer false signals)
-- Regime-adaptive logic handles both bull/bear/range markets
-- 4h HMA provides stable trend bias (proven in successful strategies)
-- Should generate 30-60 trades/year per symbol (enough for stats)
-
-Timeframe: 30m (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels
+Timeframe: 1h (REQUIRED)
+HTF: 4h via mtf_data helper
+Position sizing: 0.30 discrete
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_regime_chop_4h_hma_adaptive_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_keltner_4h_hma_volume_adx_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -68,68 +49,14 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI using standard Wilder's method."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma
-
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market
-    CHOP < 38.2 = trending market
-    
-    Formula: CHOP = 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    """
-    n = len(close)
-    chop = np.full(n, np.nan)
-    
-    # Calculate ATR for each bar
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    for i in range(period, n):
-        atr_sum = tr[i-period+1:i+1].sum()
-        highest_high = high[i-period+1:i+1].max()
-        lowest_low = low[i-period+1:i+1].min()
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    return chop
-
 def calculate_adx(high, low, close, period=14):
-    """
-    Calculate ADX (Average Directional Index).
-    ADX > 25 = strong trend, ADX < 20 = ranging market
-    """
+    """Calculate ADX (Average Directional Index)."""
     n = len(close)
     adx = np.full(n, np.nan)
     
     if n < period * 2 + 10:
         return adx
     
-    # Calculate True Range and Directional Movement
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -148,12 +75,10 @@ def calculate_adx(high, low, close, period=14):
         if low_diff > high_diff and low_diff > 0:
             minus_dm[i] = low_diff
     
-    # Smooth TR, +DM, -DM using Wilder's method (EMA with span=period)
     tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    # Calculate DI+ and DI-
     di_plus = np.zeros(n)
     di_minus = np.zeros(n)
     
@@ -162,23 +87,44 @@ def calculate_adx(high, low, close, period=14):
             di_plus[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
             di_minus[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
     
-    # Calculate DX and ADX
     dx = np.zeros(n)
     for i in range(period, n):
         di_sum = di_plus[i] + di_minus[i]
         if di_sum > 1e-10:
             dx[i] = 100 * np.abs(di_plus[i] - di_minus[i]) / di_sum
     
-    # ADX = smoothed DX
     adx_series = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean()
     adx = adx_series.values
     
     return adx
 
+def calculate_keltner_channels(high, low, close, ema_period=20, atr_period=14, multiplier=2.0):
+    """
+    Calculate Keltner Channels.
+    Middle = EMA(close, 20)
+    Upper = Middle + multiplier * ATR(14)
+    Lower = Middle - multiplier * ATR(14)
+    """
+    close_s = pd.Series(close)
+    middle = close_s.ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
+    atr = calculate_atr(high, low, close, atr_period)
+    
+    upper = middle + multiplier * atr
+    lower = middle - multiplier * atr
+    
+    return upper, lower, middle
+
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average."""
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_ma
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -190,17 +136,16 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 7)  # Faster RSI for 30m
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
-    chop = calculate_choppiness_index(high, low, close, 14)
     adx = calculate_adx(high, low, close, 14)
+    keltner_upper, keltner_lower, keltner_middle = calculate_keltner_channels(high, low, close, 20, 14, 2.0)
+    volume_ma = calculate_volume_ma(volume, 20)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -219,15 +164,15 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop[i]) or np.isnan(adx[i]):
+        if np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]):
+        if np.isnan(volume_ma[i]) or volume_ma[i] == 0:
             signals[i] = 0.0
             continue
         
@@ -235,35 +180,30 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === REGIME DETECTION ===
-        # CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-        range_regime = chop[i] > 61.8
-        trend_regime = chop[i] < 38.2
+        # === ADX TREND STRENGTH ===
+        trending_market = adx[i] > 20
         
-        # === GENERATE SIGNAL BASED ON REGIME ===
+        # === VOLUME CONFIRMATION ===
+        # Volume must be above average for breakout confirmation
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        
+        # === KELTNER BREAKOUT SIGNALS ===
+        # Long breakout: price breaks above Keltner upper
+        long_breakout = close[i] > keltner_upper[i-1] if i > 0 else False
+        
+        # Short breakout: price breaks below Keltner lower
+        short_breakout = close[i] < keltner_lower[i-1] if i > 0 else False
+        
+        # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        if trend_regime:
-            # TREND REGIME: Pullback entries in direction of HTF trend
-            # Long: RSI pullback to 35-45 + 4h bullish + ADX confirms
-            if bull_trend_4h and adx[i] > 18:
-                if 35 <= rsi[i] <= 50:
-                    new_signal = SIZE
-            
-            # Short: RSI pullback to 50-65 + 4h bearish + ADX confirms
-            elif bear_trend_4h and adx[i] > 18:
-                if 50 <= rsi[i] <= 65:
-                    new_signal = -SIZE
+        # LONG ENTRY: Breakout + 4h bullish bias + ADX confirms + Volume confirms
+        if long_breakout and bull_trend_4h and trending_market and volume_confirmed:
+            new_signal = SIZE
         
-        elif range_regime:
-            # RANGE REGIME: Mean reversion at Bollinger band extremes
-            # Long: Price at lower band + 4h bullish bias
-            if bull_trend_4h and close[i] <= bb_lower[i]:
-                new_signal = SIZE
-            
-            # Short: Price at upper band + 4h bearish bias
-            elif bear_trend_4h and close[i] >= bb_upper[i]:
-                new_signal = -SIZE
+        # SHORT ENTRY: Breakout + 4h bearish bias + ADX confirms + Volume confirms
+        elif short_breakout and bear_trend_4h and trending_market and volume_confirmed:
+            new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -291,12 +231,9 @@ def generate_signals(prices):
             if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0
         
-        # === REGIME CHANGE EXIT ===
-        # Exit long if regime changes from range to trend (bearish)
-        # Exit short if regime changes from range to trend (bullish)
-        if in_position and position_side > 0 and chop[i] < 38.2 and bear_trend_4h:
-            new_signal = 0.0
-        if in_position and position_side < 0 and chop[i] < 38.2 and bull_trend_4h:
+        # === ADX DROPS BELOW THRESHOLD ===
+        # Exit if market becomes ranging (ADX < 18 with hysteresis)
+        if in_position and adx[i] < 18:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
