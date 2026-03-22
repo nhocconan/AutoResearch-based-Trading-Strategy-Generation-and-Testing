@@ -1,34 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #159: 1h EMA Crossover + 4h HMA Trend + Volume Confirmation + ATR Stop
+Experiment #160: 4h EMA Trend + 1d HMA Filter + Volume Confirmation
 
-Hypothesis: 1h timeframe provides a balance between noise (15m) and lag (4h).
-Simple EMA crossover generates adequate trades, while 4h HMA filters counter-trend
-entries. Volume confirmation reduces false breakouts. ATR stoploss protects capital.
+Hypothesis: 4h primary timeframe with 1d HMA trend filter provides stable
+bias while 4h EMA crossover gives timely entries. Volume confirmation
+(taker buy ratio) filters false breakouts. This combines proven elements
+from current best (mtf_4h_kama_1d_hma_adx_atr_v1 Sharpe=0.478) but with
+simpler EMA crossover instead of KAMA for more responsive entries.
 
-Why this might work where others failed:
-- #147, #152 (KAMA): Too complex, laggy adaptive MA hurt performance
-- #148, #153 (Donchian): Breakout strategies fail in choppy 2022-2024 markets
-- #149, #154, #155 (RSI mean rev): Mean reversion fails in strong trends
-- #151, #156, #157 (Regime adaptive): Over-engineered, too many filters = 0 trades
+Why 4h might work:
+- Slower than 15m/30m strategies that failed recently
+- Fewer trades = less fee drag (critical for profitability)
+- 1d HMA provides strong trend bias to avoid counter-trend trades
+- Volume filter reduces whipsaw entries at range boundaries
 
-This strategy uses PROVEN components:
-- 4h HMA trend bias (from baseline that achieved Sharpe=0.478)
-- Simple EMA crossover (generates trades, unlike complex filters)
-- Volume spike confirmation (filters false breakouts)
-- ATR trailing stop (mandatory risk management)
+Learning from failures:
+- #151-159: Complex regime filters (CHOP, Fisher) all failed badly
+- #154, #155: Mean reversion on 4h/12h lost money
+- #152: KAMA + RSI pullback crashed -97%
+- Simpler trend following with HTF filter = current best (Sharpe=0.478)
 
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.30 discrete levels
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25-0.35 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_ema_4h_hma_volume_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_ema_1d_hma_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -41,7 +43,7 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_ema(close, period=21):
+def calculate_ema(close, period):
     """Calculate Exponential Moving Average."""
     close_s = pd.Series(close)
     ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
@@ -57,39 +59,41 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_volume_ma(volume, period=20):
-    """Calculate volume moving average for volume spike detection."""
-    vol_s = pd.Series(volume)
-    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_ma
+def calculate_volume_ratio(taker_buy_volume, volume):
+    """Calculate taker buy volume ratio (0-1, >0.5 = bullish pressure)."""
+    ratio = np.zeros(len(volume))
+    mask = volume > 0
+    ratio[mask] = taker_buy_volume[mask] / volume[mask]
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
+    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
     ema_fast = calculate_ema(close, 8)
     ema_slow = calculate_ema(close, 21)
-    vol_ma = calculate_volume_ma(volume, 20)
+    vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_STRONG = 0.35
     
     # Track position state for stoploss
     in_position = False
@@ -104,7 +108,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -112,47 +116,32 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(vol_ma[i]) or vol_ma[i] == 0:
-            signals[i] = 0.0
-            continue
-        
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # 1d HMA = higher timeframe trend bias
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === EMA CROSSOVER SIGNAL ===
-        # Fast EMA crosses above slow EMA = bullish
-        # Fast EMA crosses below slow EMA = bearish
+        # === 4h EMA CROSSOVER ===
         ema_bull = ema_fast[i] > ema_slow[i]
         ema_bear = ema_fast[i] < ema_slow[i]
         
-        # Check for actual crossover (not just position)
-        ema_cross_bull = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
-        ema_cross_bear = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
-        
         # === VOLUME CONFIRMATION ===
-        # Volume must be above average to confirm breakout
-        vol_spike = volume[i] > 1.2 * vol_ma[i]
+        # Volume ratio > 0.55 = strong buying pressure
+        # Volume ratio < 0.45 = strong selling pressure
+        vol_bull = vol_ratio[i] > 0.52
+        vol_bear = vol_ratio[i] < 0.48
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS ===
-        # 4h bullish + EMA bullish + volume confirmation
-        # Allow entries on crossover OR sustained bullish alignment
-        if bull_trend_4h and ema_bull:
-            if ema_cross_bull and vol_spike:
-                new_signal = SIZE_STRONG  # Strong signal on crossover + volume
-            elif ema_bull:
-                new_signal = SIZE_BASE  # Maintain position on sustained trend
+        # 1d bullish + 4h EMA bullish + volume confirmation
+        if bull_trend_1d and ema_bull and vol_bull:
+            new_signal = SIZE_BASE
         
         # === SHORT ENTRY CONDITIONS ===
-        # 4h bearish + EMA bearish + volume confirmation
-        if bear_trend_4h and ema_bear:
-            if ema_cross_bear and vol_spike:
-                new_signal = -SIZE_STRONG  # Strong signal on crossover + volume
-            elif ema_bear:
-                new_signal = -SIZE_BASE  # Maintain position on sustained trend
+        # 1d bearish + 4h EMA bearish + volume confirmation
+        if bear_trend_1d and ema_bear and vol_bear:
+            new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Update trailing highs/lows for active positions
