@@ -1,48 +1,49 @@
 #!/usr/bin/env python3
 """
-Experiment #379: 15m Regime-Adaptive with 1h HMA Trend + RSI(7) Mean-Reversion + Supertrend
+Experiment #380: 30m Connors RSI + 4h HMA Trend + Choppiness Regime Filter
 
-Hypothesis: 15m timeframe needs faster signals than 4h strategies, but still requires
-HTF filter to avoid noise. Key insight from 378 failed experiments:
-
-1. REGIME DETECTION is essential - trending vs ranging requires different logic
-2. HTF trend bias (1h HMA) prevents counter-trend trades that get stopped out
-3. RSI(7) faster than RSI(14) for 15m - catches quicker reversals
-4. Supertrend for trending regime entries (breakout confirmation)
-5. Asymmetric thresholds: easier to enter with HTF trend, harder against it
+Hypothesis: After 379 experiments, the key insight is that 30m timeframe needs
+faster entry signals than 4h/1d strategies, but still requires HTF trend confirmation.
+Connors RSI (CRSI) has proven 75% win rate in academic studies for mean-reversion
+entries within a trend. Combined with 4h HMA trend bias and Choppiness regime filter,
+this should generate 50-100 trades/year with positive Sharpe on all symbols.
 
 STRATEGY COMPONENTS:
-1. 1h HMA(21): Trend bias from HTF (call get_htf_data ONCE before loop)
-2. Choppiness Index(14): Regime detection on 15m
-   - CHOP > 61.8 = ranging (use RSI mean-reversion)
-   - CHOP < 38.2 = trending (use Supertrend breakout)
-3. RSI(7): Fast mean-reversion for ranging market
-   - Long: RSI < 25 + price > 1h HMA
-   - Short: RSI > 75 + price < 1h HMA
-4. Supertrend(10, 3.0): Trend-following for trending market
-   - Long: Supertrend flips green + price > 1h HMA
-   - Short: Supertrend flips red + price < 1h HMA
-5. ATR(14) Trailing Stop: 2.0x ATR stoploss
-6. Position Sizing: 0.25 discrete (conservative for 15m volatility)
+1. CONNORS RSI (30m): (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+   - Long when CRSI < 15 (oversold pullback in uptrend)
+   - Short when CRSI > 85 (overbought rally in downtrend)
+   - Generates more trades than simple RSI(14) extremes
 
-Why this should work on 15m:
-- Faster RSI(7) catches 15m reversals that RSI(14) misses
-- 1h HMA provides stable trend filter without too much lag
-- Regime detection avoids Supertrend whipsaw in chop
-- Should generate 50-100 trades/year per symbol (enough for stats)
-- Works on BTC, ETH, SOL individually (not SOL-biased)
+2. 4h HMA(21) TREND BIAS (HTF via mtf_data):
+   - Only long when price > 4h HMA (bullish HTF trend)
+   - Only short when price < 4h HMA (bearish HTF trend)
+   - HMA has less lag than EMA for trend detection
 
-Timeframe: 15m (REQUIRED for this experiment)
-HTF: 1h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels
-Stoploss: 2.0 * ATR(14) trailing
+3. CHOPPINESS INDEX (14-period) REGIME FILTER:
+   - CHOP > 61.8 = ranging (widen CRSI bands to 10/90 for more mean-reversion)
+   - CHOP < 38.2 = trending (tighten CRSI bands to 20/80 for trend pullbacks)
+   - Avoids entries in neutral chop zone
+
+4. ATR TRAILING STOP (2.5x): Risk management
+   - Signal → 0 when price moves 2.5*ATR against position
+   - Protects from sudden reversals
+
+5. POSITION SIZING: 0.28 discrete levels
+   - Conservative for 30m volatility
+   - Discrete levels minimize fee churn
+
+Timeframe: 30m (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.28 discrete levels
+Stoploss: 2.5 * ATR(14) trailing
+Expected trades: 60-120/year per symbol (enough for statistical significance)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_regime_adaptive_1h_hma_rsi_supertrend_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_crsi_4h_hma_chop_regime_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -64,6 +65,81 @@ def calculate_hma(close, period=21):
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI using standard Wilder's method."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
+
+def calculate_rsi_streak(close, period=2):
+    """
+    Calculate RSI of streak length (Connors RSI component).
+    Streak = consecutive up or down days.
+    """
+    n = len(close)
+    streak_rsi = np.full(n, np.nan)
+    streaks = np.zeros(n)
+    
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streaks[i] = streaks[i-1] + 1 if streaks[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streaks[i] = streaks[i-1] - 1 if streaks[i-1] <= 0 else -1
+        else:
+            streaks[i] = 0
+    
+    # Calculate RSI on absolute streak values
+    abs_streaks = np.abs(streaks)
+    abs_streaks_s = pd.Series(abs_streaks)
+    
+    # Handle edge case where all streaks are 0
+    if abs_streaks_s.max() == 0:
+        return np.ones(n) * 50.0
+    
+    delta = abs_streaks_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    streak_rsi = 100 - (100 / (1 + rs))
+    
+    return streak_rsi.values
+
+def calculate_percent_rank(close, period=100):
+    """
+    Calculate Percent Rank (Connors RSI component).
+    Percentage of closes in last period days that were lower than current close.
+    """
+    n = len(close)
+    pr = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        window = close[i-period+1:i+1]
+        current = close[i]
+        count_lower = np.sum(window[:-1] < current)  # exclude current from comparison
+        pr[i] = 100 * count_lower / (period - 1)
+    
+    return pr
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, pr_period=100):
+    """
+    Calculate Connors RSI.
+    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    """
+    rsi_short = calculate_rsi(close, rsi_period)
+    rsi_streak = calculate_rsi_streak(close, streak_period)
+    percent_rank = calculate_percent_rank(close, pr_period)
+    
+    crsi = (rsi_short + rsi_streak + percent_rank) / 3.0
+    return crsi
 
 def calculate_choppiness_index(high, low, close, period=14):
     """
@@ -91,59 +167,6 @@ def calculate_choppiness_index(high, low, close, period=14):
     
     return chop
 
-def calculate_rsi(close, period=7):
-    """Calculate RSI with specified period."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-    Returns: supertrend_values, supertrend_direction (1=green/long, -1=red/short)
-    """
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    supertrend = np.full(n, np.nan)
-    direction = np.full(n, np.nan)
-    
-    # Calculate basic bands
-    hl2 = (high + low) / 2.0
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    for i in range(period, n):
-        if i == period:
-            supertrend[i] = upper_band[i]
-            direction[i] = 1  # Start with upper band (short signal)
-        else:
-            # Update bands based on previous direction
-            if direction[i-1] == 1:  # Previously upper band
-                upper_band[i] = min(upper_band[i], supertrend[i-1])
-                if close[i] > supertrend[i-1]:
-                    supertrend[i] = lower_band[i]
-                    direction[i] = -1  # Flip to lower band (long signal)
-                else:
-                    supertrend[i] = upper_band[i]
-                    direction[i] = 1
-            else:  # Previously lower band
-                lower_band[i] = max(lower_band[i], supertrend[i-1])
-                if close[i] < supertrend[i-1]:
-                    supertrend[i] = upper_band[i]
-                    direction[i] = 1  # Flip to upper band (short signal)
-                else:
-                    supertrend[i] = lower_band[i]
-                    direction[i] = -1
-    
-    return supertrend, direction
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -151,42 +174,38 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1h = calculate_hma(df_1h['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
     chop = calculate_choppiness_index(high, low, close, 14)
-    rsi = calculate_rsi(close, 7)  # Fast RSI for 15m
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, pr_period=100)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.25
+    SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
     position_side = 0
-    entry_price = 0.0
     highest_close = 0.0
     lowest_close = 0.0
+    entry_price = 0.0
     
-    # Track Supertrend direction for flip detection
-    prev_st_direction = 0
-    
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -194,11 +213,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(supertrend[i]) or np.isnan(st_direction[i]):
+        if np.isnan(crsi[i]):
             signals[i] = 0.0
             continue
         
@@ -206,42 +221,46 @@ def generate_signals(prices):
         ranging_market = chop[i] > 61.8
         trending_market = chop[i] < 38.2
         
-        # === 1h HMA TREND BIAS ===
-        bull_trend_1h = close[i] > hma_1h_aligned[i]
-        bear_trend_1h = close[i] < hma_1h_aligned[i]
+        # Adjust CRSI thresholds based on regime
+        if trending_market:
+            crsi_long_threshold = 20  # Less extreme for trend pullbacks
+            crsi_short_threshold = 80
+        elif ranging_market:
+            crsi_long_threshold = 10  # More extreme for mean-reversion
+            crsi_short_threshold = 90
+        else:
+            # Neutral zone - still allow trades but with middle thresholds
+            crsi_long_threshold = 15
+            crsi_short_threshold = 85
+        
+        # === 4h HMA TREND BIAS ===
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        
+        # === CRSI SIGNALS ===
+        crsi_oversold = crsi[i] < crsi_long_threshold
+        crsi_overbought = crsi[i] > crsi_short_threshold
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # RANGING REGIME: RSI Mean-Reversion
-        if ranging_market:
-            # Long: RSI oversold + with HTF trend (or neutral)
-            if rsi[i] < 25 and bull_trend_1h:
+        # LONG: CRSI oversold + 4h bullish trend (or ranging market)
+        if crsi_oversold:
+            if bull_trend_4h or ranging_market:
                 new_signal = SIZE
-            # Short: RSI overbought + with HTF trend (or neutral)
-            elif rsi[i] > 75 and bear_trend_1h:
+        
+        # SHORT: CRSI overbought + 4h bearish trend (or ranging market)
+        elif crsi_overbought:
+            if bear_trend_4h or ranging_market:
                 new_signal = -SIZE
         
-        # TRENDING REGIME: Supertrend Breakout
-        elif trending_market:
-            # Detect Supertrend flip
-            st_flip_long = prev_st_direction == 1 and st_direction[i] == -1
-            st_flip_short = prev_st_direction == -1 and st_direction[i] == 1
-            
-            # Long: Supertrend flips green + with HTF trend
-            if st_flip_long and bull_trend_1h:
-                new_signal = SIZE
-            # Short: Supertrend flips red + with HTF trend
-            elif st_flip_short and bear_trend_1h:
-                new_signal = -SIZE
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.0 * atr[i]
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -249,18 +268,23 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.0 * atr[i]
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit long if HTF trend turns bear
-        if in_position and position_side > 0 and bear_trend_1h:
-            new_signal = 0.0
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and bear_trend_4h and not ranging_market:
+                new_signal = 0.0
+            if position_side < 0 and bull_trend_4h and not ranging_market:
+                new_signal = 0.0
         
-        # Exit short if HTF trend turns bull
-        if in_position and position_side < 0 and bull_trend_1h:
-            new_signal = 0.0
+        # === CRSI REVERSAL EXIT ===
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and crsi[i] > 70:
+                new_signal = 0.0
+            if position_side < 0 and crsi[i] < 30:
+                new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
@@ -283,9 +307,6 @@ def generate_signals(prices):
                 entry_price = 0.0
                 highest_close = 0.0
                 lowest_close = 0.0
-        
-        # Update previous Supertrend direction for next iteration
-        prev_st_direction = st_direction[i] if not np.isnan(st_direction[i]) else prev_st_direction
         
         signals[i] = new_signal
     
