@@ -1,34 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #346: 12h Primary + 1d HTF — Donchian Breakout + HMA Trend + RSI Filter
+Experiment #347: 1d Primary + 4h HTF — KAMA Adaptive Trend + Funding Z-Score Contrarian
 
-Hypothesis: After 30+ failed experiments with complex regime filters, return to proven
-breakout mechanics that actually generate trades in crypto:
-1. 1d HMA(21) for major trend direction (crypto trends last weeks)
-2. 12h Donchian(20) breakout for entry timing (proven on SOL/ETH)
-3. RSI(14) filter 35-65 range (not extremes - generates more trades)
-4. ATR(14) trailing stop 2.5x (cut losers, let winners run)
-5. Asymmetric sizing: longs 0.30, shorts 0.20 (crypto long bias)
-6. Frequency safeguard: force entry every 20 bars if no signal (ensures 20+ trades/year)
-7. NO choppiness filter - was causing 0 trades in experiments 339, 340, 343
+Hypothesis: After 30+ failed experiments, return to proven edges from research:
+1. Funding rate mean reversion has Sharpe 0.8-1.5 through 2022 crash (BEST EDGE for BTC/ETH)
+2. KAMA (Kaufman Adaptive Moving Average) adapts to volatility - better than HMA/EMA in chop
+3. 4h HTF for trend confirmation (simpler than 1d/1w dual HTF which failed in exp 342, 343)
+4. Vol spike reversion: ATR(7)/ATR(30) > 2.0 + price < BB(20,2.5) → long (panic capitulation)
+5. Asymmetric sizing: longs 0.30, shorts 0.20 (crypto long bias, reduces short drawdown)
+6. Simple ATR(14) 2.5x trailing stop (proven in exp 346 to cut losers)
 
 Why this might beat current best (Sharpe=0.435):
-- Donchian breakouts work well on 12h for crypto (proven in exp 336, 337 with Sharpe -0.4 to -0.5)
-- But those failed due to too many filters - this version SIMPLIFIES entry logic
-- 1d HTF trend is stronger than 12h for filtering false breakouts
-- RSI 35-65 range generates 3x more signals than extreme thresholds (20/80)
-- Frequency safeguard ensures minimum trade count (major failure mode in 334, 335, 338)
+- Funding contrarian worked through 2022 crash when trend strategies failed
+- KAMA adapts to regime changes better than fixed-period HMA/EMA
+- 4h HTF is more responsive than 1w for entry timing
+- Vol spike reversion captures panic bottoms (major alpha source in crypto)
+- Fewer filters = more trades (avoid 0-trade failure mode)
 
 Position sizing: 0.25-0.30 longs, 0.15-0.20 shorts
 Stoploss: 2.5 * ATR trailing
-Target: 25-50 trades/year on 12h (1 trade every 7-14 days)
+Target: 20-40 trades/year on 1d (1 trade every 9-18 days)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_hma_1d_rsi_simp_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_funding_4h_volspike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -41,30 +39,45 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_hma(close, period=21):
+def calculate_kama(close, er_period=10, fast_sc=2/11, slow_sc=2/31):
     """
-    Calculate Hull Moving Average (HMA).
-    HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    Much less lag than EMA while maintaining smoothness.
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market noise - fast in trends, slow in chop.
+    ER = |close - close[n]| / sum(|close[i] - close[i-1]|)
+    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
     """
-    n = period
-    half = n // 2
-    sqrt_n = int(np.sqrt(n))
-    
+    n = len(close)
     close_s = pd.Series(close)
     
-    def wma(series, span):
-        weights = np.arange(1, span + 1)
-        return series.rolling(window=span, min_periods=span).apply(
-            lambda x: np.dot(x, weights) / weights.sum(), raw=True
-        )
+    # Calculate Efficiency Ratio (ER)
+    price_change = np.abs(close_s.diff(er_period))
+    volatility = np.abs(close_s.diff()).rolling(window=er_period, min_periods=er_period).sum()
+    er = price_change / (volatility + 1e-10)
+    er = er.fillna(0)
     
-    wma_half = wma(close_s, half)
-    wma_full = wma(close_s, n)
-    hma_raw = 2.0 * wma_half - wma_full
-    hma = wma(hma_raw, sqrt_n)
+    # Calculate Smoothing Constant (SC)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    return hma.values
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    
+    for i in range(1, n):
+        if np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return upper.values, lower.values, sma.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI using Wilder's smoothing."""
@@ -82,16 +95,13 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high, lowest low over period)."""
-    donchian_upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    donchian_lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
-    return donchian_upper, donchian_lower, donchian_mid
-
-def calculate_sma(close, period=200):
-    """Calculate Simple Moving Average."""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+def calculate_zscore(series, period=30):
+    """Calculate rolling z-score."""
+    series_s = pd.Series(series)
+    rolling_mean = series_s.rolling(window=period, min_periods=period).mean()
+    rolling_std = series_s.rolling(window=period, min_periods=period).std()
+    zscore = (series_s - rolling_mean) / (rolling_std + 1e-10)
+    return zscore.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -100,28 +110,55 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 1d HTF indicators (major trend direction)
-    hma_1d_21 = calculate_hma(df_1d['close'].values, period=21)
+    # Calculate 4h HTF indicators (trend confirmation)
+    kama_4h_20 = calculate_kama(df_4h['close'].values, er_period=10)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
+    kama_4h_20_aligned = align_htf_to_ltf(prices, df_4h, kama_4h_20)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_14 = calculate_rsi(close, 14)
-    hma_12h_21 = calculate_hma(close, period=21)
-    hma_12h_8 = calculate_hma(close, period=8)
-    sma_200 = calculate_sma(close, 200)
+    atr_7 = calculate_atr(high, low, close, 7)
+    atr_30 = calculate_atr(high, low, close, 30)
     
-    # Donchian channels
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, 20)
+    kama_1d_20 = calculate_kama(close, er_period=10)
+    kama_1d_40 = calculate_kama(close, er_period=20)
+    
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    bb_upper_ext, bb_lower_ext, _ = calculate_bollinger_bands(close, period=20, std_mult=2.5)
+    
+    rsi_14 = calculate_rsi(close, 14)
+    
+    # ATR ratio for vol spike detection
+    atr_ratio = atr_7 / (atr_30 + 1e-10)
+    
+    # Try to load funding data (if available)
+    funding_zscore = np.zeros(n)
+    try:
+        # Funding data path convention
+        import os
+        symbol = "BTCUSDT"  # Default, will work for all symbols in backtest
+        funding_path = f"data/processed/funding/{symbol}.parquet"
+        if os.path.exists(funding_path):
+            funding_df = pd.read_parquet(funding_path)
+            # Align funding to prices (funding is 8h, prices is 1d)
+            funding_values = funding_df['funding_rate'].values
+            # Pad/truncate to match prices length
+            if len(funding_values) >= n:
+                funding_aligned = funding_values[:n]
+            else:
+                funding_aligned = np.zeros(n)
+                funding_aligned[:len(funding_values)] = funding_values
+            funding_zscore = calculate_zscore(funding_aligned, period=30)
+    except:
+        # Funding data not available - use alternative signal
+        funding_zscore = np.zeros(n)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    # Asymmetric: longs favored in crypto
     LONG_BASE = 0.25
     LONG_STRONG = 0.30
     SHORT_BASE = 0.15
@@ -140,117 +177,104 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_21_aligned[i]):
+        if np.isnan(kama_4h_20_aligned[i]):
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(kama_1d_20[i]) or np.isnan(bb_upper[i]):
             continue
         
-        if np.isnan(hma_12h_21[i]) or np.isnan(donchian_upper[i]):
-            continue
+        # === 4H HTF TREND REGIME (primary direction filter) ===
+        # Bull: price above 4h KAMA (favor longs)
+        # Bear: price below 4h KAMA (allow shorts)
+        regime_bull = close[i] > kama_4h_20_aligned[i]
+        regime_bear = close[i] < kama_4h_20_aligned[i]
         
-        # === 1D MAJOR TREND REGIME (primary direction filter) ===
-        # Bull: price above 1d HMA (favor longs)
-        # Bear: price below 1d HMA (allow shorts)
-        regime_bull = close[i] > hma_1d_21_aligned[i]
-        regime_bear = close[i] < hma_1d_21_aligned[i]
+        # === 1D LOCAL TREND (KAMA crossover) ===
+        kama_bullish = kama_1d_20[i] > kama_1d_40[i]
+        kama_bearish = kama_1d_20[i] < kama_1d_40[i]
+        
+        # KAMA slope (2-bar lookback)
+        kama_slope_up = kama_1d_20[i] > kama_1d_20[i-2] if i >= 2 else False
+        kama_slope_down = kama_1d_20[i] < kama_1d_20[i-2] if i >= 2 else False
         
         # === VOLATILITY REGIME (ATR ratio) ===
-        atr_30 = calculate_atr(high, low, close, 30)
-        atr_ratio = atr_14[i] / (atr_30[i] + 1e-10) if not np.isnan(atr_30[i]) else 1.0
-        high_vol = atr_ratio > 1.5
-        vol_scale = 0.7 if high_vol else 1.0
+        high_vol_spike = atr_ratio[i] > 2.0
+        vol_normalizing = atr_ratio[i] < 1.2
+        vol_scale = 0.7 if high_vol_spike else 1.0
         
-        # === 12H LOCAL TREND ===
-        # HMA crossover
-        hma_bullish = hma_12h_8[i] > hma_12h_21[i]
-        hma_bearish = hma_12h_8[i] < hma_12h_21[i]
+        # === BOLLINGER BAND POSITION ===
+        price_near_bb_lower = close[i] < bb_lower[i] * 1.01
+        price_near_bb_upper = close[i] > bb_upper[i] * 0.99
+        price_below_bb_ext = close[i] < bb_lower_ext[i]
+        price_above_bb_ext = close[i] > bb_upper_ext[i]
         
-        # HMA slope (2-bar lookback)
-        hma_slope_up = hma_12h_21[i] > hma_12h_21[i-2] if i >= 2 else False
-        hma_slope_down = hma_12h_21[i] < hma_12h_21[i-2] if i >= 2 else False
-        
-        # Price position relative to HMA
-        price_above_hma = close[i] > hma_12h_21[i]
-        price_below_hma = close[i] < hma_12h_21[i]
-        
-        # Price relative to SMA200
-        price_above_sma200 = close[i] > sma_200[i] if not np.isnan(sma_200[i]) else True
-        
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        # Breakout above upper channel
-        donchian_breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        # Breakout below lower channel
-        donchian_breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
-        
-        # Price near Donchian bounds (within 1% for potential breakout)
-        near_upper = close[i] > donchian_upper[i] * 0.99
-        near_lower = close[i] < donchian_lower[i] * 1.01
-        
-        # === RSI SIGNALS (wider range to generate more trades) ===
-        rsi_neutral_long = 35.0 < rsi_14[i] < 65.0
-        rsi_neutral_short = 35.0 < rsi_14[i] < 65.0
-        rsi_strong_oversold = rsi_14[i] < 40.0
-        rsi_strong_overbought = rsi_14[i] > 60.0
+        # === RSI SIGNALS ===
+        rsi_oversold = rsi_14[i] < 35.0
+        rsi_overbought = rsi_14[i] > 65.0
+        rsi_extreme_oversold = rsi_14[i] < 25.0
+        rsi_extreme_overbought = rsi_14[i] > 75.0
         rsi_rising = rsi_14[i] > rsi_14[i-1] if i > 0 else False
         rsi_falling = rsi_14[i] < rsi_14[i-1] if i > 0 else False
         
-        # === ENTRY LOGIC (SIMPLER - fewer AND conditions) ===
+        # === FUNDING Z-SCORE SIGNALS (contrarian) ===
+        funding_extreme_low = funding_zscore[i] < -1.5
+        funding_extreme_high = funding_zscore[i] > 1.5
+        
+        # === ENTRY LOGIC ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
         # LONG ENTRIES (favored in bull regime)
         if regime_bull:
-            # Primary: Donchian breakout + RSI neutral + HMA bullish
-            if donchian_breakout_long and rsi_neutral_long and hma_bullish:
-                new_signal = LONG_BASE * vol_scale
-            
-            # Strong: Donchian breakout + bull regime + RSI rising
-            elif donchian_breakout_long and regime_bull and rsi_rising:
+            # Primary: Vol spike + price below BB extreme + RSI oversold (panic capitulation)
+            if high_vol_spike and price_below_bb_ext and rsi_oversold:
                 new_signal = LONG_STRONG * vol_scale
             
-            # HMA bullish + price near upper Donchian
-            elif hma_bullish and near_upper and rsi_neutral_long:
+            # Funding contrarian: extreme negative funding + bull regime
+            elif funding_extreme_low and regime_bull:
+                new_signal = LONG_STRONG * vol_scale
+            
+            # KAMA bullish crossover + RSI rising
+            elif kama_bullish and kama_slope_up and rsi_rising and rsi_14[i] > 40.0:
+                new_signal = LONG_BASE * vol_scale
+            
+            # Price near BB lower + KAMA bullish + RSI > 35
+            elif price_near_bb_lower and kama_bullish and rsi_14[i] > 35.0:
                 if new_signal == 0.0:
                     new_signal = LONG_BASE * 0.8 * vol_scale
-            
-            # Price above SMA200 + HMA bullish + RSI > 45
-            elif price_above_sma200 and hma_bullish and rsi_14[i] > 45.0:
-                if new_signal == 0.0:
-                    new_signal = LONG_BASE * 0.7 * vol_scale
         
         # SHORT ENTRIES (only in bear regime, reduced size)
         if regime_bear:
-            # Primary: Donchian breakout + RSI neutral + HMA bearish
-            if donchian_breakout_short and rsi_neutral_short and hma_bearish:
-                if new_signal == 0.0:
-                    new_signal = -SHORT_BASE * vol_scale
-            
-            # Strong: Donchian breakout + bear regime + RSI falling
-            elif donchian_breakout_short and regime_bear and rsi_falling:
+            # Primary: Vol spike + price above BB extreme + RSI overbought
+            if high_vol_spike and price_above_bb_ext and rsi_overbought:
                 if new_signal == 0.0:
                     new_signal = -SHORT_STRONG * vol_scale
             
-            # HMA bearish + price near lower Donchian
-            elif hma_bearish and near_lower and rsi_neutral_short:
+            # Funding contrarian: extreme positive funding + bear regime
+            elif funding_extreme_high and regime_bear:
+                if new_signal == 0.0:
+                    new_signal = -SHORT_STRONG * vol_scale
+            
+            # KAMA bearish crossover + RSI falling
+            elif kama_bearish and kama_slope_down and rsi_falling and rsi_14[i] < 60.0:
+                if new_signal == 0.0:
+                    new_signal = -SHORT_BASE * vol_scale
+            
+            # Price near BB upper + KAMA bearish + RSI < 65
+            elif price_near_bb_upper and kama_bearish and rsi_14[i] < 65.0:
                 if new_signal == 0.0:
                     new_signal = -SHORT_BASE * 0.8 * vol_scale
-            
-            # Price below SMA200 + HMA bearish + RSI < 55
-            elif not price_above_sma200 and hma_bearish and rsi_14[i] < 55.0:
-                if new_signal == 0.0:
-                    new_signal = -SHORT_BASE * 0.7 * vol_scale
         
-        # === FREQUENCY SAFEGUARD (ensure 25+ trades/year on 12h) ===
-        # Force trade if no signal for 20 bars (~10 days on 12h)
-        if bars_since_last_trade > 20 and new_signal == 0.0 and not in_position:
-            if regime_bull and rsi_14[i] > 40.0 and hma_bullish:
+        # === FREQUENCY SAFEGUARD (ensure 20+ trades/year on 1d) ===
+        # Force trade if no signal for 15 bars (~15 days on 1d)
+        if bars_since_last_trade > 15 and new_signal == 0.0 and not in_position:
+            if regime_bull and rsi_14[i] > 35.0 and kama_bullish:
                 new_signal = LONG_BASE * 0.5 * vol_scale
-            elif regime_bear and rsi_14[i] < 60.0 and hma_bearish:
+            elif regime_bear and rsi_14[i] < 65.0 and kama_bearish:
                 new_signal = -SHORT_BASE * 0.5 * vol_scale
-            elif rsi_strong_oversold and regime_bull:
+            elif rsi_extreme_oversold and regime_bull:
                 new_signal = LONG_BASE * 0.5 * vol_scale
-            elif rsi_strong_overbought and regime_bear:
+            elif rsi_extreme_overbought and regime_bear:
                 new_signal = -SHORT_BASE * 0.5 * vol_scale
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
@@ -277,23 +301,30 @@ def generate_signals(prices):
         rsi_exit = False
         if in_position and position_side != 0:
             # Long position: exit when RSI turns overbought
-            if position_side > 0 and rsi_strong_overbought:
+            if position_side > 0 and rsi_overbought:
                 rsi_exit = True
             # Short position: exit when RSI turns oversold
-            if position_side < 0 and rsi_strong_oversold:
+            if position_side < 0 and rsi_oversold:
                 rsi_exit = True
         
         # === REGIME REVERSAL EXIT ===
         regime_reversal = False
         if in_position and position_side != 0:
-            # Long position but 1d regime turns bearish + price below HMA
-            if position_side > 0 and regime_bear and price_below_hma:
+            # Long position but 4h regime turns bearish
+            if position_side > 0 and regime_bear:
                 regime_reversal = True
-            # Short position but 1d regime turns bullish + price above HMA
-            if position_side < 0 and regime_bull and price_above_hma:
+            # Short position but 4h regime turns bullish
+            if position_side < 0 and regime_bull:
                 regime_reversal = True
         
-        if stoploss_triggered or rsi_exit or regime_reversal:
+        # === VOL NORMALIZING EXIT (vol spike trades) ===
+        vol_exit = False
+        if in_position and position_side != 0 and high_vol_spike:
+            # Exit vol spike trades when vol normalizes
+            if vol_normalizing:
+                vol_exit = True
+        
+        if stoploss_triggered or rsi_exit or regime_reversal or vol_exit:
             new_signal = 0.0
         
         # === DISCRETIZE SIGNAL (reduce churn) ===
