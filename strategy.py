@@ -1,33 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #125: 12h KAMA Adaptive Trend + 1d HMA Filter + ADX Regime + ATR Stop
+Experiment #126: 1d KAMA + Supertrend + 1w HMA Filter + Funding Rate Contrarian + ATR Stop
 
-Hypothesis: Building on the BEST performing strategy (mtf_4h_kama_1d_hma_adx_atr_v1 
-with Sharpe=0.478), adapting it for 12h timeframe with enhancements:
-- KAMA(21) adapts to volatility better than EMA (critical for 2022 crash)
-- 1d HMA(21) provides stable HTF trend bias (proven in winning strategy)
-- ADX(14) > 20 filters choppy markets (addresses whipsaw losses)
-- Bollinger Band Width percentile detects regime (range vs trend)
-- ATR(14) trailing stop at 2.5*ATR protects capital
-- 12h naturally reduces noise vs 4h, fewer but higher quality trades
+Hypothesis: Daily timeframe provides cleaner signals with less noise than lower TFs.
+Combining multiple proven edges:
+- KAMA(21) adapts to volatility (proven in best strategy #118 Sharpe=0.478)
+- Supertrend(10,3) for clear trend direction
+- 1w HMA(21) for major trend bias (HTF filter)
+- Funding rate z-score for contrarian edge (BTC/ETH specific edge from research)
+- ATR(14) trailing stop at 2.0*ATR for risk management
 
-Why this might beat the 4h version:
-- Slower timeframe = fewer false breakouts in 2022 crash
-- BB Width regime filter avoids mean-reversion losses in trends
-- KAMA's adaptive nature handles BTC's varying volatility regimes
-- Position sizing 0.20-0.35 discrete levels limits drawdown
+Why 1d might work better:
+- Fewer false signals in 2022 crash vs lower TFs
+- Funding rate mean reversion works best on daily+ timeframes
+- Natural fit for swing trading (hold positions days/weeks)
+- Less fee drag from fewer trades
 
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20-0.35 discrete levels
-Stoploss: 2.5 * ATR(14) trailing
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25-0.35 discrete levels
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_1d_hma_adx_bb_regime_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_supertrend_1w_hma_funding_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -41,11 +40,7 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_kama(close, period=21, fast=2, slow=30):
-    """
-    Kaufman Adaptive Moving Average (KAMA).
-    Adapts smoothing based on market efficiency ratio.
-    More responsive in trends, smoother in chop.
-    """
+    """Kaufman Adaptive Moving Average."""
     n = len(close)
     kama = np.zeros(n)
     kama[:] = np.nan
@@ -53,7 +48,6 @@ def calculate_kama(close, period=21, fast=2, slow=30):
     if n < period + slow:
         return kama
     
-    # Efficiency Ratio (ER)
     er = np.zeros(n)
     er[:] = np.nan
     
@@ -65,10 +59,8 @@ def calculate_kama(close, period=21, fast=2, slow=30):
         else:
             er[i] = 0
     
-    # Smoothing Constant
     sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
     
-    # KAMA calculation
     kama[period] = close[period]
     for i in range(period + 1, n):
         if not np.isnan(sc[i]):
@@ -79,7 +71,7 @@ def calculate_kama(close, period=21, fast=2, slow=30):
     return kama
 
 def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend with less lag."""
+    """Hull Moving Average."""
     close_s = pd.Series(close)
     half = max(1, period // 2)
     sqrt_period = max(1, int(np.sqrt(period)))
@@ -88,68 +80,71 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX for trend strength."""
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator."""
     n = len(close)
-    adx = np.zeros(n)
-    adx[:] = np.nan
+    supertrend = np.zeros(n)
+    supertrend[:] = np.nan
+    direction = np.zeros(n)  # 1 = bullish, -1 = bearish
     
-    if n < period * 2:
-        return adx
+    atr = calculate_atr(high, low, close, period)
     
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
+    if n < period:
+        return supertrend, direction
     
-    for i in range(1, n):
-        plus_dm[i] = max(0, high[i] - high[i-1]) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
-        minus_dm[i] = max(0, low[i-1] - low[i]) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    hl2 = (high + low) / 2
     
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
     
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    dx = np.zeros(n)
+    supertrend[period] = upper_band[period]
+    direction[period] = 1
     
-    mask = tr_s > 0
-    plus_di[mask] = 100 * plus_dm_s[mask] / tr_s[mask]
-    minus_di[mask] = 100 * minus_dm_s[mask] / tr_s[mask]
+    for i in range(period + 1, n):
+        if np.isnan(atr[i]) or atr[i] == 0:
+            supertrend[i] = supertrend[i-1]
+            direction[i] = direction[i-1]
+            continue
+        
+        # Update bands
+        if upper_band[i] < supertrend[i-1] or close[i-1] > supertrend[i-1]:
+            supertrend[i] = upper_band[i]
+        else:
+            supertrend[i] = supertrend[i-1]
+        
+        if lower_band[i] > supertrend[i-1] or close[i-1] < supertrend[i-1]:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = supertrend[i-1]
+        
+        # Determine direction
+        if close[i] > supertrend[i]:
+            direction[i] = 1
+        else:
+            direction[i] = -1
     
-    di_sum = plus_di + minus_di
-    mask2 = di_sum > 0
-    dx[mask2] = 100 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
-    
-    adx_series = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean()
-    adx = adx_series.values
-    
-    return adx
+    return supertrend, direction
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands and Band Width."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    bw = (upper - lower) / sma * 100  # Band Width as percentage
-    return upper, lower, bw
-
-def calculate_bb_percentile(bw, lookback=100):
-    """Calculate BB Width percentile over lookback period."""
-    n = len(bw)
-    percentile = np.zeros(n)
-    percentile[:] = np.nan
+def calculate_funding_zscore(funding_data, lookback=30):
+    """Calculate z-score of funding rate for contrarian signal."""
+    if funding_data is None or len(funding_data) < lookback:
+        return None
+    
+    funding = funding_data['funding_rate'].values if 'funding_rate' in funding_data.columns else funding_data.values
+    n = len(funding)
+    zscore = np.zeros(n)
+    zscore[:] = np.nan
     
     for i in range(lookback, n):
-        window = bw[i-lookback:i]
+        window = funding[i-lookback:i]
         valid = window[~np.isnan(window)]
         if len(valid) > 0:
-            percentile[i] = np.sum(valid <= bw[i]) / len(valid) * 100
+            mean = np.mean(valid)
+            std = np.std(valid)
+            if std > 0:
+                zscore[i] = (funding[i] - mean) / std
     
-    return percentile
+    return zscore
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -158,20 +153,40 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
-    # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Align HTF to LTF (Rule 2 - auto shift(1))
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Try to load funding data for contrarian edge
+    funding_zscore = None
+    try:
+        import os
+        symbol = prices.get('symbol', 'BTCUSDT')
+        if isinstance(symbol, (list, np.ndarray)):
+            symbol = symbol[0] if len(symbol) > 0 else 'BTCUSDT'
+        funding_path = f"data/processed/funding/{symbol}.parquet"
+        if os.path.exists(funding_path):
+            funding_df = pd.read_parquet(funding_path)
+            if len(funding_df) > 0:
+                # Align funding to prices timeframe
+                funding_zscore_raw = calculate_funding_zscore(funding_df, 30)
+                if funding_zscore_raw is not None:
+                    # Simple alignment - take last available funding values
+                    min_len = min(n, len(funding_zscore_raw))
+                    funding_zscore = np.zeros(n)
+                    funding_zscore[:] = np.nan
+                    funding_zscore[-min_len:] = funding_zscore_raw[-min_len:]
+    except Exception:
+        funding_zscore = None
+    
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     kama = calculate_kama(close, 21)
-    adx = calculate_adx(high, low, close, 14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2.0)
-    bb_percentile = calculate_bb_percentile(bb_width, 100)
+    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
     
     signals = np.zeros(n)
     
@@ -186,93 +201,95 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama[i]) or np.isnan(adx[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(bb_percentile[i]):
+        if np.isnan(kama[i]) or np.isnan(supertrend[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 1d HMA = higher timeframe trend bias
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
         
         # === KAMA ADAPTIVE TREND ===
-        # Price above KAMA = bullish momentum
         bull_kama = close[i] > kama[i]
         bear_kama = close[i] < kama[i]
         
-        # KAMA slope (momentum)
-        kama_slope = kama[i] - kama[i-5] if i >= 5 else 0
-        kama_bull_slope = kama_slope > 0
-        kama_bear_slope = kama_slope < 0
+        # === SUPERTREND DIRECTION ===
+        st_bull = st_direction[i] == 1
+        st_bear = st_direction[i] == -1
         
-        # === ADX TREND STRENGTH ===
-        adx_strong = adx[i] > 20  # Trending market
-        adx_weak = adx[i] < 20    # Ranging market
+        # === FUNDING RATE CONTRARIAN ===
+        funding_long_signal = False
+        funding_short_signal = False
         
-        # === BOLLINGER BAND REGIME ===
-        # BB Width percentile < 30 = squeeze (expect breakout)
-        # BB Width percentile > 70 = expansion (trend likely ending)
-        bb_squeeze = bb_percentile[i] < 30
-        bb_expansion = bb_percentile[i] > 70
+        if funding_zscore is not None and not np.isnan(funding_zscore[i]):
+            # Extreme negative funding = crowd too short = long opportunity
+            if funding_zscore[i] < -1.5:
+                funding_long_signal = True
+            # Extreme positive funding = crowd too long = short opportunity
+            elif funding_zscore[i] > 1.5:
+                funding_short_signal = True
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS ===
-        # Strong: 1d bullish + KAMA bullish + KAMA slope up + ADX strong + BB squeeze
-        if bull_trend_1d and bull_kama and kama_bull_slope and adx_strong and bb_squeeze:
+        # Strong: 1w bullish + KAMA bullish + Supertrend bullish
+        if bull_trend_1w and bull_kama and st_bull:
             new_signal = SIZE_STRONG
-        # Moderate: 1d bullish + KAMA bullish + ADX strong
-        elif bull_trend_1d and bull_kama and adx_strong:
+            # Boost if funding contrarian confirms
+            if funding_long_signal:
+                new_signal = SIZE_STRONG
+        # Moderate: 1w bullish + (KAMA bullish OR Supertrend bullish)
+        elif bull_trend_1w and (bull_kama or st_bull):
             new_signal = SIZE_BASE
-        # Weak (ensure trades): 1d bullish + KAMA bullish
-        elif bull_trend_1d and bull_kama:
+        # Weak (ensure trades): KAMA bullish + Supertrend bullish
+        elif bull_kama and st_bull:
+            new_signal = SIZE_BASE
+        # Funding contrarian alone (ensure trades in range markets)
+        elif funding_long_signal and bull_trend_1w:
             new_signal = SIZE_BASE
         
         # === SHORT ENTRY CONDITIONS ===
-        # Strong: 1d bearish + KAMA bearish + KAMA slope down + ADX strong + BB squeeze
-        if bear_trend_1d and bear_kama and kama_bear_slope and adx_strong and bb_squeeze:
+        # Strong: 1w bearish + KAMA bearish + Supertrend bearish
+        if bear_trend_1w and bear_kama and st_bear:
             new_signal = -SIZE_STRONG
-        # Moderate: 1d bearish + KAMA bearish + ADX strong
-        elif bear_trend_1d and bear_kama and adx_strong:
+            if funding_short_signal:
+                new_signal = -SIZE_STRONG
+        # Moderate: 1w bearish + (KAMA bearish OR Supertrend bearish)
+        elif bear_trend_1w and (bear_kama or st_bear):
             new_signal = -SIZE_BASE
-        # Weak (ensure trades): 1d bearish + KAMA bearish
-        elif bear_trend_1d and bear_kama:
+        # Weak (ensure trades): KAMA bearish + Supertrend bearish
+        elif bear_kama and st_bear:
+            new_signal = -SIZE_BASE
+        # Funding contrarian alone
+        elif funding_short_signal and bear_trend_1w:
             new_signal = -SIZE_BASE
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
-        # Update trailing highs/lows for active positions
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
-            # Trailing stop: 2.5 * ATR below highest close
-            stoploss_price = highest_close - 2.5 * atr[i]
+            stoploss_price = highest_close - 2.0 * atr[i]
             if close[i] < stoploss_price:
-                new_signal = 0.0  # Stoploss hit
+                new_signal = 0.0
         
         if in_position and position_side < 0:
             if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
-            # Trailing stop: 2.5 * ATR above lowest close
-            stoploss_price = lowest_close + 2.5 * atr[i]
+            stoploss_price = lowest_close + 2.0 * atr[i]
             if close[i] > stoploss_price:
-                new_signal = 0.0  # Stoploss hit
+                new_signal = 0.0
         
         # Update position tracking
-        # Entering new position
         if new_signal != 0.0 and not in_position:
             in_position = True
             position_side = np.sign(new_signal)
@@ -280,14 +297,12 @@ def generate_signals(prices):
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
-        # Reversing position
         elif new_signal != 0.0 and in_position and np.sign(new_signal) != position_side:
             position_side = np.sign(new_signal)
             entry_price = close[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
-        # Exiting position
         elif new_signal == 0.0 and in_position:
             in_position = False
             position_side = 0
