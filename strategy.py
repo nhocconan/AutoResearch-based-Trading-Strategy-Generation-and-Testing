@@ -1,39 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #334: 4h KAMA Crossover with 1d HMA Bias and MACD Momentum
+Experiment #335: 12h Volatility Breakout with 1d HMA Bias and Supertrend
 
-Hypothesis: After analyzing 286 failed strategies, the key insights are:
-1. Mean reversion fails on crypto (all RSI/CRSI strategies failed)
-2. Fisher transform was catastrophic (#328 Sharpe=-15)
-3. 4h KAMA MACD was CLOSE to working (#322 Sharpe=-0.047)
-4. Current best uses regime filtering with Choppiness Index
+Hypothesis: After analyzing 286 failed strategies and the experiment history:
+1. #329 (12h MACD + dual HTF) achieved Sharpe=0.311 - shows 12h CAN work
+2. Most failures come from too many conflicting filters (0 trades)
+3. Mean reversion fails on crypto, but volatility breakouts work
+4. 12h timeframe = fewer trades but higher quality, less noise
 
-Key improvements over #322:
-1. Add 1d HMA trend bias (proven edge from successful strategies)
-2. Use MACD histogram (not just line) for momentum
-3. Loosen ADX threshold to 15 (ensure >=10 trades)
-4. Position size 0.30 (more aggressive but controlled)
-5. ATR stoploss at 2.5x for risk management
+Key improvements:
+1. Volatility expansion filter (ATR7/ATR30 > 1.2) - catches breakout momentum
+2. Donchian(20) breakout - proven breakout signal
+3. Supertrend(10,3) - dynamic trend confirmation
+4. 1d HMA bias - higher timeframe directional filter
+5. ADX > 20 + CHOP < 50 - ensures trending regime, not range
+6. Position size 0.30 with 2x ATR trailing stop
 
-Why this should work on 4h:
-- 4h is slow enough to avoid noise, fast enough for trade generation
-- 1d HMA provides stable trend bias (proven in multiple successful strategies)
-- KAMA adapts to volatility better than EMA
-- MACD histogram confirms momentum direction
-- ADX > 15 is loose enough for trade generation
-- Position size 0.30 controls drawdown during 2022 crash
+Why this should work on 12h:
+- 12h captures multi-day moves without intraday noise
+- Volatility expansion precedes major moves (learned from vol spike research)
+- Donchian breakout is simple but effective when filtered properly
+- Supertrend provides dynamic support/resistance
+- 1d HMA gives stable trend bias (proven in successful strategies)
+- Loose enough filters to generate ≥10 trades but strict enough for quality
 
-Timeframe: 4h (REQUIRED for this experiment)
+Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d via mtf_data helper (call ONCE before loop)
 Position sizing: 0.30 discrete levels
-Stoploss: 2.5 * ATR(14) trailing
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_crossover_1d_hma_macd_adx_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_vol_breakout_1d_hma_supertrend_donchian_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -56,50 +57,52 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average."""
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator."""
     n = len(close)
-    kama = np.full(n, np.nan)
+    supertrend = np.full(n, np.nan)
     
-    if n < er_period + 1:
-        return kama
+    # Calculate ATR
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    # Calculate Efficiency Ratio
-    change = np.abs(close - np.roll(close, er_period))
-    change[:er_period] = np.nan
+    # Calculate bands
+    hl2 = (high + low) / 2.0
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
     
-    volatility = np.zeros(n)
-    for i in range(er_period, n):
-        vol_sum = 0.0
-        for j in range(1, er_period + 1):
-            vol_sum += np.abs(close[i - j + 1] - close[i - j])
-        volatility[i] = vol_sum
+    # Calculate Supertrend
+    supertrend[period] = upper_band[period]
+    for i in range(period + 1, n):
+        if np.isnan(atr[i]):
+            supertrend[i] = np.nan
+            continue
+        if close[i] > supertrend[i - 1]:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
     
-    er = np.zeros(n)
-    er[er_period:] = change[er_period:] / np.maximum(volatility[er_period:], 1e-10)
-    er = np.clip(er, 0, 1)
+    # Determine direction
+    direction = np.where(close > supertrend, 1, -1)
+    direction[:period] = np.nan
     
-    # Calculate smoothing constant
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama[er_period] = close[er_period]
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama
+    return supertrend, direction
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD indicator."""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
-    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel upper and lower bands."""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
 
 def calculate_adx(high, low, close, period=14):
     """Calculate Average Directional Index (ADX)."""
@@ -132,6 +135,23 @@ def calculate_adx(high, low, close, period=14):
     
     return adx.values
 
+def calculate_chop(high, low, close, period=14):
+    """Calculate Choppiness Index."""
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        tr_sum = 0.0
+        for j in range(1, period + 1):
+            tr_sum += np.abs(high[i - j + 1] - low[i - j + 1])
+        
+        if tr_sum > 0 and (highest_high - lowest_low) > 0:
+            chop[i] = 100 * np.log10(tr_sum / (highest_high - lowest_low)) / np.log10(period)
+    
+    return chop
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -147,12 +167,18 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    kama_fast = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    kama_slow = calculate_kama(close, er_period=10, fast_period=5, slow_period=30)
-    macd_line, signal_line, histogram = calculate_macd(close, 12, 26, 9)
+    atr_7 = calculate_atr(high, low, close, 7)
+    atr_30 = calculate_atr(high, low, close, 30)
+    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     adx = calculate_adx(high, low, close, 14)
+    chop = calculate_chop(high, low, close, 14)
+    
+    # Volatility ratio
+    vol_ratio = np.full(n, np.nan)
+    vol_ratio[30:] = atr_7[30:] / np.maximum(atr_30[30:], 1e-10)
     
     signals = np.zeros(n)
     
@@ -176,15 +202,19 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
+        if np.isnan(supertrend[i]) or np.isnan(st_direction[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(macd_line[i]) or np.isnan(histogram[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]):
+        if np.isnan(adx[i]) or np.isnan(chop[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
@@ -193,37 +223,44 @@ def generate_signals(prices):
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === KAMA CROSSOVER ===
-        # Fast KAMA above slow KAMA = bullish
-        kama_bullish = kama_fast[i] > kama_slow[i]
-        kama_bearish = kama_fast[i] < kama_slow[i]
+        # === SUPERTREND DIRECTION ===
+        st_bullish = st_direction[i] == 1
+        st_bearish = st_direction[i] == -1
         
-        # === MACD MOMENTUM ===
-        # Histogram > 0 = bullish momentum
-        macd_bullish = histogram[i] > 0
-        macd_bearish = histogram[i] < 0
+        # === DONCHIAN BREAKOUT ===
+        donchian_breakout_up = close[i] > donchian_upper[i - 1]
+        donchian_breakout_down = close[i] < donchian_lower[i - 1]
         
         # === ADX TREND STRENGTH ===
-        # ADX > 15 = trending (loose for trade generation)
-        trending = adx[i] > 15
+        trending = adx[i] > 20
+        
+        # === CHOPPINESS FILTER ===
+        not_choppy = chop[i] < 50
+        
+        # === VOLATILITY EXPANSION ===
+        vol_expanding = vol_ratio[i] > 1.2
         
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
         
-        # LONG: 1d trend up + KAMA bullish + MACD bullish + trending
+        # LONG: 1d trend up + Supertrend bullish + Donchian breakout + trending + not choppy + vol expanding
         long_conditions = (
             bull_trend_1d and
-            kama_bullish and
-            macd_bullish and
-            trending
+            st_bullish and
+            donchian_breakout_up and
+            trending and
+            not_choppy and
+            vol_expanding
         )
         
-        # SHORT: 1d trend down + KAMA bearish + MACD bearish + trending
+        # SHORT: 1d trend down + Supertrend bearish + Donchian breakout + trending + not choppy + vol expanding
         short_conditions = (
             bear_trend_1d and
-            kama_bearish and
-            macd_bearish and
-            trending
+            st_bearish and
+            donchian_breakout_down and
+            trending and
+            not_choppy and
+            vol_expanding
         )
         
         # === GENERATE SIGNAL ===
@@ -233,19 +270,19 @@ def generate_signals(prices):
         if short_conditions:
             new_signal = -SIZE
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr[i]
+                stoploss_price = highest_close - 2.0 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
             if position_side < 0:
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr[i]
+                stoploss_price = lowest_close + 2.0 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
@@ -257,12 +294,12 @@ def generate_signals(prices):
             if position_side < 0 and bull_trend_1d:
                 new_signal = 0.0
         
-        # === KAMA REVERSAL EXIT ===
-        # Exit if KAMA flips against position
+        # === SUPERTREND REVERSAL EXIT ===
+        # Exit if Supertrend flips against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and kama_bearish:
+            if position_side > 0 and st_bearish:
                 new_signal = 0.0
-            if position_side < 0 and kama_bullish:
+            if position_side < 0 and st_bullish:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
