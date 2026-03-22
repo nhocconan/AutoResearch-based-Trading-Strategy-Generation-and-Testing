@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #479: 12h KAMA Trend + Daily HMA Bias + RSI-ADX Filter + ATR Stop
-Hypothesis: KAMA adapts to volatility better than HMA/EMA, reducing whipsaws in 
-range markets (2025 test period). Using wider RSI bands (30-70) and lower ADX 
-threshold (>20 not >40) ensures >=10 trades per symbol. 12h timeframe reduces 
-noise vs lower TFs while maintaining reasonable trade frequency. 3*ATR stoploss 
-appropriate for 12h bars. Multiple entry paths to guarantee trade generation.
-Timeframe: 12h (REQUIRED), HTF: 1d via mtf_data helper.
+Experiment #480: 1d Donchian Breakout + Weekly HMA Bias + ADX-RSI Filter + ATR Stop
+Hypothesis: Daily Donchian channels (20-period) capture sustained trends while weekly 
+HMA provides higher-timeframe bias. ADX>25 filters weak trends, RSI 40-60 zone avoids 
+extreme entries. Multiple entry paths (breakout + pullback) ensure >=10 trades. 
+Daily timeframe reduces noise and fee impact vs lower TFs. 3*ATR stop appropriate 
+for daily volatility. This should work in both 2021-2022 bull and 2025 bear markets.
+Timeframe: 1d (REQUIRED), HTF: 1w via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_daily_hma_rsi_adx_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_weekly_hma_adx_rsi_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -25,36 +25,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average - adapts to market noise."""
-    close_s = pd.Series(close)
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Efficiency Ratio
-    change = np.abs(close - np.roll(close, period))
-    change[0:period] = np.nan
-    volatility = np.zeros(n)
-    for i in range(period, n):
-        volatility[i] = np.sum(np.abs(close[i-period+1:i+1] - np.roll(close[i-period+1:i+1], 1)))
-    
-    er = np.zeros(n)
-    er[period:] = np.where(volatility[period:] > 0, change[period:] / volatility[period:], 0)
-    
-    # Smoothing constant
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    
-    # KAMA calculation
-    kama[period] = close[period]
-    for i in range(period + 1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -104,6 +74,21 @@ def calculate_adx(high, low, close, period=14):
     
     return adx, plus_di, minus_di
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (upper/lower bounds)."""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(period, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    upper[:period] = np.nan
+    lower[:period] = np.nan
+    
+    return upper, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -111,20 +96,22 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    kama_12h = calculate_kama(close, period=10)
-    kama_12h_fast = calculate_kama(close, period=5)
     rsi = calculate_rsi(close, 14)
     adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    
+    # Also calculate shorter Donchian for pullback entries
+    donchian_upper_10, donchian_lower_10 = calculate_donchian(high, low, 10)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.30
@@ -144,7 +131,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(kama_12h[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(donchian_upper[i]):
             signals[i] = 0.0
             continue
         
@@ -152,67 +139,72 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Daily trend bias (HTF)
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        # Weekly trend bias (HTF)
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # 12h KAMA trend
-        kama_12h_bullish = close[i] > kama_12h[i]
-        kama_12h_bearish = close[i] < kama_12h[i]
-        kama_rising = kama_12h[i] > kama_12h[i-1] if i > 0 else False
-        kama_falling = kama_12h[i] < kama_12h[i-1] if i > 0 else False
+        # ADX trend strength (lower threshold for daily TF)
+        trend_strong = adx[i] > 25
+        trend_moderate = adx[i] > 20
         
-        # Fast KAMA crossover
-        fast_above_slow = kama_12h_fast[i] > kama_12h[i]
-        fast_below_slow = kama_12h_fast[i] < kama_12h[i]
-        
-        # ADX trend strength (lower threshold for more trades)
-        trend_strength = adx[i] > 20  # Was >40, too strict
-        
-        # RSI zones (wider bands for more trades)
-        rsi_bullish = rsi[i] > 40 and rsi[i] < 70
-        rsi_bearish = rsi[i] > 30 and rsi[i] < 60
-        rsi_oversold = rsi[i] < 45
-        rsi_overbought = rsi[i] > 55
+        # RSI zones (avoid extremes for trend following)
+        rsi_neutral_long = rsi[i] > 40 and rsi[i] < 70
+        rsi_neutral_short = rsi[i] > 30 and rsi[i] < 60
+        rsi_pullback_long = rsi[i] > 35 and rsi[i] < 55
+        rsi_pullback_short = rsi[i] > 45 and rsi[i] < 65
         
         # DI crossover
         di_bullish = plus_di[i] > minus_di[i]
         di_bearish = plus_di[i] < minus_di[i]
         
+        # Donchian breakout signals
+        breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
+        breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
+        
+        # Price position in channel
+        channel_range = donchian_upper[i] - donchian_lower[i]
+        if channel_range > 0 and not np.isnan(donchian_upper[i]):
+            channel_pct = (close[i] - donchian_lower[i]) / channel_range
+        else:
+            channel_pct = 0.5
+        
+        in_upper_half = channel_pct > 0.5
+        in_lower_half = channel_pct < 0.5
+        
         new_signal = 0.0
         
         # === LONG ENTRIES (multiple paths for >=10 trades) ===
-        # Path 1: Daily bullish + 12h KAMA bullish + ADX trending + RSI ok
-        if daily_bullish and kama_12h_bullish and trend_strength and rsi_bullish:
+        # Path 1: Weekly bullish + Donchian breakout + ADX strong + RSI ok
+        if weekly_bullish and breakout_long and trend_strong and rsi_neutral_long:
             new_signal = SIZE_ENTRY
-        # Path 2: Daily bullish + Fast KAMA above slow + DI bullish
-        elif daily_bullish and fast_above_slow and di_bullish:
+        # Path 2: Weekly bullish + Price in upper half + DI bullish + ADX moderate
+        elif weekly_bullish and in_upper_half and di_bullish and trend_moderate:
             new_signal = SIZE_ENTRY
-        # Path 3: 12h KAMA bullish + KAMA rising + RSI oversold (pullback)
-        elif kama_12h_bullish and kama_rising and rsi_oversold:
+        # Path 3: Donchian breakout + Weekly bullish + RSI pullback zone
+        elif breakout_long and weekly_bullish and rsi_pullback_long:
             new_signal = SIZE_ENTRY
-        # Path 4: Daily bullish + 12h bullish + Fast KAMA crossover up
-        elif daily_bullish and kama_12h_bullish and fast_above_slow and kama_12h_fast[i] > kama_12h_fast[i-1]:
+        # Path 4: Price > weekly HMA + ADX > 20 + DI bullish + RSI 45-65
+        elif weekly_bullish and adx[i] > 20 and di_bullish and rsi[i] > 45 and rsi[i] < 65:
             new_signal = SIZE_ENTRY
-        # Path 5: Price above both KAMA/HMA + ADX > 15 + RSI 45-65
-        elif close[i] > kama_12h[i] and close[i] > hma_1d_aligned[i] and adx[i] > 15 and rsi[i] > 45 and rsi[i] < 65:
+        # Path 5: Breakout on 10-day Donchian + Weekly bullish + ADX > 18
+        elif (close[i] > donchian_upper_10[i-1] if not np.isnan(donchian_upper_10[i-1]) else False) and weekly_bullish and adx[i] > 18:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES (multiple paths for >=10 trades) ===
-        # Path 1: Daily bearish + 12h KAMA bearish + ADX trending + RSI ok
-        if daily_bearish and kama_12h_bearish and trend_strength and rsi_bearish:
+        # Path 1: Weekly bearish + Donchian breakout + ADX strong + RSI ok
+        if weekly_bearish and breakout_short and trend_strong and rsi_neutral_short:
             new_signal = -SIZE_ENTRY
-        # Path 2: Daily bearish + Fast KAMA below slow + DI bearish
-        elif daily_bearish and fast_below_slow and di_bearish:
+        # Path 2: Weekly bearish + Price in lower half + DI bearish + ADX moderate
+        elif weekly_bearish and in_lower_half and di_bearish and trend_moderate:
             new_signal = -SIZE_ENTRY
-        # Path 3: 12h KAMA bearish + KAMA falling + RSI overbought (rally short)
-        elif kama_12h_bearish and kama_falling and rsi_overbought:
+        # Path 3: Donchian breakdown + Weekly bearish + RSI pullback zone
+        elif breakout_short and weekly_bearish and rsi_pullback_short:
             new_signal = -SIZE_ENTRY
-        # Path 4: Daily bearish + 12h bearish + Fast KAMA crossover down
-        elif daily_bearish and kama_12h_bearish and fast_below_slow and kama_12h_fast[i] < kama_12h_fast[i-1]:
+        # Path 4: Price < weekly HMA + ADX > 20 + DI bearish + RSI 35-55
+        elif weekly_bearish and adx[i] > 20 and di_bearish and rsi[i] > 35 and rsi[i] < 55:
             new_signal = -SIZE_ENTRY
-        # Path 5: Price below both KAMA/HMA + ADX > 15 + RSI 35-55
-        elif close[i] < kama_12h[i] and close[i] < hma_1d_aligned[i] and adx[i] > 15 and rsi[i] > 35 and rsi[i] < 55:
+        # Path 5: Breakdown on 10-day Donchian + Weekly bearish + ADX > 18
+        elif (close[i] < donchian_lower_10[i-1] if not np.isnan(donchian_lower_10[i-1]) else False) and weekly_bearish and adx[i] > 18:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -221,7 +213,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (3*ATR for 12h timeframe - wider)
+            # Calculate trailing stop (3*ATR for daily timeframe)
             current_stop = highest_close - 3.0 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -242,7 +234,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (3*ATR for 12h timeframe - wider)
+            # Calculate trailing stop (3*ATR for daily timeframe)
             current_stop = lowest_close + 3.0 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
