@@ -1,57 +1,59 @@
 #!/usr/bin/env python3
 """
-Experiment #383: 12h Bollinger Mean Reversion + 1d/1w HMA Trend Bias + Vol Filter
+Experiment #384: 1d Primary Timeframe - Weekly Trend + Daily RSI Mean Reversion + Regime Filter
 
-Hypothesis: After 382 experiments, the key insight is that 12h timeframe needs
-MEAN REVERSION logic (not pure trend following) with HTF trend BIAS (not filter).
-Trend-following alone fails in 2022 crash and 2025 bear market. Pure mean-reversion
-fails in strong trends. We combine them: mean-reversion entries WITH trend bias.
+Hypothesis: Daily timeframe is underutilized in crypto futures. Most strategies fail because they
+overtrade on lower timeframes. On 1d, we can capture major swings with fewer trades and lower fees.
+
+KEY INSIGHTS FROM 383 FAILED EXPERIMENTS:
+1. Pure trend-following fails in 2022 crash and 2025 bear market
+2. Pure mean-reversion fails in strong trends (2021 bull run)
+3. REGIME DETECTION is the missing piece - need to adapt strategy per market state
+4. Weekly HMA provides stable trend bias (less noise than daily)
+5. RSI mean-reversion works BEST when aligned with higher timeframe trend
 
 STRATEGY COMPONENTS:
-1. 1d HMA(21) + 1w HMA(21) TREND BIAS (not filter):
-   - Both bullish = long bias (take long mean-reversion, skip short)
-   - Both bearish = short bias (take short mean-reversion, skip long)
-   - Mixed = neutral (reduce position size by 50%)
-   - This is softer than hard filter, allows trades in all regimes
-
-2. BOLLINGER BAND MEAN REVERSION (20, 2.0):
-   - Long when price < BB_lower + RSI(14) < 35
-   - Short when price > BB_upper + RSI(14) > 65
-   - BB mean-reversion works on 12h (proven in literature)
-
-3. VOLATILITY SPIKE FILTER:
-   - ATR(7)/ATR(30) > 1.8 = vol spike (panic/extreme = good MR opportunity)
-   - Only enter when vol is elevated (captures "vol crush" after panic)
-   - This avoids entering during quiet chop
-
-4. ATR TRAILING STOP (2.5x):
-   - Signal → 0 when price moves 2.5*ATR against position
-   - Protects from trend runaway
-
-5. POSITION SIZING: 0.30 discrete (conservative for 12h volatility)
+1. 1w HMA(21) TREND BIAS (via mtf_data): Long-term trend direction
+   - Price > 1w HMA = bull bias (prefer long entries)
+   - Price < 1w HMA = bear bias (prefer short entries)
+   
+2. DAILY RSI(14) MEAN REVERSION: Entry trigger
+   - Long: RSI < 40 (oversold) + bull bias from 1w
+   - Short: RSI > 60 (overbought) + bear bias from 1w
+   - These thresholds are LOOSE enough to generate 10+ trades/year
+   
+3. CHOPPINESS INDEX(14) REGIME FILTER: Avoid whipsaw
+   - CHOP > 55 = ranging (enable mean-reversion entries)
+   - CHOP < 45 = trending (enable trend-following entries)
+   - 45-55 = neutral (reduce position size by 50%)
+   
+4. ATR(14) TRAILING STOP: Risk management
+   - Exit when price moves 2.5*ATR against position
+   - Critical for surviving 2022-style crashes
+   
+5. POSITION SIZING: 0.30 discrete (conservative for daily volatility)
    - Max 30% capital per position
-   - Discrete levels minimize fee churn
-   - Reduce to 0.15 when HTF signals mixed
+   - Discrete levels: 0.0, ±0.15, ±0.30
 
-Why this should work on 12h:
-- 12h has fewer bars → fewer false signals than 15m/1h
-- Mean-reversion works better on 12h than pure trend (less noise)
-- HTF trend bias (1d/1w) provides direction without hard filtering
-- Vol spike filter ensures we only enter at extremes (panic/euphoria)
-- Should generate 20-40 trades/year per symbol (enough for stats)
+Why this should beat current best (Sharpe=0.676):
+- Weekly trend filter avoids counter-trend trades (major improvement)
+- RSI thresholds (40/60) are looser than typical (30/70) = more trades
+- Choppiness regime filter reduces whipsaw in transition periods
+- Daily timeframe = fewer false signals, lower fee drag
 - Works on BTC, ETH, SOL individually (not SOL-biased)
 
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.30 normal, 0.15 mixed bias
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
+Position sizing: 0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
+Expected trades: 15-30 per symbol per year (enough for statistical significance)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_bb_meanrev_1d_1w_hma_vol_spike_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_weekly_hma_rsi_chop_regime_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -64,6 +66,20 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_rsi(close, period=14):
+    """Calculate RSI using Wilder's smoothing."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[avg_loss == 0] = 100.0
+    return rsi
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -74,26 +90,32 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    return upper.values, lower.values, sma.values
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = ranging market (mean-reversion works)
+    CHOP < 38.2 = trending market (trend-following works)
+    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    for i in range(period, n):
+        atr_sum = tr[i-period+1:i+1].sum()
+        highest_high = high[i-period+1:i+1].max()
+        lowest_low = low[i-period+1:i+1].min()
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 0:
+            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -102,29 +124,24 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
     rsi = calculate_rsi(close, 14)
+    chop = calculate_choppiness_index(high, low, close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_NORMAL = 0.30
-    SIZE_MIXED = 0.15
+    SIZE_FULL = 0.30
+    SIZE_HALF = 0.15
     
     # Track position state for stoploss
     in_position = False
@@ -139,11 +156,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(bb_lower[i]) or np.isnan(bb_upper[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -151,49 +164,36 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(atr_7[i]) or np.isnan(atr_30[i]) or atr_30[i] == 0:
+        if np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        # === HTF TREND BIAS (1d + 1w HMA) ===
-        bull_1d = close[i] > hma_1d_aligned[i]
-        bear_1d = close[i] < hma_1d_aligned[i]
-        bull_1w = close[i] > hma_1w_aligned[i]
-        bear_1w = close[i] < hma_1w_aligned[i]
+        # === WEEKLY TREND BIAS ===
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
         
-        # Determine bias strength
-        if bull_1d and bull_1w:
-            trend_bias = 1  # Strong long bias
-        elif bear_1d and bear_1w:
-            trend_bias = -1  # Strong short bias
-        else:
-            trend_bias = 0  # Mixed/neutral
+        # === REGIME DETECTION ===
+        ranging_market = chop[i] > 55.0
+        trending_market = chop[i] < 45.0
+        neutral_market = 45.0 <= chop[i] <= 55.0
         
-        # === VOLATILITY SPIKE FILTER ===
-        vol_ratio = atr_7[i] / (atr_30[i] + 1e-10)
-        vol_spike = vol_ratio > 1.8  # Elevated volatility = MR opportunity
-        
-        # === BOLLINGER BAND MEAN REVERSION SIGNALS ===
-        # Long: price below BB lower + RSI oversold
-        bb_long = close[i] < bb_lower[i] and rsi[i] < 35
-        
-        # Short: price above BB upper + RSI overbought
-        bb_short = close[i] > bb_upper[i] and rsi[i] > 65
+        # === RSI SIGNALS (LOOSE THRESHOLDS FOR MORE TRADES) ===
+        rsi_oversold = rsi[i] < 40.0
+        rsi_overbought = rsi[i] > 60.0
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
+        current_size = SIZE_FULL if not neutral_market else SIZE_HALF
         
-        # Long entry: BB long signal + (long bias OR neutral) + vol spike
-        if bb_long and vol_spike:
-            if trend_bias >= 0:  # Long bias or neutral
-                new_signal = SIZE_NORMAL if trend_bias == 1 else SIZE_MIXED
-            # Skip long if strong short bias
+        # LONG ENTRY: RSI oversold + weekly bull trend OR ranging market
+        if rsi_oversold:
+            if bull_trend_1w or ranging_market:
+                new_signal = current_size
         
-        # Short entry: BB short signal + (short bias OR neutral) + vol spike
-        elif bb_short and vol_spike:
-            if trend_bias <= 0:  # Short bias or neutral
-                new_signal = -SIZE_NORMAL if trend_bias == -1 else -SIZE_MIXED
-            # Skip short if strong long bias
+        # SHORT ENTRY: RSI overbought + weekly bear trend OR ranging market
+        if rsi_overbought:
+            if bear_trend_1w or ranging_market:
+                new_signal = -current_size
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -213,26 +213,22 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === MEAN REVERSION EXIT ===
-        # Exit long when price returns to BB mid or RSI > 55
-        if in_position and position_side > 0 and new_signal != 0.0:
-            if close[i] >= bb_mid[i] or rsi[i] > 55:
+        # === TREND REVERSAL EXIT ===
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and bear_trend_1w and not ranging_market:
+                # Long position should exit if weekly trend turns bear and not ranging
+                new_signal = 0.0
+            if position_side < 0 and bull_trend_1w and not ranging_market:
+                # Short position should exit if weekly trend turns bull and not ranging
                 new_signal = 0.0
         
-        # Exit short when price returns to BB mid or RSI < 45
-        if in_position and position_side < 0 and new_signal != 0.0:
-            if close[i] <= bb_mid[i] or rsi[i] < 45:
+        # === RSI REVERSAL EXIT (take profit) ===
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and rsi[i] > 70.0:
+                # Long position take profit when RSI overbought
                 new_signal = 0.0
-        
-        # === TREND BIAS REVERSAL EXIT ===
-        # Exit long if trend bias flips strongly bearish
-        if in_position and position_side > 0 and new_signal != 0.0:
-            if trend_bias == -1:  # Strong short bias now
-                new_signal = 0.0
-        
-        # Exit short if trend bias flips strongly bullish
-        if in_position and position_side < 0 and new_signal != 0.0:
-            if trend_bias == 1:  # Strong long bias now
+            if position_side < 0 and rsi[i] < 30.0:
+                # Short position take profit when RSI oversold
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
