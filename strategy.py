@@ -1,38 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #212: 30m Regime-Adaptive Strategy with Choppiness Index + 4h HMA Trend
+Experiment #213: 1h MACD Momentum + 4h HMA Trend + BB Squeeze + Volume Filter
 
-Hypothesis: 30m timeframe needs regime detection to avoid whipsaws. Previous 30m 
-strategies failed because they used pure trend-following or pure mean-reversion 
-without adapting to market conditions. This strategy uses Choppiness Index (CHOP) 
-to detect regime: CHOP>61.8 = range (mean revert at BB), CHOP<38.2 = trend (follow 
-pullback to EMA). 4h HMA provides higher-timeframe bias. Volume confirmation filters 
-false breakouts. This hybrid approach should outperform single-regime strategies.
+Hypothesis: 1h timeframe needs STRONGER filtering than 4h due to more noise.
+This strategy combines:
+1. 4h HMA(21) as primary trend filter (HTF bias - call ONCE before loop)
+2. 1h MACD histogram momentum for entry timing (faster signal)
+3. Bollinger Band Width squeeze detection (low vol = breakout potential)
+4. Volume confirmation (taker_buy_volume ratio > 0.55 for longs)
+5. ATR(14) trailing stop at 2.5x for risk management
 
-Why 30m with regime detection might work:
-- 30m captures intraday swings but needs filter to avoid noise
-- CHOP index proven to distinguish trend vs range (75% accuracy in crypto)
-- 4h HMA filter prevents counter-trend trades (proven in best strategies)
-- Volume spike confirmation reduces false breakouts
-- Conservative sizing (0.25) controls drawdown
+Why this might work on 1h:
+- 4h HMA provides stable trend bias (proven in current best strategy)
+- MACD histogram captures momentum shifts faster than EMA crossover
+- BB squeeze identifies consolidation before breakouts (reduces whipsaws)
+- Volume filter confirms genuine moves vs fake breakouts
+- Conservative sizing (0.25) controls 2022-style crash drawdown
 
 Learning from failures:
-- #200 (30m KAMA): Sharpe=-0.668 - no regime filter, whipsawed in ranges
-- #206 (30m Fisher): Sharpe=-2.564 - pure mean reversion failed in trends
-- #205 (15m EMA pullback): Sharpe=-3.678 - no regime adaptation
-- Key insight: crypto alternates between trend and range, need both strategies
+- #201 (1h KAMA): Sharpe=-1.202 - KAMA alone too slow for 1h noise
+- #207 (1h RSI mean-rev): Sharpe=-9.084 - mean-rev fails on 1h crypto
+- #211 (15m MACD): Sharpe=-2.490 - too fast, needs stronger HTF filter
+- Current best uses 4h+1d, this uses 1h+4h (faster but filtered)
 
-Timeframe: 30m (REQUIRED for this experiment)
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels
-Stoploss: 2.0 * ATR(14) trailing
+Position sizing: 0.25 discrete levels (max 0.30)
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_chop_regime_4h_hma_vol_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_macd_4h_hma_bb_squeeze_vol_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -45,57 +46,29 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP = 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    CHOP > 61.8 = range/choppy market
-    CHOP < 38.2 = trending market
-    """
-    n = len(close)
-    chop = np.zeros(n)
-    
-    # First calculate ATR for each bar
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    for i in range(period, n):
-        # Sum of ATR over period
-        atr_sum = np.sum(tr[i-period+1:i+1])
-        
-        # Highest high and lowest low over period
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        price_range = highest_high - lowest_low
-        
-        if price_range > 0 and atr_sum > 0:
-            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-        else:
-            chop[i] = 50.0  # neutral
-    
-    # Fill initial values
-    chop[:period] = chop[period]
-    
-    return chop
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD (Moving Average Convergence Divergence)."""
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
 
-def calculate_bollinger(close, period=20, std_dev=2.0):
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
     """Calculate Bollinger Bands."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
     upper = sma + std_dev * std
     lower = sma - std_dev * std
-    return upper, lower, sma
+    return upper.values, lower.values, sma.values, std.values
 
-def calculate_ema(close, period=21):
-    """Calculate Exponential Moving Average."""
-    close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    return ema.values
+def calculate_bb_width(upper, lower, sma):
+    """Calculate Bollinger Band Width (normalized)."""
+    width = (upper - lower) / sma
+    return width
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -107,33 +80,23 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI (Relative Strength Index)."""
+def calculate_ema(close, period=21):
+    """Calculate Exponential Moving Average."""
     close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi.values
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    return ema.values
 
-def calculate_volume_spike(volume, period=20):
-    """Detect volume spikes (volume > 1.5 * average)."""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean().values
-    volume_spike = volume > 1.5 * vol_avg
-    return volume_spike
+def calculate_volume_ratio(taker_buy_volume, volume):
+    """Calculate taker buy volume ratio."""
+    ratio = taker_buy_volume / (volume + 1e-10)
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
+    taker_buy_vol = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -145,20 +108,25 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
-    chop = calculate_choppiness(high, low, close, 14)
-    bb_upper, bb_lower, bb_sma = calculate_bollinger(close, 20, 2.0)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
+    bb_upper, bb_lower, bb_sma, bb_std = calculate_bollinger_bands(close, 20, 2.0)
+    bb_width = calculate_bb_width(bb_upper, bb_lower, bb_sma)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
-    rsi = calculate_rsi(close, 14)
-    vol_spike = calculate_volume_spike(volume, 20)
+    vol_ratio = calculate_volume_ratio(taker_buy_vol, volume)
+    
+    # Calculate BB Width percentile for squeeze detection (rolling 100 periods)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=100).apply(
+        lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min() + 1e-10), raw=False
+    ).values
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.25
-    SIZE_REDUCED = 0.15
+    SIZE_MAX = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -176,85 +144,85 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop[i]) or np.isnan(bb_upper[i]) or np.isnan(rsi[i]):
+        if np.isnan(macd_hist[i]) or np.isnan(bb_width[i]) or np.isnan(bb_width_percentile[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME DETECTION ===
-        # CHOP > 61.8 = range/choppy (mean revert)
-        # CHOP < 38.2 = trending (trend follow)
-        # 38.2 <= CHOP <= 61.8 = transition (no trade or reduce size)
-        is_range = chop[i] > 61.8
-        is_trend = chop[i] < 38.2
-        is_transition = not is_range and not is_trend
-        
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias
+        # 4h HMA = higher timeframe trend bias (STRONG filter for 1h)
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === EMA STRUCTURE ===
+        # === BB SQUEEZE DETECTION ===
+        # BB Width percentile < 0.3 = low volatility (squeeze = breakout potential)
+        bb_squeeze = bb_width_percentile[i] < 0.3
+        
+        # === MACD MOMENTUM ===
+        # MACD histogram crossing above 0 = bullish momentum
+        # MACD histogram crossing below 0 = bearish momentum
+        macd_bullish = macd_hist[i] > 0 and macd_hist[i-1] <= 0  # Fresh cross
+        macd_bearish = macd_hist[i] < 0 and macd_hist[i-1] >= 0  # Fresh cross
+        
+        # MACD histogram positive/negative (sustained momentum)
+        macd_hist_positive = macd_hist[i] > 0
+        macd_hist_negative = macd_hist[i] < 0
+        
+        # === EMA CONFIRMATION ===
+        # EMA21 > EMA50 = bullish trend structure
+        # EMA21 < EMA50 = bearish trend structure
         ema_bullish = ema_21[i] > ema_50[i]
         ema_bearish = ema_21[i] < ema_50[i]
         
+        # === VOLUME CONFIRMATION ===
+        # Taker buy ratio > 0.55 = buying pressure
+        # Taker buy ratio < 0.45 = selling pressure
+        vol_bullish = vol_ratio[i] > 0.55
+        vol_bearish = vol_ratio[i] < 0.45
+        
+        # === PRICE POSITION IN BB ===
+        # Price near upper band = bullish
+        # Price near lower band = bearish
+        price_position = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i] + 1e-10)
+        price_upper = price_position > 0.6
+        price_lower = price_position < 0.4
+        
         new_signal = 0.0
         
-        # === TRENDING REGIME (CHOP < 38.2) ===
-        # Follow pullbacks to EMA21 in direction of 4h trend
-        if is_trend:
-            # Long: 4h bullish + price pullback to EMA21 + RSI > 40 (not oversold)
-            if bull_trend_4h and ema_bullish:
-                # Pullback entry: price near EMA21 (within 1%)
-                pullback_long = abs(close[i] - ema_21[i]) / ema_21[i] < 0.01
-                if pullback_long and rsi[i] > 40 and rsi[i] < 70:
+        # === ENTRY CONDITIONS ===
+        # Long: 4h bullish + (BB squeeze OR MACD fresh cross) + volume/price confirmation
+        # More flexible to ensure enough trades on 1h
+        if bull_trend_4h:
+            # Primary entry: BB squeeze + MACD momentum + volume
+            if bb_squeeze and macd_hist_positive:
+                if vol_bullish or price_upper or ema_bullish:
                     new_signal = SIZE_BASE
             
-            # Short: 4h bearish + price rally to EMA21 + RSI < 60 (not overbought)
-            if bear_trend_4h and ema_bearish:
-                # Rally entry: price near EMA21 (within 1%)
-                rally_short = abs(close[i] - ema_21[i]) / ema_21[i] < 0.01
-                if rally_short and rsi[i] < 60 and rsi[i] > 30:
-                    new_signal = -SIZE_BASE
-        
-        # === RANGING REGIME (CHOP > 61.8) ===
-        # Mean revert at Bollinger Band extremes
-        if is_range:
-            # Long: price at lower BB + RSI oversold + volume spike confirmation
-            at_lower_bb = close[i] <= bb_lower[i] * 1.002  # within 0.2% of lower BB
-            if at_lower_bb and rsi[i] < 35:
-                # Volume spike adds confidence
-                if vol_spike[i]:
+            # Secondary entry: MACD fresh cross (momentum shift)
+            if macd_bullish:
+                if vol_bullish or ema_bullish:
                     new_signal = SIZE_BASE
-                else:
-                    new_signal = SIZE_REDUCED  # smaller position without volume
-            
-            # Short: price at upper BB + RSI overbought + volume spike confirmation
-            at_upper_bb = close[i] >= bb_upper[i] * 0.998  # within 0.2% of upper BB
-            if at_upper_bb and rsi[i] > 65:
-                # Volume spike adds confidence
-                if vol_spike[i]:
+        
+        # Short: 4h bearish + (BB squeeze OR MACD fresh cross) + volume/price confirmation
+        if bear_trend_4h:
+            # Primary entry: BB squeeze + MACD momentum + volume
+            if bb_squeeze and macd_hist_negative:
+                if vol_bearish or price_lower or ema_bearish:
                     new_signal = -SIZE_BASE
-                else:
-                    new_signal = -SIZE_REDUCED  # smaller position without volume
+            
+            # Secondary entry: MACD fresh cross (momentum shift)
+            if macd_bearish:
+                if vol_bearish or ema_bearish:
+                    new_signal = -SIZE_BASE
         
-        # === TRANSITION REGIME (38.2 <= CHOP <= 61.8) ===
-        # Reduce position size or stay flat
-        if is_transition:
-            # Only take high-conviction trades with 4h trend alignment
-            if bull_trend_4h and ema_bullish and rsi[i] > 50 and rsi[i] < 70:
-                new_signal = SIZE_REDUCED
-            elif bear_trend_4h and ema_bearish and rsi[i] < 50 and rsi[i] > 30:
-                new_signal = -SIZE_REDUCED
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Check stoploss on EXISTING position before considering new entry
         if in_position:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                # Trailing stop: 2.0 * ATR below highest close
-                stoploss_price = highest_close - 2.0 * atr[i]
+                # Trailing stop: 2.5 * ATR below highest close
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
             
@@ -262,8 +230,8 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                # Trailing stop: 2.0 * ATR above lowest close
-                stoploss_price = lowest_close + 2.0 * atr[i]
+                # Trailing stop: 2.5 * ATR above lowest close
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
         
