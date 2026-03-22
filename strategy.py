@@ -1,38 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #011: 4h HMA Trend + 1D HMA Bias + RSI Pullback with Z-Score Filter
+Experiment #012: 12h Dual-HMA Trend + Donchian Breakout with 1d/1w Confirmation
 
-Hypothesis: After 10 failed experiments with complex regime-switching logic, 
-simplicity wins. The best proven strategy (mtf_hma_rsi_zscore_v1, Sharpe=5.4) 
-used: HTF HMA trend + LTF RSI pullback + Z-score filter.
+Hypothesis: After 11 failures with regime-switching (Choppiness) strategies, return to 
+proven trend-following with proper HTF confirmation. This combines:
 
-This strategy adapts that proven formula for 4h primary timeframe:
-1. 1D HMA(21) = Primary trend bias (very stable, few whipsaws)
-2. 4h RSI(14) pullback = Entry timing (RSI 30-55 for long, 45-70 for short)
-3. Z-score(20) filter = Avoid extremes (|z| < 2.0 for entry)
-4. ATR(14) trailing stop = Risk management (2.5 * ATR)
-5. Discrete sizing = 0.25-0.30, ATR-scaled
+1. 12H HMA(21) vs HMA(48) crossover - primary trend signal with less lag than EMA
+2. 1D HMA(21) - confirms major trend direction (filter false breakouts)
+3. 1W HMA(48) - secular trend bias (only long if weekly bullish)
+4. Donchian(20) breakout - entry trigger on trend confirmation
+5. ATR(14) trailing stop - 2.5 ATR exit to protect capital
 
 Why this should work when others failed:
-- Simpler logic = less overfitting to specific regimes
-- 1D HMA = more stable than 4h HMA for trend direction
-- RSI pullback (not extreme) = catches trend continuations, not reversals
-- Z-score filter = avoids chasing moves
-- Proven formula from best historical strategy
-- Looser RSI thresholds = ensures ≥10 trades per symbol
+- Simpler logic = fewer conflicting filters = more trades generated
+- 12h timeframe = 20-50 trades/year naturally (not too many fees, not too few signals)
+- Triple HTF confirmation (1d + 1w) = filters 2022 crash whipsaws
+- Donchian breakout = catches sustained moves, not noise
+- Discrete sizing (0.25/0.30) = minimizes fee churn
 
-Timeframe: 4h (REQUIRED for this experiment)
-HTF: 1D via mtf_data helper (call ONCE before loop)
+Timeframe: 12h (REQUIRED for this experiment)
+HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25-0.30 discrete
 Stoploss: 2.5 * ATR(14) trailing
-Target trades: 20-50 per year (loose enough RSI thresholds)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_rsi_1d_hma_zscore_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_dual_hma_donchian_1d_1w_confirm_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -55,31 +51,36 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI using standard Wilder's method."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high / lowest low over period)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
     
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+    upper = high_s.rolling(window=period, min_periods=period).max()
+    lower = low_s.rolling(window=period, min_periods=period).min()
     
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi.values
+    return upper.values, lower.values
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score of price relative to rolling mean."""
-    close_s = pd.Series(close)
-    mean = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
+def calculate_hma_crossover(hma_fast, hma_slow):
+    """Detect HMA crossover signals."""
+    crossover_long = np.zeros(len(hma_fast))
+    crossover_short = np.zeros(len(hma_fast))
     
-    zscore = (close_s - mean) / std.replace(0, np.inf)
+    for i in range(1, len(hma_fast)):
+        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
+            continue
+        if np.isnan(hma_fast[i-1]) or np.isnan(hma_slow[i-1]):
+            continue
+        
+        # Long: fast crosses above slow
+        if hma_fast[i] > hma_slow[i] and hma_fast[i-1] <= hma_slow[i-1]:
+            crossover_long[i] = 1
+        
+        # Short: fast crosses below slow
+        if hma_fast[i] < hma_slow[i] and hma_fast[i-1] >= hma_slow[i-1]:
+            crossover_short[i] = 1
     
-    return zscore.values
+    return crossover_long, crossover_short
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -89,22 +90,32 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    # Calculate 1D indicators
+    hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
+    
+    # Calculate 1W indicators
+    hma_1w_48 = calculate_hma(df_1w['close'].values, 48)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
+    hma_1w_48_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_48)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_14 = calculate_rsi(close, 14)
-    zscore_20 = calculate_zscore(close, 20)
+    hma_12h_21 = calculate_hma(close, 21)
+    hma_12h_48 = calculate_hma(close, 48)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    
+    # HMA crossover signals on 12h
+    crossover_long_12h, crossover_short_12h = calculate_hma_crossover(hma_12h_21, hma_12h_48)
     
     signals = np.zeros(n)
     
     # Base position sizing (Rule 4 - discrete levels, max 0.40)
-    BASE_SIZE = 0.28
+    BASE_SIZE_LONG = 0.28
+    BASE_SIZE_SHORT = 0.25  # Slightly smaller for shorts (bear market bias)
     
     # Track position state for stoploss
     in_position = False
@@ -118,47 +129,80 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_21_aligned[i]):
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(hma_1w_48_aligned[i]):
             continue
         
-        if np.isnan(zscore_20[i]):
+        if np.isnan(hma_12h_21[i]) or np.isnan(hma_12h_48[i]):
             continue
         
-        # === 1D HMA TREND BIAS ===
-        bull_bias = close[i] > hma_1d_aligned[i]
-        bear_bias = close[i] < hma_1d_aligned[i]
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            continue
         
-        # === Z-SCORE FILTER (avoid extremes) ===
-        zscore_ok = abs(zscore_20[i]) < 2.0
+        # === 1W SECULAR TREND BIAS ===
+        weekly_bullish = close[i] > hma_1w_48_aligned[i]
+        weekly_bearish = close[i] < hma_1w_48_aligned[i]
         
-        # === ATR-BASED POSITION SIZING ===
-        if i > 100:
-            atr_median = np.nanmedian(atr_14[100:i])
-            atr_ratio = atr_14[i] / atr_median if atr_median > 0 else 1.0
-            atr_ratio = np.clip(atr_ratio, 0.5, 2.0)
-            size_multiplier = 1.0 / atr_ratio
-            current_size = BASE_SIZE * size_multiplier
-            current_size = np.clip(current_size, 0.20, 0.35)
-        else:
-            current_size = BASE_SIZE
+        # === 1D MAJOR TREND CONFIRMATION ===
+        daily_bullish = close[i] > hma_1d_21_aligned[i]
+        daily_bearish = close[i] < hma_1d_21_aligned[i]
+        
+        # === 12H HMA TREND ===
+        hma_bullish = hma_12h_21[i] > hma_12h_48[i]
+        hma_bearish = hma_12h_21[i] < hma_12h_48[i]
+        
+        # === DONCHIAN BREAKOUT ===
+        breakout_long = close[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
+        breakout_short = close[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
+        
+        # === HMA CROSSOVER SIGNAL ===
+        hma_cross_long = crossover_long_12h[i] == 1
+        hma_cross_short = crossover_short_12h[i] == 1
+        
+        # === POSITION SIZING ===
+        # Use discrete levels
+        long_size = BASE_SIZE_LONG
+        short_size = BASE_SIZE_SHORT
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # LONG: 1D bullish bias + RSI pullback (30-55) + z-score OK
-        # Looser thresholds to ensure enough trades
-        if bull_bias and zscore_ok:
-            if 30 <= rsi_14[i] <= 55:
-                new_signal = current_size
+        # LONG ENTRY: Multiple confluence required
+        # Need: 12h HMA bullish OR crossover + 1d bullish + breakout OR weekly bullish
+        long_conditions = 0
+        if hma_bullish:
+            long_conditions += 1
+        if hma_cross_long:
+            long_conditions += 1
+        if daily_bullish:
+            long_conditions += 1
+        if breakout_long:
+            long_conditions += 1
+        if weekly_bullish:
+            long_conditions += 1
         
-        # SHORT: 1D bearish bias + RSI pullback (45-70) + z-score OK
-        # Looser thresholds to ensure enough trades
-        if bear_bias and zscore_ok:
-            if 45 <= rsi_14[i] <= 70:
-                new_signal = -current_size
+        # Enter long if 3+ conditions met (including at least one breakout/crossover)
+        if long_conditions >= 3 and (breakout_long or hma_cross_long):
+            new_signal = long_size
+        
+        # SHORT ENTRY: Multiple confluence required
+        short_conditions = 0
+        if hma_bearish:
+            short_conditions += 1
+        if hma_cross_short:
+            short_conditions += 1
+        if daily_bearish:
+            short_conditions += 1
+        if breakout_short:
+            short_conditions += 1
+        if weekly_bearish:
+            short_conditions += 1
+        
+        # Enter short if 3+ conditions met (including at least one breakout/crossover)
+        if short_conditions >= 3 and (breakout_short or hma_cross_short):
+            new_signal = -short_size
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -183,11 +227,11 @@ def generate_signals(prices):
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            # Exit long if 1D bias turns bearish
-            if position_side > 0 and bear_bias:
+            # Exit long if 12h HMA turns bearish strongly
+            if position_side > 0 and hma_bearish and not hma_cross_long:
                 trend_reversal = True
-            # Exit short if 1D bias turns bullish
-            if position_side < 0 and bull_bias:
+            # Exit short if 12h HMA turns bullish strongly
+            if position_side < 0 and hma_bullish and not hma_cross_short:
                 trend_reversal = True
         
         # Apply stoploss or trend reversal
