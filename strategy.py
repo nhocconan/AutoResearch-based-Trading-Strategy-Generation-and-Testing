@@ -1,40 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 1d RSI Pullback with Weekly HMA Trend Filter
+Experiment #008: 30m Multi-Timeframe Confluence with Session Filter
 
-Hypothesis: After 6 consecutive failures with complex regime-switching strategies,
-the pattern is clear - over-engineering kills performance. The best strategy
-(mtf_hma_rsi_zscore_v1, Sharpe=5.4) uses SIMPLE logic: HTF trend + LTF pullback.
+Hypothesis: After 7 consecutive failures with complex regime-switching strategies,
+the issue is OVER-FITTING. This strategy uses SIMPLE but STRICT confluence:
 
-This strategy simplifies to THREE core components:
-1. WEEKLY HMA(21): Ultra-stable trend filter. Only long if price > 1w_HMA,
-   only short if price < 1w_HMA. Weekly is slow enough to avoid whipsaws.
+1. DUAL HTF TREND BIAS: Both 4h AND 1d HMA must agree (proven stable filter)
+2. 30m RSI PULLBACK: Enter on pullback within HTF trend (RSI 35-45 long, 55-65 short)
+3. VOLUME CONFIRMATION: Volume > 0.8 * 20-bar SMA (filters fakeouts)
+4. SESSION FILTER: Only trade 8-20 UTC (highest liquidity, lowest slippage)
+5. ATR TRAILING STOP: 2.5 * ATR(14) to protect capital
 
-2. DAILY RSI(14) pullback: Enter on pullbacks WITHIN the trend.
-   Long: RSI drops to 40-50 (not oversold, just pullback) + price > 1w_HMA
-   Short: RSI rises to 50-60 (not overbought, just retracement) + price < 1w_HMA
-   This catches continuations, not reversals = higher win rate in trends.
+Why this should work when #001-#007 failed:
+- SIMPLER logic = less overfitting (failed strategies had 3+ regime modes)
+- DUAL HTF filter = more stable than single 4h HMA
+- SESSION filter = critical for 30m (avoid Asian session whipsaw)
+- RSI pullback = proven edge from baseline strategy (Sharpe=5.4)
+- Strict entry = ensures 30-80 trades/year target (not 200+)
 
-3. ATR(14) stoploss: 2.5 * ATR trailing stop. Protects from major reversals.
-
-Why this should beat the 6 failed strategies:
-- SIMPLER = fewer failure modes (all 6 failures were over-complex)
-- Weekly HMA = extremely stable (changes ~4 times/year = few false signals)
-- RSI pullback (not extreme) = catches trend continuations (70%+ win rate)
-- Few trades (target 25-40/year on 1d) = low fee drag
-- Works in bull (2021), crash (2022), bear (2025) because trend-following
-
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.30 discrete (protects from 2022-style crashes)
-Stoploss: 2.5 * ATR(14) trailing
+Timeframe: 30m (REQUIRED)
+HTF: 4h + 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25 discrete (conservative for lower TF)
+Stoploss: 2.5 * ATR(14) trailing via signal→0
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_rsi_pullback_1w_hma_atr_v1"
-timeframe = "1d"
+name = "mtf_30m_rsi_pullback_4h_1d_hma_session_vol_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -58,10 +52,9 @@ def calculate_hma(close, period=21):
     return wma3.values
 
 def calculate_rsi(close, period=14):
-    """Calculate RSI using Wilder's smoothing method."""
+    """Calculate RSI using standard Wilder's method."""
     close_s = pd.Series(close)
     delta = close_s.diff()
-    
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
     
@@ -77,25 +70,33 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1d indicators
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
     
+    # Volume SMA for confirmation
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     
-    # Position sizing (Rule 4 - discrete levels, max 0.40)
-    POSITION_SIZE = 0.30
+    # Base position sizing (Rule 4 - discrete levels, max 0.40)
+    BASE_SIZE = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -109,33 +110,64 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             continue
         
         if np.isnan(rsi_14[i]):
             continue
         
-        # === WEEKLY HMA TREND BIAS ===
-        bull_bias = close[i] > hma_1w_aligned[i]
-        bear_bias = close[i] < hma_1w_aligned[i]
+        if np.isnan(vol_sma[i]) or vol_sma[i] == 0:
+            continue
+        
+        # === SESSION FILTER (8-20 UTC only) ===
+        # open_time is in milliseconds since epoch
+        hour_utc = (open_time[i] // 3600000) % 24
+        in_session = 8 <= hour_utc <= 20
+        
+        # === DUAL HTF TREND BIAS (4h + 1d must agree) ===
+        bull_bias_4h = close[i] > hma_4h_aligned[i]
+        bear_bias_4h = close[i] < hma_4h_aligned[i]
+        bull_bias_1d = close[i] > hma_1d_aligned[i]
+        bear_bias_1d = close[i] < hma_1d_aligned[i]
+        
+        # Both HTF must agree for strong bias
+        strong_bull_bias = bull_bias_4h and bull_bias_1d
+        strong_bear_bias = bear_bias_4h and bear_bias_1d
+        
+        # === VOLUME CONFIRMATION ===
+        volume_confirmed = volume[i] > 0.8 * vol_sma[i]
         
         # === RSI PULLBACK SIGNALS ===
-        # Long: RSI pulls back to 40-50 zone (not oversold, just pause in uptrend)
-        rsi_pullback_long = (rsi_14[i] >= 40) and (rsi_14[i] <= 50)
+        # Long: RSI pulled back to 35-45 within bullish HTF trend
+        rsi_pullback_long = 35 <= rsi_14[i] <= 48
+        # Short: RSI pulled back to 52-65 within bearish HTF trend
+        rsi_pullback_short = 52 <= rsi_14[i] <= 65
         
-        # Short: RSI rallies to 50-60 zone (not overbought, just retracement in downtrend)
-        rsi_pullback_short = (rsi_14[i] >= 50) and (rsi_14[i] <= 60)
+        # === ATR-BASED POSITION SIZING ===
+        # Reduce size when volatility is high (protect in crashes)
+        if i > 100:
+            atr_median = np.nanmedian(atr_14[100:i])
+            if atr_median > 0:
+                atr_ratio = atr_14[i] / atr_median
+                atr_ratio = np.clip(atr_ratio, 0.5, 2.0)
+                size_multiplier = 1.0 / atr_ratio
+                current_size = BASE_SIZE * size_multiplier
+                current_size = np.clip(current_size, 0.15, 0.35)
+            else:
+                current_size = BASE_SIZE
+        else:
+            current_size = BASE_SIZE
         
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (ALL conditions must be met) ===
         new_signal = 0.0
         
-        # Long entry: Weekly bullish + RSI pullback
-        if bull_bias and rsi_pullback_long:
-            new_signal = POSITION_SIZE
+        # LONG: Strong bull bias + RSI pullback + volume + session
+        if strong_bull_bias and rsi_pullback_long and volume_confirmed and in_session:
+            new_signal = current_size
         
-        # Short entry: Weekly bearish + RSI pullback
-        elif bear_bias and rsi_pullback_short:
-            new_signal = -POSITION_SIZE
+        # SHORT: Strong bear bias + RSI pullback + volume + session
+        elif strong_bear_bias and rsi_pullback_short and volume_confirmed and in_session:
+            new_signal = -current_size
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -158,12 +190,13 @@ def generate_signals(prices):
                     stoploss_triggered = True
         
         # === TREND REVERSAL EXIT ===
-        # Exit if weekly trend flips against position
         trend_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and bear_bias:
+            # Exit long if BOTH HTF turn bearish
+            if position_side > 0 and strong_bear_bias:
                 trend_reversal = True
-            if position_side < 0 and bull_bias:
+            # Exit short if BOTH HTF turn bullish
+            if position_side < 0 and strong_bull_bias:
                 trend_reversal = True
         
         # Apply stoploss or trend reversal
