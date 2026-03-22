@@ -1,38 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #071: 4h Primary + 1d/1w HTF — Volatility Mean Reversion with Trend Filter
+Experiment #072: 12h Primary + 1d/1w HTF — KAMA Adaptive Trend + Volatility Regime
 
-Hypothesis: Previous trend-following strategies failed because 2022 whipsaw and 2025 bear/range
-markets punish pure trend systems. This strategy uses VOLATILITY MEAN REVERSION:
+Hypothesis: Previous 12h strategies failed because HMA doesn't adapt to volatility regimes.
+KAMA (Kaufman Adaptive Moving Average) adjusts smoothing based on market efficiency ratio,
+performing better in ranging markets while capturing trends. Combined with:
 
-1. 1d HMA(21) for MAJOR trend bias (only trade WITH trend, not against)
-2. 4h Bollinger Band squeeze detection (BW percentile < 20 = expansion coming)
-3. 4h RSI(7) extremes for entry timing (not 14 - faster for mean reversion)
-4. 4h ATR(14) ratio for vol spike detection (ATR(7)/ATR(30) > 1.8 = vol expansion)
-5. Asymmetric entries: Long only when 1d bullish, Short only when 1d bearish
-6. Position size: 0.28 discrete (reduced to 0.20 in weak trends)
-7. Stoploss: 2.5 * ATR(14) trailing (wider for mean reversion)
+1. KAMA(10/30) crossover for adaptive trend following (not fixed HMA)
+2. ATR Ratio (ATR7/ATR30) for volatility regime detection (expansion vs contraction)
+3. Bollinger Band Width squeeze for breakout confirmation
+4. 1d KAMA slope + 1w price position for major trend context
+5. Asymmetric entry: long only when 1w bullish, short only when 1w bearish
+6. RSI(14) 45/55 thresholds (not extreme) for momentum confirmation
+7. Position size: 0.28 discrete, reduced to 0.20 in low volatility
+8. Stoploss: 2.5 * ATR(14) trailing (wider for 12h to avoid whipsaws)
 
-Why this should work:
-- Mean reversion works better in bear/range markets (2025 test period)
-- Bollinger squeeze catches volatility expansions before they happen
-- 1d trend filter prevents counter-trend disasters (like 2022 bottom whipsaw)
-- RSI(7) is faster than RSI(14) for catching short-term extremes
-- Vol ratio filter ensures we enter when volatility is actually expanding
-- Fewer but higher quality trades (target 25-40/year on 4h)
+Why this should beat previous attempts:
+- KAMA adapts to market conditions (unlike fixed HMA/EMA)
+- Volatility regime filter prevents entries during compression
+- BB Width squeeze catches breakouts before they happen
+- 1w HTF ensures we don't trade against major trend
+- Asymmetric logic reduces counter-trend losses in bear markets
+- Looser RSI thresholds (45/55 vs 20/80) ensure trade generation
 
-Timeframe: 4h (REQUIRED for this experiment)
-HTF: 1d via mtf_data.get_htf_data() — called ONCE before loop
-Position sizing: 0.28 base, 0.20 reduced
+Timeframe: 12h (REQUIRED)
+HTF: 1d and 1w via mtf_data.get_htf_data() — called ONCE before loop
+Position sizing: 0.20-0.28 discrete
 Stoploss: 2.5 * ATR(14) trailing
-Target trades: 25-40/year per symbol
+Target trades: 25-45/year per symbol
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_vol_meanrevert_bb_rsi_1d1w_v1"
-timeframe = "4h"
+name = "mtf_12h_kama_volregime_bb_1d1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -60,55 +62,60 @@ def calculate_rsi(close, period=14):
     rsi = rsi.fillna(50).values
     return rsi
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts smoothing based on market efficiency ratio.
+    ER = |net change| / sum of absolute changes over period
+    SC = (ER * (fast_SC - slow_SC) + slow_SC)^2
+    """
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma * 100  # Bandwidth as percentage
-    return upper, lower, sma, bandwidth
+    n = len(close)
+    
+    # Efficiency Ratio
+    net_change = np.abs(close_s.diff(er_period))
+    sum_changes = close_s.diff().abs().rolling(window=er_period, min_periods=er_period).sum()
+    er = net_change / (sum_changes + 1e-10)
+    er = er.fillna(0).values
+    
+    # Smoothing Constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = np.power(er * (fast_sc - slow_sc) + slow_sc, 2)
+    
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[er_period] = close[er_period]  # Initialize with price
+    
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
-def calculate_bb_percentile(bandwidth, lookback=100):
-    """Calculate Bollinger Bandwidth percentile over lookback."""
-    bb_pct = np.zeros(len(bandwidth))
-    for i in range(lookback, len(bandwidth)):
-        window = bandwidth[i-lookback:i+1]
-        valid = window[~np.isnan(window)]
-        if len(valid) > 0:
-            bb_pct[i] = np.sum(valid <= bandwidth[i]) / len(valid) * 100
-        else:
-            bb_pct[i] = 50
-    return bb_pct
-
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend with less lag."""
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands and Band Width."""
     close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    
+    upper = sma + (std_dev * std)
+    lower = sma - (std_dev * std)
+    bandwidth = (upper - lower) / sma * 100  # Normalized bandwidth
+    
+    return upper.values, lower.values, bandwidth.values
 
-def calculate_hma_slope(hma_values, lookback=5):
-    """Calculate HMA slope over lookback period."""
-    slope = np.zeros(len(hma_values))
-    for i in range(lookback, len(hma_values)):
-        if hma_values[i - lookback] != 0:
-            slope[i] = (hma_values[i] - hma_values[i - lookback]) / hma_values[i - lookback] * 100
-        else:
-            slope[i] = 0
+def calculate_kama_slope(kama_values, lookback=5):
+    """Calculate KAMA slope over lookback period."""
+    slope = np.zeros(len(kama_values))
+    for i in range(lookback, len(kama_values)):
+        if kama_values[i - lookback] != 0:
+            slope[i] = (kama_values[i] - kama_values[i - lookback]) / kama_values[i - lookback] * 100
     return slope
 
-def calculate_vol_ratio(atr_values, short_period=7, long_period=30):
-    """Calculate ATR ratio for volatility expansion detection."""
-    atr_s = pd.Series(atr_values)
-    atr_short = atr_s.ewm(span=short_period, min_periods=short_period, adjust=False).mean().values
-    atr_long = atr_s.ewm(span=long_period, min_periods=long_period, adjust=False).mean().values
-    vol_ratio = atr_short / (atr_long + 1e-10)
-    return vol_ratio
+def calculate_atr_ratio(atr_short, atr_long):
+    """Calculate ATR ratio for volatility regime detection."""
+    ratio = atr_short / (atr_long + 1e-10)
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -118,28 +125,38 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate HTF indicators
-    hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_slope = calculate_hma_slope(hma_1d_21, 5)
+    # Calculate 1d HTF indicators
+    kama_1d_20 = calculate_kama(df_1d['close'].values, er_period=10, fast_period=2, slow_period=20)
+    kama_1d_slope = calculate_kama_slope(kama_1d_20, 5)
+    
+    # Calculate 1w HTF indicators
+    kama_1w_20 = calculate_kama(df_1w['close'].values, er_period=10, fast_period=2, slow_period=20)
+    price_1w = df_1w['close'].values
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
-    hma_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_slope)
+    kama_1d_20_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_20)
+    kama_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_slope)
+    kama_1w_20_aligned = align_htf_to_ltf(prices, df_1w, kama_1w_20)
+    price_1w_aligned = align_htf_to_ltf(prices, df_1w, price_1w)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, 14)
     atr_7 = calculate_atr(high, low, close, 7)
     atr_30 = calculate_atr(high, low, close, 30)
-    rsi_7 = calculate_rsi(close, 7)
     rsi_14 = calculate_rsi(close, 14)
     
-    # Bollinger Bands
-    bb_upper, bb_lower, bb_sma, bb_bandwidth = calculate_bollinger_bands(close, 20, 2.0)
-    bb_percentile = calculate_bb_percentile(bb_bandwidth, 100)
+    # KAMA for trend (adaptive)
+    kama_10 = calculate_kama(close, er_period=10, fast_period=2, slow_period=10)
+    kama_30 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     
-    # Volatility ratio
-    vol_ratio = calculate_vol_ratio(atr_14, 7, 30)
+    # Bollinger Bands for squeeze detection
+    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, period=20, std_dev=2.0)
+    bb_width_sma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    
+    # ATR ratio for volatility regime
+    atr_ratio = calculate_atr_ratio(atr_7, atr_30)
     
     signals = np.zeros(n)
     
@@ -155,99 +172,108 @@ def generate_signals(prices):
     lowest_price = 0.0
     last_trade_bar = -50
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_slope_aligned[i]):
+        if np.isnan(kama_1d_20_aligned[i]) or np.isnan(kama_1d_slope_aligned[i]):
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(kama_1w_20_aligned[i]) or np.isnan(price_1w_aligned[i]):
             continue
         
-        if np.isnan(bb_bandwidth[i]) or np.isnan(bb_percentile[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(kama_10[i]) or np.isnan(kama_30[i]):
             continue
         
-        if np.isnan(vol_ratio[i]):
+        if np.isnan(bb_width[i]) or np.isnan(bb_width_sma[i]):
             continue
         
-        # === 1D TREND BIAS (MAJOR FILTER) ===
-        # Only trade WITH the 1d trend direction
-        trend_1d_bullish = hma_1d_slope_aligned[i] > 0.5  # Slope > 0.5%
-        trend_1d_bearish = hma_1d_slope_aligned[i] < -0.5  # Slope < -0.5%
-        trend_1d_neutral = not trend_1d_bullish and not trend_1d_bearish
+        if np.isnan(atr_ratio[i]):
+            continue
         
-        # Price position vs 1d HMA for additional confirmation
-        price_above_1d_hma = close[i] > hma_1d_21_aligned[i] * 1.01
-        price_below_1d_hma = close[i] < hma_1d_21_aligned[i] * 0.99
+        # === 1W TREND BIAS (MAJOR) ===
+        # Price above 1w KAMA = bullish major trend (prefer longs only)
+        # Price below 1w KAMA = bearish major trend (prefer shorts only)
+        trend_1w_bullish = close[i] > kama_1w_20_aligned[i]
+        trend_1w_bearish = close[i] < kama_1w_20_aligned[i]
+        
+        # === 1D TREND CONFIRMATION ===
+        # 1d KAMA slope > 0 = bullish intermediate trend
+        # 1d KAMA slope < 0 = bearish intermediate trend
+        trend_1d_bullish = kama_1d_slope_aligned[i] > 0.5  # Threshold to avoid noise
+        trend_1d_bearish = kama_1d_slope_aligned[i] < -0.5
+        
+        # === 12H KAMA CROSSOVER (ADAPTIVE) ===
+        # Fast KAMA(10) crosses above Slow KAMA(30) = bullish crossover
+        # Fast KAMA(10) crosses below Slow KAMA(30) = bearish crossover
+        kama_bullish_cross = kama_10[i] > kama_30[i] and kama_10[i-1] <= kama_30[i-1]
+        kama_bearish_cross = kama_10[i] < kama_30[i] and kama_10[i-1] >= kama_30[i-1]
+        
+        # Current KAMA alignment
+        kama_aligned_bullish = kama_10[i] > kama_30[i]
+        kama_aligned_bearish = kama_10[i] < kama_30[i]
+        
+        # === VOLATILITY REGIME ===
+        # ATR ratio > 1.2 = volatility expanding (good for breakouts)
+        # ATR ratio < 0.8 = volatility contracting (wait for breakout)
+        # ATR ratio 0.8-1.2 = normal volatility
+        vol_expanding = atr_ratio[i] > 1.2
+        vol_contracting = atr_ratio[i] < 0.8
+        vol_normal = not vol_expanding and not vol_contracting
         
         # === BOLLINGER BAND SQUEEZE ===
-        # BB Percentile < 25 = bands are compressed (expansion likely)
-        bb_squeeze = bb_percentile[i] < 25
+        # BB Width < 80% of 50-period average = squeeze (potential breakout)
+        bb_squeeze = bb_width[i] < 0.8 * bb_width_sma[i]
+        bb_expansion = bb_width[i] > bb_width_sma[i]  # Bandwidth expanding
         
-        # === VOLATILITY EXPANSION ===
-        # Vol ratio > 1.5 = volatility is expanding (good for entries)
-        vol_expanding = vol_ratio[i] > 1.5
-        
-        # === RSI EXTREMES (MEAN REVERSION) ===
-        # RSI(7) < 25 = oversold (long opportunity in bullish trend)
-        # RSI(7) > 75 = overbought (short opportunity in bearish trend)
-        rsi_oversold = rsi_7[i] < 25
-        rsi_overbought = rsi_7[i] > 75
-        
-        # RSI(7) < 35 = moderately oversold
-        # RSI(7) > 65 = moderately overbought
-        rsi_mod_oversold = rsi_7[i] < 35
-        rsi_mod_overbought = rsi_7[i] > 65
-        
-        # === PRICE AT BB BOUNDS ===
-        price_at_lower_bb = close[i] <= bb_lower[i] * 1.005
-        price_at_upper_bb = close[i] >= bb_upper[i] * 0.995
+        # === RSI MOMENTUM ===
+        # RSI > 50 = bullish momentum
+        # RSI < 50 = bearish momentum
+        rsi_bullish = rsi_14[i] > 50
+        rsi_bearish = rsi_14[i] < 50
         
         # === POSITION SIZING ===
         current_size = BASE_SIZE
         
-        # Reduce size in neutral 1d trend
-        if trend_1d_neutral:
+        # Reduce size in low volatility (less opportunity)
+        if vol_contracting:
             current_size = REDUCED_SIZE
         
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (ASYMMETRIC) ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRIES
-        # Require: 1d bullish bias + RSI oversold + price at lower BB or vol expanding
-        if trend_1d_bullish or price_above_1d_hma:
-            # Strong long: RSI very oversold + at lower BB
-            if rsi_oversold and price_at_lower_bb:
-                new_signal = current_size
-            # Moderate long: RSI moderately oversold + vol expanding + BB squeeze
-            elif rsi_mod_oversold and vol_expanding and bb_squeeze:
-                new_signal = current_size * 0.8
-            # Pullback long: RSI pulling back from oversold + still below SMA
-            elif rsi_7[i] > 30 and rsi_7[i-1] < 30 and close[i] < bb_sma[i]:
-                new_signal = current_size * 0.7
+        # LONG ENTRIES (only when 1w bullish bias)
+        if trend_1w_bullish:
+            # Strong entry: KAMA crossover + vol expansion + RSI confirmation
+            if kama_bullish_cross and (vol_expanding or vol_normal) and rsi_bullish:
+                if trend_1d_bullish:  # 1d confirms
+                    new_signal = current_size
+            # Pullback entry in established uptrend
+            elif kama_aligned_bullish and trend_1d_bullish:
+                if rsi_14[i] > 45 and rsi_14[i] < 60:  # Pullback zone
+                    if bb_expansion:  # Bands expanding after squeeze
+                        new_signal = current_size * 0.8
         
-        # SHORT ENTRIES
-        # Require: 1d bearish bias + RSI overbought + price at upper BB or vol expanding
-        if trend_1d_bearish or price_below_1d_hma:
-            # Strong short: RSI very overbought + at upper BB
-            if rsi_overbought and price_at_upper_bb:
-                new_signal = -current_size
-            # Moderate short: RSI moderately overbought + vol expanding + BB squeeze
-            elif rsi_mod_overbought and vol_expanding and bb_squeeze:
-                new_signal = -current_size * 0.8
-            # Pullback short: RSI pulling back from overbought + still above SMA
-            elif rsi_7[i] < 70 and rsi_7[i-1] > 70 and close[i] > bb_sma[i]:
-                new_signal = -current_size * 0.7
+        # SHORT ENTRIES (only when 1w bearish bias)
+        if trend_1w_bearish:
+            # Strong entry: KAMA crossover + vol expansion + RSI confirmation
+            if kama_bearish_cross and (vol_expanding or vol_normal) and rsi_bearish:
+                if trend_1d_bearish:  # 1d confirms
+                    new_signal = -current_size
+            # Pullback entry in established downtrend
+            elif kama_aligned_bearish and trend_1d_bearish:
+                if rsi_14[i] > 40 and rsi_14[i] < 55:  # Pullback zone
+                    if bb_expansion:  # Bands expanding after squeeze
+                        new_signal = -current_size * 0.8
         
         # === FREQUENCY SAFEGUARD ===
-        # If no trades for 200 bars (~33 days on 4h), allow weaker entry
-        if bars_since_last_trade > 200 and new_signal == 0.0 and not in_position:
-            if trend_1d_bullish and rsi_mod_oversold:
+        # If no trades for 120 bars (~60 days on 12h), allow weaker entry
+        if bars_since_last_trade > 120 and new_signal == 0.0 and not in_position:
+            if trend_1w_bullish and kama_aligned_bullish and rsi_14[i] > 48:
                 new_signal = current_size * 0.5
-            elif trend_1d_bearish and rsi_mod_overbought:
+            elif trend_1w_bearish and kama_aligned_bearish and rsi_14[i] < 52:
                 new_signal = -current_size * 0.5
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
@@ -271,24 +297,15 @@ def generate_signals(prices):
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            # Exit long if 1d trend reverses bearish strongly
-            if position_side > 0 and trend_1d_bearish:
+            # Exit long if 1w trend reverses bearish
+            if position_side > 0 and trend_1w_bearish and kama_aligned_bearish:
                 trend_reversal = True
-            # Exit short if 1d trend reverses bullish strongly
-            if position_side < 0 and trend_1d_bullish:
+            # Exit short if 1w trend reverses bullish
+            if position_side < 0 and trend_1w_bullish and kama_aligned_bullish:
                 trend_reversal = True
         
-        # === MEAN REVERSION TARGET EXIT ===
-        # Exit when price reaches middle band (BB SMA) after mean reversion entry
-        mean_reversion_exit = False
-        if in_position and position_side != 0:
-            if position_side > 0 and close[i] >= bb_sma[i] * 1.002:
-                mean_reversion_exit = True
-            if position_side < 0 and close[i] <= bb_sma[i] * 0.998:
-                mean_reversion_exit = True
-        
-        # Apply stoploss, trend reversal, or mean reversion exit
-        if stoploss_triggered or trend_reversal or mean_reversion_exit:
+        # Apply stoploss or trend reversal
+        if stoploss_triggered or trend_reversal:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
