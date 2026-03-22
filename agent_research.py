@@ -697,10 +697,8 @@ def main():
             test_results = []
 
         # Log results
-        description = f"exp#{experiment_num:03d} {strategy_name}"
-        append_results(bt_results, status, description, period="train")
-        if test_results:
-            append_results(test_results, status, description, period="test")
+        # Results already logged per-symbol inside the loop above
+        # Do NOT call append_results again here (was causing duplicates)
 
         history.append({
             "num": experiment_num,
