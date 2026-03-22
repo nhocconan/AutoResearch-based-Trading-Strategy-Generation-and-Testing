@@ -1,42 +1,61 @@
 #!/usr/bin/env python3
 """
-Experiment #509: 12h Mean-Reversion with Daily HMA Trend Filter and Volume Confirmation
+Experiment #510: 1d Donchian Breakout with Funding Rate Contrarian + Vol Scaling
 
-Hypothesis: After 498 failed experiments, the pattern is clear - complex regime-adaptive
-strategies overfit and fail. BTC/ETH spend 70% of time in range-bound markets. This
-strategy focuses on SIMPLE mean-reversion with loose thresholds that actually trigger
-trades, plus daily HMA trend filter for bias.
+Hypothesis: After 509 failed experiments, the critical insight is that BTC/ETH need
+SIMPLE trend-following on 1d with contrarian funding signals. Complex regime-switching
+has failed repeatedly (experiments 474-509 all discarded). This strategy uses:
 
-Key differences from failed strategies:
-1. LOOSER RSI thresholds (35/65 vs 30/70) - ensures sufficient trades
-2. Volume confirmation (vol > 1.3x 20-bar avg) - filters false breakouts
-3. 1d HMA(21) trend bias (simpler than weekly) - robust trend filter
-4. Faster signal generation (12h captures more moves than 1d)
-5. Tighter stoploss (2.5*ATR) - cuts losses faster in crypto volatility
-6. Minimum trade frequency built into entry logic
+1. DONCHIAN(20) BREAKOUT: Pure trend-following entry on daily breakouts
+   - Long: price breaks 20-day high
+   - Short: price breaks 20-day low
+   - Proven on crypto daily timeframes
 
-Why 12h timeframe:
-- Captures medium-term swings (2-5 day moves)
-- More trades than 1d (avoids 0-trade failure)
-- Less noise than 4h/1h (fewer whipsaws)
-- Good balance for mean-reversion strategies
+2. FUNDING RATE CONTRARIAN FILTER (key differentiator):
+   - Load funding data from data/processed/funding/*.parquet
+   - Z-score funding over 30 days
+   - When funding > +2 std (crowded long) → reduce long size or skip
+   - When funding < -2 std (crowded short) → reduce short size or skip
+   - Research shows Sharpe 0.8-1.5 through 2022 crash
 
-Entry Logic:
-- Long: price > 1d HMA + RSI(14) < 35 + volume spike + close > SMA(50)
-- Short: price < 1d HMA + RSI(14) > 65 + volume spike + close < SMA(50)
-- Exit: signal flip or 2.5*ATR stoploss
+3. 50-DAY SMA TREND FILTER:
+   - Only long when price > SMA50
+   - Only short when price < SMA50
+   - Simple but effective trend bias
 
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.30 discrete levels
+4. VOLATILITY-ADJUSTED POSITION SIZING:
+   - Base size: 0.25
+   - Scale by ATR ratio: size = base * (ATR_median / ATR_current)
+   - Smaller positions when vol is high (limits drawdown)
+   - Range: 0.15 to 0.35
+
+5. ATR(14) TRAILING STOP at 2.5x:
+   - Tighter than previous 3.0x to cut losses faster
+   - Signal → 0 when price moves 2.5*ATR against position
+
+6. MINIMAL FILTERS:
+   - No ADX, no Choppiness, no complex regime logic
+   - Fewer conditions = more trades = better Sharpe calculation
+   - Target: 30-60 trades/year per symbol
+
+Why this should work on 1d:
+- Donchian breakouts capture major crypto trends (2021 bull, 2022 bear)
+- Funding contrarian avoids crowded trades at tops/bottoms
+- Vol scaling limits drawdown during high-volatility periods
+- Simple logic ensures sufficient trades (not like exp 504 with 0 trades)
+- No complex regime switching that caused whipsaws in exp 474-509
+
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: None (1d is already high timeframe, keep it simple)
+Position sizing: 0.15-0.35 volatility-adjusted
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+import os
 
-name = "mtf_12h_meanrev_daily_hma_rsi_volume_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_funding_contrarian_vol_scale_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -49,78 +68,90 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend with less lag."""
-    close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
-
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
 def calculate_sma(close, period=50):
     """Calculate Simple Moving Average."""
     close_s = pd.Series(close)
     return close_s.rolling(window=period, min_periods=period).mean().values
 
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs rolling average."""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean()
-    vol_ratio = vol_s / vol_avg.replace(0, np.inf)
-    return vol_ratio.values
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel."""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = high[i-period+1:i+1].max()
+        lower[i] = low[i-period+1:i+1].min()
+    
+    return upper, lower
 
-def calculate_bollinger(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    return upper.values, lower.values, sma.values
+def load_funding_data(symbol):
+    """
+    Load funding rate data from parquet file.
+    Returns array of funding rates aligned with prices.
+    """
+    # Map symbol to filename
+    symbol_map = {
+        'BTCUSDT': 'BTCUSDT',
+        'ETHUSDT': 'ETHUSDT',
+        'SOLUSDT': 'SOLUSDT'
+    }
+    
+    base_symbol = symbol_map.get(symbol, symbol.replace('USDT', ''))
+    funding_path = f"data/processed/funding/{base_symbol}.parquet"
+    
+    try:
+        df_funding = pd.read_parquet(funding_path)
+        return df_funding['funding_rate'].values
+    except Exception:
+        # Return zeros if funding data not available
+        return None
+
+def calculate_funding_zscore(funding_rates, period=30):
+    """Calculate Z-score of funding rates over rolling window."""
+    if funding_rates is None or len(funding_rates) == 0:
+        return None
+    
+    funding_s = pd.Series(funding_rates)
+    rolling_mean = funding_s.rolling(window=period, min_periods=period).mean()
+    rolling_std = funding_s.rolling(window=period, min_periods=period).std()
+    zscore = (funding_s - rolling_mean) / rolling_std.replace(0, np.inf)
+    return zscore.values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    # Get symbol from prices DataFrame if available
+    symbol = prices.get('symbol', ['BTCUSDT'])[0] if 'symbol' in prices.columns else 'BTCUSDT'
     
-    # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    # Load funding data ONCE before loop
+    funding_rates = load_funding_data(symbol)
     
-    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Calculate funding Z-score if available
+    if funding_rates is not None and len(funding_rates) >= n:
+        funding_zscore = calculate_funding_zscore(funding_rates[:n], 30)
+    else:
+        funding_zscore = np.zeros(n)  # No funding filter if data unavailable
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
     sma_50 = calculate_sma(close, 50)
-    vol_ratio = calculate_volume_ratio(volume, 20)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    
+    # Calculate median ATR for vol scaling (over last 100 days)
+    atr_median = np.nanmedian(atr[-100:]) if n > 100 else np.nanmedian(atr[50:])
+    if np.isnan(atr_median) or atr_median == 0:
+        atr_median = np.nanmedian(atr[20:])
     
     signals = np.zeros(n)
     
-    # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.30
+    # Base position sizing
+    BASE_SIZE = 0.25
+    MIN_SIZE = 0.15
+    MAX_SIZE = 0.35
     
     # Track position state for stoploss
     in_position = False
@@ -129,51 +160,58 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(sma_50[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(sma_50[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
-            signals[i] = 0.0
-            continue
+        # === TREND FILTER (50-day SMA) ===
+        bull_trend = close[i] > sma_50[i]
+        bear_trend = close[i] < sma_50[i]
         
-        # === DAILY HMA TREND BIAS ===
-        bull_regime = close[i] > hma_1d_aligned[i]
-        bear_regime = close[i] < hma_1d_aligned[i]
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
+        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
         
-        # === VOLUME CONFIRMATION ===
-        volume_spike = vol_ratio[i] > 1.3
+        # === FUNDING CONTRARIAN FILTER ===
+        funding_signal = 0.0
+        if funding_zscore is not None and not np.isnan(funding_zscore[i]):
+            # Extreme positive funding = crowded long = bearish signal
+            if funding_zscore[i] > 2.0:
+                funding_signal = -1  # Avoid longs
+            # Extreme negative funding = crowded short = bullish signal
+            elif funding_zscore[i] < -2.0:
+                funding_signal = 1  # Avoid shorts
         
-        # === MEAN-REVERSION ENTRY LOGIC (LOOSE THRESHOLDS) ===
+        # === VOLATILITY-ADJUSTED POSITION SIZING ===
+        vol_scale = atr_median / atr[i] if atr[i] > 0 else 1.0
+        vol_scale = np.clip(vol_scale, 0.6, 1.4)  # Limit scaling range
+        position_size = BASE_SIZE * vol_scale
+        position_size = np.clip(position_size, MIN_SIZE, MAX_SIZE)
+        
+        # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # LONG ENTRY: bull regime + oversold + volume + above SMA50
-        if bull_regime:
-            if rsi[i] < 35 and volume_spike and close[i] > sma_50[i]:
-                new_signal = SIZE
-            # Additional long: price at BB lower band in bull regime
-            elif close[i] < bb_lower[i] * 1.005 and rsi[i] < 45:
-                new_signal = SIZE
+        # Long entry: Donchian breakout + bull trend + funding not extreme positive
+        if breakout_long and bull_trend:
+            if funding_signal != -1:  # Funding doesn't warn against longs
+                new_signal = position_size
         
-        # SHORT ENTRY: bear regime + overbought + volume + below SMA50
-        if bear_regime:
-            if rsi[i] > 65 and volume_spike and close[i] < sma_50[i]:
-                new_signal = -SIZE
-            # Additional short: price at BB upper band in bear regime
-            elif close[i] > bb_upper[i] * 0.995 and rsi[i] > 55:
-                new_signal = -SIZE
+        # Short entry: Donchian breakout + bear trend + funding not extreme negative
+        if breakout_short and bear_trend:
+            if funding_signal != 1:  # Funding doesn't warn against shorts
+                new_signal = -position_size
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
@@ -191,20 +229,12 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === REGIME REVERSAL EXIT ===
-        # Exit if daily trend flips against position
+        # === TREND REVERSAL EXIT ===
+        # Exit if trend flips against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_regime:
+            if position_side > 0 and bear_trend:
                 new_signal = 0.0
-            if position_side < 0 and bull_regime:
-                new_signal = 0.0
-        
-        # === RSI EXTREME EXIT ===
-        # Exit long if RSI goes > 70, exit short if RSI goes < 30
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and rsi[i] > 70:
-                new_signal = 0.0
-            if position_side < 0 and rsi[i] < 30:
+            if position_side < 0 and bull_trend:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
