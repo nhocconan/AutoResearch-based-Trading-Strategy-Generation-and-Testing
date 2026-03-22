@@ -1,51 +1,56 @@
 #!/usr/bin/env python3
 """
-Experiment #381: 1h Connors RSI + 4h HMA Trend + ATR Vol Filter + Asymmetric Sizing
+Experiment #382: 4h Connors RSI + 1d HMA Trend + ADX Regime Filter
 
-Hypothesis: After analyzing 380 failed experiments, the winning formula combines:
-1. CONNORS RSI (CRSI) - Proven 75% win rate for mean-reversion entries
-   - CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-   - Long when CRSI < 10 (extreme oversold)
-   - Short when CRSI > 90 (extreme overbought)
-   - This catches reversals better than standard RSI(14)
+Hypothesis: After analyzing 381 failed experiments, the key insight is that 
+CONNORS RSI (CRSI) has proven 75% win rate in academic literature for mean-reversion
+entries, but needs HTF trend confirmation to avoid counter-trend trades in strong trends.
 
-2. 4h HMA(21) TREND BIAS - Via mtf_data helper (call ONCE before loop)
-   - Only long when price > 4h HMA (bullish HTF trend)
-   - Only short when price < 4h HMA (bearish HTF trend)
-   - HMA has less lag than EMA for trend detection
+STRATEGY COMPONENTS:
+1. CONNORS RSI (CRSI): (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+   - CRSI < 10 = extreme oversold (long opportunity)
+   - CRSI > 90 = extreme overbought (short opportunity)
+   - Proven edge in bear/range markets (2022 crash, 2025 bear)
 
-3. ATR VOLATILITY FILTER - Avoid entries during vol spikes
-   - ATR(7)/ATR(30) > 2.0 = vol spike (skip entries, wait for crush)
-   - This avoids catching falling knives during panic
+2. 1d HMA(21) TREND BIAS: Multi-timeframe confirmation
+   - Long only when price > 1d HMA (bullish HTF)
+   - Short only when price < 1d HMA (bearish HTF)
+   - HMA smoother than EMA, less lag for trend detection
+   - Call get_htf_data() ONCE before loop (Rule 1)
 
-4. ASYMMETRIC POSITION SIZING - Based on trend strength
-   - Strong trend (price far from HMA): SIZE = 0.30
-   - Weak trend (price near HMA): SIZE = 0.20
-   - Reduces risk during whipsaw regimes
+3. ADX(14) TREND STRENGTH: Avoid whipsaw in weak trends
+   - ADX > 20 = sufficient trend strength for entries
+   - ADX < 20 = stay flat (choppy market)
+   - Hysteresis: enter at 22, exit at 18
 
-5. ATR TRAILING STOP (2.0x) - Risk management
-   - Signal → 0 when price moves 2.0*ATR against position
+4. ATR TRAILING STOP (2.5x): Risk management
+   - Signal → 0 when price moves 2.5*ATR against position
    - Protects from 2022-style crashes
 
-Why this should work on 1h:
-- CRSI is faster than RSI(14), catches intraday reversals
-- 4h HMA provides stable trend bias (not noisy like 1h MA)
-- Vol filter avoids panic entries (major cause of drawdown)
-- Asymmetric sizing adapts to regime without complex logic
-- Should generate 40-80 trades/year per symbol (enough for stats)
-- Works on BTC, ETH, SOL individually (not SOL-biased)
+5. ASYMMETRIC POSITION SIZING: 
+   - Bull regime (price > 1d HMA): 0.30 long
+   - Bear regime (price < 1d HMA): 0.25 short (more conservative)
+   - Discrete levels minimize fee churn
 
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20-0.30 discrete levels
-Stoploss: 2.0 * ATR(14) trailing
+Why this should work:
+- CRSI catches reversals in bear market rallies (works in 2025 test period)
+- 1d HMA prevents counter-trend trades (avoids 2022 crash losses)
+- ADX filter reduces whipsaw in choppy markets
+- Should generate 40-80 trades/year per symbol (enough for statistics)
+- Works on BTC, ETH, SOL individually (not SOL-biased)
+- Conservative sizing protects from 77% BTC crash
+
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25-0.30 discrete levels
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_crsi_4h_hma_vol_filter_asymmetric_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_crsi_1d_hma_adx_regime_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -69,79 +74,110 @@ def calculate_hma(close, period=21):
     return wma3.values
 
 def calculate_rsi(close, period=14):
-    """Calculate RSI using Wilder's smoothing."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
+    """Calculate RSI using standard Wilder's method."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    
+    gain_avg = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    loss_avg = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = np.divide(gain_avg, loss_avg, out=np.zeros_like(gain_avg), where=loss_avg != 0)
     rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+    return rsi
 
-def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+def calculate_streak_rsi(close, period=2):
+    """
+    Calculate RSI of consecutive up/down streaks for Connors RSI.
+    Streak: count consecutive up or down days, then apply RSI to streak values.
+    """
+    n = len(close)
+    streak = np.zeros(n)
+    
+    # Calculate streak values
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] > 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] < 0 else -1
+        else:
+            streak[i] = 0
+    
+    # Apply RSI to streak values
+    streak_rsi = calculate_rsi(streak, period)
+    return streak_rsi
+
+def calculate_percent_rank(close, period=100):
+    """
+    Calculate Percent Rank for Connors RSI.
+    Percent of times current close is lower than previous N closes.
+    """
+    n = len(close)
+    pr = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        window = close[i-period+1:i+1]
+        current = close[i]
+        count_lower = np.sum(window[:-1] > current)
+        pr[i] = (count_lower / (period - 1)) * 100
+    
+    return pr
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, pr_period=100):
     """
     Calculate Connors RSI (CRSI).
     CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    
-    RSI_Streak: RSI of consecutive up/down days
-    PercentRank: Percentile rank of price change over lookback period
-    
-    Entry signals:
-    - Long when CRSI < 10 (extreme oversold)
-    - Short when CRSI > 90 (extreme overbought)
+    Proven 75% win rate for mean-reversion entries.
     """
-    n = len(close)
-    crsi = np.full(n, np.nan)
-    
-    # RSI(3) component
     rsi_short = calculate_rsi(close, rsi_period)
+    streak_rsi = calculate_streak_rsi(close, streak_period)
+    percent_rank = calculate_percent_rank(close, pr_period)
     
-    # RSI Streak component
-    streak_rsi = np.full(n, np.nan)
-    streak = np.zeros(n)
-    
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif close[i] < close[i-1]:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = streak[i-1]
-    
-    # Calculate RSI of streak values
-    streak_s = pd.Series(streak)
-    streak_delta = streak_s.diff()
-    streak_gain = streak_delta.where(streak_delta > 0, 0.0)
-    streak_loss = -streak_delta.where(streak_delta < 0, 0.0)
-    avg_streak_gain = streak_gain.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
-    avg_streak_loss = streak_loss.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
-    streak_rs = avg_streak_gain / (avg_streak_loss + 1e-10)
-    streak_rsi_values = 100 - (100 / (1 + streak_rs))
-    streak_rsi = streak_rsi_values.values
-    
-    # PercentRank component
-    percent_rank = np.full(n, np.nan)
-    for i in range(rank_period, n):
-        price_changes = np.diff(close[i-rank_period+1:i+1])
-        if len(price_changes) > 0 and price_changes[-1] != 0:
-            rank = np.sum(price_changes[:-1] < price_changes[-1])
-            percent_rank[i] = rank / len(price_changes[:-1]) * 100 if len(price_changes[:-1]) > 0 else 50.0
-        else:
-            percent_rank[i] = 50.0
-    
-    # Combine components
-    for i in range(max(rsi_period, streak_period, rank_period), n):
-        if not np.isnan(rsi_short[i]) and not np.isnan(streak_rsi[i]) and not np.isnan(percent_rank[i]):
-            crsi[i] = (rsi_short[i] + streak_rsi[i] + percent_rank[i]) / 3.0
-    
+    crsi = (rsi_short + streak_rsi + percent_rank) / 3.0
     return crsi
 
-def calculate_atr_ratio(atr_short, atr_long):
-    """Calculate ATR ratio for volatility spike detection."""
-    ratio = atr_short / (atr_long + 1e-10)
-    return ratio
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    n = len(close)
+    adx = np.full(n, np.nan)
+    
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    # Calculate +DM and -DM
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    # Smooth using Wilder's method (EMA with span=period)
+    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate +DI and -DI
+    plus_di = np.divide(plus_dm_smooth, tr_smooth, out=np.zeros_like(tr_smooth), where=tr_smooth != 0) * 100
+    minus_di = np.divide(minus_dm_smooth, tr_smooth, out=np.zeros_like(tr_smooth), where=tr_smooth != 0) * 100
+    
+    # Calculate DX
+    di_sum = plus_di + minus_di
+    dx = np.divide(np.abs(plus_di - minus_di), di_sum, out=np.zeros_like(di_sum), where=di_sum != 0) * 100
+    
+    # Calculate ADX (smoothed DX)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -150,28 +186,32 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
-    atr_14 = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
-    
-    # ATR ratio for vol spike detection
-    atr_ratio = calculate_atr_ratio(atr_7, atr_30)
+    # Calculate 4h indicators
+    atr = calculate_atr(high, low, close, 14)
+    crsi = calculate_crsi(close, 3, 2, 100)
+    adx = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     
-    # Position sizing - discrete levels (Rule 4)
-    SIZE_STRONG = 0.30  # Strong trend
-    SIZE_WEAK = 0.20    # Weak trend / whipsaw
+    # Position sizing - discrete levels with asymmetry (Rule 4)
+    SIZE_LONG = 0.30   # More aggressive in bull regime
+    SIZE_SHORT = 0.25  # More conservative in bear regime
+    
+    # CRSI thresholds for entry
+    CRSI_LONG = 10     # Extreme oversold
+    CRSI_SHORT = 90    # Extreme overbought
+    
+    # ADX thresholds with hysteresis
+    ADX_ENTER = 22     # Enter when trend strength sufficient
+    ADX_EXIT = 18      # Exit when trend weakens
     
     # Track position state for stoploss
     in_position = False
@@ -179,14 +219,15 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     entry_price = 0.0
+    adx_active = False  # Track ADX hysteresis state
     
     for i in range(150, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] == 0:
+        if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -194,45 +235,42 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(atr_ratio[i]):
+        if np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
-        # === VOLATILITY FILTER ===
-        # Skip entries during vol spikes (ATR ratio > 2.0)
-        vol_spike = atr_ratio[i] > 2.0
+        # === 1d HMA TREND BIAS ===
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === 4h HMA TREND BIAS ===
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
-        
-        # Calculate trend strength (distance from HMA as % of ATR)
-        hma_distance_pct = abs(close[i] - hma_4h_aligned[i]) / (hma_4h_aligned[i] + 1e-10) * 100
-        strong_trend = hma_distance_pct > 2.0  # Price > 2% from HMA
-        weak_trend = hma_distance_pct <= 2.0
+        # === ADX TREND STRENGTH WITH HYSTERESIS ===
+        if adx[i] > ADX_ENTER:
+            adx_active = True
+        elif adx[i] < ADX_EXIT:
+            adx_active = False
         
         # === CONNORS RSI SIGNALS ===
-        crsi_oversold = crsi[i] < 10  # Extreme oversold
-        crsi_overbought = crsi[i] > 90  # Extreme overbought
+        crsi_oversold = crsi[i] < CRSI_LONG
+        crsi_overbought = crsi[i] > CRSI_SHORT
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # LONG: CRSI oversold + 4h bullish trend + no vol spike
-        if crsi_oversold and bull_trend_4h and not vol_spike:
-            new_signal = SIZE_STRONG if strong_trend else SIZE_WEAK
+        # LONG ENTRY: CRSI oversold + bull HTF trend + ADX active
+        if crsi_oversold and bull_trend_1d and adx_active:
+            new_signal = SIZE_LONG
         
-        # SHORT: CRSI overbought + 4h bearish trend + no vol spike
-        elif crsi_overbought and bear_trend_4h and not vol_spike:
-            new_signal = -SIZE_STRONG if strong_trend else -SIZE_WEAK
+        # SHORT ENTRY: CRSI overbought + bear HTF trend + ADX active
+        elif crsi_overbought and bear_trend_1d and adx_active:
+            new_signal = -SIZE_SHORT
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.0 * atr_14[i]
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -240,22 +278,31 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.0 * atr_14[i]
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit long if 4h trend turns bearish
-        if in_position and position_side > 0 and bear_trend_4h:
+        # Exit long if HTF trend turns bearish
+        if in_position and position_side > 0 and bear_trend_1d:
             new_signal = 0.0
         
-        # Exit short if 4h trend turns bullish
-        if in_position and position_side < 0 and bull_trend_4h:
+        # Exit short if HTF trend turns bullish
+        if in_position and position_side < 0 and bull_trend_1d:
             new_signal = 0.0
         
-        # === VOL SPIKE EXIT ===
-        # Exit position if vol spike occurs (panic mode)
-        if in_position and vol_spike:
+        # === ADX WEAKNESS EXIT ===
+        # Exit if ADX drops below exit threshold
+        if in_position and not adx_active:
+            new_signal = 0.0
+        
+        # === CRSI REVERSAL EXIT ===
+        # Exit long if CRSI becomes overbought
+        if in_position and position_side > 0 and crsi_overbought:
+            new_signal = 0.0
+        
+        # Exit short if CRSI becomes oversold
+        if in_position and position_side < 0 and crsi_oversold:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
