@@ -1,41 +1,57 @@
 #!/usr/bin/env python3
 """
-Experiment #398: 30m RSI Momentum + 4h HMA Trend + ADX Filter
+Experiment #399: 1h Volatility Regime + 4h HMA Trend + ATR Stop
 
-Hypothesis: After 397 failed experiments, the pattern is clear - strategies fail
-when they're either too complex (multiple conflicting filters) or too simple
-(plain EMA crossover). The 30m timeframe offers a sweet spot: fast enough to
-catch intraday reversals, slow enough to avoid 15m noise.
+Hypothesis: After 398 failed experiments, the pattern is clear - strategies fail because
+they're either too complex (too many conflicting filters) or don't adapt to volatility regimes.
 
 KEY INSIGHTS FROM FAILURES:
-- Exp 397 (-4.9 Sharpe): RSI mean-reversion on 15m was too noisy
-- Exp 392 (-0.89 Sharpe): KAMA adaptive was over-engineered
-- Exp 391 (-3.9 Sharpe): RSI pullback on 15m had too many whipsaws
+- Exp #387-398: All negative Sharpe, most -1.0 to -5.0
+- Over-filtering = 0 trades or massive whipsaw
+- BTC/ETH need volatility-adaptive logic, not pure trend or pure mean-reversion
 
-THIS STRATEGY:
-1. 4h HMA(21) trend bias - proven stable across BTC/ETH/SOL
-2. 30m RSI(14) asymmetric entries - long <35, short >65 (looser than 30/70)
-3. ADX(14) > 18 filter - avoids dead chop, but not too restrictive
-4. NO volume filter - volume confirmation was killing trade count
-5. ATR(14) 2.5x trailing stop - mandatory risk management
-6. Position sizing: 0.25 discrete - conservative for 30m volatility
+STRATEGY DESIGN:
+1. VOLATILITY REGIME (BB Width Percentile): 
+   - BB Width > 70th percentile = high vol (trend-following works)
+   - BB Width < 30th percentile = low vol (mean-reversion works)
+   - This adapts to market conditions automatically
 
-Why this should beat Sharpe=0.676:
-- 30m captures swings that 4h misses (intraday reversals)
-- Looser RSI thresholds = more trades (avoid 0-trade failure)
-- ADX > 18 (not 25) = more opportunities while filtering worst chop
-- 4h HMA provides stable trend context (proven in best strategies)
+2. 4h HMA(21) TREND BIAS:
+   - Long only when price > 4h HMA in high vol regime
+   - Short only when price < 4h HMA in high vol regime
+   - Provides stable trend filter without whipsaw
 
-Timeframe: 30m (REQUIRED for this experiment)
+3. 1h RSI(14) ENTRY TRIGGER:
+   - High vol + trend: Enter on RSI pullback (40-60 range)
+   - Low vol: Enter on RSI extremes (<30 long, >70 short)
+   - Different logic per regime
+
+4. ATR(14) TRAILING STOP (2.5x):
+   - Signal → 0 when price moves 2.5*ATR against position
+   - Protects from crash scenarios
+
+5. POSITION SIZING: 0.30 discrete
+   - Conservative enough for 77% BTC crash
+   - Discrete levels minimize fee churn
+
+Why this should work:
+- Adapts to volatility regime (key missing piece in 300+ failures)
+- 4h HMA is stable trend filter (proven in baseline)
+- RSI entry is simple and generates trades
+- Should work on BTC, ETH, SOL individually
+- Targets 40-80 trades/year (enough for stats, not too many for fees)
+
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Target: >60 trades per symbol on train, >15 on test, Sharpe > 0.7
+Position sizing: 0.30 discrete levels
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_rsi_momentum_4h_hma_adx_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_vol_regime_4h_hma_rsi_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -59,7 +75,7 @@ def calculate_hma(close, period=21):
     return wma3.values
 
 def calculate_rsi(close, period=14):
-    """Calculate RSI using standard Wilder's method."""
+    """Calculate RSI using standard formula."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -70,31 +86,28 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and bandwidth."""
     close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / (sma + 1e-10)
+    return upper.values, lower.values, bandwidth.values, sma.values
+
+def calculate_bb_width_percentile(bandwidth, lookback=100):
+    """Calculate rolling percentile of BB width to detect volatility regime."""
+    n = len(bandwidth)
+    percentile = np.full(n, np.nan)
     
-    plus_dm = high_s.diff()
-    minus_dm = -low_s.diff()
+    for i in range(lookback, n):
+        window = bandwidth[i-lookback+1:i+1]
+        valid_window = window[~np.isnan(window)]
+        if len(valid_window) >= lookback // 2:
+            percentile[i] = np.sum(valid_window <= bandwidth[i]) / len(valid_window) * 100
     
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    
-    tr1 = high_s - low_s
-    tr2 = np.abs(high_s - close_s.shift(1))
-    tr3 = np.abs(low_s - close_s.shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
-    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / (atr + 1e-10))
-    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / (atr + 1e-10))
-    
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return adx.values
+    return percentile
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -105,21 +118,22 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 4h HMA
+    # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    adx = calculate_adx(high, low, close, 14)
+    bb_upper, bb_lower, bb_bandwidth, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
+    bb_percentile = calculate_bb_width_percentile(bb_bandwidth, 100)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -128,7 +142,7 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
@@ -138,34 +152,44 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(adx[i]):
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        # === TREND BIAS FROM 4h HMA ===
+        if np.isnan(bb_percentile[i]):
+            signals[i] = 0.0
+            continue
+        
+        # === VOLATILITY REGIME DETECTION ===
+        high_vol = bb_percentile[i] > 70  # Top 30% volatility = trending
+        low_vol = bb_percentile[i] < 30   # Bottom 30% volatility = ranging
+        
+        # === 4h HMA TREND BIAS ===
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === ADX FILTER (avoid dead chop) ===
-        # ADX > 18 = enough momentum to trade (looser than 25 for more trades)
-        adx_ok = adx[i] > 18
-        
-        # === RSI SIGNALS (asymmetric thresholds for more trades) ===
-        # Long: RSI < 35 (oversold pullback in uptrend)
-        # Short: RSI > 65 (overbought pullback in downtrend)
-        rsi_long = rsi[i] < 35
-        rsi_short = rsi[i] > 65
-        
-        # === GENERATE SIGNAL ===
+        # === GENERATE SIGNAL BASED ON REGIME ===
         new_signal = 0.0
         
-        # LONG: 4h bull trend + ADX ok + RSI oversold
-        if bull_trend_4h and adx_ok and rsi_long:
-            new_signal = SIZE
+        # HIGH VOLATILITY REGIME: Trend-following with RSI pullback
+        if high_vol:
+            if bull_trend_4h and rsi[i] >= 40 and rsi[i] <= 60:
+                # Long on RSI pullback in uptrend
+                new_signal = SIZE
+            elif bear_trend_4h and rsi[i] >= 40 and rsi[i] <= 60:
+                # Short on RSI pullback in downtrend
+                new_signal = -SIZE
         
-        # SHORT: 4h bear trend + ADX ok + RSI overbought
-        elif bear_trend_4h and adx_ok and rsi_short:
-            new_signal = -SIZE
+        # LOW VOLATILITY REGIME: Mean-reversion at extremes
+        elif low_vol:
+            if rsi[i] < 30:
+                # Oversold = long
+                new_signal = SIZE
+            elif rsi[i] > 70:
+                # Overbought = short
+                new_signal = -SIZE
+        
+        # NEUTRAL VOLATILITY (30-70 percentile): Stay flat or hold existing
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -186,13 +210,22 @@ def generate_signals(prices):
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit long if 4h trend turns bear
-        if in_position and position_side > 0 and bear_trend_4h:
-            new_signal = 0.0
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and bear_trend_4h and high_vol:
+                # Long position exits when 4h trend flips bearish in high vol
+                new_signal = 0.0
+            if position_side < 0 and bull_trend_4h and high_vol:
+                # Short position exits when 4h trend flips bullish in high vol
+                new_signal = 0.0
         
-        # Exit short if 4h trend turns bull
-        if in_position and position_side < 0 and bull_trend_4h:
-            new_signal = 0.0
+        # === RSI EXTREME EXIT (for low vol mean-reversion) ===
+        if in_position and low_vol:
+            if position_side > 0 and rsi[i] > 60:
+                # Long exits when RSI recovers to neutral
+                new_signal = 0.0
+            if position_side < 0 and rsi[i] < 40:
+                # Short exits when RSI recovers to neutral
+                new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
