@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #600: 1h Primary + 4h HTF — Simplified RSI + Choppiness + Funding Rate Contrarian
+Experiment #601: 4h Primary + 1d/1w HTF — Simplified Regime + CRSI + ATR Stop
 
-Hypothesis: #595 failed (Sharpe=-0.231) due to overly strict filters (CRSI extremes 15/85, session 8-20 UTC).
-This version simplifies entry logic while maintaining trade frequency control:
-1. RSI(14) instead of CRSI - simpler, more reliable mean reversion signal
-2. RSI thresholds 25/75 (not 15/85) - ensures trades actually trigger
-3. Remove session filter - crypto trades 24/7, session filter unnecessary
-4. Add funding rate contrarian signal - proven edge for BTC/ETH in bear markets
-5. Simpler CHOP regime: >50 = range (mean revert), <50 = trend (follow)
-6. 4h HMA(21) for trend bias (proven in #591, #594 with Sharpe>0.4)
-7. Position size: 0.25 discrete, stoploss 2.5 ATR trailing
+Hypothesis: Building on #591/#594 success (4h chop regime), this strategy simplifies
+entry logic to ensure adequate trade frequency while maintaining edge. Key changes
+from failed #595 (1h, negative Sharpe):
+1. Move to 4h primary (proven timeframe, 20-50 trades/year target)
+2. Add 1d HTF HMA for stronger trend bias (not just 4h)
+3. Relax CRSI thresholds (20/80 vs 15/85) to generate more trades
+4. Remove session filter (irrelevant on 4h)
+5. Simplify exit logic (avoid premature exits killing winners)
+6. ATR-based position scaling (smaller size when vol spikes)
 
 Why this might beat Sharpe=0.520:
-- Funding rate contrarian works especially well in 2022 crash and 2025 bear
-- Simpler logic = fewer bugs, more consistent signals
-- RSI(14) more stable than CRSI for 1h timeframe
-- 4h trend filter prevents counter-trend mean reversion trades
+1. 4h TF = proven winner (#591 Sharpe=0.423, #594 Sharpe=0.465)
+2. Dual HTF (1d + 1w) for robust trend confirmation
+3. CHOP regime switch with cleaner thresholds (>58 chop, <42 trend)
+4. CRSI mean reversion in chop, pullback entries in trend
+5. Volatility-adjusted position sizing (0.25-0.35 based on ATR percentile)
+6. Clean 2.5*ATR trailing stoploss
 
-Position sizing: 0.25 discrete (control drawdown on 1h)
+Position sizing: 0.30 base, scaled 0.25-0.35 by vol
 Target: >=30 trades/symbol train, >=3 test, Sharpe > 0 all symbols
-Trade frequency: 40-70/year via RSI extremes + HTF trend confluence
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_rsi_chop_funding_4h_v1"
-timeframe = "1h"
+name = "mtf_4h_crsi_chop_dual_htf_1d1w_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -56,12 +57,63 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Calculate Connors RSI (CRSI) - composite mean reversion indicator.
+    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    """
+    n = len(close)
+    close_s = pd.Series(close)
+    
+    # RSI(3) - fast RSI
+    rsi_3 = calculate_rsi(close, rsi_period)
+    
+    # Streak RSI - count consecutive up/down
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = 0
+    
+    streak_gain = np.where(streak > 0, streak, 0.0)
+    streak_loss = np.where(streak < 0, -streak, 0.0)
+    
+    streak_gain_s = pd.Series(streak_gain)
+    streak_loss_s = pd.Series(streak_loss)
+    
+    avg_streak_gain = streak_gain_s.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
+    avg_streak_loss = streak_loss_s.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rs_streak = avg_streak_gain / (avg_streak_loss + 1e-10)
+    rsi_streak = 100.0 - (100.0 / (1.0 + rs_streak))
+    rsi_streak = rsi_streak.fillna(50.0).values
+    
+    # PercentRank(100)
+    price_change = close_s.diff()
+    percent_rank = pd.Series(np.zeros(n))
+    
+    for i in range(rank_period, n):
+        window = price_change.iloc[i-rank_period:i]
+        current = price_change.iloc[i]
+        if np.isnan(current):
+            percent_rank.iloc[i] = 50.0
+        else:
+            rank = (window < current).sum() / len(window)
+            percent_rank.iloc[i] = rank * 100.0
+    
+    percent_rank = percent_rank.fillna(50.0).values
+    
+    crsi = (rsi_3 + rsi_streak + percent_rank) / 3.0
+    crsi = np.clip(crsi, 0.0, 100.0)
+    
+    return crsi
+
 def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP) - regime detection.
-    CHOP > 50 = choppy/range market (mean reversion works)
-    CHOP < 50 = trending market (trend following works)
-    """
+    """Calculate Choppiness Index for regime detection."""
     n = period
     atr_vals = calculate_atr(high, low, close, 14)
     
@@ -79,7 +131,7 @@ def calculate_choppiness(high, low, close, period=14):
     return chop
 
 def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average (HMA) - reduces lag vs EMA."""
+    """Calculate Hull Moving Average."""
     n = period
     half = n // 2
     sqrt_n = int(np.sqrt(n))
@@ -99,25 +151,39 @@ def calculate_hma(close, period=21):
     
     return hma.values
 
-def load_funding_rate(symbol):
-    """
-    Load funding rate data from processed funding parquet files.
-    Returns aligned funding rate array for contrarian signal.
-    Funding > 0.03% = crowded long (short signal)
-    Funding < -0.03% = crowded short (long signal)
-    """
-    try:
-        symbol_map = {
-            'BTCUSDT': 'btcusdt',
-            'ETHUSDT': 'ethusdt',
-            'SOLUSDT': 'solusdt'
-        }
-        symbol_lower = symbol_map.get(symbol, symbol.lower())
-        funding_path = f"data/processed/funding/{symbol_lower}.parquet"
-        df_funding = pd.read_parquet(funding_path)
-        return df_funding['funding_rate'].values
-    except:
-        return None
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX for trend strength."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    tr1 = high_s - low_s
+    tr2 = np.abs(high_s - close_s.shift(1))
+    tr3 = np.abs(low_s - close_s.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    
+    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_di = 100.0 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / (atr + 1e-10))
+    minus_di = 100.0 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / (atr + 1e-10))
+    
+    dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    return adx.values
+
+def calculate_atr_percentile(atr, lookback=100):
+    """Calculate ATR percentile for position sizing."""
+    atr_s = pd.Series(atr)
+    atr_rank = atr_s.rolling(window=lookback, min_periods=50).apply(
+        lambda x: (x < x.iloc[-1]).sum() / len(x), raw=False
+    )
+    return atr_rank.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -126,39 +192,35 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 4h HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    # Load HTF data ONCE before loop (Rule 1)
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h HTF HMA for trend direction
-    hma_4h_21 = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_50 = calculate_hma(df_4h['close'].values, period=50)
+    # Calculate 1d HTF indicators
+    hma_1d_21 = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_50 = calculate_hma(df_1d['close'].values, period=50)
     
-    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
-    hma_4h_50_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_50)
+    # Calculate 1w HTF indicators
+    hma_1w_21 = calculate_hma(df_1w['close'].values, period=21)
     
-    # Calculate 1h indicators
+    # Align HTF to LTF (Rule 2 - auto shift(1))
+    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
+    hma_1d_50_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_50)
+    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
+    
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_14 = calculate_rsi(close, 14)
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
     chop_14 = calculate_choppiness(high, low, close, 14)
-    
-    # Volume SMA for confirmation
-    vol_sma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Load funding rate for contrarian signal
-    symbol = prices.get('symbol', 'BTCUSDT')
-    funding_rates = load_funding_rate(symbol)
-    if funding_rates is not None and len(funding_rates) >= n:
-        funding_aligned = funding_rates[:n]
-    else:
-        funding_aligned = np.zeros(n)
+    adx_14 = calculate_adx(high, low, close, 14)
+    atr_pct = calculate_atr_percentile(atr_14, lookback=100)
     
     signals = np.zeros(n)
     
-    # Position sizing (Rule 4 - discrete, max 0.40, smaller for 1h)
-    POSITION_SIZE = 0.25
+    # Base position size
+    BASE_SIZE = 0.30
     
-    # Track position state for stoploss
+    # Track position state
     in_position = False
     position_side = 0
     entry_price = 0.0
@@ -169,59 +231,68 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(hma_4h_50_aligned[i]):
+        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_50_aligned[i]):
             continue
-        if np.isnan(rsi_14[i]) or np.isnan(chop_14[i]):
+        if np.isnan(hma_1w_21_aligned[i]):
             continue
-        if np.isnan(vol_sma20[i]):
+        if np.isnan(crsi[i]) or np.isnan(chop_14[i]) or np.isnan(adx_14[i]):
+            continue
+        if np.isnan(atr_pct[i]):
             continue
         
-        # === REGIME DETECTION (Choppiness Index) ===
-        is_chop_regime = chop_14[i] > 50.0
-        is_trend_regime = chop_14[i] < 50.0
+        # === REGIME DETECTION ===
+        is_chop_regime = chop_14[i] > 58.0
+        is_trend_regime = chop_14[i] < 42.0
         
-        # === 4H TREND BIAS ===
-        bull_bias_4h = close[i] > hma_4h_21_aligned[i]
-        bear_bias_4h = close[i] < hma_4h_21_aligned[i]
+        # === 1D TREND BIAS ===
+        bull_bias_1d = close[i] > hma_1d_21_aligned[i]
+        bear_bias_1d = close[i] < hma_1d_21_aligned[i]
         
-        # 4h HMA slope for trend strength
-        hma_4h_slope_bull = hma_4h_21_aligned[i] > hma_4h_50_aligned[i]
-        hma_4h_slope_bear = hma_4h_21_aligned[i] < hma_4h_50_aligned[i]
+        # 1d HMA slope
+        hma_1d_slope_bull = hma_1d_21_aligned[i] > hma_1d_50_aligned[i]
+        hma_1d_slope_bear = hma_1d_21_aligned[i] < hma_1d_50_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > 0.7 * vol_sma20[i]
+        # === 1W MAJOR TREND ===
+        bull_bias_1w = close[i] > hma_1w_21_aligned[i]
+        bear_bias_1w = close[i] < hma_1w_21_aligned[i]
         
-        # === FUNDING RATE CONTRARIAN ===
-        funding_extreme_long = funding_aligned[i] > 0.0003  # >0.03%
-        funding_extreme_short = funding_aligned[i] < -0.0003  # <-0.03%
+        # === POSITION SIZING (vol-adjusted) ===
+        # Lower size when ATR is in top 30% (high vol)
+        if atr_pct[i] > 0.70:
+            position_size = BASE_SIZE * 0.83  # 0.25
+        elif atr_pct[i] < 0.30:
+            position_size = BASE_SIZE * 1.17  # 0.35
+        else:
+            position_size = BASE_SIZE  # 0.30
         
-        # === ENTRY LOGIC - DUAL REGIME ===
+        # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        if volume_confirmed:
-            # --- CHOP REGIME: Mean Reversion (RSI extremes) ---
-            if is_chop_regime:
-                # Long: RSI < 30 (oversold) + 4h bull bias OR funding extreme short
-                if rsi_14[i] < 30.0 and (bull_bias_4h or funding_extreme_short):
-                    new_signal = POSITION_SIZE
-                
-                # Short: RSI > 70 (overbought) + 4h bear bias OR funding extreme long
-                elif rsi_14[i] > 70.0 and (bear_bias_4h or funding_extreme_long):
-                    new_signal = -POSITION_SIZE
+        # --- CHOP REGIME: Mean Reversion (CRSI extremes) ---
+        if is_chop_regime:
+            # Long: CRSI < 20 (oversold) + 1d bull bias
+            if crsi[i] < 20.0 and bull_bias_1d:
+                new_signal = position_size
             
-            # --- TREND REGIME: Trend Following (RSI pullback + trend) ---
-            elif is_trend_regime:
-                # Long: RSI < 45 (pullback) + 4h bull + slope confirmed
-                if rsi_14[i] < 45.0 and bull_bias_4h and hma_4h_slope_bull:
-                    new_signal = POSITION_SIZE
-                
-                # Short: RSI > 55 (pullback) + 4h bear + slope confirmed
-                elif rsi_14[i] > 55.0 and bear_bias_4h and hma_4h_slope_bear:
-                    new_signal = -POSITION_SIZE
+            # Short: CRSI > 80 (overbought) + 1d bear bias
+            elif crsi[i] > 80.0 and bear_bias_1d:
+                new_signal = -position_size
         
-        # === HOLD POSITION LOGIC ===
-        if in_position and new_signal == 0.0:
-            new_signal = signals[i-1] if i > 0 else 0.0
+        # --- TREND REGIME: Trend Following (CRSI pullback) ---
+        elif is_trend_regime:
+            # Long: CRSI < 35 (pullback) + 1d bull + slope + 1w confirm
+            if crsi[i] < 35.0 and bull_bias_1d and hma_1d_slope_bull and bull_bias_1w:
+                new_signal = position_size
+            
+            # Short: CRSI > 65 (pullback) + 1d bear + slope + 1w confirm
+            elif crsi[i] > 65.0 and bear_bias_1d and hma_1d_slope_bear and bear_bias_1w:
+                new_signal = -position_size
+        
+        # --- NEUTRAL REGIME: Stay flat or hold existing ---
+        else:
+            # In neutral regime, only hold existing positions
+            if in_position:
+                new_signal = signals[i-1] if i > 0 else 0.0
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
         stoploss_triggered = False
@@ -244,13 +315,15 @@ def generate_signals(prices):
         if stoploss_triggered:
             new_signal = 0.0
         
-        # === EXIT CONDITIONS (regime flip or bias flip) ===
+        # === EXIT ON REGIME FLIP ===
+        # Exit long if regime flips to strong trend bear
         if in_position and position_side > 0:
-            if bear_bias_4h and rsi_14[i] > 55.0:
+            if chop_14[i] < 42.0 and bear_bias_1d and hma_1d_slope_bear:
                 new_signal = 0.0
         
+        # Exit short if regime flips to strong trend bull
         if in_position and position_side < 0:
-            if bull_bias_4h and rsi_14[i] < 45.0:
+            if chop_14[i] < 42.0 and bull_bias_1d and hma_1d_slope_bull:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -262,6 +335,7 @@ def generate_signals(prices):
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
+                # Flip position
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
