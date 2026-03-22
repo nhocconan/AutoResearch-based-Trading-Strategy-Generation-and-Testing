@@ -1,41 +1,54 @@
 #!/usr/bin/env python3
 """
-Experiment #408: 1d Weekly HMA Trend + Daily ADX/RSI Ensemble + BB Regime Filter
+Experiment #409: 15m Trend-Pullback System with 4h/1h HTF Filters
 
-Hypothesis: After 407 failed experiments, the key insight is that DAILY timeframe
-needs WEEKLY trend bias + ENSEMBLE voting + ASYMMETRIC entries.
-
-WHY THIS SHOULD WORK (vs 407 failures):
-1. WEEKLY HMA(21) is MORE STABLE than daily HMA - fewer false trend flips
-2. ENSEMBLE VOTING (2 of 3 signals) reduces whipsaw vs single indicator
-3. ASYMMETRIC entries: easier to enter WITH weekly trend, harder AGAINST
-4. BB WIDTH percentile detects regime better than absolute CHOP values
-5. LOW trade frequency target (25-40 trades/year) minimizes fee drag on 1d
+Hypothesis: After 408 failed experiments, the pattern is clear - complex regime 
+switching overfits and fails. Simple trend-following on 15m gets whipsawed.
+The solution: SIMPLE multi-timeframe alignment with pullback entries.
 
 STRATEGY COMPONENTS:
-1. WEEKLY HMA(21) via mtf_data: Primary trend bias (bull/bear)
-2. DAILY ADX(14): Trend strength filter (ADX>25 = trend, ADX<20 = range)
-3. DAILY RSI(14): Entry timing (pullback to 40-60 in trend, extremes in range)
-4. DAILY BB WIDTH(20): Regime detection (width percentile <30 = squeeze breakout)
-5. ATR(14) trailing stop: 3x ATR for risk management
-6. Position sizing: 0.30 discrete (conservative for daily moves)
+1. 4h HMA(21) TREND BIAS: Major trend direction
+   - Only long when price > 4h HMA
+   - Only short when price < 4h HMA
+   - HMA smoother than EMA, less lag
 
-ENTRY LOGIC:
-- BULL regime (price > weekly HMA): Long on RSI pullback to 35-50 + ADX>20
-- BEAR regime (price < weekly HMA): Short on RSI rally to 50-65 + ADX>20
-- RANGE regime (ADX<20): Mean-revert at RSI<30 or RSI>70 + BB squeeze
+2. 1h RSI(14) MOMENTUM FILTER: Confirms trend strength
+   - Long only when 1h RSI > 45 (bullish momentum)
+   - Short only when 1h RSI < 55 (bearish momentum)
+   - Avoids entering against HTF momentum
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data helper (call ONCE before loop)
+3. 15m RSI(7) PULLBACK ENTRY: Timing entries on dips
+   - Long when 15m RSI(7) crosses above 35 from below (pullback end)
+   - Short when 15m RSI(7) crosses below 65 from above (rally end)
+   - Looser thresholds than extreme mean-reversion (20/80) to generate trades
+
+4. ATR(14) TRAILING STOP: Risk management
+   - Signal → 0 when price moves 2.5*ATR against position
+   - Protects from crashes while allowing trend runs
+
+5. POSITION SIZING: 0.30 discrete
+   - 30% capital per position (conservative for 15m volatility)
+   - Discrete levels minimize fee churn
+
+Why this should work on 15m:
+- 4h HMA filters out 15m noise and whipsaw
+- 1h RSI confirms momentum alignment across timeframes
+- 15m RSI pullback entries catch trend continuations (not reversals)
+- Should generate 50-100 trades/year (enough for stats, not too many for fees)
+- Works in both bull (2021) and bear (2022, 2025) markets
+- Simple logic = less overfitting than complex regime systems
+
+Timeframe: 15m (REQUIRED for this experiment)
+HTF: 1h and 4h via mtf_data helper (call ONCE before loop each)
 Position sizing: 0.30 discrete levels
-Stoploss: 3.0 * ATR(14) trailing
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_weekly_hma_adx_rsi_bb_ensemble_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_trend_pullback_4h_hma_1h_rsi_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -70,69 +83,6 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    n = len(close)
-    adx = np.full(n, np.nan)
-    
-    # Calculate True Range and DM
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    dm_plus = np.zeros(n)
-    dm_minus = np.zeros(n)
-    
-    for i in range(1, n):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        
-        if up_move > down_move and up_move > 0:
-            dm_plus[i] = up_move
-        if down_move > up_move and down_move > 0:
-            dm_minus[i] = down_move
-    
-    # Smooth with Wilder's method (EMA with span=period)
-    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=period, min_periods=period, adjust=False).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Calculate DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / (tr_smooth + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (tr_smooth + 1e-10)
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx_raw = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    adx[period*2:] = adx_raw[period*2:]  # ADX needs 2x period to stabilize
-    return adx
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    width = (upper - lower) / (sma + 1e-10)  # Normalized width
-    return upper, lower, sma, width
-
-def calculate_percentile_rank(values, lookback=100):
-    """Calculate percentile rank of current value vs lookback period."""
-    n = len(values)
-    pr = np.full(n, np.nan)
-    
-    for i in range(lookback, n):
-        window = values[i-lookback:i]
-        current = values[i]
-        if len(window) > 0:
-            pr[i] = np.sum(window < current) / len(window) * 100
-    
-    return pr
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -140,20 +90,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    adx = calculate_adx(high, low, close, 14)
-    bb_upper, bb_lower, bb_sma, bb_width = calculate_bollinger_bands(close, 20, 2.0)
-    bb_width_pr = calculate_percentile_rank(bb_width, 100)
+    rsi_15m = calculate_rsi(close, 7)  # Faster RSI for pullback detection
     
     signals = np.zeros(n)
     
@@ -167,116 +117,77 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
-    for i in range(150, n):
+    # Track RSI crosses
+    prev_rsi_15m = 0.0
+    
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
+            prev_rsi_15m = rsi_15m[i] if not np.isnan(rsi_15m[i]) else prev_rsi_15m
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
+            prev_rsi_15m = rsi_15m[i] if not np.isnan(rsi_15m[i]) else prev_rsi_15m
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(adx[i]):
+        if np.isnan(rsi_1h_aligned[i]):
             signals[i] = 0.0
+            prev_rsi_15m = rsi_15m[i] if not np.isnan(rsi_15m[i]) else prev_rsi_15m
             continue
         
-        if np.isnan(bb_width_pr[i]):
+        if np.isnan(rsi_15m[i]):
             signals[i] = 0.0
+            prev_rsi_15m = rsi_15m[i] if not np.isnan(rsi_15m[i]) else prev_rsi_15m
             continue
         
-        # === REGIME DETECTION ===
-        # Weekly HMA trend bias
-        bull_trend_1w = close[i] > hma_1w_aligned[i]
-        bear_trend_1w = close[i] < hma_1w_aligned[i]
+        # === 4h HMA TREND BIAS ===
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # Daily ADX trend strength
-        strong_trend = adx[i] > 25
-        weak_trend = adx[i] < 20
-        # 20-25 = neutral
+        # === 1h RSI MOMENTUM FILTER ===
+        bull_momentum_1h = rsi_1h_aligned[i] > 45.0
+        bear_momentum_1h = rsi_1h_aligned[i] < 55.0
         
-        # BB Width regime (squeeze = potential breakout)
-        bb_squeeze = bb_width_pr[i] < 30  # Width in bottom 30% of last 100 days
+        # === 15m RSI PULLBACK ENTRY ===
+        rsi_cross_above_35 = (prev_rsi_15m <= 35.0 and rsi_15m[i] > 35.0)
+        rsi_cross_below_65 = (prev_rsi_15m >= 65.0 and rsi_15m[i] < 65.0)
         
-        # === SIGNAL VOTES (Ensemble: need 2 of 3) ===
-        long_votes = 0
-        short_votes = 0
-        
-        # Vote 1: Trend alignment
-        if bull_trend_1w:
-            long_votes += 1
-        elif bear_trend_1w:
-            short_votes += 1
-        
-        # Vote 2: RSI entry timing
-        # In bull trend: look for pullback (RSI 35-55)
-        # In bear trend: look for rally (RSI 45-65)
-        # In range: look for extremes (RSI <30 or >70)
-        if bull_trend_1w and 35 <= rsi[i] <= 55:
-            long_votes += 1
-        elif bear_trend_1w and 45 <= rsi[i] <= 65:
-            short_votes += 1
-        elif weak_trend:
-            if rsi[i] < 30:
-                long_votes += 1
-            elif rsi[i] > 70:
-                short_votes += 1
-        
-        # Vote 3: ADX confirmation or BB squeeze
-        if strong_trend:
-            if bull_trend_1w:
-                long_votes += 1
-            elif bear_trend_1w:
-                short_votes += 1
-        elif bb_squeeze:
-            # Squeeze breakout - follow trend direction
-            if bull_trend_1w:
-                long_votes += 1
-            elif bear_trend_1w:
-                short_votes += 1
-        
-        # === GENERATE SIGNAL (need 2 of 3 votes) ===
+        # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        if long_votes >= 2:
+        # LONG: 4h uptrend + 1h bullish momentum + 15m pullback end
+        if bull_trend_4h and bull_momentum_1h and rsi_cross_above_35:
             new_signal = SIZE
-        elif short_votes >= 2:
+        
+        # SHORT: 4h downtrend + 1h bearish momentum + 15m rally end
+        elif bear_trend_4h and bear_momentum_1h and rsi_cross_below_65:
             new_signal = -SIZE
         
-        # === STOPLOSS LOGIC (Rule 6) - 3.0 * ATR trailing ===
-        if in_position and position_side != 0:
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        if in_position and position_side != 0 and new_signal != 0.0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 3.0 * atr[i]
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
-            if position_side < 0:
+            elif position_side < 0:
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 3.0 * atr[i]
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_1w and adx[i] > 25:
-                # Long position but weekly trend flipped bearish with strong ADX
+            if position_side > 0 and bear_trend_4h:
                 new_signal = 0.0
-            if position_side < 0 and bull_trend_1w and adx[i] > 25:
-                # Short position but weekly trend flipped bullish with strong ADX
-                new_signal = 0.0
-        
-        # === RSI EXTREME EXIT (take profit) ===
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and rsi[i] > 75:
-                # Long position, RSI overbought - take profit
-                new_signal = 0.0
-            if position_side < 0 and rsi[i] < 25:
-                # Short position, RSI oversold - take profit
+            if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -302,5 +213,6 @@ def generate_signals(prices):
                 lowest_close = 0.0
         
         signals[i] = new_signal
+        prev_rsi_15m = rsi_15m[i]
     
     return signals
