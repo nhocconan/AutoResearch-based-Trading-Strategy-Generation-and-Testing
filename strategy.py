@@ -1,63 +1,61 @@
 #!/usr/bin/env python3
 """
-Experiment #456: 1d Fisher Transform + Choppiness Index + Weekly HMA Regime
+Experiment #457: 15m Multi-Regime Ensemble with 4h Trend Filter
 
-Hypothesis: After 455 failed experiments, the key insight is that RSI-based mean 
-reversion fails on 1d because RSI assumes normal distributions. Price action is 
-NOT normal - it has fat tails. The Ehlers Fisher Transform normalizes price 
-distribution, making reversal signals more reliable. Combined with Choppiness 
-Index (proven regime filter from academic literature) and Weekly HMA trend bias, 
-this should work better than RSI-based approaches (#450, #455 both failed).
+Hypothesis: 15m timeframe needs careful regime detection to avoid noise whipsaws.
+This strategy uses:
 
-Key Components:
-1. EHLERS FISHER TRANSFORM (period=9): 
-   - Transforms price to near-Gaussian distribution
-   - Long when Fisher crosses above -1.5 (oversold reversal)
-   - Short when Fisher crosses below +1.5 (overbought reversal)
-   - Superior to RSI for non-normal price distributions
+1. 4H HMA(21) TREND BIAS (via mtf_data helper):
+   - Long bias when price > 4h HMA
+   - Short bias when price < 4h HMA
+   - HMA reduces lag vs EMA for trend detection
 
-2. CHOPPINESS INDEX (period=14):
-   - CHOP > 61.8 = ranging market (use mean reversion signals)
-   - CHOP < 38.2 = trending market (use breakout signals)
-   - 38.2-61.8 = transition (no new entries)
-   - Proven regime filter in quantitative literature
+2. 1H ADX(14) REGIME FILTER (via mtf_data helper):
+   - ADX > 25 = trending (allow breakout signals)
+   - ADX < 20 = ranging (allow mean reversion only)
+   - Hysteresis prevents rapid regime switching
 
-3. WEEKLY HMA(21) TREND BIAS (via mtf_data):
-   - Price > 1w HMA = bull bias (prefer long signals)
-   - Price < 1w HMA = bear bias (prefer short signals)
-   - HMA smoother than EMA, critical for weekly trend
+3. 15M SIGNALS (ensemble - multiple trigger types):
+   a) RSI(14) MEAN REVERSION: RSI < 30 (long) or > 70 (short)
+      - Only in ranging regime + aligned with 4h trend
+      - Proven edge on 15m for BTC/ETH
+   
+   b) MACD(12,26,9) HISTOGRAM CROSSOVER:
+      - Histogram crosses above 0 = long signal
+      - Histogram crosses below 0 = short signal
+      - Only in trending regime + aligned with 4h trend
+   
+   c) BOLLINGER BAND SQUEEZE BREAKOUT:
+      - BB Width < 20th percentile = squeeze
+      - Price breaks upper BB = long, lower BB = short
+      - High probability after compression
 
 4. ATR(14) TRAILING STOP at 2.5x:
    - Signal → 0 when price moves 2.5*ATR against position
-   - Critical for 2022-style crash protection
+   - Critical for crash protection
 
-5. ASYMMETRIC ENTRY LOGIC:
-   - Range market (CHOP>61.8): Fisher mean reversion ONLY
-   - Trend market (CHOP<38.2): Breakout + Fisher confirmation
-   - Always aligned with weekly HMA bias
-
-6. POSITION SIZING: 0.30 discrete (conservative for daily volatility)
-   - Max 30% capital per position
+5. POSITION SIZING: 0.25 discrete (conservative for 15m volatility)
+   - Max 25% capital per position
    - Discrete levels minimize fee churn
 
-Why this should beat previous 1d attempts:
-- Fisher Transform > RSI for non-normal distributions (academic proof)
-- Choppiness Index = proven regime filter (not ADX which failed #447)
-- Weekly HMA = proven trend bias (from best strategies)
-- Asymmetric logic = avoids counter-trend disasters
-- Should generate 15-30 trades/year (enough for Sharpe calculation)
+Why this should work on 15m:
+- Multiple signal types ensure sufficient trade frequency
+- 4h HMA + 1h ADX filters prevent counter-trend disasters
+- Regime-adaptive (different logic for trending vs ranging)
+- Looser RSI thresholds than failed experiments
+- Should work on BTC/ETH/SOL individually
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.30 discrete levels
+Timeframe: 15m (REQUIRED for this experiment)
+HTF: 1h and 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_fisher_chop_weekly_hma_regime_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_regime_ensemble_4h_hma_1h_adx_macd_bb_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -80,93 +78,89 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_fisher_transform(high, low, period=9):
-    """
-    Ehlers Fisher Transform - normalizes price to near-Gaussian distribution.
-    Superior to RSI for reversal detection in non-normal price distributions.
-    
-    Formula:
-    1. Calculate typical price: (high + low) / 2
-    2. Normalize to range -1 to +1 using period highs/lows
-    3. Apply Fisher transform: 0.5 * ln((1+x)/(1-x))
-    4. Smooth with EMA
-    """
-    n = len(high)
-    fisher = np.full(n, np.nan)
-    fisher_signal = np.full(n, np.nan)
-    
-    typical = (high + low) / 2.0
-    
-    for i in range(period - 1, n):
-        # Find highest high and lowest low over period
-        highest = high[i-period+1:i+1].max()
-        lowest = low[i-period+1:i+1].min()
-        
-        price_range = highest - lowest
-        if price_range < 1e-10:
-            continue
-        
-        # Normalize price to -1 to +1 range (with 0.999 clamp to avoid ln(0))
-        normalized = 0.999 * (2.0 * (typical[i] - lowest) / price_range - 1.0)
-        
-        # Apply Fisher transform
-        fisher_raw = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized + 1e-10))
-        
-        # Smooth with EMA (span=3 for responsiveness)
-        if i == period - 1:
-            fisher[i] = fisher_raw
-            fisher_signal[i] = fisher_raw
-        else:
-            fisher[i] = 0.7 * fisher_raw + 0.3 * fisher[i-1]
-            fisher_signal[i] = fisher[i-1]  # Previous value for crossover detection
-    
-    return fisher, fisher_signal
-
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppiness vs trending.
-    Values: 0-100 (high = choppy/ranging, low = trending)
-    
-    Formula:
-    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
-    
-    Interpretation:
-    - CHOP > 61.8: Ranging market (mean reversion preferred)
-    - CHOP < 38.2: Trending market (breakout preferred)
-    - 38.2-61.8: Transition zone (no new entries)
-    """
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index (ADX)."""
     n = len(close)
-    choppiness = np.full(n, np.nan)
+    adx = np.full(n, np.nan)
     
-    # Calculate true range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    for i in range(period, n):
-        # Sum of ATR over period
-        atr_sum = tr[i-period+1:i+1].sum()
-        
-        # Highest high and lowest low over period
-        highest_high = high[i-period+1:i+1].max()
-        lowest_low = low[i-period+1:i+1].min()
-        
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 0:
-            # CHOP formula
-            choppiness[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-            # Clamp to 0-100
-            choppiness[i] = np.clip(choppiness[i], 0, 100)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
     
-    return choppiness
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    for i in range(period, n):
+        if tr_s[i] > 1e-10:
+            plus_di = 100 * plus_dm_s[i] / tr_s[i]
+            minus_di = 100 * minus_dm_s[i] / tr_s[i]
+            di_sum = plus_di + minus_di
+            if di_sum > 1e-10:
+                dx = 100 * np.abs(plus_di - minus_di) / di_sum
+            else:
+                dx = 0
+        else:
+            dx = 0
+        
+        if i == period:
+            adx[i] = dx
+        else:
+            adx[i] = ((adx[i-1] * (period - 1)) + dx) / period
+    
+    return adx
 
-def calculate_sma(close, period=50):
-    """Calculate Simple Moving Average."""
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index."""
     close_s = pd.Series(close)
-    return close_s.rolling(window=period, min_periods=period).mean().values
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / avg_loss.replace(0, np.inf)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
+
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram."""
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    return upper.values, lower.values, sma.values
+
+def calculate_bb_width(upper, lower, sma):
+    """Calculate Bollinger Band Width as percentage."""
+    width = (upper - lower) / sma
+    return width
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -175,24 +169,37 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1h = get_htf_data(prices, '1h')
     
-    # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    # Calculate 4h HMA trend
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Calculate 1h ADX regime
+    adx_1h = calculate_adx(df_1h['high'].values, df_1h['low'].values, df_1h['close'].values, 14)
+    adx_1h_aligned = align_htf_to_ltf(prices, df_1h, adx_1h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    fisher, fisher_signal = calculate_fisher_transform(high, low, 9)
-    choppiness = calculate_choppiness_index(high, low, close, 14)
-    sma_50 = calculate_sma(close, 50)
+    rsi = calculate_rsi(close, 14)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
+    bb_upper, bb_lower, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
+    bb_width = calculate_bb_width(bb_upper, bb_lower, bb_sma)
+    
+    # Calculate BB width percentile for squeeze detection
+    bb_width_pct = np.full(n, np.nan)
+    lookback = 100
+    for i in range(lookback, n):
+        valid_widths = bb_width[i-lookback:i+1]
+        valid_widths = valid_widths[~np.isnan(valid_widths)]
+        if len(valid_widths) > 0:
+            bb_width_pct[i] = np.percentile(valid_widths, np.where(valid_widths <= bb_width[i])[0].size / len(valid_widths) * 100)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -201,69 +208,71 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
+    # Track MACD histogram for crossover detection
+    prev_macd_hist = 0.0
+    
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(fisher_signal[i]):
+        if np.isnan(adx_1h_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(choppiness[i]):
+        if np.isnan(macd_hist[i]) or np.isnan(bb_upper[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_50[i]):
-            signals[i] = 0.0
-            continue
+        # === 4H HMA TREND BIAS ===
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === WEEKLY HMA TREND BIAS ===
-        bull_trend_1w = close[i] > hma_1w_aligned[i]
-        bear_trend_1w = close[i] < hma_1w_aligned[i]
+        # === 1H ADX REGIME DETECTION ===
+        adx_val = adx_1h_aligned[i]
+        trending_market = adx_val > 25
+        ranging_market = adx_val < 20
         
-        # === REGIME DETECTION (Choppiness Index) ===
-        ranging_market = choppiness[i] > 61.8
-        trending_market = choppiness[i] < 38.2
-        transition_market = (choppiness[i] >= 38.2) and (choppiness[i] <= 61.8)
+        # === SIGNAL 1: RSI MEAN REVERSION (ranging market) ===
+        rsi_long = rsi[i] < 30 and ranging_market
+        rsi_short = rsi[i] > 70 and ranging_market
         
-        # === FISHER TRANSFORM SIGNALS ===
-        # Long: Fisher crosses above -1.5 (oversold reversal)
-        fisher_long_cross = (fisher_signal[i] < -1.5) and (fisher[i] >= -1.5)
-        # Short: Fisher crosses below +1.5 (overbought reversal)
-        fisher_short_cross = (fisher_signal[i] > 1.5) and (fisher[i] <= 1.5)
+        # === SIGNAL 2: MACD HISTOGRAM CROSSOVER (trending market) ===
+        macd_long = macd_hist[i] > 0 and prev_macd_hist <= 0 and trending_market
+        macd_short = macd_hist[i] < 0 and prev_macd_hist >= 0 and trending_market
         
-        # === GENERATE SIGNAL ===
+        # === SIGNAL 3: BB SQUEEZE BREAKOUT (any regime) ===
+        squeeze = bb_width_pct[i] < 20 if not np.isnan(bb_width_pct[i]) else False
+        bb_long = squeeze and close[i] > bb_upper[i-1] if i > 0 else False
+        bb_short = squeeze and close[i] < bb_lower[i-1] if i > 0 else False
+        
+        # === GENERATE SIGNAL (Ensemble - any signal can trigger) ===
         new_signal = 0.0
         
-        # RANGING MARKET (CHOP > 61.8): Mean reversion via Fisher
-        if ranging_market:
-            if fisher_long_cross and bull_trend_1w:
+        # RSI MEAN REVERSION (ranging market + trend aligned)
+        if rsi_long and bull_trend_4h:
+            new_signal = SIZE
+        elif rsi_short and bear_trend_4h:
+            new_signal = -SIZE
+        
+        # MACD CROSSOVER (trending market + trend aligned)
+        if new_signal == 0.0:
+            if macd_long and bull_trend_4h:
                 new_signal = SIZE
-            elif fisher_short_cross and bear_trend_1w:
+            elif macd_short and bear_trend_4h:
                 new_signal = -SIZE
         
-        # TRENDING MARKET (CHOP < 38.2): Breakout + Fisher confirmation
-        elif trending_market:
-            # Long breakout: Price > SMA50 + Fisher confirmation
-            if close[i] > sma_50[i] and fisher_long_cross and bull_trend_1w:
+        # BB SQUEEZE BREAKOUT (trend aligned)
+        if new_signal == 0.0:
+            if bb_long and bull_trend_4h:
                 new_signal = SIZE
-            # Short breakout: Price < SMA50 + Fisher confirmation
-            elif close[i] < sma_50[i] and fisher_short_cross and bear_trend_1w:
+            elif bb_short and bear_trend_4h:
                 new_signal = -SIZE
-        
-        # TRANSITION MARKET (38.2-61.8): No new entries, hold existing
-        elif transition_market:
-            # Keep existing position, don't open new ones
-            if in_position:
-                new_signal = SIZE if position_side > 0 else -SIZE
-            else:
-                new_signal = 0.0
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -285,9 +294,9 @@ def generate_signals(prices):
         
         # === TREND REVERSAL EXIT ===
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_1w:
+            if position_side > 0 and bear_trend_4h:
                 new_signal = 0.0
-            if position_side < 0 and bull_trend_1w:
+            if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -313,5 +322,8 @@ def generate_signals(prices):
                 lowest_close = 0.0
         
         signals[i] = new_signal
+        
+        # Store MACD histogram for next iteration crossover detection
+        prev_macd_hist = macd_hist[i]
     
     return signals
