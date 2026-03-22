@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #006: 12h Vol-Spike Mean Reversion with 1d Trend Bias
+Experiment #001: 4h Dual-Regime HMA-Choppiness with 1d Trend Filter
 
-Hypothesis: Previous trend-following strategies failed because BTC/ETH spend 60%+
-time in range/chop markets. This strategy flips the logic:
-1. Wait for volatility SPIKE (ATR(7)/ATR(30) > 1.8) - signals panic/exhaustion
-2. Wait for price at Bollinger extreme (2.5 std dev) - oversold/overbought
-3. 1d HMA(21) determines BIAS only (long bias if price > 1d HMA, short if below)
-4. Enter MEAN REVERSION trade (counter to recent move, WITH daily bias)
+Hypothesis: 4h timeframe captures major moves while filtering noise. Using Choppiness
+Index to switch between trend-following (CHOP < 38.2) and mean-reversion (CHOP > 61.8)
+regimes adapts to market conditions. 1d HMA provides major trend bias to avoid
+counter-trend trades that failed in 2022 crash.
 
-Why this should work:
-- Vol spike + BB extreme = capitulation event (high prob reversal)
-- 1d filter prevents catching falling knives in strong downtrends
-- 12h TF = 20-40 trades/year (fee drag manageable)
-- Works in both bull AND bear markets (mean reversion universal)
+Key components:
+1. 1d HMA(21) - Major trend bias (price above = long bias, below = short bias)
+2. 4h HMA(16/48) - Trend direction on primary TF
+3. Choppiness Index(14) - Regime detection (trending vs ranging)
+4. RSI(14) - Entry timing within regime
+5. Donchian(20) - Breakout confirmation for trend regime
+6. ATR(14) - Stoploss at 2.5x and volatility-adjusted sizing
 
-Key differences from failed experiments:
-- NOT trend-following (those failed on BTC/ETH 2022-2025)
-- NOT dual-regime switch (too complex, whipsawed)
-- Simple vol-spike + mean reversion (proven in literature)
+Why this works:
+- Regime-switching adapts to 2022 crash (choppy) vs 2021 bull (trending)
+- 1d filter prevents counter-trend entries that destroyed simple strategies
+- 4h natural frequency: 20-50 trades/year (fee drag manageable)
+- Discrete sizing (0.25-0.30) minimizes churn costs
 
-Timeframe: 12h (REQUIRED)
+Timeframe: 4h (REQUIRED for Experiment #001)
 HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.30 discrete
-Stoploss: 3.0 * ATR(14) trailing
-Target: 25-40 trades/year, Sharpe > 0.5 on all symbols
+Position sizing: 0.25-0.30 discrete levels
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_vol_spike_mean_reversion_1d_bias_v1"
-timeframe = "12h"
+name = "mtf_4h_dual_regime_hma_chop_1d_filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -54,16 +54,15 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger(close, period=20, std_mult=2.5):
-    """Calculate Bollinger Bands with configurable std deviation."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high / lowest low over period)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
     
-    upper = sma + (std * std_mult)
-    lower = sma - (std * std_mult)
+    upper = high_s.rolling(window=period, min_periods=period).max()
+    lower = low_s.rolling(window=period, min_periods=period).min()
     
-    return upper.values, lower.values, sma.values
+    return upper.values, lower.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI using standard Wilder's method."""
@@ -77,9 +76,37 @@ def calculate_rsi(close, period=14):
     
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(np.isinf(rs), 100.0, rsi)
-    rsi = np.where(np.isnan(rsi), 50.0, rsi)
+    rsi = rsi.fillna(50).values
     return rsi
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = ranging market (mean reversion)
+    CHOP < 38.2 = trending market (trend follow)
+    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    """
+    atr = calculate_atr(high, low, close, period)
+    
+    # Calculate highest high and lowest low over period
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    hh = high_s.rolling(window=period, min_periods=period).max().values
+    ll = low_s.rolling(window=period, min_periods=period).min().values
+    
+    # Sum of ATR over period
+    atr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
+    
+    # Avoid division by zero
+    range_val = hh - ll
+    range_val = np.where(range_val == 0, 1e-10, range_val)
+    
+    chop = 100 * np.log10(atr_sum / range_val) / np.log10(period)
+    chop = np.clip(chop, 0, 100)
+    chop = np.nan_to_num(chop, nan=50.0)
+    
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -96,21 +123,13 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    
-    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.5)
+    hma_4h_16 = calculate_hma(close, 16)  # Faster HMA for entry
+    hma_4h_48 = calculate_hma(close, 48)  # Slower HMA for trend
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     rsi_14 = calculate_rsi(close, 14)
-    
-    # Volatility spike ratio (ATR short / ATR long)
-    vol_spike_ratio = np.zeros(n)
-    for i in range(30, n):
-        if atr_30[i] > 0 and not np.isnan(atr_30[i]):
-            vol_spike_ratio[i] = atr_7[i] / atr_30[i]
-        else:
-            vol_spike_ratio[i] = 1.0
+    chop_14 = calculate_choppiness(high, low, close, 14)
     
     signals = np.zeros(n)
     
@@ -123,8 +142,7 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_price = 0.0
     lowest_price = 0.0
-    last_trade_bar = -50
-    consecutive_losses = 0
+    last_trade_bar = -50  # Track last trade for frequency control
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -134,73 +152,90 @@ def generate_signals(prices):
         if np.isnan(hma_1d_21_aligned[i]):
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(hma_4h_16[i]) or np.isnan(hma_4h_48[i]):
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             continue
         
-        # === 1D TREND BIAS (determines direction bias only) ===
+        if np.isnan(chop_14[i]):
+            continue
+        
+        # === 1D TREND BIAS ===
         daily_bullish = close[i] > hma_1d_21_aligned[i]
         daily_bearish = close[i] < hma_1d_21_aligned[i]
         
-        # === VOLATILITY SPIKE DETECTION ===
-        vol_spike = vol_spike_ratio[i] > 1.8  # ATR(7) > 1.8x ATR(30)
+        # === 4H HMA TREND ===
+        hma_bullish = hma_4h_16[i] > hma_4h_48[i]
+        hma_bearish = hma_4h_16[i] < hma_4h_48[i]
         
-        # === BOLLINGER BAND EXTREMES ===
-        at_bb_lower = close[i] <= bb_lower[i]
-        at_bb_upper = close[i] >= bb_upper[i]
+        # === HMA TREND STRENGTH (slope) ===
+        hma_slope_long = hma_4h_16[i] > hma_4h_16[i-1] if i > 0 else False
+        hma_slope_short = hma_4h_16[i] < hma_4h_16[i-1] if i > 0 else False
         
-        # === RSI EXTREMES (confirm exhaustion) ===
-        rsi_oversold = rsi_14[i] < 25
-        rsi_overbought = rsi_14[i] > 75
+        # === CHOPPINESS REGIME ===
+        trending_regime = chop_14[i] < 38.2  # Trend-following mode
+        ranging_regime = chop_14[i] > 61.8   # Mean-reversion mode
+        neutral_regime = not trending_regime and not ranging_regime
+        
+        # === DONCHIAN BREAKOUT ===
+        breakout_long = close[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
+        breakout_short = close[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
+        
+        # === RSI EXTREMES FOR MEAN REVERSION ===
+        rsi_oversold = rsi_14[i] < 35
+        rsi_overbought = rsi_14[i] > 65
+        rsi_neutral_long = rsi_14[i] < 70  # Don't long at extreme overbought
+        rsi_neutral_short = rsi_14[i] > 30  # Don't short at extreme oversold
         
         # === VOLATILITY-ADJUSTED POSITION SIZING ===
         atr_ratio = atr_14[i] / np.nanmedian(atr_14[max(0, i-100):i]) if i > 100 else 1.0
         vol_adjustment = np.clip(1.0 / atr_ratio, 0.7, 1.3)
         current_size = BASE_SIZE * vol_adjustment
-        current_size = np.clip(current_size, 0.20, 0.35)
+        current_size = np.clip(current_size, 0.20, 0.35)  # Keep in safe range
         
-        # Reduce size after consecutive losses
-        if consecutive_losses >= 2:
-            current_size = current_size * 0.7
-        
-        # === ENTRY LOGIC (Mean Reversion with Daily Bias) ===
+        # === ENTRY LOGIC - DUAL REGIME ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRY: Vol spike + BB lower + RSI oversold + daily bias NOT strongly bearish
-        long_condition = (
-            vol_spike and
-            at_bb_lower and
-            rsi_oversold and
-            (daily_bullish or not daily_bearish)  # Allow if neutral or bullish
-        )
+        # TRENDING REGIME: Follow trend with breakout confirmation
+        if trending_regime:
+            # LONG: HMA bullish + breakout + daily bias + RSI ok
+            if hma_bullish and breakout_long and daily_bullish and rsi_neutral_long:
+                new_signal = current_size
+            
+            # SHORT: HMA bearish + breakout + daily bias + RSI ok
+            elif hma_bearish and breakout_short and daily_bearish and rsi_neutral_short:
+                new_signal = -current_size
         
-        # SHORT ENTRY: Vol spike + BB upper + RSI overbought + daily bias NOT strongly bullish
-        short_condition = (
-            vol_spike and
-            at_bb_upper and
-            rsi_overbought and
-            (daily_bearish or not daily_bullish)  # Allow if neutral or bearish
-        )
+        # RANGING REGIME: Mean reversion at extremes
+        elif ranging_regime:
+            # LONG: RSI oversold + price near lower Donchian + daily bullish bias preferred
+            if rsi_oversold and close[i] < donchian_lower[i-1] * 1.01 if i > 0 else False:
+                if daily_bullish or neutral_regime:  # Allow in range even without daily bias
+                    new_signal = current_size * 0.8  # Slightly smaller for mean revert
+            
+            # SHORT: RSI overbought + price near upper Donchian + daily bearish bias preferred
+            elif rsi_overbought and close[i] > donchian_upper[i-1] * 0.99 if i > 0 else False:
+                if daily_bearish or neutral_regime:
+                    new_signal = -current_size * 0.8
         
-        if long_condition:
-            new_signal = current_size
-        
-        if short_condition:
-            new_signal = -current_size
+        # NEUTRAL REGIME: Use HMA crossover with RSI filter (simpler)
+        else:
+            if hma_bullish and hma_slope_long and rsi_14[i] < 60 and daily_bullish:
+                new_signal = current_size * 0.7
+            elif hma_bearish and hma_slope_short and rsi_14[i] > 40 and daily_bearish:
+                new_signal = -current_size * 0.7
         
         # === FREQUENCY SAFEGUARD ===
-        # If no trades for 80 bars (~40 days on 12h), allow weaker entries
+        # If no trades for 80 bars (~13 days on 4h), allow weaker entry
         if bars_since_last_trade > 80 and new_signal == 0.0 and not in_position:
-            # Weaker condition: just BB extreme + RSI (no vol spike required)
-            if at_bb_lower and rsi_14[i] < 30 and daily_bullish:
+            if hma_bullish and daily_bullish and rsi_14[i] < 55:
                 new_signal = current_size * 0.6
-            elif at_bb_upper and rsi_14[i] > 70 and daily_bearish:
+            elif hma_bearish and daily_bearish and rsi_14[i] > 45:
                 new_signal = -current_size * 0.6
         
-        # === STOPLOSS LOGIC (Rule 6) - 3.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
         
         if in_position and position_side != 0:
@@ -208,47 +243,30 @@ def generate_signals(prices):
                 # Update highest price for long position
                 if close[i] > highest_price:
                     highest_price = close[i]
-                stoploss_price = highest_price - 3.0 * atr_14[i]
+                stoploss_price = highest_price - 2.5 * atr_14[i]
                 if close[i] < stoploss_price:
                     stoploss_triggered = True
-                    consecutive_losses += 1
             
             if position_side < 0:
                 # Update lowest price for short position
                 if lowest_price == 0.0 or close[i] < lowest_price:
                     lowest_price = close[i]
-                stoploss_price = lowest_price + 3.0 * atr_14[i]
+                stoploss_price = lowest_price + 2.5 * atr_14[i]
                 if close[i] > stoploss_price:
                     stoploss_triggered = True
-                    consecutive_losses += 1
         
-        # === MEAN REVERSION EXIT (profit target) ===
-        profit_exit = False
+        # === TREND REVERSAL EXIT ===
+        trend_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0:
-                # Exit long when price returns to BB middle
-                if close[i] >= bb_mid[i] and (close[i] - entry_price) > 0.5 * atr_14[i]:
-                    profit_exit = True
-                    consecutive_losses = 0
-            
-            if position_side < 0:
-                # Exit short when price returns to BB middle
-                if close[i] <= bb_mid[i] and (entry_price - close[i]) > 0.5 * atr_14[i]:
-                    profit_exit = True
-                    consecutive_losses = 0
+            # Exit long if 4h HMA turns bearish
+            if position_side > 0 and hma_bearish:
+                trend_reversal = True
+            # Exit short if 4h HMA turns bullish
+            if position_side < 0 and hma_bullish:
+                trend_reversal = True
         
-        # === DAILY BIAS REVERSAL EXIT ===
-        bias_reversal = False
-        if in_position and position_side != 0:
-            # Exit long if 1d trend turns strongly bearish
-            if position_side > 0 and daily_bearish and close[i] < hma_1d_21_aligned[i] * 0.98:
-                bias_reversal = True
-            # Exit short if 1d trend turns strongly bullish
-            if position_side < 0 and daily_bullish and close[i] > hma_1d_21_aligned[i] * 1.02:
-                bias_reversal = True
-        
-        # Apply stoploss, profit exit, or bias reversal
-        if stoploss_triggered or profit_exit or bias_reversal:
+        # Apply stoploss or trend reversal
+        if stoploss_triggered or trend_reversal:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
