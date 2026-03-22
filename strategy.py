@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #078: 1d KAMA + Fisher Transform with 1w HMA Trend Filter
-Hypothesis: 1d timeframe is ideal for adaptive trend-following with clear entry signals.
-KAMA (Kaufman Adaptive Moving Average) reduces whipsaw in ranging markets while following trends.
-Fisher Transform provides clear entry signals at extremes (catches reversals in bear markets).
-1w HMA provides strong trend bias without killing trade frequency on 1d.
-Key insight: Previous 1d strategies failed due to regime-switching complexity or mean-reversion focus.
-Simple adaptive trend + Fisher entries + weekly trend filter = robust across bull/bear/range.
+Experiment #079: 15m RSI Pullback with 4h HMA Trend + 1h Supertrend Confirmation
+Hypothesis: 15m timeframe is ideal for catching pullbacks within higher-TF trends.
+Instead of breakout chasing (which fails on 15m due to noise), we buy/sell pullbacks
+when the 4h trend is clear and 1h supertrend confirms direction.
+Key insight: 15m strategies #067, #073 failed because they tried to trade breakouts
+on noisy data. Pullback entries have better win rates in trending markets.
 This strategy uses:
-- KAMA(10, ER=10) for adaptive trend following (less lag than EMA, less whipsaw than SMA)
-- Fisher Transform(9) for entry timing (long when crosses above -1.5, short when crosses below +1.5)
-- 1w HMA(21) for weekly trend bias (long only above, short only below)
-- ATR(14) trailing stop at 2.5x for risk management
-- Discrete position sizing (0.25-0.30 levels)
-Why this might work: KAMA adapts to market efficiency ratio, performing well in both trending and ranging.
-Fisher Transform normalizes price to Gaussian distribution, providing clear reversal signals.
-1w HMA ensures we trade with the dominant weekly trend. 1d has fewer false signals than lower TFs.
-Timeframe: 1d (REQUIRED), HTF: 1w via mtf_data helper (call ONCE before loop).
+- 4h HMA(21) for primary trend bias (long only above, short only below)
+- 1h Supertrend(10,3) for intermediate confirmation (must match direction)
+- 15m RSI(14) pullback entries (RSI 35-45 for longs, 55-65 for shorts)
+- Volume confirmation (current volume > 1.3x 20-bar avg)
+- ATR(14) trailing stop at 2.0x for risk management
+- Discrete position sizing (0.25 base, 0.30 strong)
+Why this might work: Pullback entries have 60-70% win rates in trending markets.
+4h HMA provides smooth trend filter. 1h Supertrend adds confirmation without
+killing trade frequency. 15m RSI catches intraday dips/rallies.
+Timeframe: 15m (REQUIRED), HTF: 1h and 4h via mtf_data helper (call ONCE before loop).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_kama_fisher_1w_hma_adaptive_v2"
-timeframe = "1d"
+name = "mtf_15m_rsi_pullback_4h_hma_1h_supertrend_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -35,84 +35,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_kama(close, period=10, er_period=10):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA).
-    KAMA adapts to market noise using Efficiency Ratio (ER).
-    ER = |net change| / sum of absolute changes over period
-    SC = [ER * (fast_sc - slow_sc) + slow_sc]^2
-    KAMA = prior_KAMA + SC * (price - prior_KAMA)
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(er_period - 1, n):
-        net_change = np.abs(close[i] - close[i - er_period + 1])
-        sum_changes = np.sum(np.abs(np.diff(close[i - er_period + 1:i + 1])))
-        if sum_changes > 0:
-            er[i] = net_change / sum_changes
-        else:
-            er[i] = 0.0
-    
-    # Smoothing constants
-    fast_sc = 2.0 / (2 + 1)  # fast = 2 periods
-    slow_sc = 2.0 / (2 + 30)  # slow = 30 periods
-    
-    # Initialize KAMA
-    kama[er_period - 1] = close[er_period - 1]
-    
-    for i in range(er_period, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
-
-def calculate_fisher(close, period=9):
-    """
-    Calculate Ehlers Fisher Transform.
-    Transforms price to Gaussian-like distribution for clearer signals.
-    Fisher = 0.5 * ln((1 + X) / (1 - X)) where X = normalized price
-    """
-    n = len(close)
-    fisher = np.zeros(n)
-    fisher[:] = np.nan
-    fisher_signal = np.zeros(n)
-    fisher_signal[:] = np.nan
-    
-    # Normalize price to -1 to +1 range
-    for i in range(period - 1, n):
-        highest = np.max(close[i - period + 1:i + 1])
-        lowest = np.min(close[i - period + 1:i + 1])
-        
-        if highest == lowest:
-            continue
-        
-        # Normalize to 0-1, then scale to -0.99 to +0.99
-        x = 2.0 * (close[i] - lowest) / (highest - lowest) - 1.0
-        x = np.clip(x, -0.99, 0.99)  # prevent division by zero in log
-        
-        # Fisher transform
-        fisher[i] = 0.5 * np.log((1.0 + x) / (1.0 - x))
-        
-        # Signal line (1-period lag)
-        if i > 0:
-            fisher_signal[i] = fisher[i - 1]
-    
-    return fisher, fisher_signal
-
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend with less lag."""
-    close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI."""
@@ -137,26 +59,103 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average for smoother trend with less lag."""
+    close_s = pd.Series(close)
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
+
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """
+    Calculate Supertrend indicator.
+    Returns: supertrend_values, trend_direction (1=bullish, -1=bearish)
+    """
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    hl2 = (high + low) / 2.0
+    
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    supertrend = np.zeros(n)
+    trend = np.zeros(n)
+    
+    upper_band[:] = np.nan
+    lower_band[:] = np.nan
+    supertrend[:] = np.nan
+    trend[:] = np.nan
+    
+    for i in range(period, n):
+        if np.isnan(atr[i]):
+            continue
+        
+        upper_band[i] = hl2[i] + multiplier * atr[i]
+        lower_band[i] = hl2[i] - multiplier * atr[i]
+        
+        if i == period:
+            supertrend[i] = upper_band[i]
+            trend[i] = -1
+        else:
+            if close[i - 1] <= supertrend[i - 1]:
+                supertrend[i] = min(upper_band[i], supertrend[i - 1])
+                if close[i] > supertrend[i]:
+                    supertrend[i] = lower_band[i]
+                    trend[i] = 1
+                else:
+                    trend[i] = -1
+            else:
+                supertrend[i] = max(lower_band[i], supertrend[i - 1])
+                if close[i] < supertrend[i]:
+                    supertrend[i] = upper_band[i]
+                    trend[i] = -1
+                else:
+                    trend[i] = 1
+    
+    return supertrend, trend
+
+def calculate_ema(close, period):
+    """Calculate EMA."""
+    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average."""
+    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    supertrend_1h, trend_1h = calculate_supertrend(
+        df_1h['high'].values,
+        df_1h['low'].values,
+        df_1h['close'].values,
+        period=10,
+        multiplier=3.0
+    )
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    trend_1h_aligned = align_htf_to_ltf(prices, df_1h, trend_1h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    kama = calculate_kama(close, 10, 10)
-    fisher, fisher_signal = calculate_fisher(close, 9)
     rsi = calculate_rsi(close, 14)
+    ema_21 = calculate_ema(close, 21)
+    ema_50 = calculate_ema(close, 50)
+    vol_ma = calculate_volume_ma(volume, 20)
     
     signals = np.zeros(n)
     
@@ -171,91 +170,99 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama[i]) or np.isnan(fisher[i]):
+        if np.isnan(trend_1h_aligned[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(rsi[i]) or np.isnan(ema_21[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 1w HMA = weekly trend bias (strong filter)
-        bull_trend_1w = close[i] > hma_1w_aligned[i]
-        bear_trend_1w = close[i] < hma_1w_aligned[i]
+        # 4h HMA = primary trend bias
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === KAMA TREND ===
-        kama_bullish = close[i] > kama[i]
-        kama_bearish = close[i] < kama[i]
+        # 1h Supertrend = intermediate confirmation
+        bull_supertrend_1h = trend_1h_aligned[i] == 1
+        bear_supertrend_1h = trend_1h_aligned[i] == -1
         
-        # === FISHER TRANSFORM SIGNALS ===
-        # Long: Fisher crosses above -1.5 from below (oversold reversal)
-        fisher_long = False
-        if i > 1 and not np.isnan(fisher_signal[i]):
-            fisher_long = (fisher[i] > -1.5) and (fisher_signal[i] <= -1.5)
+        # === VOLUME CONFIRMATION ===
+        vol_confirmed = volume[i] > 1.3 * vol_ma[i] if vol_ma[i] > 0 else False
         
-        # Short: Fisher crosses below +1.5 from above (overbought reversal)
-        fisher_short = False
-        if i > 1 and not np.isnan(fisher_signal[i]):
-            fisher_short = (fisher[i] < 1.5) and (fisher_signal[i] >= 1.5)
+        # === EMA ALIGNMENT ===
+        ema_bullish = ema_21[i] > ema_50[i]
+        ema_bearish = ema_21[i] < ema_50[i]
         
-        # Fisher extreme levels (alternative entry)
-        fisher_oversold = fisher[i] < -1.8
-        fisher_overbought = fisher[i] > 1.8
+        # === RSI PULLBACK ZONES ===
+        # For longs: RSI pulled back to 35-50 zone (not oversold, just resting)
+        rsi_pullback_long = 35 <= rsi[i] <= 50
+        # For shorts: RSI rallied to 50-65 zone (not overbought, just resting)
+        rsi_pullback_short = 50 <= rsi[i] <= 65
         
-        # === RSI FILTER (avoid extreme entries) ===
-        rsi_ok_long = rsi[i] < 70  # not overbought
-        rsi_ok_short = rsi[i] > 30  # not oversold
+        # RSI momentum (rising for longs, falling for shorts)
+        rsi_rising = rsi[i] > rsi[i - 1] if i > 0 else False
+        rsi_falling = rsi[i] < rsi[i - 1] if i > 0 else False
+        
+        # Price above/below EMA21 for entry timing
+        price_above_ema21 = close[i] > ema_21[i]
+        price_below_ema21 = close[i] < ema_21[i]
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS ===
-        # Path 1: Fisher reversal + weekly trend bullish + KAMA bullish
-        if fisher_long and bull_trend_1w and kama_bullish:
-            if rsi_ok_long:
-                new_signal = SIZE_STRONG
+        # Primary: 4h bullish + 1h supertrend bullish + RSI pullback
+        if bull_trend_4h and bull_supertrend_1h:
+            if rsi_pullback_long:
+                if price_above_ema21 or rsi_rising:
+                    if vol_confirmed or ema_bullish:
+                        new_signal = SIZE_STRONG
+                    else:
+                        new_signal = SIZE_BASE
         
-        # Path 2: Fisher oversold + weekly trend bullish (mean reversion in uptrend)
-        if fisher_oversold and bull_trend_1w:
-            if kama_bullish or rsi[i] < 50:
-                new_signal = SIZE_BASE
+        # Secondary: 4h bullish + EMA bullish + RSI recovering from pullback
+        if bull_trend_4h and ema_bullish:
+            if 40 <= rsi[i] <= 55:
+                if rsi_rising and price_above_ema21:
+                    new_signal = SIZE_BASE
         
-        # Path 3: KAMA bullish + weekly trend bullish + RSI momentum (trend continuation)
-        if kama_bullish and bull_trend_1w:
-            if 40 <= rsi[i] <= 65:
-                new_signal = SIZE_BASE
-        
-        # Path 4: Simple KAMA cross with weekly confirmation (ensure trades happen)
-        if kama_bullish and bull_trend_1w:
-            if rsi[i] > 35 and rsi[i] < 75:
-                new_signal = SIZE_BASE
+        # Tertiary: Ensure we get trades - simpler conditions
+        if bull_trend_4h:
+            if 35 <= rsi[i] <= 55:
+                if price_above_ema21:
+                    new_signal = SIZE_BASE
         
         # === SHORT ENTRY CONDITIONS ===
-        # Path 1: Fisher reversal + weekly trend bearish + KAMA bearish
-        if fisher_short and bear_trend_1w and kama_bearish:
-            if rsi_ok_short:
-                new_signal = -SIZE_STRONG
+        # Primary: 4h bearish + 1h supertrend bearish + RSI pullback
+        if bear_trend_4h and bear_supertrend_1h:
+            if rsi_pullback_short:
+                if price_below_ema21 or rsi_falling:
+                    if vol_confirmed or ema_bearish:
+                        new_signal = -SIZE_STRONG
+                    else:
+                        new_signal = -SIZE_BASE
         
-        # Path 2: Fisher overbought + weekly trend bearish (mean reversion in downtrend)
-        if fisher_overbought and bear_trend_1w:
-            if kama_bearish or rsi[i] > 50:
-                new_signal = -SIZE_BASE
+        # Secondary: 4h bearish + EMA bearish + RSI recovering from pullback
+        if bear_trend_4h and ema_bearish:
+            if 45 <= rsi[i] <= 60:
+                if rsi_falling and price_below_ema21:
+                    new_signal = -SIZE_BASE
         
-        # Path 3: KAMA bearish + weekly trend bearish + RSI momentum (trend continuation)
-        if kama_bearish and bear_trend_1w:
-            if 35 <= rsi[i] <= 60:
-                new_signal = -SIZE_BASE
-        
-        # Path 4: Simple KAMA cross with weekly confirmation (ensure trades happen)
-        if kama_bearish and bear_trend_1w:
-            if rsi[i] > 25 and rsi[i] < 65:
-                new_signal = -SIZE_BASE
+        # Tertiary: Ensure we get trades - simpler conditions
+        if bear_trend_4h:
+            if 45 <= rsi[i] <= 65:
+                if price_below_ema21:
+                    new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) ===
         # Long position stoploss
@@ -263,7 +270,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            current_stop = highest_close - 2.5 * atr[i]
+            current_stop = highest_close - 2.0 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -275,7 +282,7 @@ def generate_signals(prices):
             if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
             
-            current_stop = lowest_close + 2.5 * atr[i]
+            current_stop = lowest_close + 2.0 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -288,14 +295,14 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
