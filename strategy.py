@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #250: 4h Sentiment Reversal Strategy with Taker Volume + RSI + 1d HMA
+Experiment #251: 12h Simplified Trend-Following with ADX + RSI Pullback + 1d HMA
 
-Hypothesis: 4h timeframe captures multi-day sentiment extremes that reverse.
-Using taker_buy_volume ratio as sentiment proxy (crowd positioning) +
-RSI for entry timing + 1d HMA for trend bias.
+Hypothesis: Previous 12h strategies failed due to overly complex filters that prevented trades.
+This strategy simplifies to core trend-following:
+- 1d HMA for higher timeframe bias (not requiring 1d+1w agreement)
+- ADX(14) > 20 for trend confirmation (not >25 or >30 which is too strict)
+- RSI(14) pullback to 40-60 zone for entries (not extreme 30/70)
+- KAMA(10/30) for trend direction
+- ATR(14) 2.5x stoploss
 
-Why this might work on 4h:
-- Taker buy ratio > 0.65 = crowd overly long (reversal likely)
-- Taker buy ratio < 0.35 = crowd overly short (bounce likely)
-- 4h captures sentiment extremes without 15m/1h noise
-- 1d HMA provides trend bias but doesn't block counter-trend reversals
-- Simpler entry conditions = more trades (critical lesson from failures)
-- Conservative sizing (0.25) + ATR stoploss controls drawdown
+Why this might work:
+- 12h captures multi-day trends without 1d/1w noise
+- ADX > 20 happens frequently enough for trades (vs >30 which is rare)
+- RSI 40-60 pullbacks occur regularly in trends
+- Single HTF (1d) reduces conflicting signals
+- Conservative sizing (0.25) controls drawdown
 
-Key improvements over failed experiments:
-- #244 (4h Fisher): 0 trades - conditions too strict
-- #238 (4h Chop/Connors): Sharpe=-0.056 - too many filters
-- This uses LOOSE thresholds: RSI 35/65 (not 20/80), taker ratio 0.35/0.65
-- Only 3 conditions for entry (not 5-7 conflicting filters)
-- Allows counter-trend trades when sentiment extreme (not just trend-follow)
+Key differences from #245:
+- Removed BB Width percentile regime filter (too restrictive)
+- Removed Donchian breakout logic (complex, few signals)
+- Removed 1w HMA requirement (too many conflicting signals)
+- Looser RSI thresholds (40/60 vs 30/70)
+- Lower ADX threshold (20 vs 25)
+- Warmup 100 vs 150 (more trades)
 
-Timeframe: 4h (REQUIRED for this experiment)
+Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
@@ -30,8 +34,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_sentiment_rsi_1d_hma_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_adx_rsi_pullback_1d_hma_kama_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -43,6 +47,33 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average (KAMA)."""
+    n = len(close)
+    kama = np.zeros(n)
+    
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        price_change = abs(close[i] - close[i - er_period])
+        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        if volatility > 0:
+            er[i] = price_change / volatility
+        else:
+            er[i] = 0
+    
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = er * (fast_sc - slow_sc) + slow_sc
+    
+    kama[er_period] = close[er_period]
+    
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    kama[:er_period] = close[:er_period]
+    
+    return kama
 
 def calculate_rsi(close, period=14):
     """Calculate RSI (Relative Strength Index)."""
@@ -59,6 +90,42 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    n = len(close)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+    
+    atr = calculate_atr(high, low, close, period)
+    
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    for i in range(period, n):
+        if atr[i] > 0:
+            plus_di[i] = 100 * pd.Series(plus_dm[:i+1]).ewm(span=period, adjust=False).mean().iloc[-1] / atr[i]
+            minus_di[i] = 100 * pd.Series(minus_dm[:i+1]).ewm(span=period, adjust=False).mean().iloc[-1] / atr[i]
+    
+    dx = np.zeros(n)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx, plus_di, minus_di
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -69,19 +136,16 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_taker_ratio(taker_buy_volume, volume):
-    """Calculate taker buy volume ratio (sentiment proxy)."""
-    ratio = np.zeros(len(volume))
-    mask = volume > 0
-    ratio[mask] = taker_buy_volume[mask] / volume[mask]
-    return ratio
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    return ema.values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -93,13 +157,14 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
+    kama_10 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    kama_30 = calculate_kama(close, er_period=10, fast_period=2, slow_period=60)
     rsi_14 = calculate_rsi(close, 14)
-    taker_ratio = calculate_taker_ratio(taker_buy_volume, volume)
-    
-    # Calculate 4h HMA for local trend
-    hma_4h = calculate_hma(close, 21)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
+    ema_21 = calculate_ema(close, 21)
+    ema_50 = calculate_ema(close, 50)
     
     signals = np.zeros(n)
     
@@ -125,51 +190,52 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(taker_ratio[i]):
+        if np.isnan(kama_10[i]) or np.isnan(kama_30[i]) or np.isnan(rsi_14[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
         # === HIGHER TIMEFRAME BIAS ===
-        # 1d HMA = trend bias (but we allow counter-trend on extreme sentiment)
+        # 1d HMA = trend bias (simpler than requiring 1d+1w agreement)
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === SENTIMENT EXTREMES ===
-        # Taker ratio > 0.65 = crowd overly long (look for short)
-        # Taker ratio < 0.35 = crowd overly short (look for long)
-        sentiment_long_extreme = taker_ratio[i] > 0.65
-        sentiment_short_extreme = taker_ratio[i] < 0.35
+        # === TREND STRENGTH ===
+        # ADX > 20 = trending market (looser than >25 or >30)
+        is_trending = adx[i] > 20
         
-        # === RSI CONFIRMATION ===
-        # RSI > 65 = overbought (supports short)
-        # RSI < 35 = oversold (supports long)
-        rsi_overbought = rsi_14[i] > 65
-        rsi_oversold = rsi_14[i] < 35
+        # === KAMA TREND DIRECTION ===
+        kama_bullish = kama_10[i] > kama_30[i]
+        kama_bearish = kama_10[i] < kama_30[i]
         
-        # === LOCAL TREND ===
-        hma_4h_bullish = close[i] > hma_4h[i]
-        hma_4h_bearish = close[i] < hma_4h[i]
+        # KAMA slope (3-bar lookback for responsiveness)
+        kama_slope_bullish = kama_10[i] > kama_10[i-3] if i >= 3 else False
+        kama_slope_bearish = kama_10[i] < kama_10[i-3] if i >= 3 else False
+        
+        # === EMA CONFIRMATION ===
+        ema_bullish = ema_21[i] > ema_50[i]
+        ema_bearish = ema_21[i] < ema_50[i]
         
         # === ENTRY SIGNALS ===
         new_signal = 0.0
         
-        # --- LONG ENTRY: Sentiment short extreme + RSI oversold ---
-        # Can enter even against 1d trend if sentiment is extreme enough
-        if sentiment_short_extreme and rsi_oversold:
-            # Stronger signal if 1d trend is bullish or neutral
-            if bull_trend_1d or (not bear_trend_1d):
+        # --- LONG ENTRIES ---
+        # Trend following: KAMA bullish + ADX trending + 1d bullish + RSI pullback (not overbought)
+        if kama_bullish and kama_slope_bullish and is_trending and bull_trend_1d:
+            # RSI pullback zone: 40-60 (not extreme, catches trend continuations)
+            if 40 <= rsi_14[i] <= 65:
                 new_signal = SIZE_BASE
-            # Still enter counter-trend if sentiment VERY extreme
-            elif taker_ratio[i] < 0.30 and rsi_14[i] < 30:
+            # RSI not too overbought
+            elif rsi_14[i] < 70:
                 new_signal = SIZE_BASE
         
-        # --- SHORT ENTRY: Sentiment long extreme + RSI overbought ---
-        if sentiment_long_extreme and rsi_overbought:
-            # Stronger signal if 1d trend is bearish or neutral
-            if bear_trend_1d or (not bull_trend_1d):
+        # --- SHORT ENTRIES ---
+        # Trend following: KAMA bearish + ADX trending + 1d bearish + RSI pullback (not oversold)
+        if kama_bearish and kama_slope_bearish and is_trending and bear_trend_1d:
+            # RSI pullback zone: 35-60
+            if 35 <= rsi_14[i] <= 60:
                 new_signal = -SIZE_BASE
-            # Still enter counter-trend if sentiment VERY extreme
-            elif taker_ratio[i] > 0.70 and rsi_14[i] > 70:
+            # RSI not too oversold
+            elif rsi_14[i] > 30:
                 new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
@@ -221,7 +287,6 @@ def generate_signals(prices):
                 entry_price_idx = i
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
-            # else: maintaining same position direction (possibly reduced size)
         else:
             # Exiting position (signal-based or stoploss)
             if in_position:
