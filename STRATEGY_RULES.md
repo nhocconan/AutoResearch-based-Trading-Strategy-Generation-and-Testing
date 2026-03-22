@@ -161,3 +161,21 @@ Before submitting strategy.py, verify:
 - [ ] **ALL symbols must have Sharpe > 0** individually (no SOL-only strategies)
 - [ ] All indicators use min_periods
 - [ ] No .shift(-n) or future indexing
+
+## Rule 10: Trade Frequency by Timeframe
+
+The #1 reason lower TF strategies fail: too many trades → fee drag.
+
+| Primary TF | Max Trades/Year | Fee Drag at 0.05% RT |
+|-----------|----------------|---------------------|
+| 15m | Target: 50-100 | 2.5-5% |
+| 30m | Target: 40-80 | 2-4% |
+| 1h | Target: 30-60 | 1.5-3% |
+| 4h | Target: 20-50 | 1-2.5% |
+| 12h/1d | Target: 10-30 | 0.5-1.5% |
+
+If your strategy generates >100 trades/year on any TF below 4h, your entry
+conditions are TOO LOOSE. Add more filters (session, volume, confluence).
+
+For 15m/30m/1h: use HTF (4h/12h) for signal direction, lower TF only for
+entry timing precision. This gives HTF trade frequency with lower TF execution.

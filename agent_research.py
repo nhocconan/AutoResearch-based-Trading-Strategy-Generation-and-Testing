@@ -271,7 +271,15 @@ BTC/ETH SPECIFIC (these coins ALWAYS fail simple trend strategies):
 
 RISK MANAGEMENT (MANDATORY):
 - Every position MUST have stoploss: signal → 0 when price moves > 2-3*ATR
-- Fewer trades = less fee drag. Target 20-50 trades/year, not 200+.
+- Fewer trades = less fee drag.
+
+TRADE FREQUENCY LIMITS (CRITICAL — #1 reason lower TF fails):
+- 15m/30m: MAX 50-100 trades/year (use very strict entry: 3+ confluence)
+- 1h: MAX 30-60 trades/year
+- 4h: MAX 20-50 trades/year
+- 12h/1d: MAX 10-30 trades/year
+- If >100 trades/year on lower TF → entry conditions TOO LOOSE → add more filters
+- For 15m/30m/1h: use 4h/12h for signal DIRECTION, lower TF only for entry TIMING
 
 COST MODEL (engine-enforced):
 - Taker 0.035% + Maker 0.01%. Avg 0.025%/side = 0.05% round trip = 0.05% round trip
@@ -355,35 +363,54 @@ def build_experiment_prompt(
     # Determine which phase and what to try next
     phase_hint = ""
     n = experiment_num
-    # Rotate through ALL timeframes equally — 6 TF groups, cycle every 36 experiments
+    # Weighted TF rotation: focus on what works (4h/12h/1d get more attempts)
+    # Lower TFs included but with strict "few trades" guidance
     tf_groups = [
-        ("15m", "1h/4h"),
-        ("30m", "4h/1d"),
-        ("1h", "4h/12h/1d"),
-        ("4h", "1d/1w"),
-        ("12h", "1d/1w"),
-        ("1d", "single TF"),
+        ("4h", "1d/1w"),      # proven: ETH Sharpe +0.923
+        ("12h", "1d/1w"),     # proven: SOL Sharpe +0.782
+        ("1d", "1w"),         # proven: SOL Sharpe +0.748
+        ("4h", "12h/1d"),     # variation
+        ("1h", "4h/1d"),      # lower TF — must have very few trades (<60/yr)
+        ("12h", "1d"),        # variation
+        ("1d", "single TF"),  # single TF simplicity
+        ("30m", "4h/1d"),     # lower TF — strict entry, <80 trades/yr
+        ("4h", "1d"),         # variation
+        ("1h", "4h/12h"),     # lower TF with multiple HTF filters
     ]
     group_idx = (n - 1) % len(tf_groups)
     primary_tf, htf_options = tf_groups[group_idx]
 
+    # Build TF-specific guidance
+    if primary_tf in ("15m", "30m", "1h"):
+        tf_guidance = f"""THIS EXPERIMENT: Primary = {primary_tf}, HTF = {htf_options}
+CRITICAL FOR LOWER TF: you MUST generate VERY FEW trades (target 30-80/year).
+Use 3+ CONFLUENCE filters: HTF trend + indicator + volume + session(8-20 UTC).
+The #1 failure: too many trades (>200/yr) → fee drag kills profit.
+
+Best approach for {primary_tf}: use {htf_options} for SIGNAL DIRECTION,
+{primary_tf} only for ENTRY TIMING (when to pull the trigger within the HTF trend).
+
+Proven pattern: Choppiness Index regime + Connors RSI + HTF HMA trend.
+CHOP > 55 = range → mean revert. CHOP < 45 = trend → follow.
+Add: session filter (only 8-20 UTC), volume > 0.8x avg, strict 1:2 R:R.
+Size: 0.20 (smaller for lower TF)."""
+    else:
+        tf_guidance = f"""THIS EXPERIMENT: Primary = {primary_tf}, HTF = {htf_options}
+Proven TF — higher timeframes work best. Target 20-50 trades/year.
+
+Best patterns for {primary_tf}:
+- Choppiness Index regime switch + Connors RSI (ETH Sharpe +0.923)
+- Donchian breakout + HMA trend + RSI + ATR (SOL Sharpe +0.782)
+- KAMA trend + ADX + Choppiness filter (ETH Sharpe +0.755)
+- HMA crossover + RSI filter + ATR trail (SOL +0.879)
+- Dual regime: mean revert in chop, trend follow otherwise
+Size: 0.25-0.30."""
+
     phase_hint = f"""
-THIS EXPERIMENT: Primary timeframe = {primary_tf}, HTF options = {htf_options}
-You MUST use timeframe = "{primary_tf}" for this experiment.
+{tf_guidance}
 
-Timeframe rotation: each experiment uses a DIFFERENT primary TF.
-Available data: 15m, 30m, 1h, 4h, 6h, 12h, 1d (all real Binance data).
+You MUST use timeframe = "{primary_tf}".
 For MTF: use mtf_data.get_htf_data(prices, '{htf_options.split("/")[0]}') ONCE before loop.
-
-Strategy ideas for {primary_tf}:
-- Supertrend + RSI pullback + ADX filter
-- HMA/KAMA crossover + Bollinger BW regime
-- MACD histogram + volume confirmation + ATR stop
-- Donchian breakout + trend filter from HTF ({htf_options})
-- EMA crossover + Z-score mean reversion filter
-- Ensemble: 2-3 indicators vote, majority wins
-
-Position sizing: 0.20-0.30, discrete levels, stoploss at 2*ATR.
 REMEMBER: call get_htf_data() ONCE before loop, use aligned arrays inside."""
     # Gather failed approaches to avoid repeating
     failed_approaches = set()
