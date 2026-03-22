@@ -1,44 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #075: 1h Z-Score Mean Reversion with 4h HMA Trend Filter + Volume Confirmation
-Hypothesis: 1h timeframe captures intraday mean reversion opportunities while 4h HMA provides
-trend bias to avoid counter-trend trades. Z-score(20) extremes (<-2 or >+2) signal overextended
-moves likely to revert. Volume confirmation (taker_buy_ratio > 0.55 for longs) ensures genuine
-interest. ATR filter avoids trading during extreme volatility spikes.
-
-Why this might work:
-1. Z-score mean reversion has proven edge in crypto (70%+ win rate at extremes)
-2. 4h HMA trend filter prevents dangerous counter-trend entries during strong trends
-3. Volume confirmation filters out fake breakouts/reversals
-4. ATR volatility filter avoids whipsaw during panic pumps/dumps
-5. Asymmetric sizing: smaller positions in bear regime (4h HMA sloping down)
-
-Key improvements vs failed strategies:
-- Simpler entry logic (Z-score + trend + volume) = more trades
-- No complex regime switching that causes 0 trades
-- Discrete position sizes (0.20, 0.30) to minimize fee churn
-- Stoploss at 2.5*ATR with trailing for winners
-
-Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20 base, 0.30 strong signal, max 0.35
+Experiment #076: 4h Supertrend with 1d HMA Trend Filter + RSI Pullback
+Hypothesis: 4h timeframe with simpler conditions will generate more trades than complex regime strategies.
+Key insight: Previous 4h strategies failed due to too many filters (0 trades or negative Sharpe).
+This strategy uses:
+- Supertrend(10, 3) as primary signal generator
+- 1d HMA(21) for trend bias only (not hard filter)
+- RSI(14) pullback entries (35-65 range, not extremes)
+- ATR trailing stop for risk management
+- Conservative position sizing (0.25-0.30)
+Why this might work: Fewer conditions = more trades. Supertrend works well on 4h+.
+1d HMA provides gentle trend bias without killing trade frequency.
+RSI pullback ensures we enter on dips in uptrend, not chasing breakouts.
+Timeframe: 4h (REQUIRED), HTF: 1d via mtf_data helper (call ONCE before loop).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_zscore_4h_hma_vol_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_supertrend_1d_hma_rsi_pullback_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend with less lag."""
-    close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
 
 def calculate_atr(high, low, close, period=14):
     """Calculate ATR using Wilder's smoothing."""
@@ -49,14 +31,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score of price vs rolling mean."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - sma) / (std + 1e-10)
-    return zscore.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI."""
@@ -81,51 +55,98 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average for smoother trend with less lag."""
+    close_s = pd.Series(close)
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
+
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """
+    Calculate Supertrend indicator.
+    Returns: supertrend_line, supertrend_direction (1=below price=bullish, -1=above price=bearish)
+    """
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    # Calculate HL2 (median price)
+    hl2 = (high + low) / 2
+    
+    # Upper and lower bands
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    # Supertrend values
+    supertrend = np.zeros(n)
+    supertrend[:] = np.nan
+    direction = np.zeros(n)  # 1 = bullish (price above ST), -1 = bearish
+    
+    for i in range(period, n):
+        if np.isnan(atr[i]) or atr[i] == 0:
+            continue
+            
+        # Initial values
+        if i == period:
+            supertrend[i] = upper_band[i]
+            direction[i] = -1
+        else:
+            # Update bands based on previous direction
+            if direction[i-1] == 1:  # Previously bullish
+                lower_band[i] = max(lower_band[i], supertrend[i-1])
+                if close[i] < lower_band[i]:
+                    supertrend[i] = upper_band[i]
+                    direction[i] = -1
+                else:
+                    supertrend[i] = lower_band[i]
+                    direction[i] = 1
+            else:  # Previously bearish
+                upper_band[i] = min(upper_band[i], supertrend[i-1])
+                if close[i] > upper_band[i]:
+                    supertrend[i] = lower_band[i]
+                    direction[i] = 1
+                else:
+                    supertrend[i] = upper_band[i]
+                    direction[i] = -1
+    
+    return supertrend, direction
+
 def calculate_ema(close, period):
     """Calculate EMA."""
     return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-
-def calculate_volume_ratio(taker_buy_volume, volume):
-    """Calculate taker buy volume ratio."""
-    ratio = taker_buy_volume / (volume + 1e-10)
-    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    zscore = calculate_zscore(close, 20)
     rsi = calculate_rsi(close, 14)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
-    vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
     
-    # ATR ratio for volatility filter (ATR(7)/ATR(30))
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    atr_ratio = atr_7 / (atr_30 + 1e-10)
+    # Supertrend
+    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.20
+    SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
-    SIZE_MAX = 0.35
     
     # Track positions for stoploss
     position_side = 0
@@ -140,113 +161,78 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(zscore[i]) or np.isnan(rsi[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(ema_21[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(rsi[i]) or np.isnan(ema_21[i]) or np.isnan(supertrend[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = intermediate trend bias
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # 1d HMA = intermediate trend bias (soft filter, not hard)
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # 4h HMA slope (compare to 3 bars ago)
-        hma_slope_bull = i >= 3 and not np.isnan(hma_4h_aligned[i-3]) and hma_4h_aligned[i] > hma_4h_aligned[i-3]
-        hma_slope_bear = i >= 3 and not np.isnan(hma_4h_aligned[i-3]) and hma_4h_aligned[i] < hma_4h_aligned[i-3]
+        # === SUPERTREND SIGNAL ===
+        st_bullish = st_direction[i] == 1
+        st_bearish = st_direction[i] == -1
         
-        # EMA alignment on 1h
+        # === EMA ALIGNMENT ===
         ema_bullish = ema_21[i] > ema_50[i]
         ema_bearish = ema_21[i] < ema_50[i]
         
-        # === VOLATILITY FILTER ===
-        # Avoid trading during extreme vol spikes (ATR ratio > 2.5)
-        normal_vol = atr_ratio[i] < 2.5
-        low_vol = atr_ratio[i] < 1.5
+        # === RSI PULLBACK (not extreme, just healthy pullback) ===
+        # For longs: RSI between 35-55 (pullback in uptrend)
+        # For shorts: RSI between 45-65 (pullback in downtrend)
+        rsi_pullback_long = 35 <= rsi[i] <= 55
+        rsi_pullback_short = 45 <= rsi[i] <= 65
         
-        # === Z-SCORE MEAN REVERSION SIGNALS ===
-        # Z-score <-2 = oversold (potential long)
-        # Z-score >+2 = overbought (potential short)
-        zscore_oversold = zscore[i] < -2.0
-        zscore_overbought = zscore[i] > 2.0
-        zscore_extreme_oversold = zscore[i] < -2.5
-        zscore_extreme_overbought = zscore[i] > 2.5
-        
-        # === VOLUME CONFIRMATION ===
-        # For longs: want buying pressure (taker buy ratio > 0.55)
-        # For shorts: want selling pressure (taker buy ratio < 0.45)
-        vol_buying = vol_ratio[i] > 0.55
-        vol_selling = vol_ratio[i] < 0.45
-        vol_neutral = 0.45 <= vol_ratio[i] <= 0.55
-        
-        # === RSI FILTER ===
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
-        rsi_neutral = 40 <= rsi[i] <= 60
-        
-        # === PRICE VS EMA ===
-        price_above_ema21 = close[i] > ema_21[i]
-        price_below_ema21 = close[i] < ema_21[i]
+        # RSI momentum confirmation
+        rsi_momentum_long = rsi[i] > 40
+        rsi_momentum_short = rsi[i] < 60
         
         new_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS (multiple paths for more trades) ===
+        # === LONG ENTRY CONDITIONS (simpler, more permissive) ===
         
-        # Path 1: Z-score oversold + bull trend + volume confirmation
-        if bull_trend_4h and zscore_oversold and normal_vol:
-            if vol_buying or rsi_oversold:
-                if hma_slope_bull:
+        # Path 1: Supertrend bullish + 1d trend bias + RSI pullback
+        if st_bullish and bull_trend_1d:
+            if rsi_pullback_long or rsi_momentum_long:
+                if ema_bullish:
                     new_signal = SIZE_STRONG
                 else:
                     new_signal = SIZE_BASE
         
-        # Path 2: Extreme Z-score oversold (stronger signal, less volume req)
-        if zscore_extreme_oversold and normal_vol:
-            if bull_trend_4h or ema_bullish:
+        # Path 2: Supertrend flip to bullish (stronger signal)
+        if i > 100 and st_direction[i] == 1 and st_direction[i-1] == -1:
+            if bull_trend_1d:
+                new_signal = SIZE_STRONG
+        
+        # Path 3: Simple trend continuation (ensure trades happen)
+        if st_bullish and bull_trend_1d:
+            if rsi[i] > 45 and rsi[i] < 65:
                 new_signal = SIZE_BASE
         
-        # Path 3: RSI oversold + bull trend + price near EMA support
-        if bull_trend_4h and rsi_oversold and price_above_ema21:
-            if vol_buying:
-                new_signal = SIZE_BASE
+        # === SHORT ENTRY CONDITIONS (simpler, more permissive) ===
         
-        # Path 4: EMA bullish + pullback to EMA21 + neutral Z-score
-        if ema_bullish and bull_trend_4h:
-            if -1.0 < zscore[i] < 0.5 and price_above_ema21:
-                if vol_buying:
-                    new_signal = SIZE_BASE
-        
-        # === SHORT ENTRY CONDITIONS (multiple paths for more trades) ===
-        
-        # Path 1: Z-score overbought + bear trend + volume confirmation
-        if bear_trend_4h and zscore_overbought and normal_vol:
-            if vol_selling or rsi_overbought:
-                if hma_slope_bear:
+        # Path 1: Supertrend bearish + 1d trend bias + RSI pullback
+        if st_bearish and bear_trend_1d:
+            if rsi_pullback_short or not rsi_momentum_long:
+                if ema_bearish:
                     new_signal = -SIZE_STRONG
                 else:
                     new_signal = -SIZE_BASE
         
-        # Path 2: Extreme Z-score overbought (stronger signal, less volume req)
-        if zscore_extreme_overbought and normal_vol:
-            if bear_trend_4h or ema_bearish:
-                new_signal = -SIZE_BASE
+        # Path 2: Supertrend flip to bearish (stronger signal)
+        if i > 100 and st_direction[i] == -1 and st_direction[i-1] == 1:
+            if bear_trend_1d:
+                new_signal = -SIZE_STRONG
         
-        # Path 3: RSI overbought + bear trend + price below EMA resistance
-        if bear_trend_4h and rsi_overbought and price_below_ema21:
-            if vol_selling:
+        # Path 3: Simple trend continuation (ensure trades happen)
+        if st_bearish and bear_trend_1d:
+            if rsi[i] > 35 and rsi[i] < 55:
                 new_signal = -SIZE_BASE
-        
-        # Path 4: EMA bearish + rally to EMA21 + neutral Z-score
-        if ema_bearish and bear_trend_4h:
-            if -0.5 < zscore[i] < 1.0 and price_below_ema21:
-                if vol_selling:
-                    new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) ===
         # Long position stoploss
@@ -263,7 +249,7 @@ def generate_signals(prices):
         
         # Short position stoploss
         if position_side < 0 and entry_price > 0:
-            if close[i] < lowest_close or lowest_close == 0.0:
+            if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
             
             current_stop = lowest_close + 2.5 * atr[i]
