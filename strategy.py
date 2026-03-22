@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #038: 30m Multi-Timeframe Trend with Dual Entry Modes
-Hypothesis: Combining pullback entries (RSI dip in trend) with breakout entries (Donchian) 
-generates more trades while maintaining trend bias from 4h/1d HMA.
-Previous 30m strategies failed due to overly strict conditions. This loosens entries
-by allowing BOTH pullback AND breakout modes, increasing trade count.
-Timeframe: 30m (REQUIRED), HTF: 4h and 1d via mtf_data helper.
-Position sizing: 0.25-0.30 discrete, stoploss at 2.5*ATR.
-Must generate 10+ trades on train, 3+ on test - dual entry modes ensure sufficient trades.
+Experiment #039: 1h Multi-Timeframe Trend-Follow with 4h HMA Bias
+Hypothesis: 1h timeframe captures short-term momentum while 4h HMA provides cleaner trend filter than 1d.
+Key insight: Previous 1h strategies failed due to too many filters (CRSI, Choppiness) = 0 trades.
+This strategy uses SIMPLER logic: 4h HMA for trend bias, 1h EMA pullback entries, RSI 40-60 zone, ADX>20.
+Position sizing: 0.25 base, 0.15 half - discrete levels to minimize fee churn.
+Timeframe: 1h (REQUIRED for exp#039), HTF: 4h via mtf_data helper.
+Why this might work: 1h has more entry opportunities than 12h/1d, 4h HMA smoother than 1h for regime.
+Entry conditions LOOSENED vs failed experiments to ensure 10+ trades per symbol.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_dual_entry_4h_1d_hma_v1"
-timeframe = "30m"
+name = "mtf_1h_trend_4h_hma_ema_rsi_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -64,11 +64,43 @@ def calculate_ema(close, period):
     """Calculate EMA."""
     return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel for breakout detection."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX for trend strength."""
+    n = len(close)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    atr = calculate_atr(high, low, close, period)
+    
+    plus_di = pd.Series(plus_dm / (atr + 1e-10)).ewm(span=period, min_periods=period, adjust=False).mean().values * 100
+    minus_di = pd.Series(minus_dm / (atr + 1e-10)).ewm(span=period, min_periods=period, adjust=False).mean().values * 100
+    
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx, plus_di, minus_di
+
+def calculate_sma(close, period):
+    """Calculate SMA."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return upper, lower, sma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -78,28 +110,30 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HTF HMAs
+    # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    ema_200 = calculate_ema(close, 200)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
+    
+    # HMA on 1h for faster trend
+    hma_1h = calculate_hma(close, 21)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.25
-    SIZE_HALF = 0.125
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -108,80 +142,97 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):
+    for i in range(250, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(ema_21[i]):
+        if np.isnan(rsi[i]) or np.isnan(ema_21[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
-        # HTF trend bias - 4h HMA primary
+        # 4h trend bias (HTF) - main regime filter
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # 30m trend confirmation
-        bull_trend_30m = ema_21[i] > ema_50[i]
-        bear_trend_30m = ema_21[i] < ema_50[i]
+        # 1h trend confirmation
+        bull_trend_1h = ema_21[i] > ema_50[i] and close[i] > ema_50[i]
+        bear_trend_1h = ema_21[i] < ema_50[i] and close[i] < ema_50[i]
+        
+        # ADX trend strength - LOOSENED threshold
+        trend_strong = adx[i] > 18  # Lower than typical 25 for more trades
+        trend_weak = adx[i] < 25
         
         # RSI conditions - LOOSENED for more trades
-        rsi_pullback_long = 35 < rsi[i] < 55
-        rsi_bounce_short = 45 < rsi[i] < 65
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
+        rsi_pullback_long = 35 < rsi[i] < 55  # Pullback zone, not oversold
+        rsi_bounce_short = 45 < rsi[i] < 65  # Bounce zone, not overbought
+        rsi_momentum_long = rsi[i] > 50 and rsi[i] < 70
+        rsi_momentum_short = rsi[i] < 50 and rsi[i] > 30
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
-        breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
+        # Price position relative to Bollinger
+        price_near_lower = close[i] < bb_lower[i] * 1.02 or close[i] < bb_mid[i]
+        price_near_upper = close[i] > bb_upper[i] * 0.98 or close[i] > bb_mid[i]
+        
+        # HMA crossover on 1h
+        hma_cross_long = False
+        hma_cross_short = False
+        if i >= 1 and not np.isnan(hma_1h[i]) and not np.isnan(hma_1h[i-1]):
+            hma_cross_long = hma_1h[i] > ema_50[i] and hma_1h[i-1] <= ema_50[i-1]
+            hma_cross_short = hma_1h[i] < ema_50[i] and hma_1h[i-1] >= ema_50[i-1]
         
         # Price pullback to EMA21
         price_near_ema21_long = close[i] <= ema_21[i] * 1.015 and close[i] >= ema_21[i] * 0.985
         price_near_ema21_short = close[i] >= ema_21[i] * 0.985 and close[i] <= ema_21[i] * 1.015
         
+        # DI crossover confirmation
+        di_bullish = plus_di[i] > minus_di[i]
+        di_bearish = plus_di[i] < minus_di[i]
+        
+        # Long-term trend filter
+        above_200 = not np.isnan(ema_200[i]) and close[i] > ema_200[i]
+        below_200 = not np.isnan(ema_200[i]) and close[i] < ema_200[i]
+        
         new_signal = 0.0
         
-        # === LONG ENTRIES (dual mode: pullback OR breakout) ===
+        # === LONG ENTRIES (when 4h bullish) ===
         if bull_trend_4h:
-            # Mode 1: Pullback entry - RSI dip in uptrend
-            if price_near_ema21_long and rsi_pullback_long:
+            # Primary: Pullback to EMA21 with RSI confirmation + ADX
+            if price_near_ema21_long and rsi_pullback_long and trend_strong and above_200:
                 new_signal = SIZE_BASE
             
-            # Mode 2: Breakout entry - Donchian breakout with trend
-            elif breakout_long and bull_trend_30m:
+            # Secondary: HMA crossover with 4h confirmation + DI
+            elif hma_cross_long and bull_trend_4h and di_bullish and trend_strong:
                 new_signal = SIZE_BASE
             
-            # Mode 3: Oversold bounce in strong trend (4h + 1d bull)
-            elif bull_trend_1d and rsi_oversold:
+            # Tertiary: RSI momentum in uptrend (simpler condition)
+            elif rsi_momentum_long and bull_trend_1h and di_bullish:
                 new_signal = SIZE_HALF
             
-            # Mode 4: Simple trend continuation
-            elif bull_trend_30m and rsi[i] > 45 and rsi[i] < 65:
+            # Quaternary: Price near BB mid with trend (more entries)
+            elif close[i] > bb_mid[i] and bull_trend_4h and rsi[i] > 45:
                 new_signal = SIZE_HALF
         
-        # === SHORT ENTRIES (dual mode: pullback OR breakout) ===
+        # === SHORT ENTRIES (when 4h bearish) ===
         elif bear_trend_4h:
-            # Mode 1: Pullback entry - RSI bounce in downtrend
-            if price_near_ema21_short and rsi_bounce_short:
+            # Primary: Bounce to EMA21 with RSI confirmation + ADX
+            if price_near_ema21_short and rsi_bounce_short and trend_strong and below_200:
                 new_signal = -SIZE_BASE
             
-            # Mode 2: Breakout entry - Donchian breakdown with trend
-            elif breakout_short and bear_trend_30m:
+            # Secondary: HMA crossover with 4h confirmation + DI
+            elif hma_cross_short and bear_trend_4h and di_bearish and trend_strong:
                 new_signal = -SIZE_BASE
             
-            # Mode 3: Overbought rejection in strong trend (4h + 1d bear)
-            elif bear_trend_1d and rsi_overbought:
+            # Tertiary: RSI momentum in downtrend (simpler condition)
+            elif rsi_momentum_short and bear_trend_1h and di_bearish:
                 new_signal = -SIZE_HALF
             
-            # Mode 4: Simple trend continuation
-            elif bear_trend_30m and rsi[i] > 35 and rsi[i] < 55:
+            # Quaternary: Price near BB mid with trend (more entries)
+            elif close[i] < bb_mid[i] and bear_trend_4h and rsi[i] < 55:
                 new_signal = -SIZE_HALF
         
         # === STOPLOSS LOGIC (Rule 6) ===
