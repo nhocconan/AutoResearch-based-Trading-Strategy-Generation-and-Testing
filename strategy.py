@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #018: 1d Weekly Trend + Daily RSI Pullback Strategy
-Hypothesis: Daily timeframe reduces noise and fee drag. Using 1w HMA for 
-major trend bias (captures multi-month cycles), daily RSI for pullback entries,
-ADX for trend strength filter, and volume confirmation. Asymmetric sizing
-based on trend alignment. Conservative 0.25-0.30 position size with 2.5*ATR stop.
-Timeframe: 1d (REQUIRED), HTF: 1w
+Experiment #019: 15m Connors RSI Mean Reversion with 4h HTF Trend Filter
+Hypothesis: 15m timeframe captures intraday mean reversion opportunities while
+4h HMA provides trend bias. Connors RSI (CRSI) has proven 75% win rate for
+reversals. Combined with Bollinger Band squeeze detection and volume confirmation,
+this should work in both bull and bear markets. Conservative sizing (0.25-0.30)
+with 2.0*ATR stoploss. Multiple entry paths ensure >=10 trades per symbol.
+Timeframe: 15m (REQUIRED), HTF: 4h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_weekly_hma_daily_rsi_adx_vol_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_crsi_4h_hma_bb_squeeze_vol_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -46,6 +47,65 @@ def calculate_rsi(close, period=14):
     rsi = 100 - 100 / (1 + rs)
     rsi = np.clip(rsi, 0, 100)
     return rsi
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Calculate Connors RSI (CRSI).
+    CRSI = (RSI(close, 3) + RSI(Streak, 2) + PercentRank(100)) / 3
+    Proven 75% win rate for mean reversion entries.
+    """
+    n = len(close)
+    crsi = np.zeros(n)
+    crsi[:] = np.nan
+    
+    # RSI(3) component
+    rsi_short = calculate_rsi(close, rsi_period)
+    
+    # Streak RSI component
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = streak[i-1]
+    
+    streak_rsi = calculate_rsi(streak, streak_period)
+    
+    # Percent Rank component
+    for i in range(rank_period, n):
+        window = close[i-rank_period+1:i+1]
+        current = close[i]
+        rank = np.sum(window[:-1] < current) / (rank_period - 1) * 100
+        crsi[i] = (rsi_short[i] + streak_rsi[i] + rank) / 3.0
+    
+    return crsi
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score of price relative to rolling mean."""
+    close_s = pd.Series(close)
+    mean = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    zscore = (close - mean) / (std + 1e-10)
+    return zscore
+
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    mid = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = mid + std_mult * std
+    lower = mid - std_mult * std
+    bw = (upper - lower) / mid  # Bandwidth
+    return upper, mid, lower, bw
+
+def calculate_volume_ratio(taker_buy_volume, volume):
+    """Calculate taker buy volume ratio (0-1, >0.5 = bullish pressure)."""
+    ratio = np.zeros(len(volume))
+    mask = volume > 0
+    ratio[mask] = taker_buy_volume[mask] / volume[mask]
+    return ratio
 
 def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index) for trend strength."""
@@ -85,38 +145,17 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
-def calculate_volume_ratio(taker_buy_volume, volume):
-    """Calculate taker buy volume ratio (0-1, >0.5 = bullish pressure)."""
-    ratio = np.zeros(len(volume))
-    mask = volume > 0
-    ratio[mask] = taker_buy_volume[mask] / volume[mask]
-    return ratio
-
-def calculate_sma(close, period=50):
+def calculate_sma(close, period=200):
     """Calculate Simple Moving Average."""
-    close_s = pd.Series(close)
-    return close_s.rolling(window=period, min_periods=period).mean().values
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
-def calculate_ema(close, period=21):
-    """Calculate Exponential Moving Average."""
-    close_s = pd.Series(close)
-    return close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
-
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    mid = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = mid + std_mult * std
-    lower = mid - std_mult * std
-    return upper, mid, lower
-
-def calculate_momentum(close, period=10):
-    """Calculate price momentum (rate of change)."""
-    mom = np.zeros(len(close))
-    for i in range(period, len(close)):
-        mom[i] = (close[i] - close[i-period]) / close[i-period] * 100
-    return mom
+def calculate_volatility_spike(atr, period_short=7, period_long=30):
+    """Calculate ATR ratio for volatility spike detection."""
+    atr_s = pd.Series(atr)
+    atr_short = atr_s.ewm(span=period_short, min_periods=period_short, adjust=False).mean().values
+    atr_long = atr_s.ewm(span=period_long, min_periods=period_long, adjust=False).mean().values
+    ratio = atr_short / (atr_long + 1e-10)
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -127,34 +166,33 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
-    ema_1w = calculate_ema(df_1w['close'].values, 50)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     rsi_fast = calculate_rsi(close, 7)
+    crsi = calculate_crsi(close, 3, 2, 100)
+    zscore = calculate_zscore(close, 20)
     adx = calculate_adx(high, low, close, 14)
     vol_ratio = calculate_volume_ratio(taker_buy_vol, volume)
-    
-    # Moving averages
-    sma_50 = calculate_sma(close, 50)
-    sma_200 = calculate_sma(close, 200)
-    ema_21 = calculate_ema(close, 21)
-    ema_50 = calculate_ema(close, 50)
+    vol_spike = calculate_volatility_spike(atr, 7, 30)
     
     # Bollinger Bands
-    bb_upper, bb_mid, bb_lower = calculate_bollinger(close, 20, 2.0)
+    bb_upper, bb_mid, bb_lower, bb_bw = calculate_bollinger(close, 20, 2.0)
     
-    # Momentum
-    mom_10 = calculate_momentum(close, 10)
+    # SMA 200 for long-term trend
+    sma_200 = calculate_sma(close, 200)
+    
+    # HMA for 15m trend
+    hma_15m = calculate_hma(close, 21)
+    hma_15m_fast = calculate_hma(close, 10)
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.28
@@ -168,116 +206,138 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(ema_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(rsi[i]) or np.isnan(sma_50[i]) or np.isnan(sma_200[i]):
+        if np.isnan(zscore[i]) or np.isnan(adx[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(ema_21[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(crsi[i]) or np.isnan(vol_spike[i]):
             signals[i] = 0.0
             continue
         
-        # 1w trend bias (HTF) - major cycle direction
-        htf_bullish = close[i] > hma_1w_aligned[i]
-        htf_bearish = close[i] < hma_1w_aligned[i]
-        htf_strong_bull = close[i] > ema_1w_aligned[i] and hma_1w_aligned[i] > ema_1w_aligned[i]
-        htf_strong_bear = close[i] < ema_1w_aligned[i] and hma_1w_aligned[i] < ema_1w_aligned[i]
+        # 4h trend bias (HTF)
+        htf_bullish = close[i] > hma_4h_aligned[i]
+        htf_bearish = close[i] < hma_4h_aligned[i]
         
-        # 1d trend
-        price_above_sma50 = close[i] > sma_50[i]
-        price_above_sma200 = close[i] > sma_200[i]
-        price_above_ema21 = close[i] > ema_21[i]
-        ema21_above_ema50 = ema_21[i] > ema_50[i]
-        ema21_below_ema50 = ema_21[i] < ema_50[i]
+        # 15m trend
+        hma_15m_bullish = close[i] > hma_15m[i]
+        hma_15m_bearish = close[i] < hma_15m[i]
         
-        # ADX regime
-        trend_strong = adx[i] > 22
-        trend_weak = adx[i] < 20
-        
-        # RSI extremes
-        rsi_oversold = rsi[i] < 38
-        rsi_overbought = rsi[i] > 62
-        rsi_neutral = 40 < rsi[i] < 60
-        rsi_fast_oversold = rsi_fast[i] < 30
-        rsi_fast_overbought = rsi_fast[i] > 70
+        # HMA crossover
+        fast_above_slow = hma_15m_fast[i] > hma_15m[i]
+        fast_below_slow = hma_15m_fast[i] < hma_15m[i]
         
         # Volume confirmation
-        vol_bullish = vol_ratio[i] > 0.52
-        vol_bearish = vol_ratio[i] < 0.48
-        vol_neutral = 0.45 < vol_ratio[i] < 0.55
+        vol_bullish = vol_ratio[i] > 0.48
+        vol_bearish = vol_ratio[i] < 0.52
         
-        # Bollinger position
-        price_near_lower = close[i] < bb_lower[i] * 1.01
-        price_near_upper = close[i] > bb_upper[i] * 0.99
-        price_at_mid = bb_lower[i] * 1.02 < close[i] < bb_upper[i] * 0.98
+        # ADX regime
+        trend_strong = adx[i] > 20
+        trend_weak = adx[i] < 25
         
-        # Momentum
-        mom_positive = mom_10[i] > 0
-        mom_negative = mom_10[i] < 0
-        mom_strong_pos = mom_10[i] > 5
-        mom_strong_neg = mom_10[i] < -5
+        # Z-score extremes
+        zscore_oversold = zscore[i] < -1.5
+        zscore_overbought = zscore[i] > 1.5
+        
+        # RSI extremes
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
+        rsi_fast_oversold = rsi_fast[i] < 25
+        rsi_fast_overbought = rsi_fast[i] > 75
+        
+        # CRSI extremes (Connors RSI)
+        crsi_oversold = crsi[i] < 10
+        crsi_overbought = crsi[i] > 90
+        
+        # Bollinger Band position
+        price_near_lower = close[i] < bb_lower[i] * 1.005
+        price_near_upper = close[i] > bb_upper[i] * 0.995
+        bb_squeeze = bb_bw[i] < np.nanpercentile(bb_bw[:i], 20) if i > 20 else False
+        
+        # Volatility spike
+        vol_spike_high = vol_spike[i] > 2.0
+        
+        # SMA 200 filter
+        price_above_sma200 = close[i] > sma_200[i] if not np.isnan(sma_200[i]) else True
+        price_below_sma200 = close[i] < sma_200[i] if not np.isnan(sma_200[i]) else True
         
         new_signal = 0.0
         
-        # === LONG ENTRIES ===
+        # === LONG ENTRIES (Mean Reversion Focus) ===
         
-        # Path 1: 1w bullish + daily pullback to EMA21 + RSI oversold (trend pullback)
-        if htf_bullish and price_above_ema21 and rsi_oversold and trend_strong:
+        # Path 1: CRSI oversold + 4h bullish (primary mean reversion)
+        if crsi_oversold and htf_bullish:
             new_signal = SIZE_ENTRY
         
-        # Path 2: 1w strong bullish + RSI fast oversold + volume bullish (dip buy)
-        elif htf_strong_bull and rsi_fast_oversold and vol_bullish:
+        # Path 2: CRSI oversold + price at BB lower + volume bullish (deep pullback)
+        elif crsi_oversold and price_near_lower and vol_bullish:
             new_signal = SIZE_ENTRY
         
-        # Path 3: Price > SMA200 + RSI < 40 + ADX rising (bull market dip)
-        elif price_above_sma200 and rsi[i] < 40 and adx[i] > 18:
+        # Path 3: Z-score oversold + 4h bullish + ADX weak (mean reversion in ranging uptrend)
+        elif zscore_oversold and htf_bullish and trend_weak:
             new_signal = SIZE_ENTRY
         
-        # Path 4: EMA21 > EMA50 + price near BB lower + volume confirm (pullback in uptrend)
-        elif ema21_above_ema50 and price_near_lower and vol_bullish:
+        # Path 4: RSI fast oversold + CRSI oversold (double confirmation)
+        elif rsi_fast_oversold and crsi_oversold:
             new_signal = SIZE_ENTRY
         
-        # Path 5: 1w bullish + momentum positive + RSI crossing up from oversold
-        if htf_bullish and mom_positive and rsi[i] > rsi[i-1] and rsi[i-1] < 35:
+        # Path 5: Volatility spike + price at BB lower + 4h bullish (vol crush play)
+        elif vol_spike_high and price_near_lower and htf_bullish:
             new_signal = SIZE_ENTRY
         
-        # Path 6: Break above EMA21 after being below + 1w bullish + volume
-        elif close[i] > ema_21[i] and close[i-1] < ema_21[i-1] and htf_bullish and vol_bullish:
+        # Path 6: BB squeeze breakout long + 4h bullish + volume
+        elif bb_squeeze and close[i] > bb_upper[i] and htf_bullish and vol_bullish:
             new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRIES ===
+        # Path 7: HMA crossover up + 4h bullish + RSI not overbought
+        elif fast_above_slow and htf_bullish and rsi[i] < 70:
+            new_signal = SIZE_ENTRY
         
-        # Path 1: 1w bearish + daily rally to EMA21 + RSI overbought (trend pullback)
-        if htf_bearish and not price_above_ema21 and rsi_overbought and trend_strong:
+        # Path 8: Price above SMA200 + CRSI oversold (bull market dip buy)
+        elif price_above_sma200 and crsi_oversold:
+            new_signal = SIZE_ENTRY
+        
+        # === SHORT ENTRIES (Mean Reversion Focus) ===
+        
+        # Path 1: CRSI overbought + 4h bearish (primary mean reversion)
+        if crsi_overbought and htf_bearish:
             new_signal = -SIZE_ENTRY
         
-        # Path 2: 1w strong bearish + RSI fast overbought + volume bearish (rally sell)
-        elif htf_strong_bear and rsi_fast_overbought and vol_bearish:
+        # Path 2: CRSI overbought + price at BB upper + volume bearish
+        elif crsi_overbought and price_near_upper and vol_bearish:
             new_signal = -SIZE_ENTRY
         
-        # Path 3: Price < SMA200 + RSI > 60 + ADX rising (bear market rally)
-        elif not price_above_sma200 and rsi[i] > 60 and adx[i] > 18:
+        # Path 3: Z-score overbought + 4h bearish + ADX weak
+        elif zscore_overbought and htf_bearish and trend_weak:
             new_signal = -SIZE_ENTRY
         
-        # Path 4: EMA21 < EMA50 + price near BB upper + volume confirm (rally in downtrend)
-        elif ema21_below_ema50 and price_near_upper and vol_bearish:
+        # Path 4: RSI fast overbought + CRSI overbought (double confirmation)
+        elif rsi_fast_overbought and crsi_overbought:
             new_signal = -SIZE_ENTRY
         
-        # Path 5: 1w bearish + momentum negative + RSI crossing down from overbought
-        if htf_bearish and mom_negative and rsi[i] < rsi[i-1] and rsi[i-1] > 65:
+        # Path 5: Volatility spike + price at BB upper + 4h bearish
+        elif vol_spike_high and price_near_upper and htf_bearish:
             new_signal = -SIZE_ENTRY
         
-        # Path 6: Break below EMA21 after being above + 1w bearish + volume
-        elif close[i] < ema_21[i] and close[i-1] > ema_21[i-1] and htf_bearish and vol_bearish:
+        # Path 6: BB squeeze breakout short + 4h bearish + volume
+        elif bb_squeeze and close[i] < bb_lower[i] and htf_bearish and vol_bearish:
+            new_signal = -SIZE_ENTRY
+        
+        # Path 7: HMA crossover down + 4h bearish + RSI not oversold
+        elif fast_below_slow and htf_bearish and rsi[i] > 30:
+            new_signal = -SIZE_ENTRY
+        
+        # Path 8: Price below SMA200 + CRSI overbought (bear market rally sell)
+        elif price_below_sma200 and crsi_overbought:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -286,8 +346,8 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for 1d timeframe)
-            current_stop = highest_close - 2.5 * atr[i]
+            # Calculate trailing stop (2.0*ATR for 15m timeframe)
+            current_stop = highest_close - 2.0 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -296,7 +356,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.5 * atr[i]
+                risk = 2.0 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
@@ -307,8 +367,8 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for 1d timeframe)
-            current_stop = lowest_close + 2.5 * atr[i]
+            # Calculate trailing stop (2.0*ATR for 15m timeframe)
+            current_stop = lowest_close + 2.0 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -317,7 +377,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.5 * atr[i]
+                risk = 2.0 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
@@ -330,7 +390,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
@@ -339,7 +399,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
