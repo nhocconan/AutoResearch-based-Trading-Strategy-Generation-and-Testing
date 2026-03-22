@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #012: 12h Primary + 1d/1w HTF — Fisher Transform + Z-Score Mean Reversion
+Experiment #013: 1d Primary + 1w HTF — Regime-Adaptive Dual Strategy
 
-Hypothesis: Connors RSI + Choppiness combinations have failed 4+ times. 
-This strategy uses DIFFERENT indicators proven in bear/range markets:
+Hypothesis: Higher timeframes (1d) with weekly trend bias can capture major moves
+while avoiding lower-TF noise. This strategy uses REGIME-ADAPTIVE logic:
 
-1. Ehlers Fisher Transform (period=9) - catches reversals in bear rallies
-   Long when Fisher crosses above -1.5, Short when crosses below +1.5
-2. Z-Score(20) - statistical mean reversion, adapts to volatility regime
-   Entry when |z-score| > 2.0, exit when |z-score| < 0.5
-3. 1d HMA(21) for major trend bias - only trade WITH 1d trend direction
-4. ADX(14) regime filter - ADX<25 = range (prefer mean reversion)
-5. ATR(14) trailing stoploss at 2.5x - mandatory risk management
-6. Discrete sizing: 0.25 base, 0.30 for high conviction
+1. 1w HMA(21) for MAJOR trend bias (only trade WITH weekly trend)
+2. Choppiness Index(14) for regime detection:
+   - CHOP > 55 = range (use Connors RSI mean reversion)
+   - CHOP < 45 = trend (use Donchian breakout)
+3. Connors RSI(3,2,100) for mean-reversion entries in range regime
+4. Donchian(20) breakout for trend-following entries in trend regime
+5. ATR(14) trailing stoploss at 2.5x for risk management
+6. Volume filter (>0.7x 20-bar avg) to confirm moves
+7. Asymmetric sizing: reduce size in choppy markets
 
 Why this should work:
-- Fisher Transform has 70%+ win rate on reversals (Ehlers research)
-- Z-score entries are statistical, not arbitrary thresholds
-- 1d trend filter prevents counter-trend trades in strong moves
-- ADX regime detection avoids trend-following in chop
-- 12h timeframe = ~30-50 trades/year (optimal for fee drag)
-- Different indicator suite than all 11 failed experiments
+- 1d timeframe = 20-50 trades/year (manageable fee drag)
+- Regime detection prevents trend-following in ranges (major failure mode)
+- Weekly HMA filters out counter-trend trades (2022 crash protection)
+- Connors RSI has 75% win rate for mean reversion
+- Donchian breakout captures sustained trends
+- Discrete sizing (0.25/0.30) minimizes fee churn
 
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d and 1w via mtf_data.get_htf_data() — called ONCE before loop
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data.get_htf_data() — called ONCE before loop
 Position sizing: 0.25-0.30 discrete
 Stoploss: 2.5 * ATR(14) trailing
 Target trades: 20-50/year per symbol
@@ -32,8 +33,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_fisher_zscore_adx_1d1w_v1"
-timeframe = "12h"
+name = "mtf_1d_regime_adaptive_connors_donchian_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -61,95 +62,77 @@ def calculate_rsi(close, period=14):
     rsi = rsi.fillna(50).values
     return rsi
 
-def calculate_fisher_transform(high, low, close, period=9):
+def calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100):
     """
-    Ehlers Fisher Transform - normalizes price to Gaussian distribution
+    Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
     
-    Steps:
-    1. Calculate typical price: (high + low + close) / 3
-    2. Normalize: (price - lowest) / (highest - lowest) * 0.999 + 0.001
-    3. Apply Fisher: 0.5 * ln((1+x)/(1-x))
-    4. Smooth with EMA
+    RSI_Streak: RSI of consecutive up/down days
+    PercentRank: percentile rank of price change over lookback
+    """
+    close_s = pd.Series(close)
     
-    Entry: Fisher crosses above -1.5 (long), crosses below +1.5 (short)
+    # Component 1: RSI(3)
+    rsi_3 = calculate_rsi(close, rsi_period)
+    
+    # Component 2: Streak RSI
+    delta = close_s.diff()
+    streak = np.zeros(len(close))
+    for i in range(1, len(close)):
+        if delta.iloc[i] > 0:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif delta.iloc[i] < 0:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = 0
+    
+    streak_s = pd.Series(streak)
+    streak_gain = streak_s.where(streak_s > 0, 0.0)
+    streak_loss = -streak_s.where(streak_s < 0, 0.0)
+    
+    avg_streak_gain = streak_gain.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
+    avg_streak_loss = streak_loss.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
+    
+    streak_rs = avg_streak_gain / avg_streak_loss.replace(0, np.nan)
+    streak_rsi = 100 - (100 / (1 + streak_rs))
+    streak_rsi = streak_rsi.fillna(50).values
+    
+    # Component 3: Percent Rank
+    returns = close_s.pct_change()
+    percent_rank = returns.rolling(window=rank_period, min_periods=rank_period).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) >= rank_period else 50,
+        raw=False
+    )
+    percent_rank = percent_rank.fillna(50).values
+    
+    # Connors RSI
+    connors_rsi = (rsi_3 + streak_rsi + percent_rank) / 3
+    return connors_rsi
+
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Choppiness Index = 100 * (ATR(1) sum / ATR(period)) / (Highest High - Lowest Low) * log10(period)
+    
+    CHOP > 61.8 = range/choppy
+    CHOP < 38.2 = trending
     """
     high_s = pd.Series(high)
     low_s = pd.Series(low)
-    close_s = pd.Series(close)
     
-    # Typical price
-    typical = (high_s + low_s + close_s) / 3
-    
-    # Rolling highest and lowest
-    highest = typical.rolling(window=period, min_periods=period).max()
-    lowest = typical.rolling(window=period, min_periods=period).min()
-    
-    # Normalize to 0-1 range with bounds
-    range_hl = highest - lowest
-    normalized = ((typical - lowest) / range_hl.replace(0, np.nan)) * 0.999 + 0.001
-    normalized = normalized.clip(0.001, 0.999)
-    
-    # Fisher transform
-    fisher = 0.5 * np.log((1 + normalized) / (1 - normalized))
-    
-    # Smooth with EMA
-    fisher_smooth = fisher.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return fisher_smooth.values
-
-def calculate_zscore(close, period=20):
-    """
-    Z-Score = (price - SMA) / StdDev
-    
-    |z| > 2.0 = extreme (entry signal)
-    |z| < 0.5 = mean reached (exit signal)
-    """
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    
-    zscore = (close_s - sma) / std.replace(0, np.nan)
-    zscore = zscore.fillna(0).values
-    return zscore
-
-def calculate_adx(high, low, close, period=14):
-    """
-    Average Directional Index - measures trend strength
-    
-    ADX > 25 = trending
-    ADX < 20 = ranging
-    """
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    
-    # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    # Directional Movement
-    plus_dm = high_s.diff()
-    minus_dm = -low_s.diff()
+    atr1_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    atr_period = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    hh_ll = high_s.rolling(window=period, min_periods=period).max().values - low_s.rolling(window=period, min_periods=period).min().values
     
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    chop = 100 * (atr1_sum / atr_period) / np.maximum(hh_ll, 1e-10) * np.log10(period)
+    chop = np.nan_to_num(chop, nan=50.0)
+    chop = np.clip(chop, 0, 100)
     
-    # Smooth with Wilder's method (EMA with span=period)
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
-    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    
-    # DX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)
-    
-    # ADX = smoothed DX
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    adx = adx.fillna(0).values
-    
-    return adx
+    return chop
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -161,36 +144,50 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high / lowest low over period)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    upper = high_s.rolling(window=period, min_periods=period).max().values
+    lower = low_s.rolling(window=period, min_periods=period).min().values
+    middle = (upper + lower) / 2
+    
+    return upper, lower, middle
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
     hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
     hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    fisher = calculate_fisher_transform(high, low, close, 9)
-    zscore = calculate_zscore(close, 20)
-    adx = calculate_adx(high, low, close, 14)
-    rsi_14 = calculate_rsi(close, 14)
+    connors_rsi = calculate_connors_rsi(close, 3, 2, 100)
+    chop = calculate_choppiness_index(high, low, close, 14)
+    donchian_upper, donchian_lower, donchian_middle = calculate_donchian(high, low, 20)
+    
+    # Volume SMA for filter
+    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # SMA200 for major trend filter
+    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
     
     signals = np.zeros(n)
     
     # Base position sizing (Rule 4 - discrete levels, max 0.40)
-    BASE_SIZE = 0.25
-    HIGH_CONV_SIZE = 0.30
+    BASE_SIZE_TREND = 0.30
+    BASE_SIZE_RANGE = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -198,112 +195,91 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_price = 0.0
     lowest_price = 0.0
-    last_fisher_long = -100
-    last_fisher_short = -100
+    last_trade_bar = -50
     
-    for i in range(100, n):
+    for i in range(250, n):  # Start later to ensure all indicators ready
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1w_21_aligned[i]):
+        if np.isnan(hma_1w_21_aligned[i]):
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(zscore[i]) or np.isnan(adx[i]):
+        if np.isnan(connors_rsi[i]) or np.isnan(chop[i]):
             continue
         
-        # === 1W TREND BIAS (MAJOR) ===
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            continue
+        
+        if np.isnan(volume_sma[i]) or volume_sma[i] == 0:
+            continue
+        
+        if np.isnan(sma_200[i]):
+            continue
+        
+        # === WEEKLY TREND BIAS (MAJOR) ===
         # Price above 1w HMA = bullish bias (prefer longs)
         # Price below 1w HMA = bearish bias (prefer shorts)
         trend_1w_bullish = close[i] > hma_1w_21_aligned[i]
         trend_1w_bearish = close[i] < hma_1w_21_aligned[i]
         
-        # === 1D TREND CONFIRMATION (INTERMEDIATE) ===
-        trend_1d_bullish = close[i] > hma_1d_21_aligned[i]
-        trend_1d_bearish = close[i] < hma_1d_21_aligned[i]
+        # === CHOPPINESS REGIME ===
+        # CHOP > 55 = range (mean reversion preferred)
+        # CHOP < 45 = trend (trend following preferred)
+        is_range = chop[i] > 55
+        is_trend = chop[i] < 45
         
-        # === ADX REGIME ===
-        # ADX < 20 = range (mean reversion preferred)
-        # ADX > 25 = trend (trend following preferred)
-        is_range = adx[i] < 20
-        is_trend = adx[i] > 25
-        
-        # === FISHER TRANSFORM SIGNALS ===
-        # Long: Fisher crosses above -1.5 (from below)
-        # Short: Fisher crosses below +1.5 (from above)
-        fisher_cross_long = (fisher[i] > -1.5) and (fisher[last_fisher_long] <= -1.5 if last_fisher_long >= 0 else False)
-        fisher_cross_short = (fisher[i] < 1.5) and (fisher[last_fisher_short] >= 1.5 if last_fisher_short >= 0 else False)
-        
-        # Also allow extreme Fisher values without cross (for fewer trades)
-        fisher_extreme_long = fisher[i] < -1.8
-        fisher_extreme_short = fisher[i] > 1.8
-        
-        # === Z-SCORE CONFIRMATION ===
-        # |z| > 2.0 = extreme (entry confirmation)
-        # |z| < 0.5 = mean reached (exit signal)
-        zscore_extreme_long = zscore[i] < -2.0
-        zscore_extreme_short = zscore[i] > 2.0
-        zscore_mean_reached = np.abs(zscore[i]) < 0.5
-        
-        # === RSI FILTER ===
-        # Avoid entries when RSI is neutral (40-60)
-        rsi_neutral = 40 < rsi_14[i] < 60
-        rsi_bullish = rsi_14[i] > 50
-        rsi_bearish = rsi_14[i] < 50
+        # === VOLUME FILTER ===
+        volume_ok = volume[i] > 0.7 * volume_sma[i]
         
         # === POSITION SIZING ===
-        current_size = BASE_SIZE
-        # High conviction: both Fisher extreme AND z-score extreme
-        high_conviction_long = fisher_extreme_long and zscore_extreme_long
-        high_conviction_short = fisher_extreme_short and zscore_extreme_short
-        if high_conviction_long or high_conviction_short:
-            current_size = HIGH_CONV_SIZE
+        current_size = BASE_SIZE_RANGE if is_range else BASE_SIZE_TREND
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
+        bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRIES
-        # Primary: Fisher cross + z-score extreme + trend alignment
-        # Secondary: Fisher extreme + z-score extreme (mean reversion in range)
-        if trend_1w_bullish or is_range:
-            # Primary entry: Fisher cross with confirmation
-            if (fisher_cross_long or fisher_extreme_long) and zscore_extreme_long:
-                # Require trend alignment OR strong mean reversion setup
-                if trend_1d_bullish or (is_range and rsi_bullish):
+        # REGIME 1: RANGE (Mean Reversion with Connors RSI)
+        if is_range:
+            # LONG: Connors RSI < 20 + price above SMA200 + weekly bullish OR neutral
+            if connors_rsi[i] < 20 and close[i] > sma_200[i]:
+                if trend_1w_bullish or not trend_1w_bearish:
+                    if volume_ok:
+                        new_signal = current_size
+            
+            # SHORT: Connors RSI > 80 + price below SMA200 + weekly bearish OR neutral
+            if connors_rsi[i] > 80 and close[i] < sma_200[i]:
+                if trend_1w_bearish or not trend_1w_bullish:
+                    if volume_ok:
+                        new_signal = -current_size
+        
+        # REGIME 2: TREND (Donchian Breakout)
+        elif is_trend:
+            # LONG: Price breaks Donchian upper + weekly bullish
+            if close[i] > donchian_upper[i-1] and trend_1w_bullish:
+                if volume_ok:
                     new_signal = current_size
             
-            # Secondary: RSI oversold + Fisher extreme
-            if rsi_14[i] < 35 and fisher_extreme_long and zscore[i] < -1.5:
-                if is_range or trend_1d_bullish:
-                    new_signal = current_size
+            # SHORT: Price breaks Donchian lower + weekly bearish
+            if close[i] < donchian_lower[i-1] and trend_1w_bearish:
+                if volume_ok:
+                    new_signal = -current_size
         
-        # SHORT ENTRIES
-        # Primary: Fisher cross + z-score extreme + trend alignment
-        # Secondary: Fisher extreme + z-score extreme (mean reversion in range)
-        if trend_1w_bearish or is_range:
-            # Primary entry: Fisher cross with confirmation
-            if (fisher_cross_short or fisher_extreme_short) and zscore_extreme_short:
-                # Require trend alignment OR strong mean reversion setup
-                if trend_1d_bearish or (is_range and not rsi_bullish):
-                    new_signal = -current_size
-            
-            # Secondary: RSI overbought + Fisher extreme
-            if rsi_14[i] > 65 and fisher_extreme_short and zscore[i] > 1.5:
-                if is_range or trend_1d_bearish:
-                    new_signal = -current_size
+        # REGIME 3: TRANSITION (45-55 CHOP) - Use weaker signals
+        else:
+            # Allow entries with weaker conditions
+            if connors_rsi[i] < 25 and trend_1w_bullish and volume_ok:
+                new_signal = current_size * 0.7
+            elif connors_rsi[i] > 75 and trend_1w_bearish and volume_ok:
+                new_signal = -current_size * 0.7
         
         # === FREQUENCY SAFEGUARD ===
-        # If no trades for 150 bars (~75 days on 12h), allow weaker entry
-        bars_since_last_long = i - last_fisher_long
-        bars_since_last_short = i - last_fisher_short
-        
-        if bars_since_last_long > 150 and new_signal == 0.0 and not in_position:
-            if trend_1w_bullish and fisher[i] < -1.0 and zscore[i] < -1.0:
-                new_signal = BASE_SIZE * 0.7
-        
-        if bars_since_last_short > 150 and new_signal == 0.0 and not in_position:
-            if trend_1w_bearish and fisher[i] > 1.0 and zscore[i] > 1.0:
-                new_signal = -BASE_SIZE * 0.7
+        # If no trades for 60 bars (~2 months on 1d), allow weaker entry
+        if bars_since_last_trade > 60 and new_signal == 0.0 and not in_position:
+            if trend_1w_bullish and connors_rsi[i] < 35 and volume_ok:
+                new_signal = BASE_SIZE_RANGE * 0.6
+            elif trend_1w_bearish and connors_rsi[i] > 65 and volume_ok:
+                new_signal = -BASE_SIZE_RANGE * 0.6
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -323,22 +299,16 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     stoploss_triggered = True
         
-        # === Z-SCORE MEAN REVERSION EXIT ===
-        # Exit when z-score returns to mean (|z| < 0.5)
-        zscore_exit = False
-        if in_position and np.abs(zscore[i]) < 0.5:
-            zscore_exit = True
-        
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and trend_1w_bearish and fisher[i] > 1.0:
+            if position_side > 0 and trend_1w_bearish and connors_rsi[i] > 70:
                 trend_reversal = True
-            if position_side < 0 and trend_1w_bullish and fisher[i] < -1.0:
+            if position_side < 0 and trend_1w_bullish and connors_rsi[i] < 30:
                 trend_reversal = True
         
-        # Apply stoploss or exit signals
-        if stoploss_triggered or zscore_exit or trend_reversal:
+        # Apply stoploss or trend reversal
+        if stoploss_triggered or trend_reversal:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -349,19 +319,13 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_price = close[i] if position_side > 0 else 0.0
                 lowest_price = close[i] if position_side < 0 else 0.0
-                if position_side > 0:
-                    last_fisher_long = i
-                else:
-                    last_fisher_short = i
+                last_trade_bar = i
             elif np.sign(new_signal) != position_side:
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_price = close[i] if position_side > 0 else 0.0
                 lowest_price = close[i] if position_side < 0 else 0.0
-                if position_side > 0:
-                    last_fisher_long = i
-                else:
-                    last_fisher_short = i
+                last_trade_bar = i
         else:
             if in_position:
                 in_position = False
@@ -369,6 +333,7 @@ def generate_signals(prices):
                 entry_price = 0.0
                 highest_price = 0.0
                 lowest_price = 0.0
+                last_trade_bar = i
         
         signals[i] = new_signal
     
