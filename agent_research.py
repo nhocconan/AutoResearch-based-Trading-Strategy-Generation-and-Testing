@@ -274,7 +274,7 @@ RISK MANAGEMENT (MANDATORY):
 - Fewer trades = less fee drag. Target 20-50 trades/year, not 200+.
 
 COST MODEL (engine-enforced):
-- Entry: taker 0.04%, Exit: maker 0% (SL/TP). Avg 0.03%/side = 0.06% round trip = 0.06% round trip
+- Taker 0.035% + Maker 0.01%. Avg 0.025%/side = 0.05% round trip = 0.05% round trip
 - Funding rate every 8h on open positions
 - Signal at bar t → fill at bar t+1 open
 - EVERY signal change triggers a trade and costs fees!
@@ -401,7 +401,7 @@ REMEMBER: call get_htf_data() ONCE before loop, use aligned arrays inside."""
 
 RULES:
 - Train: 2021-2024 | Primary TF: 5m, 15m, 30m, 1h, 4h, 6h, 12h, 1d | HTF ref: up to 1w
-- Signal bar t → fill bar t+1 | Costs: 0.06% round trip + funding
+- Signal bar t → fill bar t+1 | Costs: 0.05% round trip + funding
 - REJECT if: DD < -50% | trades < 10 | Sharpe ≤ 0
 
 #############################################################

@@ -32,12 +32,12 @@ data:
 # --- Backtesting Settings ---
 backtest:
   # Trading costs
-  # Entry: taker 0.04% + slippage 0.01% = 0.05%
-  # Exit via SL/TP: maker 0% + slippage 0.01% = 0.01%
-  # Average per side: (0.05 + 0.01) / 2 = 0.03%
-  taker_fee_pct: 0.02        # Average of taker(0.04) and maker(0) per side
-  slippage_pct: 0.01         # Slippage both sides
-  total_cost_pct: 0.03       # 0.03% per side = 0.06% round trip
+  # Taker: 0.035%, Maker: 0.01%. No slippage (BTC/ETH/SOL liquid enough).
+  # Entry taker + Exit maker = 0.035% + 0.01% = 0.045% round trip
+  # Max 0.05% round trip for safety margin
+  taker_fee_pct: 0.025       # Average of taker(0.035) and maker(0.01) per side
+  slippage_pct: 0.00         # No slippage — liquid pairs
+  total_cost_pct: 0.025      # 0.025% per side = 0.05% round trip max
   # Execution model
   fill_delay_bars: 1         # Signal at bar t, fill at bar t+1
   # Position sizing defaults
