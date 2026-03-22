@@ -1,87 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #017: 12h KAMA + Fisher Transform with 1d HMA Regime Filter
-Hypothesis: KAMA adapts to volatility better than EMA/HMA, reducing whipsaw in 2022 crash.
-Fisher Transform catches reversals more reliably than RSI in bear markets (research-backed).
-1d HMA provides regime bias (bull/bear) to filter counter-trend trades.
-Volume confirmation ensures breakouts have participation.
-Asymmetric sizing: smaller positions in bear regime to limit drawdown.
-Timeframe: 12h (REQUIRED), HTF: 1d via mtf_data helper.
+Experiment #018: 1d Supertrend + HMA Crossover with 1w Regime Filter
+Hypothesis: Daily timeframe reduces noise and fee impact. Supertrend provides clear trend direction
+with ATR-based stops built-in. HMA crossover confirms momentum. 1w HMA acts as simple regime filter
+(bull/bear bias) without over-complicating entries. Volume spike confirms breakout validity.
+This is SIMPLER than previous attempts - fewer filters = more trades generated.
 Position sizing: 0.25 base, 0.30 in bull regime, 0.20 in bear regime.
-Stoploss: 2.5*ATR trailing stop.
+Stoploss: 2.5*ATR trailing stop (in addition to Supertrend flip).
+Timeframe: 1d (REQUIRED), HTF: 1w via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_fisher_1d_hma_regime_v1"
-timeframe = "12h"
+name = "mtf_1d_supertrend_hma_1w_regime_v1"
+timeframe = "1d"
 leverage = 1.0
-
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """
-    Kaufman Adaptive Moving Average - adapts to market noise.
-    ER (Efficiency Ratio) determines smoothing constant.
-    Less whipsaw than EMA in ranging markets.
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        signal = np.abs(close[i] - close[i - er_period])
-        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0.0
-    
-    # Calculate smoothing constants
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    
-    # Initialize KAMA
-    kama[er_period] = close[er_period]
-    
-    for i in range(er_period + 1, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
-
-def calculate_fisher(close, period=9):
-    """
-    Ehlers Fisher Transform - normalizes price to Gaussian distribution.
-    Better at identifying turning points than RSI in bear markets.
-    Long when Fisher crosses above -1.5, short when crosses below +1.5.
-    """
-    n = len(close)
-    fisher = np.zeros(n)
-    fisher[:] = np.nan
-    fisher_signal = np.zeros(n)
-    fisher_signal[:] = np.nan
-    
-    # Calculate highest high and lowest low over period
-    for i in range(period - 1, n):
-        hh = np.max(close[i - period + 1:i + 1])
-        ll = np.min(close[i - period + 1:i + 1])
-        
-        if hh > ll:
-            # Normalize price to range 0-1
-            normalized = 0.66 * ((close[i] - ll) / (hh - ll) - 0.5) + 0.67 * (fisher_signal[i - 1] if i > period - 1 else 0.0)
-            normalized = np.clip(normalized, -0.99, 0.99)
-            
-            # Fisher transform
-            fisher[i] = 0.5 * np.log((1 + normalized) / (1 - normalized))
-            
-            if i > period:
-                fisher_signal[i] = fisher[i - 1]
-            else:
-                fisher_signal[i] = fisher[i]
-    
-    return fisher, fisher_signal
 
 def calculate_atr(high, low, close, period=14):
     """Calculate ATR using Wilder's smoothing."""
@@ -92,6 +26,51 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """
+    Supertrend indicator - trend following with ATR-based stops.
+    Returns: supertrend values, direction (1=up, -1=down)
+    """
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
+    
+    supertrend = np.zeros(n)
+    supertrend[:] = np.nan
+    direction = np.zeros(n)
+    direction[:] = np.nan
+    
+    hl2 = (high + low) / 2.0
+    
+    # Upper and lower bands
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    # Initialize
+    supertrend[period] = upper_band[period]
+    direction[period] = -1  # Start bearish
+    
+    for i in range(period + 1, n):
+        if direction[i - 1] == 1:
+            # Previous was bullish
+            if lower_band[i] < supertrend[i - 1]:
+                supertrend[i] = lower_band[i]
+            else:
+                supertrend[i] = supertrend[i - 1]
+        else:
+            # Previous was bearish
+            if upper_band[i] > supertrend[i - 1]:
+                supertrend[i] = upper_band[i]
+            else:
+                supertrend[i] = supertrend[i - 1]
+        
+        # Update direction
+        if close[i] > supertrend[i]:
+            direction[i] = 1
+        else:
+            direction[i] = -1
+    
+    return supertrend, direction
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -108,6 +87,7 @@ def calculate_volume_ratio(volume, period=20):
     vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
     ratio = volume / vol_ma
     ratio[np.isnan(ratio)] = 1.0
+    ratio[np.isinf(ratio)] = 1.0
     return ratio
 
 def generate_signals(prices):
@@ -118,18 +98,23 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    fisher, fisher_signal = calculate_fisher(close, period=9)
+    supertrend, st_direction = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    
+    # HMA for crossover signals
+    hma_fast = calculate_hma(close, 16)
+    hma_slow = calculate_hma(close, 48)
+    
+    # Volume confirmation
     vol_ratio = calculate_volume_ratio(volume, period=20)
     
     # Additional trend filter
@@ -141,7 +126,6 @@ def generate_signals(prices):
     # Position sizing - asymmetric based on regime
     SIZE_BULL = 0.30  # Larger in bull regime
     SIZE_BEAR = 0.20  # Smaller in bear regime (risk management)
-    SIZE_EXIT = 0.0
     
     # Track positions for stoploss
     position_side = 0
@@ -156,36 +140,34 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama[i]) or np.isnan(fisher[i]) or np.isnan(fisher_signal[i]):
+        if np.isnan(supertrend[i]) or np.isnan(st_direction[i]):
             signals[i] = 0.0
             continue
         
-        # 1d regime bias (HTF) - determines which direction to favor
-        bull_regime = close[i] > hma_1d_aligned[i]
-        bear_regime = close[i] < hma_1d_aligned[i]
+        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
+            signals[i] = 0.0
+            continue
         
-        # KAMA trend direction
-        kama_rising = kama[i] > kama[i - 5] if i > 5 else False
-        kama_falling = kama[i] < kama[i - 5] if i > 5 else False
+        # 1w regime bias (HTF) - determines which direction to favor
+        bull_regime = close[i] > hma_1w_aligned[i]
+        bear_regime = close[i] < hma_1w_aligned[i]
         
-        # Price position vs KAMA
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # Supertrend direction
+        st_bullish = st_direction[i] == 1
+        st_bearish = st_direction[i] == -1
         
-        # Fisher Transform signals
-        fisher_long = fisher[i] > -1.5 and fisher_signal[i] < -1.5  # Cross above -1.5
-        fisher_short = fisher[i] < 1.5 and fisher_signal[i] > 1.5   # Cross below +1.5
-        
-        # Fisher extreme levels (mean reversion)
-        fisher_oversold = fisher[i] < -2.0
-        fisher_overbought = fisher[i] > 2.0
+        # HMA crossover
+        hma_golden = hma_fast[i] > hma_slow[i] and hma_fast[i-1] <= hma_slow[i-1]
+        hma_death = hma_fast[i] < hma_slow[i] and hma_fast[i-1] >= hma_slow[i-1]
+        hma_bullish = hma_fast[i] > hma_slow[i]
+        hma_bearish = hma_fast[i] < hma_slow[i]
         
         # Volume confirmation
-        volume_confirmed = vol_ratio[i] > 1.2  # 20% above average
+        volume_confirmed = vol_ratio[i] > 1.1  # 10% above average
         
         # EMA trend confirmation
         ema_bullish = close[i] > ema_50[i] and ema_50[i] > ema_200[i]
@@ -197,28 +179,36 @@ def generate_signals(prices):
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Primary: KAMA rising + Fisher long cross + bull regime + volume
-        if kama_rising and fisher_long and bull_regime and volume_confirmed:
+        # Primary: Supertrend bullish + HMA bullish + bull regime
+        if st_bullish and hma_bullish and bull_regime:
             new_signal = current_size
-        # Secondary: Fisher oversold + price above KAMA + bull regime (pullback entry)
-        elif fisher_oversold and price_above_kama and bull_regime:
+        # Secondary: Supertrend flip to bullish + volume confirmation
+        elif st_direction[i] == 1 and st_direction[i-1] == -1 and volume_confirmed:
             new_signal = current_size
-        # Tertiary: EMA bullish + KAMA rising + bull regime (trend continuation)
-        elif ema_bullish and kama_rising and bull_regime:
+        # Tertiary: HMA golden cross + bull regime
+        elif hma_golden and bull_regime:
             new_signal = current_size
         
         # === SHORT ENTRY ===
-        # Primary: KAMA falling + Fisher short cross + bear regime + volume
-        if kama_falling and fisher_short and bear_regime and volume_confirmed:
+        # Primary: Supertrend bearish + HMA bearish + bear regime
+        if st_bearish and hma_bearish and bear_regime:
             new_signal = -current_size
-        # Secondary: Fisher overbought + price below KAMA + bear regime (pullback entry)
-        elif fisher_overbought and price_below_kama and bear_regime:
+        # Secondary: Supertrend flip to bearish + volume confirmation
+        elif st_direction[i] == -1 and st_direction[i-1] == 1 and volume_confirmed:
             new_signal = -current_size
-        # Tertiary: EMA bearish + KAMA falling + bear regime (trend continuation)
-        elif ema_bearish and kama_falling and bear_regime:
+        # Tertiary: HMA death cross + bear regime
+        elif hma_death and bear_regime:
             new_signal = -current_size
         
         # === STOPLOSS LOGIC (Rule 6) ===
+        # Supertrend flip acts as primary stop
+        if position_side > 0 and st_bearish:
+            new_signal = 0.0
+        
+        if position_side < 0 and st_bullish:
+            new_signal = 0.0
+        
+        # ATR trailing stop (secondary)
         if position_side > 0 and entry_price > 0:
             # Update highest close for trailing
             if close[i] > highest_close:
