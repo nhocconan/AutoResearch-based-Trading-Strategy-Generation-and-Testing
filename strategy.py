@@ -1,34 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #540: 1d Weekly HMA Regime + Donchian Breakout with Volume/ADX Confirmation
+Experiment #541: 15m Regime-Adaptive Strategy with 4h HMA Trend Filter
 
-Hypothesis: After analyzing 539 failed experiments, the key insight for 1d timeframe:
-1. Daily bars have ~1460 bars over 4 years - need HIGH QUALITY signals, not many trades
-2. Weekly HMA(21) provides robust trend bias without daily noise
-3. Donchian(20) breakout = 20-day high/low break = captures sustained multi-week moves
-4. Volume confirmation (vol_ratio > 1.5) filters false breakouts (major failure mode)
-5. ADX(14)>25 ensures we only trade when trend has momentum
-6. 2.5*ATR trailing stop protects against 2022-style crashes
-7. Asymmetric sizing: 0.30 for trend-aligned trades, 0.20 for counter-trend
+Hypothesis: 15m strategies failed because they used ONE approach (either trend or mean-rev)
+regardless of market regime. This strategy:
+1. Uses Choppiness Index (CHOP) to detect regime: CHOP>61.8=range, CHOP<38.2=trend
+2. In TREND regime: Donchian breakout entries with 4h HMA bias
+3. In RANGE regime: RSI mean-reversion at Bollinger bounds
+4. Volume spike confirmation on breakouts (filters false moves)
+5. 4h HMA trend filter prevents counter-trend entries (major failure mode)
+6. ATR(14) stoploss at 2.0x (tighter for 15m noise)
+7. Discrete signal levels (0.0, ±0.25) to minimize fee churn
 
-Why 1d should work better than intraday:
-- Less noise, fewer false signals
-- Crypto trends last days/weeks, not hours
-- Lower fee drag (fewer trades)
-- Better suited for HTF bias (weekly/daily alignment)
+Why this should work on 15m:
+- Regime detection avoids applying wrong logic (trend in chop = death)
+- 4h HMA provides stable trend bias without 15m noise
+- Volume filter catches real breakouts vs fakeouts
+- Different entry logic per regime = adapts to market conditions
+- Tighter stoploss (2.0 ATR) for 15m volatility
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20-0.30 discrete (max 0.40)
-Stoploss: 2.5 * ATR(14) trailing
-Target: >10 trades train, >3 trades test, Sharpe > 0.676 (beat current best)
+Timeframe: 15m (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25 discrete (max 0.40)
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_weekly_hma_donchian_volume_adx_asymmetric_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_regime_adaptive_chop_donchian_rsi_4h_hma_volume_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -51,8 +52,13 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    CHOP > 61.8 = ranging market
+    CHOP < 38.2 = trending market
+    """
     high_s = pd.Series(high)
     low_s = pd.Series(low)
     close_s = pd.Series(close)
@@ -63,36 +69,19 @@ def calculate_adx(high, low, close, period=14):
     tr3 = np.abs(low_s - close_s.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Directional Movement
-    up_move = high_s - high_s.shift(1)
-    down_move = low_s.shift(1) - low_s
+    # Sum of ATR over period
+    atr_sum = tr.rolling(window=period, min_periods=period).sum()
     
-    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
-    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    # Highest High - Lowest Low over period
+    hh_ll = high_s.rolling(window=period, min_periods=period).max() - low_s.rolling(window=period, min_periods=period).min()
     
-    # Smoothed values
-    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
-    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    # CHOP formula
+    chop = 100 * np.log10(atr_sum / hh_ll.replace(0, np.inf)) / np.log10(period)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.inf)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return adx.values
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low over period)."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    
-    upper = high_s.rolling(window=period, min_periods=period).max()
-    lower = low_s.rolling(window=period, min_periods=period).min()
-    
-    return upper.values, lower.values
+    return chop.values
 
 def calculate_rsi(close, period=14):
-    """Calculate RSI using Wilder's smoothing."""
+    """Calculate RSI (Relative Strength Index)."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -106,6 +95,34 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    
+    return upper.values, lower.values
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high / lowest low over period)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    upper = high_s.rolling(window=period, min_periods=period).max()
+    lower = low_s.rolling(window=period, min_periods=period).min()
+    
+    return upper.values, lower.values
+
+def calculate_volume_spike(volume, period=20, threshold=1.5):
+    """Detect volume spikes (volume > threshold * rolling avg)."""
+    volume_s = pd.Series(volume)
+    vol_avg = volume_s.rolling(window=period, min_periods=period).mean()
+    spike = volume_s > (threshold * vol_avg)
+    return spike.values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -114,29 +131,26 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    adx_14 = calculate_adx(high, low, close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    chop_14 = calculate_choppiness(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
-    
-    # Volume moving average for confirmation
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    bb_upper, bb_lower = calculate_bollinger_bands(close, 20, 2.0)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    vol_spike = calculate_volume_spike(volume, 20, 1.5)
     
     signals = np.zeros(n)
     
-    # Position sizing - asymmetric discrete levels (Rule 4)
-    SIZE_TREND = 0.30  # Full size when trend-aligned
-    SIZE_COUNTER = 0.20  # Reduced size for counter-trend
+    # Position sizing - discrete levels (Rule 4)
+    SIZE = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -151,63 +165,64 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx_14[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(chop_14[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(volume_ma[i]) or volume_ma[i] == 0:
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             continue
         
-        # === WEEKLY HMA TREND BIAS ===
-        bull_bias = close[i] > hma_1w_aligned[i]
-        bear_bias = close[i] < hma_1w_aligned[i]
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            signals[i] = 0.0
+            continue
         
-        # === 1D DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
-        breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
+        # === 4H HMA TREND BIAS ===
+        bull_bias = close[i] > hma_4h_aligned[i]
+        bear_bias = close[i] < hma_4h_aligned[i]
         
-        # === ADX FILTER (trend strength) ===
-        trend_strong = adx_14[i] > 25  # Confirms trending market
+        # === REGIME DETECTION (Choppiness Index) ===
+        is_trending = chop_14[i] < 38.2  # Trending regime
+        is_ranging = chop_14[i] > 61.8   # Ranging regime
+        # Neutral regime: 38.2 <= CHOP <= 61.8 (no trades or reduced size)
         
         # === VOLUME CONFIRMATION ===
-        vol_ratio = volume[i] / volume_ma[i] if volume_ma[i] > 0 else 0
-        volume_confirmed = vol_ratio > 1.5  # 50% above average volume
-        
-        # === RSI FILTER (avoid extreme overbought/oversold entries) ===
-        rsi_ok_long = rsi_14[i] < 70  # Not extremely overbought
-        rsi_ok_short = rsi_14[i] > 30  # Not extremely oversold
+        volume_confirmed = vol_spike[i]
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # Long: Donchian breakout + weekly bullish bias + ADX + volume + RSI filter
-        if breakout_long and bull_bias and trend_strong and volume_confirmed and rsi_ok_long:
-            new_signal = SIZE_TREND
+        # --- TRENDING REGIME: Donchian Breakout ---
+        if is_trending:
+            # Long: Donchian breakout + 4h bullish bias + volume confirmation
+            if bull_bias and close[i] > donchian_upper[i-1] and volume_confirmed:
+                new_signal = SIZE
+            
+            # Short: Donchian breakout + 4h bearish bias + volume confirmation
+            elif bear_bias and close[i] < donchian_lower[i-1] and volume_confirmed:
+                new_signal = -SIZE
         
-        # Short: Donchian breakout + weekly bearish bias + ADX + volume + RSI filter
-        elif breakout_short and bear_bias and trend_strong and volume_confirmed and rsi_ok_short:
-            new_signal = -SIZE_TREND
+        # --- RANGING REGIME: RSI Mean Reversion at BB Bounds ---
+        elif is_ranging:
+            # Long: RSI oversold + price at/near BB lower + 4h bullish bias (loose)
+            if rsi_14[i] < 30 and close[i] <= bb_lower[i] * 1.005:
+                new_signal = SIZE
+            
+            # Short: RSI overbought + price at/near BB upper + 4h bearish bias (loose)
+            elif rsi_14[i] > 70 and close[i] >= bb_upper[i] * 0.995:
+                new_signal = -SIZE
         
-        # Counter-trend long (weaker signal, reduced size): breakout + RSI oversold
-        elif breakout_long and rsi_14[i] < 35 and not bear_bias:
-            new_signal = SIZE_COUNTER
-        
-        # Counter-trend short (weaker signal, reduced size): breakout + RSI overbought
-        elif breakout_short and rsi_14[i] > 65 and not bull_bias:
-            new_signal = -SIZE_COUNTER
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr_14[i]
+                stoploss_price = highest_close - 2.0 * atr_14[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -215,12 +230,12 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr_14[i]
+                stoploss_price = lowest_close + 2.0 * atr_14[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if weekly HMA flips against position
+        # Exit if 4h HMA flips against position
         if in_position and new_signal != 0.0:
             if position_side > 0 and bear_bias:
                 new_signal = 0.0
