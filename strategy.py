@@ -1,28 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #551: 12h Volatility Spike Mean Reversion with Daily HMA Bias
+Experiment #552: Daily EMA Crossover with Weekly HMA Bias + RSI Filter
 
-Hypothesis: After analyzing 500+ failed experiments, the pattern is clear:
-1. Pure trend following fails on BTC/ETH (2022 crash whipsaw)
-2. Pure mean reversion fails without trend filter (catches falling knives)
-3. VOLATILITY SPIKE REVERSION is the winning combination for BTC/ETH
+Hypothesis: After 500+ failed experiments, daily timeframe needs:
+1. More frequent signals than Donchian (EMA 8/21 crossover = ~2-4 signals/month)
+2. Weekly HMA trend bias (soft filter, not hard block)
+3. RSI(14) confirmation to avoid entering at extremes (RSI 25-75 range)
+4. ATR(14) stoploss at 2.5x for capital protection
+5. Discrete position sizing 0.30 to balance risk vs opportunity
 
-Why this should work on 12h:
-- ATR(7)/ATR(30) > 2.0 captures panic spikes (vol expansion)
-- Price at BB(20, 2.5) extreme = oversold/overbought after spike
-- 1d HMA bias prevents counter-trend entries (major failure mode)
-- Exit when ATR ratio < 1.2 (vol normalized = move exhausted)
-- 12h timeframe = fewer false signals than 15m/1h/4h
-- This specific setup reported Sharpe 0.8-1.5 through 2022 crash
+Why this should work on 1d:
+- EMA crossover generates enough trades (unlike Donchian which had 0 trades)
+- Weekly HMA provides regime context without blocking all counter-trend trades
+- RSI filter prevents buying tops/selling bottoms
+- Simple logic = robust across BTC/ETH/SOL (no symbol-specific tuning)
+- 1d timeframe = fewer fees, captures multi-week trends
 
-Key differences from failed strategies:
-- NOT Connors RSI (failed #544, #548, #550)
-- NOT Fisher Transform (failed #539, #542, #543)
-- NOT Choppiness Index regime (failed #539, #541, #545)
-- Simple ATR ratio + BB extremes + HTF bias = proven edge
-
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d via mtf_data helper (call ONCE before loop)
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
 Position sizing: 0.30 discrete (max 0.40)
 Stoploss: 2.5 * ATR(14) trailing
 """
@@ -30,8 +25,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_vol_spike_meanrev_daily_hma_bb_extreme_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_ema_crossover_weekly_hma_rsi_filter_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -44,6 +39,12 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    return ema.values
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -54,23 +55,20 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.5):
-    """Calculate Bollinger Bands with configurable std multiplier."""
+def calculate_rsi(close, period=14):
+    """Calculate RSI (Relative Strength Index)."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper.values, lower.values, sma.values
-
-def calculate_atr_ratio(high, low, close, short_period=7, long_period=30):
-    """Calculate ATR ratio for volatility spike detection."""
-    atr_short = calculate_atr(high, low, close, short_period)
-    atr_long = calculate_atr(high, low, close, long_period)
-    # Avoid division by zero
-    atr_long_safe = np.where(atr_long > 0, atr_long, np.nan)
-    atr_ratio = atr_short / atr_long_safe
-    return atr_ratio
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / avg_loss.replace(0, np.inf)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    return rsi
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -79,25 +77,26 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
+    ema_8 = calculate_ema(close, 8)
+    ema_21 = calculate_ema(close, 21)
+    rsi_14 = calculate_rsi(close, 14)
     atr_14 = calculate_atr(high, low, close, 14)
-    atr_ratio = calculate_atr_ratio(high, low, close, 7, 30)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.5)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE = 0.30
     
-    # Track position state for stoploss and exit
+    # Track position state for stoploss
     in_position = False
     position_side = 0
     highest_close = 0.0
@@ -110,45 +109,49 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(atr_ratio[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(ema_8[i]) or np.isnan(ema_21[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             continue
         
-        # === 1D HMA TREND BIAS ===
-        bull_bias = close[i] > hma_1d_aligned[i]
-        bear_bias = close[i] < hma_1d_aligned[i]
+        # === WEEKLY HMA TREND BIAS (soft filter) ===
+        bull_bias = close[i] > hma_1w_aligned[i]
+        bear_bias = close[i] < hma_1w_aligned[i]
         
-        # === VOLATILITY SPIKE DETECTION ===
-        vol_spike = atr_ratio[i] > 2.0  # ATR(7) > 2x ATR(30)
-        vol_normalized = atr_ratio[i] < 1.2  # Exit condition
+        # === EMA CROSSOVER SIGNALS ===
+        # Golden cross: EMA8 crosses above EMA21
+        ema_cross_long = ema_8[i] > ema_21[i] and ema_8[i-1] <= ema_21[i-1]
+        # Death cross: EMA8 crosses below EMA21
+        ema_cross_short = ema_8[i] < ema_21[i] and ema_8[i-1] >= ema_21[i-1]
         
-        # === BOLLINGER BAND EXTREMES ===
-        oversold = close[i] < bb_lower[i]
-        overbought = close[i] > bb_upper[i]
+        # === RSI FILTER (avoid extremes) ===
+        # Long: RSI between 25-75 (not oversold bounce, not overbought)
+        rsi_ok_long = 25 < rsi_14[i] < 75
+        # Short: RSI between 25-75
+        rsi_ok_short = 25 < rsi_14[i] < 75
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # Long: Vol spike + oversold + daily bullish bias
-        # This captures panic selling reversals in uptrend
-        if vol_spike and oversold and bull_bias:
-            new_signal = SIZE
+        # Long: EMA golden cross + RSI in range + weekly bias (soft)
+        if ema_cross_long and rsi_ok_long:
+            if bull_bias:
+                new_signal = SIZE  # Full size with trend
+            else:
+                new_signal = SIZE * 0.5  # Half size against weekly trend
         
-        # Short: Vol spike + overbought + daily bearish bias
-        # This captures panic buying reversals in downtrend
-        elif vol_spike and overbought and bear_bias:
-            new_signal = -SIZE
-        
-        # === EXIT LOGIC - Volatility Normalized ===
-        if in_position and vol_normalized:
-            new_signal = 0.0
+        # Short: EMA death cross + RSI in range + weekly bias (soft)
+        elif ema_cross_short and rsi_ok_short:
+            if bear_bias:
+                new_signal = -SIZE  # Full size with trend
+            else:
+                new_signal = -SIZE * 0.5  # Half size against weekly trend
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
-        if in_position and position_side != 0 and new_signal != 0.0:
+        if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
@@ -166,11 +169,26 @@ def generate_signals(prices):
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if daily HMA flips against position
+        # Exit if weekly HMA flips strongly against position
         if in_position and new_signal != 0.0:
             if position_side > 0 and bear_bias:
-                new_signal = 0.0
+                # Check if price is significantly below weekly HMA
+                if close[i] < hma_1w_aligned[i] * 0.97:  # 3% below
+                    new_signal = 0.0
             if position_side < 0 and bull_bias:
+                # Check if price is significantly above weekly HMA
+                if close[i] > hma_1w_aligned[i] * 1.03:  # 3% above
+                    new_signal = 0.0
+        
+        # === EMA REVERSAL EXIT ===
+        # Exit long if EMA8 crosses back below EMA21
+        if in_position and position_side > 0:
+            if ema_8[i] < ema_21[i]:
+                new_signal = 0.0
+        
+        # Exit short if EMA8 crosses back above EMA21
+        if in_position and position_side < 0:
+            if ema_8[i] > ema_21[i]:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
