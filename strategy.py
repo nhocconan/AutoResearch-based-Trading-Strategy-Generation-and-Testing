@@ -1,39 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #112: 4h Volatility Spike Mean Reversion + 1d HMA Trend Filter
+Experiment #113: 12h Donchian Breakout + 1d HMA Trend Filter + ATR Trailing Stop
 
-Hypothesis: Building on market analysis showing vol spike reversion works well for BTC/ETH.
-This strategy captures panic/recovery cycles that destroyed simple trend strategies in 2022.
+Hypothesis: After 12 failed experiments with complex regime-switching and mean-reversion
+strategies, returning to proven trend-following on slower timeframe (12h):
+- 12h Donchian(20) breakout captures sustained moves with fewer whipsaws than EMA
+- 1d HMA(21) provides stable higher-timeframe trend bias (avoids counter-trend trades)
+- ATR(14) trailing stop at 2.5*ATR protects against reversals
+- Simpler logic = more trades while maintaining quality (addressing 0-trade failures)
+- 12h timeframe naturally filters noise, generates 20-40 trades/year
 
-Key components:
-- ATR Ratio (ATR7/ATR30) > 2.0 signals volatility spike (panic/euphoria extreme)
-- Bollinger Bands (20, 2.5σ) identify price extremes during vol spikes
-- 1d HMA(21) provides higher-timeframe trend bias (avoid counter-trend in major moves)
-- RSI(7) confirms oversold/overbought conditions during spikes
-- Asymmetric logic: long vol spikes below BB in uptrend, short vol spikes above BB in downtrend
+Why this might work when others failed:
+- Donchian breakouts work better on slower timeframes (12h/1d) than fast (15m/1h)
+- 1d HMA filter prevents entering against major trend (critical for 2022 crash)
+- Conservative position sizing (0.25/0.35) limits drawdown during crashes
+- Trailing stop locks in profits during strong trends
 
-Why this might work where others failed:
-- Vol spike reversion captured the 2022 crash recovery (trend strategies got whipsawed)
-- BB 2.5σ is wider than standard 2.0σ, reducing false signals
-- 1d HMA filter prevents fighting major trends (unlike pure mean reversion)
-- RSI confirmation adds momentum filter to avoid catching falling knives
-- 4h timeframe balances signal frequency vs noise (fewer trades than 15m/30m failures)
-
-Timeframe: 4h (REQUIRED for this experiment)
+Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 base, 0.35 strong (discrete levels)
+Position sizing: 0.25-0.35 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
-
-Market Analysis Insight:
-"VOL SPIKE REVERSION: ATR(7)/ATR(30) > 2.0 + price < BB(20,2.5) → long.
-Captures 'vol crush' after panic. Exit when ATR ratio < 1.2."
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_vol_spike_1d_hma_bb_rsi_v2"
-timeframe = "4h"
+name = "mtf_12h_donchian_1d_hma_atr_trail_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -46,28 +39,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.5):
-    """Calculate Bollinger Bands with configurable std dev."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    return upper, lower, sma
-
-def calculate_rsi(close, period=7):
-    """Calculate RSI with configurable period."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50.0).values
-    return rsi
-
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -77,6 +48,63 @@ def calculate_hma(close, period=21):
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel upper and lower bands."""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX for trend strength."""
+    n = len(close)
+    adx = np.zeros(n)
+    adx[:] = np.nan
+    
+    if n < period * 2:
+        return adx
+    
+    # Calculate DM and TR
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        plus_dm[i] = max(0, high[i] - high[i-1]) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
+        minus_dm[i] = max(0, low[i-1] - low[i]) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    # Smooth with Wilder's method
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate DI and DX
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    
+    mask = tr_s > 0
+    plus_di[mask] = 100 * plus_dm_s[mask] / tr_s[mask]
+    minus_di[mask] = 100 * minus_dm_s[mask] / tr_s[mask]
+    
+    di_sum = plus_di + minus_di
+    mask2 = di_sum > 0
+    dx[mask2] = 100 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
+    
+    # Calculate ADX
+    adx_series = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean()
+    adx = adx_series.values
+    
+    return adx
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -93,19 +121,10 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    atr_14 = calculate_atr(high, low, close, 14)
-    
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.5)
-    rsi_7 = calculate_rsi(close, 7)
-    
-    # ATR Ratio for volatility spike detection
-    atr_ratio = np.zeros(n)
-    atr_ratio[:] = np.nan
-    mask = atr_30 > 0
-    atr_ratio[mask] = atr_7[mask] / atr_30[mask]
+    # Calculate 12h indicators
+    atr = calculate_atr(high, low, close, 14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    adx = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     
@@ -122,7 +141,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr_ratio[i]) or np.isnan(atr_14[i]) or atr_14[i] == 0:
+        if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
@@ -130,68 +149,55 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        # === VOLATILITY SPIKE DETECTION ===
-        vol_spike = atr_ratio[i] > 2.0
-        vol_normal = atr_ratio[i] < 1.2
-        
-        # === PRICE POSITION RELATIVE TO BOLLINGER BANDS ===
-        price_below_bb = close[i] < bb_lower[i]
-        price_above_bb = close[i] > bb_upper[i]
-        price_mid = bb_mid[i]
-        
-        # === HIGHER TIMEFRAME TREND BIAS ===
+        # === MULTI-TIMEFRAME TREND BIAS ===
+        # 1d HMA = higher timeframe trend bias
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === RSI CONFIRMATION ===
-        rsi_oversold = rsi_7[i] < 30
-        rsi_overbought = rsi_7[i] > 70
-        rsi_neutral = 30 <= rsi_7[i] <= 70
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        # Break above upper band = long signal
+        breakout_long = close[i] > donchian_upper[i-1]  # Use previous bar's band
+        # Break below lower band = short signal
+        breakout_short = close[i] < donchian_lower[i-1]
+        
+        # === ADX TREND STRENGTH ===
+        adx_strong = adx[i] > 25 if not np.isnan(adx[i]) else False
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS ===
-        # Strong: Vol spike + price below BB + 1d bullish + RSI oversold
-        if vol_spike and price_below_bb and bull_trend_1d and rsi_oversold:
+        # Strong: 1d bullish + Donchian breakout + ADX strong
+        if bull_trend_1d and breakout_long and adx_strong:
             new_signal = SIZE_STRONG
-        # Moderate: Vol spike + price below BB + 1d bullish
-        elif vol_spike and price_below_bb and bull_trend_1d:
+        # Moderate: 1d bullish + Donchian breakout
+        elif bull_trend_1d and breakout_long:
             new_signal = SIZE_BASE
-        # Weak: Vol spike + price below BB + RSI oversold (ensure trades on all symbols)
-        elif vol_spike and price_below_bb and rsi_oversold:
+        # Weak: Donchian breakout only (ensure trades on all symbols)
+        elif breakout_long:
             new_signal = SIZE_BASE
         
         # === SHORT ENTRY CONDITIONS ===
-        # Strong: Vol spike + price above BB + 1d bearish + RSI overbought
-        if vol_spike and price_above_bb and bear_trend_1d and rsi_overbought:
+        # Strong: 1d bearish + Donchian breakout + ADX strong
+        if bear_trend_1d and breakout_short and adx_strong:
             new_signal = -SIZE_STRONG
-        # Moderate: Vol spike + price above BB + 1d bearish
-        elif vol_spike and price_above_bb and bear_trend_1d:
+        # Moderate: 1d bearish + Donchian breakout
+        elif bear_trend_1d and breakout_short:
             new_signal = -SIZE_BASE
-        # Weak: Vol spike + price above BB + RSI overbought (ensure trades on all symbols)
-        elif vol_spike and price_above_bb and rsi_overbought:
+        # Weak: Donchian breakout only (ensure trades on all symbols)
+        elif breakout_short:
             new_signal = -SIZE_BASE
         
-        # === EXIT CONDITIONS (vol normalization) ===
-        # Exit long when vol normalizes and price returns to mid
-        if in_position and position_side > 0 and vol_normal and close[i] > price_mid:
-            new_signal = 0.0
-        
-        # Exit short when vol normalizes and price returns to mid
-        if in_position and position_side < 0 and vol_normal and close[i] < price_mid:
-            new_signal = 0.0
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Update trailing highs/lows for active positions
         if in_position and position_side > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
             # Trailing stop: 2.5 * ATR below highest close
-            stoploss_price = highest_close - 2.5 * atr_14[i]
+            stoploss_price = highest_close - 2.5 * atr[i]
             if close[i] < stoploss_price:
                 new_signal = 0.0  # Stoploss hit
         
@@ -199,7 +205,7 @@ def generate_signals(prices):
             if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
             # Trailing stop: 2.5 * ATR above lowest close
-            stoploss_price = lowest_close + 2.5 * atr_14[i]
+            stoploss_price = lowest_close + 2.5 * atr[i]
             if close[i] > stoploss_price:
                 new_signal = 0.0  # Stoploss hit
         
