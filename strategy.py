@@ -1,38 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #549: 4h Primary + 1d HTF — Simplified Trend-Pullback with Vol Filter
+Experiment #550: 1h Primary + 4h/12h HTF — Simplified Triple-Timeframe Pullback
 
-Hypothesis: After analyzing 480+ failed strategies, the clearest pattern is:
-- Complex regime switching (chop + Connors + ADX + volume) consistently FAILS
-- Simple trend + pullback works best (#543 Sharpe=0.270 on 1d timeframe)
-- 4h timeframe should target 20-50 trades/year (optimal per rules)
-- Key insight: FEWER filters = MORE trades = better Sharpe (fee drag < missed opportunities)
-
-This strategy uses SIMPLIFIED logic:
-1. 4h HMA(21) for primary trend direction
-2. 1d HMA(21) aligned for major trend bias (filter counter-trend)
-3. RSI(14) pullback entry: long when RSI 35-50 in uptrend, short when RSI 50-65 in downtrend
-4. Volatility filter: ATR(14)/ATR(50) ratio to avoid low-vol whipsaw
-5. ATR(14) 2.5x trailing stop for all positions
-6. Asymmetric sizing: 0.30 bull regime, 0.25 bear regime (crypto crashes faster than rallies)
+Hypothesis: After 480+ failed strategies, the clearest pattern for lower TF success is:
+- 1h strategies failed (#540, #545, #548) because TOO MANY conflicting filters = 0 trades
+- Key insight: Use HTF (12h/4h) for DIRECTION, 1h only for ENTRY TIMING
+- This gives HTF trade frequency (30-60/year) with 1h execution precision
+- Simplified confluence: 12h trend + 4h confirmation + 1h RSI pullback + volume filter
+- Session filter (8-20 UTC) avoids Asian session whipsaws (proven in FX/crypto literature)
+- Asymmetric sizing: 0.25 bull, 0.20 bear (crypto crashes faster than rallies)
 
 Why this might beat Sharpe=0.435:
-- Simpler = more trades (20-50/year target) = less chance of 0-trade failure
-- 1d HTF filter prevents major counter-trend losses (key failure mode in 2022)
-- RSI pullback entries catch dips in trends (proven in #543)
-- 4h TF balances trade frequency vs fee drag optimally
-- Discrete position sizing (0.0, ±0.25, ±0.30) minimizes fee churn
+- 12h HMA(21) for major trend (slow, reliable direction filter)
+- 4h HMA(21) aligned for intermediate confirmation (prevents counter-trend entries)
+- 1h RSI(14) pullback: 38-52 for longs, 48-62 for shorts (not extreme = more trades)
+- Volume filter: current > 0.8x 20-bar avg (avoids low-liquidity traps)
+- Session filter: 8-20 UTC only (London/NY overlap = best liquidity)
+- 2.5x ATR trailing stop on all positions
+- Target: 40-60 trades/year on 1h (optimal per Rule 10)
 
-Position sizing: 0.25-0.30 base (discrete per Rule 4, max 0.40)
-Stoploss: 2.5 * ATR trailing (signal → 0 when hit)
+Position sizing: 0.20-0.25 base (discrete, max 0.40 per Rule 4)
+Stoploss: 2.5 * ATR(14) trailing (signal → 0 when hit)
 Target: >=30 trades/symbol on train, >=3 on test, Sharpe > 0 all symbols
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_rsi_pullback_1d_simple_v1"
-timeframe = "4h"
+name = "mtf_1h_hma_rsi_pullback_4h12h_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -82,76 +78,56 @@ def calculate_hma(close, period=21):
     
     return hma.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    n = len(close)
-    
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    
-    plus_dm = high_s.diff()
-    minus_dm = -low_s.diff()
-    
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm < 0] = 0
-    
-    mask = (plus_dm > 0) & (minus_dm > 0)
-    plus_dm_vals = plus_dm.values.copy()
-    minus_dm_vals = minus_dm.values.copy()
-    plus_dm_vals[mask] = np.where(plus_dm_vals[mask] > minus_dm_vals[mask], plus_dm_vals[mask], 0)
-    minus_dm_vals[mask] = np.where(minus_dm_vals[mask] > plus_dm_vals[mask], minus_dm_vals[mask], 0)
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    plus_dm_s = pd.Series(plus_dm_vals).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm_vals).ewm(span=period, min_periods=period, adjust=False).mean().values
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = 100.0 * plus_dm_s / (tr_s + 1e-10)
-    minus_di = 100.0 * minus_dm_s / (tr_s + 1e-10)
-    
-    dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
+def calculate_sma(close, period=20):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+
+def get_hour_from_open_time(prices):
+    """Extract UTC hour from open_time column."""
+    # open_time is in milliseconds since epoch
+    timestamps = prices['open_time'].values / 1000.0
+    hours = (timestamps % 86400) / 3600.0
+    return hours.astype(int)
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # Load 1d HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d HTF HMA for major trend direction
-    hma_1d_21 = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_50 = calculate_hma(df_1d['close'].values, period=50)
+    # Calculate 12h HTF HMA for major trend direction
+    hma_12h_21 = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_50 = calculate_hma(df_12h['close'].values, period=50)
+    
+    # Calculate 4h HTF HMA for intermediate confirmation
+    hma_4h_21 = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_50 = calculate_hma(df_4h['close'].values, period=50)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
-    hma_1d_50_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_50)
+    hma_12h_21_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_21)
+    hma_12h_50_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_50)
+    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
+    hma_4h_50_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_50)
     
-    # Calculate 4h indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    atr_50 = calculate_atr(high, low, close, 50)
-    adx_14 = calculate_adx(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
+    vol_sma_20 = calculate_sma(volume, 20)
     
-    # 4h HMA for trend confirmation
-    hma_4h_21 = calculate_hma(close, period=21)
-    hma_4h_50 = calculate_hma(close, period=50)
+    # Extract UTC hour for session filter
+    utc_hours = get_hour_from_open_time(prices)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
     # Asymmetric: smaller size in bear regime (crypto crashes faster)
-    POSITION_SIZE_BULL = 0.30
-    POSITION_SIZE_BEAR = 0.25
+    POSITION_SIZE_BULL = 0.25
+    POSITION_SIZE_BEAR = 0.20
     
     # Track position state for stoploss
     in_position = False
@@ -164,60 +140,61 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_50_aligned[i]):
+        if np.isnan(hma_12h_21_aligned[i]) or np.isnan(hma_12h_50_aligned[i]):
             continue
-        if np.isnan(hma_4h_21[i]) or np.isnan(hma_4h_50[i]):
+        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(hma_4h_50_aligned[i]):
             continue
-        if np.isnan(adx_14[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(rsi_14[i]):
             continue
-        if np.isnan(atr_50[i]) or atr_50[i] == 0:
+        if np.isnan(vol_sma_20[i]) or vol_sma_20[i] == 0:
             continue
         
-        # === 1D MAJOR TREND (primary direction filter) ===
-        bull_regime_1d = close[i] > hma_1d_21_aligned[i]
-        bear_regime_1d = close[i] < hma_1d_21_aligned[i]
+        # === 12H MAJOR TREND (primary direction filter) ===
+        bull_regime_12h = close[i] > hma_12h_21_aligned[i]
+        bear_regime_12h = close[i] < hma_12h_21_aligned[i]
         
-        # 1d HMA slope for trend strength
-        hma_1d_slope_bull = hma_1d_21_aligned[i] > hma_1d_50_aligned[i]
-        hma_1d_slope_bear = hma_1d_21_aligned[i] < hma_1d_50_aligned[i]
+        # 12h HMA slope for trend strength
+        hma_12h_slope_bull = hma_12h_21_aligned[i] > hma_12h_50_aligned[i]
+        hma_12h_slope_bear = hma_12h_21_aligned[i] < hma_12h_50_aligned[i]
         
-        # === 4H TREND CONFIRMATION ===
-        bull_regime_4h = close[i] > hma_4h_21[i]
-        bear_regime_4h = close[i] < hma_4h_21[i]
+        # === 4H INTERMEDIATE CONFIRMATION ===
+        bull_regime_4h = close[i] > hma_4h_21_aligned[i]
+        bear_regime_4h = close[i] < hma_4h_21_aligned[i]
         
-        hma_4h_slope_bull = hma_4h_21[i] > hma_4h_50[i]
-        hma_4h_slope_bear = hma_4h_21[i] < hma_4h_50[i]
+        hma_4h_slope_bull = hma_4h_21_aligned[i] > hma_4h_50_aligned[i]
+        hma_4h_slope_bear = hma_4h_21_aligned[i] < hma_4h_50_aligned[i]
         
-        # === VOLATILITY FILTER (avoid low-vol whipsaw) ===
-        # ATR ratio > 0.7 means vol is at least 70% of long-term avg
-        vol_ratio = atr_14[i] / (atr_50[i] + 1e-10)
-        vol_ok = vol_ratio > 0.7
+        # === VOLUME FILTER (avoid low-liquidity entries) ===
+        # Current volume must be at least 80% of 20-bar average
+        vol_ok = volume[i] > 0.8 * vol_sma_20[i]
         
-        # === ADX FILTER (ensure some trend strength) ===
-        # ADX > 15 means some directional movement (not completely flat)
-        trend_ok = adx_14[i] > 15.0
+        # === SESSION FILTER (8-20 UTC only) ===
+        # London/NY overlap has best liquidity, avoids Asian whipsaws
+        session_ok = 8 <= utc_hours[i] <= 20
         
-        # === RSI PULLBACK ENTRY ===
-        # Long: RSI 35-50 in uptrend (pullback, not oversold crash)
-        rsi_pullback_long = 35.0 <= rsi_14[i] <= 52.0
-        # Short: RSI 48-65 in downtrend (rally into resistance)
-        rsi_pullback_short = 48.0 <= rsi_14[i] <= 65.0
+        # === RSI PULLBACK ENTRY (1h timing) ===
+        # Long: RSI 38-52 in uptrend (pullback, not oversold crash)
+        rsi_pullback_long = 38.0 <= rsi_14[i] <= 52.0
+        # Short: RSI 48-62 in downtrend (rally into resistance)
+        rsi_pullback_short = 48.0 <= rsi_14[i] <= 62.0
         
-        # === ENTRY LOGIC — SIMPLIFIED ===
+        # === ENTRY LOGIC — TRIPLE TIMEFRAME CONFLUENCE ===
         new_signal = 0.0
         
-        # LONG ENTRY: 1d bull + 4h bull + RSI pullback + vol OK
-        if bull_regime_1d and bull_regime_4h and rsi_pullback_long and vol_ok:
-            # Size based on 1d regime strength
-            if hma_1d_slope_bull:
+        # LONG ENTRY: 12h bull + 4h bull + RSI pullback + vol OK + session OK
+        if (bull_regime_12h and bull_regime_4h and rsi_pullback_long and 
+            vol_ok and session_ok):
+            # Size based on 12h regime strength
+            if hma_12h_slope_bull:
                 new_signal = POSITION_SIZE_BULL
             else:
                 new_signal = POSITION_SIZE_BULL * 0.8
         
-        # SHORT ENTRY: 1d bear + 4h bear + RSI pullback + vol OK
-        elif bear_regime_1d and bear_regime_4h and rsi_pullback_short and vol_ok:
-            # Size based on 1d regime strength
-            if hma_1d_slope_bear:
+        # SHORT ENTRY: 12h bear + 4h bear + RSI pullback + vol OK + session OK
+        elif (bear_regime_12h and bear_regime_4h and rsi_pullback_short and 
+              vol_ok and session_ok):
+            # Size based on 12h regime strength
+            if hma_12h_slope_bear:
                 new_signal = -POSITION_SIZE_BEAR
             else:
                 new_signal = -POSITION_SIZE_BEAR * 0.8
@@ -249,16 +226,16 @@ def generate_signals(prices):
             new_signal = 0.0
         
         # === EXIT CONDITIONS (regime flip) ===
-        # Exit long on 1d regime flip to bear
+        # Exit long on 12h regime flip to bear
         if in_position and position_side > 0:
-            if bear_regime_1d and hma_1d_slope_bear:
+            if bear_regime_12h and hma_12h_slope_bear:
                 new_signal = 0.0
             elif bear_regime_4h and hma_4h_slope_bear:
                 new_signal = 0.0
         
-        # Exit short on 1d regime flip to bull
+        # Exit short on 12h regime flip to bull
         if in_position and position_side < 0:
-            if bull_regime_1d and hma_1d_slope_bull:
+            if bull_regime_12h and hma_12h_slope_bull:
                 new_signal = 0.0
             elif bull_regime_4h and hma_4h_slope_bull:
                 new_signal = 0.0
