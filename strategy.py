@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #584: 30m Donchian Breakout with 4h HMA Trend Filter
+Experiment #585: 1h Regime-Adaptive Strategy with 4h HMA Trend Bias
 
-Hypothesis: After analyzing 500+ failed experiments, the pattern is clear:
-- 30m with RSI pullback entries FAILED (exp #572, #578, #583 all negative Sharpe)
-- 30m with Fisher transform FAILED (exp #577)
-- 30m with Choppiness Index FAILED (exp #578, #583)
+Hypothesis: After 500+ failed experiments, the key insight is:
+1. 1h timeframe is too noisy for pure trend following (many failures: #573, #579)
+2. 1h is also problematic for pure mean reversion (whipsaw in trends)
+3. SOLUTION: Regime-adaptive approach that SWITCHES logic based on market state
+4. Use Choppiness Index (CHOP) to detect regime: CHOP>55=range, CHOP<45=trend
+5. 4h HMA provides proven trend bias (from current best strategy Sharpe=0.676)
+6. In trend regime: follow 4h HMA direction with RSI pullback entries (loose thresholds)
+7. In range regime: mean revert at Bollinger Band extremes with RSI confirmation
+8. ADX>20 confirms trend strength (loose threshold to generate trades)
+9. ATR stoploss (2.5x) protects against regime misidentification
 
-NEW APPROACH - What's different:
-1. Donchian breakout entries (proven on 12h in exp #533) instead of RSI pullback
-2. Single 4h HMA(21) trend filter (simpler than dual HTF, ensures more trades)
-3. Loose ADX > 15 filter (not >25 or >40) to ensure trade generation
-4. No RSI, no Fisher, no Chop - pure breakout + trend alignment
-5. 2.5*ATR stoploss for crash protection (2022-style)
+Why 1h can work NOW:
+- Regime filter prevents trading against dominant market structure
+- 4h HMA bias prevents counter-trend trades (major failure mode in #573, #579)
+- Different logic per regime = adapts to market conditions
+- LOOSE thresholds ensure >=10 trades per symbol (critical requirement)
+- Conservative sizing (0.25) limits drawdown during regime transitions
 
-Why 30m can work:
-- 30m has 48 bars/day = enough signal frequency
-- Donchian(20) = ~10 hour breakout = catches intraday momentum
-- 4h HMA prevents counter-trend whipsaws (major failure mode)
-- ADX > 15 is loose enough to generate 20-50 trades/year
-
-Timeframe: 30m (REQUIRED for this experiment)
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25 discrete (max 0.40)
 Stoploss: 2.5 * ATR(14) trailing
@@ -29,8 +29,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_donchian_breakout_4h_hma_adx_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_regime_adaptive_chop_4h_hma_dual_mode_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -59,39 +59,80 @@ def calculate_adx(high, low, close, period=14):
     low_s = pd.Series(low)
     close_s = pd.Series(close)
     
-    # True Range
     tr1 = high_s - low_s
     tr2 = np.abs(high_s - close_s.shift(1))
     tr3 = np.abs(low_s - close_s.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Directional Movement
     up_move = high_s - high_s.shift(1)
     down_move = low_s.shift(1) - low_s
     
     plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
     minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
     
-    # Smoothed values
     atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
     plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
     minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
     
-    # DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.inf)
     adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
     
     return adx.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low over period)."""
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    CHOP > 61.8 = range/choppy market
+    CHOP < 38.2 = trending market
+    """
     high_s = pd.Series(high)
     low_s = pd.Series(low)
+    close_s = pd.Series(close)
     
-    upper = high_s.rolling(window=period, min_periods=period).max()
-    lower = low_s.rolling(window=period, min_periods=period).min()
+    tr1 = high_s - low_s
+    tr2 = np.abs(high_s - close_s.shift(1))
+    tr3 = np.abs(low_s - close_s.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=period, min_periods=period).mean()
     
-    return upper.values, lower.values
+    hh_ll = high_s.rolling(window=period, min_periods=period).max() - \
+            low_s.rolling(window=period, min_periods=period).min()
+    
+    atr_sum = atr.rolling(window=period, min_periods=period).sum()
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        chop = 100 * np.log10(atr_sum / hh_ll) / np.log10(period)
+    
+    return chop.values
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI (Relative Strength Index)."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / avg_loss.replace(0, np.inf)
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi.values
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    
+    return upper.values, lower.values, sma.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -108,10 +149,12 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, 14)
     adx_14 = calculate_adx(high, low, close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    chop_14 = calculate_choppiness(high, low, close, 14)
+    rsi_14 = calculate_rsi(close, 14)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
     
     signals = np.zeros(n)
     
@@ -135,35 +178,57 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx_14[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(adx_14[i]) or np.isnan(chop_14[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             continue
+        
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+            signals[i] = 0.0
+            continue
+        
+        # === REGIME DETECTION (LOOSE THRESHOLDS FOR MORE TRADES) ===
+        # CHOP > 55 = range/choppy, CHOP < 45 = trending
+        # Overlap region (45-55) = use trend logic as default
+        is_range_regime = chop_14[i] > 55
+        is_trend_regime = chop_14[i] < 45
         
         # === 4H HMA TREND BIAS ===
         bull_bias = close[i] > hma_4h_aligned[i]
         bear_bias = close[i] < hma_4h_aligned[i]
         
-        # === 30M DONCHIAN BREAKOUT ===
-        # Compare current close to previous Donchian levels (avoid look-ahead)
-        prev_upper = donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else 0
-        prev_lower = donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else 0
-        
-        breakout_long = close[i] > prev_upper and prev_upper > 0
-        breakout_short = close[i] < prev_lower and prev_lower > 0
-        
-        # === ADX FILTER (trend strength - loose threshold) ===
-        trend_strong = adx_14[i] > 15  # Very loose to ensure trade generation
+        # === ADX TREND STRENGTH (LOOSE THRESHOLD) ===
+        trend_strong = adx_14[i] > 20  # Not >40 (too strict, failed before)
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # Long: Donchian breakout + 4h bullish bias + ADX confirms trend
-        if breakout_long and bull_bias and trend_strong:
-            new_signal = SIZE
+        # --- TREND REGIME: Follow 4h HMA direction with RSI pullback ---
+        if is_trend_regime:
+            # Long: 4h bullish + RSI pullback (loose: 30-60)
+            if bull_bias and 30 < rsi_14[i] < 60:
+                new_signal = SIZE
+            
+            # Short: 4h bearish + RSI rally (loose: 40-70)
+            elif bear_bias and 40 < rsi_14[i] < 70:
+                new_signal = -SIZE
         
-        # Short: Donchian breakout + 4h bearish bias + ADX confirms trend
-        elif breakout_short and bear_bias and trend_strong:
-            new_signal = -SIZE
+        # --- RANGE REGIME: Mean revert at Bollinger Band extremes ---
+        elif is_range_regime:
+            # Long: Price near lower BB + RSI oversold (loose: <40)
+            if close[i] <= bb_lower[i] * 1.02 and rsi_14[i] < 40:
+                new_signal = SIZE
+            
+            # Short: Price near upper BB + RSI overbought (loose: >60)
+            elif close[i] >= bb_upper[i] * 0.98 and rsi_14[i] > 60:
+                new_signal = -SIZE
+        
+        # --- DEFAULT (overlap region 45-55): Use 4h HMA bias only ---
+        else:
+            # Simple trend following in uncertain regime
+            if bull_bias and rsi_14[i] < 55:
+                new_signal = SIZE
+            elif bear_bias and rsi_14[i] > 45:
+                new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -183,12 +248,14 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === TREND REVERSAL EXIT ===
-        # Exit if 4h HMA flips against position
+        # === REGIME FLIP EXIT ===
+        # Exit if regime changes strongly against position type
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_bias:
+            # Long position + strong range regime + price below 4h HMA
+            if position_side > 0 and is_range_regime and bear_bias:
                 new_signal = 0.0
-            if position_side < 0 and bull_bias:
+            # Short position + strong range regime + price above 4h HMA
+            if position_side < 0 and is_range_regime and bull_bias:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
