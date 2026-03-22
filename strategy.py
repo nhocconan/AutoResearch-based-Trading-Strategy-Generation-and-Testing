@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #564: 1d Regime-Adaptive Asymmetric Strategy with Weekly HMA
+Experiment #565: 15m Mean Reversion with 4h HMA Trend Filter
 
-Hypothesis: After 500+ failed experiments, the key insight is:
-1. 1d timeframe needs LOOSE entry conditions to generate enough trades
-2. Regime detection (choppy vs trending) determines which logic to use
-3. Asymmetric entries: easier to long in bull, easier to short in bear
-4. Weekly HMA provides macro trend bias without being too restrictive
-5. RSI extremes + BB regime = mean reversion in chop, breakout in trend
-6. Conservative sizing (0.25-0.35) protects against 2022-style crashes
+Hypothesis: After 500+ failed experiments, the key insight for 15m timeframe:
+1. 15m is TOO NOISY for pure trend following (exp #553, #559 both failed badly)
+2. Mean reversion works better on intraday timeframes than trend following
+3. 4h HMA provides proven trend bias filter (used in current best strategy)
+4. RSI extremes (loose thresholds <35/>65) ensure we get trades (avoid 0-trade failure)
+5. Volume confirmation filters false breakouts without being too restrictive
+6. Simple logic = more trades = statistical significance
 
-Why this should work on 1d:
-- 1d has ~365 bars/year = need ~3-5 trades/year minimum per symbol
-- Regime-adaptive logic works in both bull and bear markets
-- Weekly HMA via mtf_data helper ensures proper alignment
-- RSI(14) extremes (25/75) trigger more often than extreme (10/90)
-- BB Width percentile detects chop vs trend reliably
-- 2.5*ATR stoploss protects capital
+Why this should work on 15m:
+- 15m has 96 bars/day = high frequency but manageable with HTF filter
+- RSI mean reversion captures intraday oversold/overbought conditions
+- 4h HMA trend bias prevents counter-trend entries (major failure mode)
+- Loose RSI thresholds (35/65 not 25/75) ensure we generate trades
+- 2.0*ATR stoploss protects against adverse moves
+- Volume filter avoids low-liquidity fakeouts
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.35 discrete
-Stoploss: 2.5 * ATR(14) trailing
+Timeframe: 15m (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25 discrete (max 0.40)
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_regime_adaptive_asymmetric_weekly_hma_rsi_bb_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_rsi_meanrev_4h_hma_volume_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -65,56 +65,37 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_bb(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    
-    return upper.values, lower.values, sma.values
-
-def calculate_bb_width(upper, lower, middle):
-    """Calculate Bollinger Band Width (normalized)."""
-    width = (upper - lower) / middle
-    return width
-
-def calculate_percentile_rank(series, window=100):
-    """Calculate percentile rank of current value over rolling window."""
-    result = pd.Series(series).rolling(window=window, min_periods=window).apply(
-        lambda x: (x[-1] > x[:-1]).sum() / len(x[:-1]) if len(x) > 1 else 0.5
-    )
-    return result.values
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average for volume confirmation."""
+    volume_s = pd.Series(volume)
+    vol_ma = volume_s.rolling(window=period, min_periods=period).mean()
+    return vol_ma.values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_middle = calculate_bb(close, 20, 2.0)
-    bb_width = calculate_bb_width(bb_upper, bb_lower, bb_middle)
-    bb_width_pct = calculate_percentile_rank(bb_width, 100)
+    vol_ma_20 = calculate_volume_ma(volume, 20)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25
-    SIZE_MAX = 0.35
+    SIZE = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -129,67 +110,43 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(bb_width_pct[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME DETECTION ===
-        # BB Width percentile: <30 = trending, >70 = choppy
-        is_trending = bb_width_pct[i] < 0.30
-        is_choppy = bb_width_pct[i] > 0.70
+        # === 4H HMA TREND BIAS ===
+        bull_bias = close[i] > hma_4h_aligned[i]
+        bear_bias = close[i] < hma_4h_aligned[i]
         
-        # === WEEKLY HMA TREND BIAS (ASYMMETRIC) ===
-        # Bull: price > HMA + 1% buffer (stricter for longs)
-        # Bear: price < HMA - 1% buffer (stricter for shorts)
-        hma_buffer = hma_1w_aligned[i] * 0.01
-        bull_bias = close[i] > hma_1w_aligned[i] + hma_buffer
-        bear_bias = close[i] < hma_1w_aligned[i] - hma_buffer
-        neutral = not bull_bias and not bear_bias
+        # === 15M RSI MEAN REVERSION (loose thresholds for trades) ===
+        oversold = rsi_14[i] < 35  # Loose threshold to ensure trades
+        overbought = rsi_14[i] > 65  # Loose threshold to ensure trades
         
-        # === ENTRY LOGIC (REGIME-ADAPTIVE + ASYMMETRIC) ===
+        # === VOLUME CONFIRMATION ===
+        volume_confirm = volume[i] > vol_ma_20[i] * 0.8  # At least 80% of avg volume
+        
+        # === ENTRY LOGIC (SIMPLE to ensure trades) ===
         new_signal = 0.0
         
-        if is_trending:
-            # Trend following: enter on RSI pullback in direction of trend
-            # Long: bull bias + RSI 40-55 (pullback, not oversold)
-            if bull_bias and 40 <= rsi_14[i] <= 55:
-                new_signal = SIZE_BASE
-            
-            # Short: bear bias + RSI 45-60 (pullback, not overbought)
-            elif bear_bias and 45 <= rsi_14[i] <= 60:
-                new_signal = -SIZE_BASE
+        # Long: RSI oversold + 4h bullish bias + volume confirm
+        if oversold and bull_bias and volume_confirm:
+            new_signal = SIZE
         
-        elif is_choppy:
-            # Mean reversion: enter at extremes against recent move
-            # Long: RSI < 30 (oversold) + price near lower BB
-            if rsi_14[i] < 30 and close[i] <= bb_lower[i] * 1.01:
-                new_signal = SIZE_BASE
-            
-            # Short: RSI > 70 (overbought) + price near upper BB
-            elif rsi_14[i] > 70 and close[i] >= bb_upper[i] * 0.99:
-                new_signal = -SIZE_BASE
+        # Short: RSI overbought + 4h bearish bias + volume confirm
+        elif overbought and bear_bias and volume_confirm:
+            new_signal = -SIZE
         
-        else:
-            # Neutral regime: only take strong signals
-            # Long: RSI < 25 (very oversold)
-            if rsi_14[i] < 25:
-                new_signal = SIZE_BASE * 0.8
-            
-            # Short: RSI > 75 (very overbought)
-            elif rsi_14[i] > 75:
-                new_signal = -SIZE_BASE * 0.8
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr_14[i]
+                stoploss_price = highest_close - 2.0 * atr_14[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -197,17 +154,26 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr_14[i]
+                stoploss_price = lowest_close + 2.0 * atr_14[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if weekly HMA flips strongly against position
+        # Exit if 4h HMA flips against position
         if in_position and new_signal != 0.0:
             if position_side > 0 and bear_bias:
                 new_signal = 0.0
             if position_side < 0 and bull_bias:
                 new_signal = 0.0
+        
+        # === RSI EXIT (mean reversion complete) ===
+        # Exit long when RSI recovers to neutral
+        if in_position and position_side > 0 and rsi_14[i] > 55:
+            new_signal = 0.0
+        
+        # Exit short when RSI drops to neutral
+        if in_position and position_side < 0 and rsi_14[i] < 45:
+            new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
