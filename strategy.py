@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #128: 30m Donchian Breakout + 4h HMA Trend + ADX Filter + ATR Stop
+Experiment #129: 1h KAMA Adaptive Trend + 4h HMA Filter + RSI Pullback + ATR Stop
 
-Hypothesis: Donchian breakouts generate MORE trades than KAMA crossovers while
-maintaining trend-following edge. Key improvements over failed 30m strategies:
-- Donchian(20) breakout = clear entry signal (more trades than RSI/Fisher)
-- 4h HMA(21) trend filter = proven in Sharpe=0.478 winning strategy
-- ADX(14) > 18 (not 25) = lower threshold ensures trades in 30m noise
-- ATR(14) trailing stop at 2.0*ATR = protects capital without premature exits
-- Position sizing 0.25-0.30 discrete = balances trade frequency vs fee drag
+Hypothesis: Adapting the BEST performing strategy (mtf_4h_kama_1d_hma_adx_atr_v1 
+with Sharpe=0.478) for 1h timeframe with key modifications:
+- 1h KAMA(21) for adaptive trend following (proven in winning 4h strategy)
+- 4h HMA(21) for HTF trend bias (better ratio than 1d for 1h primary)
+- RSI(14) pullback entries (enter on dips in uptrend, rallies in downtrend)
+- ATR(14) trailing stop at 2.5*ATR for capital protection
+- Discrete position sizing 0.25-0.35 to limit drawdown
 
-Why 30m might work better than 15m:
-- Less noise than 15m (fewer false breakouts)
-- More trades than 1h/4h (ensures ≥10 trades requirement)
-- Donchian breakout is TIME-TESTED (Turtle Traders, 1980s)
+Why 1h might work better than 12h:
+- More trade opportunities (12h had very few trades)
+- Faster reaction to trend changes
+- RSI pullback entries work better on lower timeframes
+- Still reduces noise compared to 5m/15m strategies that failed
 
-Timeframe: 30m (REQUIRED for this experiment)
+Key improvements over failed 1h strategies:
+- No mean-reversion as primary (RSI -1.7 Sharpe failed)
+- No Fisher Transform (failed multiple times)
+- No Choppiness Index (failed)
+- Simple trend + pullback + stoploss (proven formula)
+
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.30 discrete levels
-Stoploss: 2.0 * ATR(14) trailing
+Position sizing: 0.25-0.35 discrete levels
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_donchian_4h_hma_adx_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_kama_4h_hma_rsi_pullback_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -38,6 +45,44 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_kama(close, period=21, fast=2, slow=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA).
+    Adapts smoothing based on market efficiency ratio.
+    More responsive in trends, smoother in chop.
+    """
+    n = len(close)
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    if n < period + slow:
+        return kama
+    
+    # Efficiency Ratio (ER)
+    er = np.zeros(n)
+    er[:] = np.nan
+    
+    for i in range(period, n):
+        signal = np.abs(close[i] - close[i - period])
+        noise = np.sum(np.abs(np.diff(close[i-period:i+1])))
+        if noise > 0:
+            er[i] = signal / noise
+        else:
+            er[i] = 0
+    
+    # Smoothing Constant
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    
+    # KAMA calculation
+    kama[period] = close[period]
+    for i in range(period + 1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    return kama
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -48,58 +93,17 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX for trend strength."""
-    n = len(close)
-    adx = np.zeros(n)
-    adx[:] = np.nan
-    
-    if n < period * 2:
-        return adx
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        plus_dm[i] = max(0, high[i] - high[i-1]) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
-        minus_dm[i] = max(0, low[i-1] - low[i]) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    dx = np.zeros(n)
-    
-    mask = tr_s > 0
-    plus_di[mask] = 100 * plus_dm_s[mask] / tr_s[mask]
-    minus_di[mask] = 100 * minus_dm_s[mask] / tr_s[mask]
-    
-    di_sum = plus_di + minus_di
-    mask2 = di_sum > 0
-    dx[mask2] = 100 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
-    
-    adx_series = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean()
-    adx = adx_series.values
-    
-    return adx
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low over period)."""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
+def calculate_rsi(close, period=14):
+    """Calculate RSI using Wilder's smoothing."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -116,16 +120,16 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
-    adx = calculate_adx(high, low, close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    kama = calculate_kama(close, 21)
+    rsi = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_STRONG = 0.35
     
     # Track position state for stoploss
     in_position = False
@@ -144,64 +148,74 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias (proven in winning strategy)
+        # 4h HMA = higher timeframe trend bias
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === DONCHIAN BREAKOUT ===
-        # Price breaks above Donchian upper = long breakout
-        # Price breaks below Donchian lower = short breakout
-        donchian_breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
-        donchian_breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
+        # === KAMA ADAPTIVE TREND ===
+        # Price above KAMA = bullish momentum
+        bull_kama = close[i] > kama[i]
+        bear_kama = close[i] < kama[i]
         
-        # === ADX TREND STRENGTH ===
-        adx_trending = adx[i] > 18  # Lower threshold for 30m = more trades
-        adx_strong = adx[i] > 25    # Strong trend
+        # KAMA slope (momentum confirmation)
+        kama_slope = kama[i] - kama[i-5] if i >= 5 else 0
+        kama_bull_slope = kama_slope > 0
+        kama_bear_slope = kama_slope < 0
+        
+        # === RSI PULLBACK ENTRY ===
+        # In uptrend: enter on RSI pullback to 40-50 zone
+        # In downtrend: enter on RSI rally to 50-60 zone
+        rsi_pullback_long = rsi[i] < 55  # Not overbought, room to run
+        rsi_pullback_short = rsi[i] > 45  # Not oversold, room to drop
+        
+        # RSI extreme for strong entries
+        rsi_strong_long = rsi[i] < 45  # Deep pullback
+        rsi_strong_short = rsi[i] > 55  # Strong rally
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS ===
-        # Strong: 4h bullish + Donchian breakout + ADX strong
-        if bull_trend_4h and donchian_breakout_long and adx_strong:
+        # Strong: 4h bullish + KAMA bullish + KAMA slope up + RSI pullback
+        if bull_trend_4h and bull_kama and kama_bull_slope and rsi_strong_long:
             new_signal = SIZE_STRONG
-        # Moderate: 4h bullish + Donchian breakout + ADX trending
-        elif bull_trend_4h and donchian_breakout_long and adx_trending:
+        # Moderate: 4h bullish + KAMA bullish + RSI not overbought
+        elif bull_trend_4h and bull_kama and rsi_pullback_long:
             new_signal = SIZE_BASE
-        # Weak (ensure trades): 4h bullish + Donchian breakout
-        elif bull_trend_4h and donchian_breakout_long:
+        # Weak (ensure trades): 4h bullish + KAMA bullish
+        elif bull_trend_4h and bull_kama:
             new_signal = SIZE_BASE
         
         # === SHORT ENTRY CONDITIONS ===
-        # Strong: 4h bearish + Donchian breakout + ADX strong
-        if bear_trend_4h and donchian_breakout_short and adx_strong:
+        # Strong: 4h bearish + KAMA bearish + KAMA slope down + RSI rally
+        if bear_trend_4h and bear_kama and kama_bear_slope and rsi_strong_short:
             new_signal = -SIZE_STRONG
-        # Moderate: 4h bearish + Donchian breakout + ADX trending
-        elif bear_trend_4h and donchian_breakout_short and adx_trending:
+        # Moderate: 4h bearish + KAMA bearish + RSI not oversold
+        elif bear_trend_4h and bear_kama and rsi_pullback_short:
             new_signal = -SIZE_BASE
-        # Weak (ensure trades): 4h bearish + Donchian breakout
-        elif bear_trend_4h and donchian_breakout_short:
+        # Weak (ensure trades): 4h bearish + KAMA bearish
+        elif bear_trend_4h and bear_kama:
             new_signal = -SIZE_BASE
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Update trailing highs/lows for active positions
         if in_position and position_side > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
-            # Trailing stop: 2.0 * ATR below highest close
-            stoploss_price = highest_close - 2.0 * atr[i]
+            # Trailing stop: 2.5 * ATR below highest close
+            stoploss_price = highest_close - 2.5 * atr[i]
             if close[i] < stoploss_price:
                 new_signal = 0.0  # Stoploss hit
         
         if in_position and position_side < 0:
             if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
-            # Trailing stop: 2.0 * ATR above lowest close
-            stoploss_price = lowest_close + 2.0 * atr[i]
+            # Trailing stop: 2.5 * ATR above lowest close
+            stoploss_price = lowest_close + 2.5 * atr[i]
             if close[i] > stoploss_price:
                 new_signal = 0.0  # Stoploss hit
         
