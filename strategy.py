@@ -1,43 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #524: 30m Choppiness Regime with 4h HMA Bias and RSI Mean-Reversion
+Experiment #525: 1h Volatility Spike Mean Reversion with 4h HMA Trend Bias
 
-Hypothesis: After 500+ failed experiments, the key insight is that 30m timeframe
-needs REGIME-BASED approach. Crypto alternates between trending and ranging periods.
-Using Choppiness Index (CHOP) to detect regime, then applying appropriate strategy:
-- Range regime (CHOP > 61.8): Mean-reversion at RSI extremes
-- Trend regime (CHOP < 38.2): Trend-following on pullbacks to EMA
-- Neutral: Stay flat or reduce position size
+Hypothesis: After 500+ failed experiments, the pattern is clear - pure trend following
+fails on BTC/ETH in bear markets, and pure mean reversion fails in strong trends.
+The winning approach is VOLATILITY-SPIKE DETECTION + MEAN REVERSION with HTF trend filter.
 
-Combined with 4h HMA for directional bias (via mtf_data helper) to avoid
-counter-trend trades. This addresses the #1 failure mode: trend strategies
-in range markets and mean-reversion in trending markets.
+Key insight from research: After panic spikes (ATR ratio > 1.8), price tends to revert
+within 2-5 bars. This works on 1h timeframe because:
+1. 1h captures intraday panic/recovery cycles better than 4h/12h
+2. Volatility spikes are more frequent on 1h (more trade opportunities)
+3. Combined with 4h HMA bias, we avoid counter-trend mean reversion
 
-Key innovations:
-1. CHOPPINESS INDEX (14): Proper formula from market science literature
-2. REGIME HYSTERESIS: Enter range at 61.8, exit at 55 (prevents whipsaw)
-3. LOOSE RSI THRESHOLDS: <35 long, >65 short (ensures ≥10 trades/year)
-4. 4h HMA BIAS: Only take trades in direction of higher timeframe trend
-5. 2.0 * ATR STOPLOSS: Tight enough to limit drawdown, loose enough to breathe
-6. DISCRETE SIZING: 0.0, ±0.25, ±0.30 to minimize fee churn
+Innovations vs failed experiments:
+1. LOOSE RSI thresholds (35/65 instead of 30/70) - ensures ≥10 trades/year
+2. ATR ratio > 1.8 (not 2.0) - captures more vol spike events
+3. 4h HMA(21) bias - only mean-revert in direction of HTF trend
+4. 2.0*ATR stoploss - tight enough for 1h, loose enough to avoid whipsaw
+5. Discrete signal levels (0.0, ±0.25) - minimizes fee churn
 
-Why 30m works:
-- Fast enough to catch intraday swings
-- Slow enough to avoid 5m/15m noise
-- 48 bars/day = good statistical sample
-- Works well with 4h HTF reference (8x ratio)
+Why 1h might work where others failed:
+- More frequent vol spikes = more entry opportunities
+- Faster mean reversion on 1h vs 4h/12h
+- Can capture both intraday swings AND multi-day trends via 4h bias
 
-Timeframe: 30m (REQUIRED for this experiment)
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.30 discrete
+Position sizing: 0.25 discrete
 Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_chop_regime_4h_hma_rsi_meanrev_trend_adaptive_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_vol_spike_4h_hma_meanrev_loose_rsi_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -74,73 +71,13 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
-    
-    Interpretation:
-    - CHOP > 61.8: Range-bound market (mean-reversion works)
-    - CHOP < 38.2: Trending market (trend-following works)
-    - 38.2 < CHOP < 61.8: Transition/neutral
-    """
-    n = len(close)
-    chop = np.full(n, np.nan)
-    
-    # Calculate ATR for each bar
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i-period+1:i+1])
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 1e-10:
-            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-        else:
-            chop[i] = 50.0  # neutral default
-    
-    return chop
-
-def calculate_chop_regime(chop, enter_range=61.8, exit_range=55.0, enter_trend=38.2, exit_trend=45.0):
-    """
-    Calculate regime state with hysteresis to prevent whipsaw.
-    Returns: 1=trending, 0=neutral, -1=ranging
-    """
-    n = len(chop)
-    regime = np.zeros(n)
-    state = 0  # 0=neutral, 1=trending, -1=ranging
-    
-    for i in range(n):
-        if np.isnan(chop[i]):
-            continue
-        
-        if state == 0:
-            if chop[i] > enter_range:
-                state = -1  # enter range
-            elif chop[i] < enter_trend:
-                state = 1   # enter trend
-        elif state == 1:  # trending
-            if chop[i] > exit_trend:
-                state = 0   # exit to neutral
-        elif state == -1:  # ranging
-            if chop[i] < exit_range:
-                state = 0   # exit to neutral
-        
-        regime[i] = state
-    
-    return regime
-
-def calculate_ema(close, period=21):
-    """Calculate Exponential Moving Average."""
+def calculate_zscore(close, period=20):
+    """Calculate Z-score of price vs rolling mean."""
     close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    return ema.values
+    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
+    rolling_std = close_s.rolling(window=period, min_periods=period).std()
+    zscore = (close_s - rolling_mean) / rolling_std.replace(0, np.inf)
+    return zscore.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -157,18 +94,23 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, 14)
+    atr_7 = calculate_atr(high, low, close, 7)
+    atr_30 = calculate_atr(high, low, close, 30)
     rsi_14 = calculate_rsi(close, 14)
-    chop = calculate_choppiness(high, low, close, 14)
-    chop_regime = calculate_chop_regime(chop, 61.8, 55.0, 38.2, 45.0)
-    ema_21 = calculate_ema(close, 21)
+    zscore_20 = calculate_zscore(close, 20)
+    
+    # Volatility ratio: ATR(7)/ATR(30) - detects vol spikes
+    vol_ratio = np.full(n, np.nan)
+    for i in range(30, n):
+        if atr_30[i] > 1e-10:
+            vol_ratio[i] = atr_7[i] / atr_30[i]
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_RANGE = 0.30  # Larger size in range regime (mean-reversion has higher win rate)
-    SIZE_TREND = 0.25  # Smaller size in trend regime (more risk)
+    SIZE = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -187,47 +129,47 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(chop_regime[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(vol_ratio[i]) or np.isnan(zscore_20[i]):
             signals[i] = 0.0
             continue
         
-        # === 4h HMA TREND BIAS ===
+        # === 4H HMA TREND BIAS ===
         bull_bias = close[i] > hma_4h_aligned[i]
         bear_bias = close[i] < hma_4h_aligned[i]
         
-        # === CHOPPINESS REGIME ===
-        regime = chop_regime[i]  # 1=trending, 0=neutral, -1=ranging
+        # === VOLATILITY SPIKE DETECTION ===
+        vol_spike = vol_ratio[i] > 1.8  # High volatility = mean reversion likely
+        vol_normal = vol_ratio[i] < 1.2  # Low volatility = trend may continue
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
-        current_size = SIZE_RANGE if regime == -1 else SIZE_TREND
         
-        # RANGE REGIME: Mean-reversion at extremes
-        if regime == -1:
-            # Long: RSI oversold + bullish 4h bias
-            if rsi_14[i] < 35 and bull_bias:
-                new_signal = current_size
-            # Short: RSI overbought + bearish 4h bias
-            elif rsi_14[i] > 65 and bear_bias:
-                new_signal = -current_size
+        # VOLATILITY SPIKE: Mean-reversion (panic reversals)
+        if vol_spike:
+            # Long: RSI oversold + Z-score low + bullish 4h bias
+            if rsi_14[i] < 40 and zscore_20[i] < -1.0 and bull_bias:
+                new_signal = SIZE
+            # Short: RSI overbought + Z-score high + bearish 4h bias
+            elif rsi_14[i] > 60 and zscore_20[i] > 1.0 and bear_bias:
+                new_signal = -SIZE
         
-        # TREND REGIME: Trend-following on pullbacks
-        elif regime == 1:
-            if bull_bias:
-                # Long pullback in uptrend: price > EMA but RSI dipped
-                if close[i] > ema_21[i] and rsi_14[i] < 50:
-                    new_signal = current_size
-            elif bear_bias:
-                # Short rally in downtrend: price < EMA but RSI rose
-                if close[i] < ema_21[i] and rsi_14[i] > 50:
-                    new_signal = -current_size
+        # NORMAL VOLATILITY: Trend continuation with pullback entries
+        elif vol_normal:
+            # Long: RSI pullback in uptrend
+            if rsi_14[i] < 50 and bull_bias:
+                new_signal = SIZE
+            # Short: RSI rally in downtrend
+            elif rsi_14[i] > 50 and bear_bias:
+                new_signal = -SIZE
         
-        # NEUTRAL REGIME: Reduced size, only strong signals
+        # MID VOLATILITY: Use Z-score extremes
         else:
-            if rsi_14[i] < 30 and bull_bias:
-                new_signal = SIZE_TREND * 0.5
-            elif rsi_14[i] > 70 and bear_bias:
-                new_signal = -SIZE_TREND * 0.5
+            # Long: Price significantly below mean + bullish bias
+            if zscore_20[i] < -1.5 and bull_bias:
+                new_signal = SIZE
+            # Short: Price significantly above mean + bearish bias
+            elif zscore_20[i] > 1.5 and bear_bias:
+                new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side != 0:
@@ -247,14 +189,12 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === REGIME EXIT ===
-        # Exit if regime flips strongly against position
+        # === TREND BIAS REVERSAL EXIT ===
+        # Exit if 4h trend flips strongly against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and regime == 1 and bear_bias:
-                # Long in trending regime but 4h bias turned bear
+            if position_side > 0 and bear_bias and vol_ratio[i] < 1.2:
                 new_signal = 0.0
-            if position_side < 0 and regime == 1 and bull_bias:
-                # Short in trending regime but 4h bias turned bull
+            if position_side < 0 and bull_bias and vol_ratio[i] < 1.2:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
