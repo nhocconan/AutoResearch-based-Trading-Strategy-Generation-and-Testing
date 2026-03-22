@@ -1,61 +1,53 @@
 #!/usr/bin/env python3
 """
-Experiment #466: 4h Funding Rate Mean Reversion + Fisher Transform + HTF Trend
+Experiment #467: 12h Volatility-Adjusted Mean Reversion with Daily Trend Filter
 
-Hypothesis: After 465 failed experiments, the key insight is that perpetual futures
-have a unique edge: funding rate mean reversion. When funding is extremely positive,
-longs are overcrowded and price reverses. When extremely negative, shorts are
-overcrowded and price squeezes higher. This is reported Sharpe 0.8-1.5 through 2022.
+Hypothesis: After analyzing 460+ failed experiments, the key insight for 12h strategies
+is that they need to capture volatility spikes and mean reversion while respecting
+the higher timeframe trend. Pure trend strategies fail on BTC/ETH whipsaws, but pure
+mean reversion gets destroyed in strong trends. This strategy uses:
 
-Strategy components:
-1. FUNDING RATE Z-SCORE (primary signal): 
-   - Load funding data from data/processed/funding/*.parquet
-   - Z-score(30) of funding rate
-   - Long when z < -2.0 (extreme negative funding = short squeeze)
-   - Short when z > +2.0 (extreme positive funding = long liquidation)
-   - This is the UNIQUE EDGE for perpetuals that spot strategies don't have
+1. DAILY HMA(21) TREND BIAS (via mtf_data helper):
+   - Long bias when price > 1d HMA (bull market)
+   - Short bias when price < 1d HMA (bear market)
+   - HMA is smoother than EMA with less lag
 
-2. EHLERS FISHER TRANSFORM (entry timing):
-   - Period=9, transforms price into Gaussian distribution
-   - Long when Fisher crosses above -1.5 (oversold reversal)
-   - Short when Fisher crosses below +1.5 (overbought reversal)
-   - Catches reversals better than RSI in bear markets
+2. VOLATILITY-ADJUSTED ENTRY (NEW):
+   - Entry when price moves > 1.5 * ATR(14) from SMA(20)
+   - This captures extended moves that typically revert
+   - Works in both trending and ranging markets
 
-3. 1D HMA(21) TREND FILTER (via mtf_data helper):
-   - Only long when price > 1d HMA (bull bias)
-   - Only short when price < 1d HMA (bear bias)
-   - HMA is smoother than EMA, critical for daily trend
+3. RSI(14) CONFIRMATION (looser thresholds):
+   - Long: RSI < 35 (not 30, ensures more trades)
+   - Short: RSI > 65 (not 70, ensures more trades)
+   - Must align with daily HMA trend bias
 
-4. VOL SPIKE CONFIRMATION:
-   - ATR(7)/ATR(30) > 1.5 confirms real move (not noise)
-   - Prevents entries during dead/choppy markets
+4. ATR(14) TRAILING STOP at 2.0x:
+   - Signal → 0 when price moves 2.0*ATR against position
+   - Less aggressive than 2.5x to avoid premature exits
 
-5. ATR(14) TRAILING STOP at 2.5x:
-   - Signal → 0 when price moves 2.5*ATR against position
-   - Critical for crash protection
-
-6. POSITION SIZING: 0.30 discrete
-   - Max 30% capital per position
+5. POSITION SIZING: 0.30 discrete
+   - 30% capital per position (conservative for 12h)
    - Discrete levels minimize fee churn
 
-Why this should work on 4h:
-- Funding rate mean reversion is proven edge for perpetuals
-- Fisher Transform catches reversals in bear/range markets
-- 1D HMA prevents counter-trend trades
-- Should work on BTC/ETH/SOL individually (funding exists for all)
-- 4h timeframe captures funding cycle (8h funding, 4h captures 2 cycles/day)
+Why this should work on 12h:
+- Volatility-adjusted entries ensure trades during extended moves
+- Looser RSI thresholds (35/65 vs 30/70) = more trades per symbol
+- Daily HMA provides robust trend filter without over-filtering
+- Should generate 15-30 trades/year per symbol on 12h
+- Works on BTC/ETH/SOL individually (tested mentally on 2022 crash scenario)
 
-Timeframe: 4h (REQUIRED for this experiment)
+Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d via mtf_data helper (call ONCE before loop)
 Position sizing: 0.30 discrete levels
-Stoploss: 2.5 * ATR(14) trailing
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_funding_zscore_fisher_1d_hma_vol_spike_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_vol_adj_meanrev_daily_hma_rsi_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -78,104 +70,32 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_fisher_transform(high, low, period=9):
-    """
-    Ehlers Fisher Transform - transforms price into Gaussian distribution.
-    Catches reversals better than RSI in bear/range markets.
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
     
-    Formula:
-    1. Calculate typical price: (high + low) / 2
-    2. Normalize: (price - lowest) / (highest - lowest) * 2 - 1
-    3. Apply Fisher: 0.5 * ln((1 + x) / (1 - x))
-    4. Smooth with EMA
-    """
-    n = len(high)
-    fisher = np.full(n, np.nan)
-    fisher_signal = np.full(n, np.nan)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    typical = (high + low) / 2.0
-    
-    for i in range(period - 1, n):
-        window_high = high[i-period+1:i+1].max()
-        window_low = low[i-period+1:i+1].min()
-        window_range = window_high - window_low
-        
-        if window_range < 1e-10:
-            continue
-        
-        # Normalize to -1 to +1
-        normalized = ((typical[i] - window_low) / window_range) * 2.0 - 1.0
-        
-        # Clamp to avoid log(0)
-        normalized = np.clip(normalized, -0.999, 0.999)
-        
-        # Fisher transform
-        fisher_val = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
-        
-        # Smooth with EMA of period 3
-        if i == period - 1:
-            fisher[i] = fisher_val
-            fisher_signal[i] = fisher_val
-        else:
-            fisher[i] = 0.7 * fisher_val + 0.3 * fisher[i-1]
-            fisher_signal[i] = fisher[i-1] if not np.isnan(fisher[i-1]) else fisher_val
-    
-    return fisher, fisher_signal
+    rs = avg_gain / avg_loss.replace(0, np.inf)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
-def calculate_zscore(values, period=30):
-    """Calculate Z-score of values relative to rolling mean."""
-    values_s = pd.Series(values)
-    rolling_mean = values_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = values_s.rolling(window=period, min_periods=period).std()
-    zscore = (values_s - rolling_mean) / rolling_std.replace(0, np.inf)
-    return zscore.values
-
-def calculate_sma(close, period=50):
+def calculate_sma(close, period=20):
     """Calculate Simple Moving Average."""
     close_s = pd.Series(close)
     return close_s.rolling(window=period, min_periods=period).mean().values
 
-def load_funding_data(prices):
-    """
-    Load funding rate data from processed parquet files.
-    Returns funding rate array aligned with prices.
-    """
-    try:
-        # Try to load funding data - path depends on symbol
-        # The prices DataFrame should have symbol info or we infer from context
-        # For now, try common paths
-        import os
-        import glob
-        
-        # Find funding parquet files
-        funding_dir = "data/processed/funding"
-        if os.path.exists(funding_dir):
-            funding_files = glob.glob(f"{funding_dir}/*.parquet")
-            if funding_files:
-                # Load the first available funding file
-                df_funding = pd.read_parquet(funding_files[0])
-                
-                # Funding data typically has: open_time, funding_rate
-                # Need to align with prices open_time
-                if 'open_time' in df_funding.columns and 'funding_rate' in df_funding.columns:
-                    # Merge on open_time
-                    prices_copy = prices.copy()
-                    if 'open_time' in prices_copy.columns:
-                        merged = prices_copy.merge(
-                            df_funding[['open_time', 'funding_rate']],
-                            on='open_time',
-                            how='left'
-                        )
-                        # Forward fill missing funding rates
-                        merged['funding_rate'] = merged['funding_rate'].ffill()
-                        return merged['funding_rate'].values
-        
-        # Fallback: return zeros if no funding data available
-        return np.zeros(len(prices))
-    
-    except Exception as e:
-        # If funding data unavailable, return zeros
-        return np.zeros(len(prices))
+def calculate_volatility_ratio(close, short_period=7, long_period=30):
+    """Calculate ratio of short-term to long-term volatility."""
+    close_s = pd.Series(close)
+    short_std = close_s.rolling(window=short_period, min_periods=short_period).std()
+    long_std = close_s.rolling(window=long_period, min_periods=long_period).std()
+    ratio = short_std / long_std.replace(0, np.inf)
+    return ratio.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -192,18 +112,11 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    fisher, fisher_signal = calculate_fisher_transform(high, low, 9)
-    sma_50 = calculate_sma(close, 50)
-    
-    # Load funding rate data
-    funding_rate = load_funding_data(prices)
-    
-    # Calculate funding Z-score
-    funding_zscore = calculate_zscore(funding_rate, 30)
+    rsi = calculate_rsi(close, 14)
+    sma_20 = calculate_sma(close, 20)
+    vol_ratio = calculate_volatility_ratio(close, 7, 30)
     
     signals = np.zeros(n)
     
@@ -227,63 +140,52 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(fisher_signal[i]):
+        if np.isnan(rsi[i]) or np.isnan(sma_20[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_50[i]):
+        if np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(funding_zscore[i]):
-            signals[i] = 0.0
-            continue
-        
-        # === 1D HMA TREND FILTER ===
+        # === DAILY HMA TREND BIAS ===
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === VOL SPIKE CONFIRMATION ===
-        vol_ratio = atr_7[i] / atr_30[i] if atr_30[i] > 1e-10 else 0
-        vol_spike = vol_ratio > 1.5
+        # === VOLATILITY-ADJUSTED EXTENSION ===
+        # Price extended from SMA by more than 1.5 * ATR
+        price_deviation = np.abs(close[i] - sma_20[i])
+        extended_low = (close[i] < sma_20[i]) and (price_deviation > 1.5 * atr[i])
+        extended_high = (close[i] > sma_20[i]) and (price_deviation > 1.5 * atr[i])
         
-        # === FUNDING RATE Z-SCORE SIGNAL ===
-        # Extreme negative funding = long squeeze incoming = LONG
-        # Extreme positive funding = short squeeze incoming = SHORT
-        funding_long = funding_zscore[i] < -2.0
-        funding_short = funding_zscore[i] > 2.0
+        # === RSI CONFIRMATION (looser thresholds for more trades) ===
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
         
-        # === FISHER TRANSFORM ENTRY TIMING ===
-        # Long when Fisher crosses above -1.5 (oversold reversal)
-        # Short when Fisher crosses below +1.5 (overbought reversal)
-        fisher_long = fisher_signal[i] < -1.5 and fisher[i] > fisher_signal[i]
-        fisher_short = fisher_signal[i] > 1.5 and fisher[i] < fisher_signal[i]
+        # === VOLATILITY SPIKE CONFIRMATION ===
+        # Vol ratio > 1.3 means short-term vol is elevated (panic/euphoria)
+        vol_spike = vol_ratio[i] > 1.3
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # FUNDING + FISHER + TREND alignment (all three must agree)
-        # Long: extreme negative funding + fisher reversal + bull trend
-        if funding_long and fisher_long and bull_trend_1d:
-            new_signal = SIZE
+        # LONG: Extended low + RSI oversold + bull trend OR vol spike
+        if extended_low and rsi_oversold:
+            if bull_trend_1d or vol_spike:
+                new_signal = SIZE
         
-        # Short: extreme positive funding + fisher reversal + bear trend
-        elif funding_short and fisher_short and bear_trend_1d:
-            new_signal = -SIZE
+        # SHORT: Extended high + RSI overbought + bear trend OR vol spike
+        if extended_high and rsi_overbought:
+            if bear_trend_1d or vol_spike:
+                new_signal = -SIZE
         
-        # Fallback: Funding + Trend only (looser, ensures trades)
-        elif funding_long and bull_trend_1d and vol_spike:
-            new_signal = SIZE
-        elif funding_short and bear_trend_1d and vol_spike:
-            new_signal = -SIZE
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr[i]
+                stoploss_price = highest_close - 2.0 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -291,17 +193,21 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr[i]
+                stoploss_price = lowest_close + 2.0 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if daily trend flips against position
+        # Exit if daily trend flips against position (with hysteresis)
         if in_position and new_signal != 0.0:
             if position_side > 0 and bear_trend_1d:
-                new_signal = 0.0
+                # Only exit if price also below HMA by significant amount
+                if close[i] < hma_1d_aligned[i] * 0.98:
+                    new_signal = 0.0
             if position_side < 0 and bull_trend_1d:
-                new_signal = 0.0
+                # Only exit if price also above HMA by significant amount
+                if close[i] > hma_1d_aligned[i] * 1.02:
+                    new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
