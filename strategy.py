@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #004: 4h Mean Reversion + 1d Trend Filter + RSI/Bollinger + ATR Stop
-Hypothesis: 4h timeframe captures multi-day swings while 1d HMA provides regime bias.
-Mean reversion works better than pure trend in bear/range markets (2022, 2025).
-Long: 1d bullish + 4h RSI<30 + price<BB_lower + Supertrend flip.
-Short: 1d bearish + 4h RSI>70 + price>BB_upper + Supertrend flip.
-ADX>20 filter ensures we trade when volatility supports moves. 2*ATR stoploss.
-Conservative sizing (0.25) controls DD during 2022 crash (-77%).
-Multiple entry paths ensure >=10 trades per symbol. Timeframe: 4h (REQUIRED), HTF: 1d.
+Experiment #005: 12h Donchian Breakout + Daily KAMA Bias + RSI Filter + ATR Stop
+Hypothesis: Donchian breakouts work well on higher timeframes (12h) where noise is reduced.
+Daily KAMA provides adaptive HTF trend bias (KAMA adapts to volatility better than HMA/EMA).
+RSI filter ensures we enter on momentum confirmation, not just price breaks.
+Multiple entry paths (breakout + pullback + momentum) ensure >=10 trades per symbol.
+12h timeframe = fewer false signals than lower TFs, but still enough trades vs 1d.
+Conservative sizing (0.28) with 2.5*ATR stoploss controls drawdown in 2022 crash.
+Timeframe: 12h (REQUIRED), HTF: 1d via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_meanrev_1d_hma_rsi_bb_supertrend_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_daily_kama_rsi_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -27,55 +27,63 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Supertrend indicator - trend following with ATR bands."""
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA).
+    Adapts to market volatility - moves fast in trends, slow in ranges.
+    Better than EMA/HMA for regime changes.
+    """
     n = len(close)
-    atr = calculate_atr(high, low, close, period)
+    kama = np.zeros(n)
+    kama[:] = np.nan
     
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)
-    direction[:] = np.nan
+    if n < period + slow:
+        return kama
     
-    hl2 = (high + low) / 2.0
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(period, n):
+        price_change = np.abs(close[i] - close[i - period])
+        volatility = np.sum(np.abs(np.diff(close[max(0, i-period):i+1])))
+        if volatility > 0:
+            er[i] = price_change / volatility
+        else:
+            er[i] = 0
+    
+    # Calculate Smoothing Constant (SC)
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
+    sc = er * (fast_sc - slow_sc) + slow_sc
+    sc = sc ** 2
+    
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    # Calculate KAMA
+    for i in range(period + 1, n):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
+def calculate_donchian(high, low, period=20):
+    """
+    Donchian Channel - tracks highest high and lowest low over period.
+    Breakout above upper = long signal, below lower = short signal.
+    """
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
     
     for i in range(period, n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            supertrend[i] = np.nan
-            direction[i] = np.nan
-            continue
-        
-        upper_band = hl2[i] + multiplier * atr[i]
-        lower_band = hl2[i] - multiplier * atr[i]
-        
-        if i == period:
-            supertrend[i] = upper_band
-            direction[i] = 1
-        else:
-            if close[i] > supertrend[i-1]:
-                supertrend[i] = lower_band
-                direction[i] = 1
-            elif close[i] < supertrend[i-1]:
-                supertrend[i] = upper_band
-                direction[i] = -1
-            else:
-                if direction[i-1] == 1:
-                    supertrend[i] = max(lower_band, supertrend[i-1])
-                    direction[i] = 1
-                else:
-                    supertrend[i] = min(upper_band, supertrend[i-1])
-                    direction[i] = -1
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
     
-    return supertrend, direction
-
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend with less lag."""
-    close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
+    return upper, lower
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -89,64 +97,15 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    n = len(close)
-    adx = np.zeros(n)
-    adx[:] = np.nan
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
-    
-    atr = calculate_atr(high, low, close, period)
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period, n):
-        if atr[i] > 0:
-            plus_di[i] = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr[i]
-            minus_di[i] = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr[i]
-    
-    dx = np.zeros(n)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx[period:] = pd.Series(dx[period:]).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
-
-def calculate_bollinger(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD histogram for momentum confirmation."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    bandwidth = (upper - lower) / sma
-    percent_b = (close - lower) / (upper - lower)
-    percent_b = np.where(np.isnan(percent_b), 0.5, percent_b)
-    return upper, lower, sma, bandwidth, percent_b
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion signals."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    zscore = (close - sma) / std
-    zscore = np.where(np.isnan(zscore), 0.0, zscore)
-    return zscore
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -158,25 +117,24 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_fast = calculate_hma(df_1d['close'].values, 10)
+    kama_1d = calculate_kama(df_1d['close'].values, period=10, fast=2, slow=30)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-    hma_1d_fast_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_fast)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     rsi = calculate_rsi(close, 14)
-    rsi_fast = calculate_rsi(close, 7)
-    adx = calculate_adx(high, low, close, 14)
-    bb_upper, bb_lower, bb_mid, bb_bw, bb_pct = calculate_bollinger(close, 20, 2.0)
-    zscore = calculate_zscore(close, 20)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
     
-    # 4h HMA for additional confirmation
-    hma_4h = calculate_hma(close, 21)
-    hma_4h_fast = calculate_hma(close, 10)
+    # 12h KAMA for local trend
+    kama_12h = calculate_kama(close, period=10, fast=2, slow=30)
+    kama_12h_fast = calculate_kama(close, period=5, fast=2, slow=15)
+    
+    # 12h SMA for additional filter
+    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
     
     signals = np.zeros(n)
     SIZE_ENTRY = 0.28
@@ -190,132 +148,104 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):
+    for i in range(250, n):  # Start later to ensure all indicators ready
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(supertrend[i]):
+        if np.isnan(kama_1d_aligned[i]) or np.isnan(donchian_upper[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(adx[i]):
+        if np.isnan(rsi[i]) or np.isnan(macd_hist[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
-            signals[i] = 0.0
-            continue
+        # Daily trend bias (HTF) - KAMA adaptive
+        daily_bullish = close[i] > kama_1d_aligned[i]
+        daily_bearish = close[i] < kama_1d_aligned[i]
+        daily_kama_rising = kama_1d_aligned[i] > kama_1d_aligned[i-1] if i > 0 else False
+        daily_kama_falling = kama_1d_aligned[i] < kama_1d_aligned[i-1] if i > 0 else False
         
-        # 1d trend bias (HTF) - primary regime filter
-        htf_bullish = close[i] > hma_1d_aligned[i]
-        htf_bearish = close[i] < hma_1d_aligned[i]
-        htf_hma_golden = hma_1d_fast_aligned[i] > hma_1d_aligned[i]
-        htf_hma_death = hma_1d_fast_aligned[i] < hma_1d_aligned[i]
+        # 12h Donchian breakout signals
+        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
+        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
         
-        # 4h Supertrend direction
-        st_bullish = st_direction[i] == 1
-        st_bearish = st_direction[i] == -1
+        # 12h KAMA trend
+        kama_12h_bullish = close[i] > kama_12h[i]
+        kama_12h_bearish = close[i] < kama_12h[i]
+        kama_12h_rising = kama_12h[i] > kama_12h[i-1] if i > 0 else False
+        kama_12h_falling = kama_12h[i] < kama_12h[i-1] if i > 0 else False
         
-        # Supertrend flip signals (strong reversal signal)
-        st_flip_long = False
-        st_flip_short = False
-        if i > 0 and not np.isnan(st_direction[i]) and not np.isnan(st_direction[i-1]):
-            st_flip_long = st_direction[i] == 1 and st_direction[i-1] == -1
-            st_flip_short = st_direction[i] == -1 and st_direction[i-1] == 1
+        # Fast KAMA crossover
+        fast_above_slow = kama_12h_fast[i] > kama_12h[i]
+        fast_below_slow = kama_12h_fast[i] < kama_12h[i]
         
-        # 4h HMA trend
-        hma_4h_bullish = close[i] > hma_4h[i]
-        hma_4h_bearish = close[i] < hma_4h[i]
-        hma_4h_rising = hma_4h[i] > hma_4h[i-1] if i > 0 else False
-        hma_4h_falling = hma_4h[i] < hma_4h[i-1] if i > 0 else False
+        # MACD momentum
+        macd_bullish = macd_hist[i] > 0
+        macd_bearish = macd_hist[i] < 0
+        macd_cross_up = macd_hist[i] > 0 and macd_hist[i-1] <= 0 if i > 0 else False
+        macd_cross_down = macd_hist[i] < 0 and macd_hist[i-1] >= 0 if i > 0 else False
         
-        # Fast HMA crossover on 4h
-        fast_above_slow = hma_4h_fast[i] > hma_4h[i]
-        fast_below_slow = hma_4h_fast[i] < hma_4h[i]
+        # RSI zones
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
+        rsi_momentum_long = rsi[i] > 45 and rsi[i] < 65
+        rsi_momentum_short = rsi[i] > 35 and rsi[i] < 55
         
-        # ADX trend strength
-        trend_strong = adx[i] > 20
-        trend_weak = adx[i] < 20
-        
-        # RSI zones - mean reversion signals
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        rsi_extreme_oversold = rsi[i] < 25
-        rsi_extreme_overbought = rsi[i] > 75
-        rsi_rising = rsi[i] > rsi[i-1] if i > 0 else False
-        rsi_falling = rsi[i] < rsi[i-1] if i > 0 else False
-        
-        # Fast RSI confirmation
-        rsi_fast_oversold = rsi_fast[i] < 30
-        rsi_fast_overbought = rsi_fast[i] > 70
-        
-        # Bollinger position
-        bb_low = close[i] <= bb_lower[i]
-        bb_high = close[i] >= bb_upper[i]
-        bb_pct_low = bb_pct[i] < 0.1
-        bb_pct_high = bb_pct[i] > 0.9
-        
-        # Z-score extremes
-        zscore_low = zscore[i] < -1.5
-        zscore_high = zscore[i] > 1.5
-        
-        # BB squeeze (low volatility before breakout)
-        bb_squeeze = bb_bw[i] < np.nanpercentile(bb_bw[:i], 20) if i > 100 else False
+        # SMA trend filter
+        above_sma50 = close[i] > sma_50[i] if not np.isnan(sma_50[i]) else False
+        below_sma50 = close[i] < sma_50[i] if not np.isnan(sma_50[i]) else False
+        above_sma200 = close[i] > sma_200[i] if not np.isnan(sma_200[i]) else False
+        below_sma200 = close[i] < sma_200[i] if not np.isnan(sma_200[i]) else False
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (mean reversion in bullish regime) ===
+        # === LONG ENTRIES (multiple paths for >=10 trades) ===
         
-        # Path 1: 1d bullish + 4h RSI oversold + price at BB lower + ST turning bullish
-        if htf_bullish and rsi_oversold and bb_low and st_bullish:
+        # Path 1: Donchian breakout + Daily bullish + RSI momentum + MACD bullish
+        if breakout_long and daily_bullish and rsi_momentum_long and macd_bullish:
             new_signal = SIZE_ENTRY
         
-        # Path 2: 1d bullish + 4h RSI extreme + Z-score low + ST flip long
-        elif htf_bullish and rsi_extreme_oversold and zscore_low and st_flip_long:
+        # Path 2: Daily bullish + KAMA 12h bullish + Fast KAMA crossover up + RSI > 50
+        elif daily_bullish and kama_12h_bullish and fast_above_slow and rsi_bullish:
             new_signal = SIZE_ENTRY
         
-        # Path 3: 1d HMA golden + 4h HMA rising + RSI rising from oversold
-        elif htf_hma_golden and hma_4h_rising and rsi_oversold and rsi_rising:
+        # Path 3: MACD cross up + Daily not bearish + RSI rising + Above SMA50
+        elif macd_cross_up and not daily_bearish and rsi[i] > rsi[i-1] if i > 0 else False and above_sma50:
             new_signal = SIZE_ENTRY
         
-        # Path 4: 1d bullish + 4h BB pct low + ADX weak (range) + ST bullish
-        elif htf_bullish and bb_pct_low and trend_weak and st_bullish:
+        # Path 4: Daily KAMA rising + Price pullback to KAMA 12h + RSI oversold bounce
+        elif daily_kama_rising and close[i] < kama_12h[i] * 1.02 and close[i] > kama_12h[i] * 0.98 and rsi_oversold and rsi[i] > rsi[i-1] if i > 0 else False:
             new_signal = SIZE_ENTRY
         
-        # Path 5: 1d bullish + 4h HMA golden + fast HMA crossover up + RSI > 40
-        elif htf_bullish and htf_hma_golden and fast_above_slow and rsi[i] > 40 and rsi_rising:
+        # Path 5: Above SMA200 + Donchian near breakout + MACD improving + RSI neutral
+        elif above_sma200 and close[i] > donchian_upper[i-1] * 0.98 if i > 0 else False and macd_hist[i] > macd_hist[i-1] if i > 0 else False and rsi[i] > 45:
             new_signal = SIZE_ENTRY
         
-        # Path 6: 1d bullish + 4h RSI fast oversold + price < 4h HMA (pullback)
-        elif htf_bullish and rsi_fast_oversold and close[i] < hma_4h[i]:
-            new_signal = SIZE_ENTRY
+        # === SHORT ENTRIES (multiple paths for >=10 trades) ===
         
-        # === SHORT ENTRIES (mean reversion in bearish regime) ===
-        
-        # Path 1: 1d bearish + 4h RSI overbought + price at BB upper + ST turning bearish
-        if htf_bearish and rsi_overbought and bb_high and st_bearish:
+        # Path 1: Donchian breakout + Daily bearish + RSI momentum + MACD bearish
+        if breakout_short and daily_bearish and rsi_momentum_short and macd_bearish:
             new_signal = -SIZE_ENTRY
         
-        # Path 2: 1d bearish + 4h RSI extreme + Z-score high + ST flip short
-        elif htf_bearish and rsi_extreme_overbought and zscore_high and st_flip_short:
+        # Path 2: Daily bearish + KAMA 12h bearish + Fast KAMA crossover down + RSI < 50
+        elif daily_bearish and kama_12h_bearish and fast_below_slow and rsi_bearish:
             new_signal = -SIZE_ENTRY
         
-        # Path 3: 1d HMA death + 4h HMA falling + RSI falling from overbought
-        elif htf_hma_death and hma_4h_falling and rsi_overbought and rsi_falling:
+        # Path 3: MACD cross down + Daily not bullish + RSI falling + Below SMA50
+        elif macd_cross_down and not daily_bullish and rsi[i] < rsi[i-1] if i > 0 else False and below_sma50:
             new_signal = -SIZE_ENTRY
         
-        # Path 4: 1d bearish + 4h BB pct high + ADX weak (range) + ST bearish
-        elif htf_bearish and bb_pct_high and trend_weak and st_bearish:
+        # Path 4: Daily KAMA falling + Price rally to KAMA 12h + RSI overbought drop
+        elif daily_kama_falling and close[i] < kama_12h[i] * 1.02 and close[i] > kama_12h[i] * 0.98 and rsi_overbought and rsi[i] < rsi[i-1] if i > 0 else False:
             new_signal = -SIZE_ENTRY
         
-        # Path 5: 1d bearish + 4h HMA death + fast HMA crossover down + RSI < 60
-        elif htf_bearish and htf_hma_death and fast_below_slow and rsi[i] < 60 and rsi_falling:
-            new_signal = -SIZE_ENTRY
-        
-        # Path 6: 1d bearish + 4h RSI fast overbought + price > 4h HMA (rally)
-        elif htf_bearish and rsi_fast_overbought and close[i] > hma_4h[i]:
+        # Path 5: Below SMA200 + Donchian near breakout + MACD worsening + RSI neutral
+        elif below_sma200 and close[i] < donchian_lower[i-1] * 1.02 if i > 0 else False and macd_hist[i] < macd_hist[i-1] if i > 0 else False and rsi[i] < 55:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -324,8 +254,8 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2*ATR for 4h timeframe)
-            current_stop = highest_close - 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR for 12h timeframe)
+            current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -334,7 +264,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
@@ -345,8 +275,8 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2*ATR for 4h timeframe)
-            current_stop = lowest_close + 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR for 12h timeframe)
+            current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -355,7 +285,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
@@ -368,7 +298,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
@@ -377,7 +307,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
