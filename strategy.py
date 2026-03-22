@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #016: 12h HMA Trend + RSI Pullback with 1d Bias
+Experiment #017: 1d HMA Trend + RSI Pullback + 1w HTF Filter with ATR Trail
 
-Hypothesis: Previous regime-adaptive strategies failed due to over-complexity and
-too-restrictive entry conditions. This strategy simplifies to proven patterns:
-1. 1d HMA for major trend bias (same as current best baseline)
-2. 12h HMA(16/48) crossover for trend direction
-3. RSI(14) pullback entries (30-70 range, not extreme) for better frequency
-4. ATR(14) trailing stoploss at 2.5x
-5. Discrete position sizing (0.25-0.30) to minimize fee churn
+Hypothesis: Daily timeframe with weekly trend filter provides optimal balance
+of signal quality and trade frequency (20-50 trades/year). Based on proven
+pattern from research: HMA crossover + RSI filter + ATR trail achieved
+Sharpe +0.879 on SOL. This adapts it for BTC/ETH/SOL with:
+
+1. 1d primary timeframe (proven to work in bear/range markets)
+2. 1w HMA as single HTF trend bias (simpler than dual 12h+1d)
+3. RSI(14) pullback entry within trend (buy dips in uptrend)
+4. ATR(14) trailing stop for risk management
+5. Looser RSI thresholds to ensure trade frequency
 
 Why this should work:
-- Simpler logic = more trades (addressing 0-trade failures in exp #006, #008, #010)
-- RSI pullback (not extreme) catches more entries in trending markets
-- 12h timeframe naturally filters noise (target 20-50 trades/year)
-- 1d HMA bias prevents counter-trend trades (major improvement over pure 12h)
-- Based on current best baseline pattern (mtf_4h_hma_rsi_pullback_1d_bias_v1)
+- 1d TF naturally filters noise, targets 20-50 trades/year
+- Weekly HMA provides strong trend bias without over-filtering
+- RSI pullback entries catch continuations (not tops/bottoms)
+- ATR trail protects gains while allowing trend to run
+- Simpler logic = fewer conditions that can all fail = more trades
 
-Key changes from failed experiments:
-- NO Choppiness Index regime detection (failed in #005, #012, #013)
-- NO Connors RSI extreme thresholds (failed in #005, #008, #013)
-- NO complex multi-regime logic (failed in #012, #013)
-- Simpler, proven HMA + RSI pullback pattern
-
-Timeframe: 12h (REQUIRED)
-HTF: 1d via mtf_data helper (call ONCE before loop)
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25-0.30 discrete
 Stoploss: 2.5 * ATR(14) trailing
 """
@@ -32,8 +29,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_hma_rsi_pullback_1d_bias_v1"
-timeframe = "12h"
+name = "mtf_1d_hma_rsi_pullback_1w_trend_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -57,29 +54,24 @@ def calculate_hma(close, period=21):
     return wma3.values
 
 def calculate_rsi(close, period=14):
-    """Calculate RSI using standard Wilder's method."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+    """Calculate RSI using Wilder's smoothing."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    rs = avg_gain / avg_loss
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    rsi = np.nan_to_num(rsi, nan=50.0)
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low over period)."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    
-    upper = high_s.rolling(window=period, min_periods=period).max()
-    lower = low_s.rolling(window=period, min_periods=period).min()
-    
-    return upper.values, lower.values
+def calculate_sma(close, period=200):
+    """Calculate Simple Moving Average."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    return sma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -88,20 +80,18 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1D indicators
-    hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
+    # Calculate 1w HMA for trend bias
+    hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
+    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
     
-    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
-    
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    hma_12h_16 = calculate_hma(close, 16)
-    hma_12h_48 = calculate_hma(close, 48)
+    hma_21 = calculate_hma(close, 21)
+    hma_50 = calculate_hma(close, 50)
     rsi_14 = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
     
@@ -121,22 +111,32 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_21_aligned[i]):
+        if np.isnan(hma_1w_21_aligned[i]):
             continue
         
-        if np.isnan(hma_12h_16[i]) or np.isnan(hma_12h_48[i]):
+        if np.isnan(hma_21[i]) or np.isnan(hma_50[i]) or np.isnan(rsi_14[i]):
             continue
         
-        if np.isnan(rsi_14[i]):
-            continue
+        # === HTF TREND BIAS (1w) ===
+        # Weekly HMA determines overall bias
+        htf_bullish = close[i] > hma_1w_21_aligned[i]
+        htf_bearish = close[i] < hma_1w_21_aligned[i]
         
-        # === 1D TREND BIAS ===
-        daily_bullish = close[i] > hma_1d_21_aligned[i]
-        daily_bearish = close[i] < hma_1d_21_aligned[i]
+        # === 1D TREND CONFIRMATION ===
+        # HMA21 > HMA50 = bullish structure
+        trend_bullish = (hma_21[i] > hma_50[i]) and (close[i] > hma_21[i])
+        trend_bearish = (hma_21[i] < hma_50[i]) and (close[i] < hma_21[i])
         
-        # === 12H HMA TREND ===
-        hma_bullish = hma_12h_16[i] > hma_12h_48[i]
-        hma_bearish = hma_12h_16[i] < hma_12h_48[i]
+        # === SMA200 FILTER ===
+        # Only long above SMA200, only short below SMA200
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
+        
+        # === RSI PULLBACK ENTRY ===
+        # Long: RSI pulled back to 35-50 in uptrend
+        # Short: RSI rallied to 50-65 in downtrend
+        rsi_long_pullback = (rsi_14[i] >= 35) and (rsi_14[i] <= 55)
+        rsi_short_pullback = (rsi_14[i] >= 45) and (rsi_14[i] <= 65)
         
         # === VOLATILITY-ADJUSTED POSITION SIZING ===
         if i > 100:
@@ -148,44 +148,41 @@ def generate_signals(prices):
         
         current_size = BASE_SIZE * vol_adjustment
         current_size = np.clip(current_size, 0.20, 0.35)
+        # Round to discrete levels
+        if current_size > 0.27:
+            current_size = 0.30
+        elif current_size > 0.17:
+            current_size = 0.20
+        else:
+            current_size = 0.15
         
-        # === ENTRY LOGIC (SIMPLIFIED PULLBACK) ===
+        # === ENTRY LOGIC ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG: 12h HMA bullish + 1d bias bullish + RSI pullback (not extreme)
-        if hma_bullish and daily_bullish:
-            # RSI pullback to 35-50 range (not oversold, just cooling off)
-            if 35 <= rsi_14[i] <= 55:
-                new_signal = current_size
-            # Or breakout above Donchian with RSI confirmation
-            elif i > 0 and not np.isnan(donchian_upper[i-1]):
-                if close[i] > donchian_upper[i-1] and rsi_14[i] > 50 and rsi_14[i] < 75:
-                    new_signal = current_size
+        # LONG ENTRY: HTF bullish + trend bullish + above SMA200 + RSI pullback
+        if htf_bullish and trend_bullish and above_sma200 and rsi_long_pullback:
+            new_signal = current_size
         
-        # SHORT: 12h HMA bearish + 1d bias bearish + RSI pullback (not extreme)
-        elif hma_bearish and daily_bearish:
-            # RSI pullback to 45-65 range (not overbought, just cooling off)
-            if 45 <= rsi_14[i] <= 65:
-                new_signal = -current_size
-            # Or breakout below Donchian with RSI confirmation
-            elif i > 0 and not np.isnan(donchian_lower[i-1]):
-                if close[i] < donchian_lower[i-1] and rsi_14[i] < 50 and rsi_14[i] > 25:
-                    new_signal = -current_size
+        # SHORT ENTRY: HTF bearish + trend bearish + below SMA200 + RSI pullback
+        elif htf_bearish and trend_bearish and below_sma200 and rsi_short_pullback:
+            new_signal = -current_size
         
         # === FREQUENCY SAFEGUARD ===
-        # If no trades for 40 bars (~20 days on 12h), force entry with weaker signal
-        if bars_since_last_trade > 40 and new_signal == 0.0 and not in_position:
-            if hma_bullish and daily_bullish and rsi_14[i] > 45:
-                new_signal = current_size * 0.6
-            elif hma_bearish and daily_bearish and rsi_14[i] < 55:
-                new_signal = -current_size * 0.6
+        # If no trades for 20 bars (~20 days on 1d), allow weaker entry
+        if bars_since_last_trade > 20 and new_signal == 0.0 and not in_position:
+            # Weaker: only need HTF + one trend confirmation
+            if htf_bullish and (close[i] > hma_21[i]) and above_sma200:
+                new_signal = current_size * 0.7
+            elif htf_bearish and (close[i] < hma_21[i]) and below_sma200:
+                new_signal = -current_size * 0.7
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
         
         if in_position and position_side != 0:
             if position_side > 0:
+                # Update highest price for long
                 if close[i] > highest_price:
                     highest_price = close[i]
                 stoploss_price = highest_price - 2.5 * atr_14[i]
@@ -193,6 +190,7 @@ def generate_signals(prices):
                     stoploss_triggered = True
             
             if position_side < 0:
+                # Update lowest price for short
                 if lowest_price == 0.0 or close[i] < lowest_price:
                     lowest_price = close[i]
                 stoploss_price = lowest_price + 2.5 * atr_14[i]
@@ -202,13 +200,23 @@ def generate_signals(prices):
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and hma_bearish:
+            # Exit long if HMA21 crosses below HMA50
+            if position_side > 0 and hma_21[i] < hma_50[i]:
                 trend_reversal = True
-            if position_side < 0 and hma_bullish:
+            # Exit short if HMA21 crosses above HMA50
+            if position_side < 0 and hma_21[i] > hma_50[i]:
                 trend_reversal = True
         
-        # Apply stoploss or trend reversal
-        if stoploss_triggered or trend_reversal:
+        # === HTF TREND REVERSAL EXIT ===
+        htf_reversal = False
+        if in_position and position_side != 0:
+            if position_side > 0 and htf_bearish:
+                htf_reversal = True
+            if position_side < 0 and htf_bullish:
+                htf_reversal = True
+        
+        # Apply stoploss or reversals
+        if stoploss_triggered or trend_reversal or htf_reversal:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
