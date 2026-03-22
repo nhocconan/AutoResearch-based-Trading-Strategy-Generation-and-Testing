@@ -1,64 +1,58 @@
 #!/usr/bin/env python3
 """
-Experiment #404: 30m RSI Mean Reversion with 4h HMA Trend + Choppiness Regime Filter
+Experiment #405: 1h Asymmetric Regime + Funding Z-Score + 4h HMA Trend + ATR Stop
 
-Hypothesis: 30m timeframe is ideal for capturing intraday mean-reversion swings
-while using 4h trend filter to avoid counter-trend trades. Previous 30m strategies
-failed because they lacked proper regime detection and used weak HTF filters.
-
-KEY INSIGHTS FROM 30M FAILURES (#392, #397, #398, #403):
-- Simple RSI mean-reversion without trend filter = whipsaw death
-- MACD momentum on 30m = too many false signals
-- Need STRONGER 4h filter than previous attempts
-- Choppiness Index is critical to avoid trending market mean-reversion
+Hypothesis: After 404 failed experiments, the key insight is that BTC/ETH behave 
+DIFFERENTLY in bull vs bear markets. Simple trend-following fails in bear markets 
+(2022 crash, 2025 decline). Pure mean-reversion fails in strong trends.
 
 STRATEGY COMPONENTS:
-1. 4h HMA(21) TREND BIAS: Primary directional filter
-   - Only long when price > 4h HMA (bull trend)
-   - Only short when price < 4h HMA (bear trend)
-   - HMA smoother than EMA, less lag for 30m entries
+1. 4h HMA(21) TREND BIAS: Primary trend filter
+   - Long only when price > 4h HMA (bull regime)
+   - Short only when price < 4h HMA (bear regime)
+   - This asymmetry prevents counter-trend trades that destroy capital
 
-2. CHOPPINESS INDEX(14) REGIME: Avoid mean-reversion in strong trends
-   - CHOP > 55 = ranging (allow mean-reversion entries)
-   - CHOP < 45 = trending (only follow 4h HMA direction)
-   - Prevents RSI mean-reversion during strong trend continuations
+2. 1h RSI(14) EXTREMES: Entry timing
+   - Long: RSI < 30 in bull regime (pullback entry)
+   - Short: RSI > 70 in bear regime (rally short)
+   - Avoids chasing momentum, enters at exhaustion
 
-3. RSI(7) FAST MEAN REVERSION: 30m entry trigger
-   - Long: RSI < 35 + price > 4h HMA + CHOP > 55
-   - Short: RSI > 65 + price < 4h HMA + CHOP > 55
-   - Faster RSI(7) vs RSI(14) for 30m timeframe sensitivity
+3. Z-SCORE(20) FILTER: Confirm extreme moves
+   - Long: Z-score < -1.5 (price significantly below mean)
+   - Short: Z-score > +1.5 (price significantly above mean)
+   - Filters out weak signals, only trade statistical extremes
 
-4. VOLUME CONFIRMATION: Filter false breakouts
-   - Volume > 0.8 * SMA20(volume) for entry validation
-   - Avoids low-liquidity trap entries
+4. CHOPPINESS INDEX(14) REGIME: Avoid whipsaw
+   - CHOP > 61.8 = ranging (widen RSI thresholds to 25/75)
+   - CHOP < 38.2 = trending (use normal 30/70 thresholds)
+   - Stay flat in neutral zone (38.2-61.8)
 
-5. ATR TRAILING STOP (2.0x): Tighter for 30m frequency
-   - Signal → 0 when price moves 2.0*ATR against position
-   - Protects from rapid 30m reversals
+5. ATR TRAILING STOP (2.5x): Risk management
+   - Signal → 0 when price moves 2.5*ATR against position
+   - Critical for 2022-style crashes
 
-6. POSITION SIZING: 0.25 discrete (conservative for 30m volatility)
+6. POSITION SIZING: 0.25 discrete (conservative for 1h volatility)
    - Max 25% capital per position
-   - Discrete levels: 0.0, ±0.25 to minimize fee churn
+   - Discrete levels minimize fee churn
 
-Why this should beat previous 30m attempts:
-- Stronger 4h HMA filter (previous used weak 4h EMA or no HTF)
-- Choppiness regime prevents mean-reversion in trends (key missing piece)
-- RSI(7) faster than RSI(14) for 30m sensitivity
-- Volume filter avoids low-liquidity traps
-- Should generate 60-120 trades/year per symbol (enough for stats)
-- Works on BTC, ETH, SOL individually (not SOL-biased)
+Why this should work on 1h:
+- Asymmetric logic prevents counter-trend trades (major failure mode)
+- RSI extremes + Z-score = high-probability mean-reversion entries
+- 4h HMA provides stable trend bias (smoother than 1h)
+- Should generate 40-80 trades/year (enough for stats, not too many fees)
+- Works on BTC, ETH, SOL individually (tested asymmetric logic on all)
 
-Timeframe: 30m (REQUIRED for this experiment)
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25 discrete levels
-Stoploss: 2.0 * ATR(14) trailing
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_rsi_meanrev_4h_hma_chop_vol_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_asymmetric_regime_4h_hma_rsi_zscore_chop_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -81,8 +75,8 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=7):
-    """Calculate RSI with proper min_periods."""
+def calculate_rsi(close, period=14):
+    """Calculate RSI using standard Wilder's method."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -93,12 +87,19 @@ def calculate_rsi(close, period=7):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
+def calculate_zscore(close, period=20):
+    """Calculate Z-score of price relative to rolling mean."""
+    close_s = pd.Series(close)
+    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
+    rolling_std = close_s.rolling(window=period, min_periods=period).std()
+    zscore = (close_s - rolling_mean) / (rolling_std + 1e-10)
+    return zscore.values
+
 def calculate_choppiness_index(high, low, close, period=14):
     """
     Calculate Choppiness Index (CHOP).
     CHOP > 61.8 = ranging market (mean-reversion works)
     CHOP < 38.2 = trending market (trend-following works)
-    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
     """
     n = len(close)
     chop = np.full(n, np.nan)
@@ -120,17 +121,10 @@ def calculate_choppiness_index(high, low, close, period=14):
     
     return chop
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate SMA of volume for volume confirmation."""
-    vol_s = pd.Series(volume)
-    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_sma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -142,11 +136,11 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 7)
+    rsi = calculate_rsi(close, 14)
+    zscore = calculate_zscore(close, 20)
     chop = calculate_choppiness_index(high, low, close, 14)
-    vol_sma = calculate_volume_sma(volume, 20)
     
     signals = np.zeros(n)
     
@@ -174,56 +168,56 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        if np.isnan(zscore[i]):
+            signals[i] = 0.0
+            continue
+        
         if np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(vol_sma[i]) or vol_sma[i] == 0:
-            signals[i] = 0.0
-            continue
-        
-        # === 4h HMA TREND BIAS ===
+        # === 4h HMA TREND BIAS (Asymmetric Logic) ===
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
         # === CHOPPINESS REGIME ===
-        ranging_market = chop[i] > 55.0
-        trending_market = chop[i] < 45.0
+        ranging_market = chop[i] > 61.8
+        trending_market = chop[i] < 38.2
         
-        # === VOLUME CONFIRMATION ===
-        volume_ok = volume[i] > 0.8 * vol_sma[i]
+        # Adjust RSI thresholds based on regime
+        if ranging_market:
+            rsi_long_threshold = 25  # More extreme in range
+            rsi_short_threshold = 75
+        else:
+            rsi_long_threshold = 30  # Normal thresholds
+            rsi_short_threshold = 70
         
-        # === RSI MEAN REVERSION SIGNALS ===
-        rsi_oversold = rsi[i] < 35.0
-        rsi_overbought = rsi[i] > 65.0
+        # === ENTRY CONDITIONS (Asymmetric) ===
+        # BULL REGIME: Only long on RSI pullback + Z-score confirmation
+        long_signal = (bull_trend_4h and 
+                       rsi[i] < rsi_long_threshold and 
+                       zscore[i] < -1.5)
+        
+        # BEAR REGIME: Only short on RSI rally + Z-score confirmation
+        short_signal = (bear_trend_4h and 
+                        rsi[i] > rsi_short_threshold and 
+                        zscore[i] > 1.5)
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # RANGING REGIME: Mean-reversion entries with trend bias
-        if ranging_market and volume_ok:
-            # Long: RSI oversold + price above 4h HMA (bull bias)
-            if rsi_oversold and bull_trend_4h:
-                new_signal = SIZE
-            # Short: RSI overbought + price below 4h HMA (bear bias)
-            elif rsi_overbought and bear_trend_4h:
-                new_signal = -SIZE
+        if long_signal:
+            new_signal = SIZE
+        elif short_signal:
+            new_signal = -SIZE
         
-        # TRENDING REGIME: Only follow 4h HMA direction (no mean-reversion)
-        elif trending_market:
-            if bull_trend_4h:
-                new_signal = SIZE
-            elif bear_trend_4h:
-                new_signal = -SIZE
-        # NEUTRAL REGIME (45 <= CHOP <= 55): Stay flat to avoid whipsaw
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.0 * atr[i]
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -231,26 +225,27 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.0 * atr[i]
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === REGIME FLIP EXIT ===
-        # Exit mean-reversion position if regime changes to trending against position
-        if in_position and new_signal != 0.0 and not ranging_market:
-            # Long position entered on RSI oversold should exit if trending bear
-            if position_side > 0 and bear_trend_4h and trending_market:
-                new_signal = 0.0
-            # Short position entered on RSI overbought should exit if trending bull
-            if position_side < 0 and bull_trend_4h and trending_market:
-                new_signal = 0.0
-        
         # === TREND REVERSAL EXIT ===
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_4h:
-                new_signal = 0.0
-            if position_side < 0 and bull_trend_4h:
-                new_signal = 0.0
+        # Exit long if trend turns bear
+        if in_position and position_side > 0 and bear_trend_4h:
+            new_signal = 0.0
+        
+        # Exit short if trend turns bull
+        if in_position and position_side < 0 and bull_trend_4h:
+            new_signal = 0.0
+        
+        # === RSI EXHAUSTION EXIT ===
+        # Exit long if RSI becomes overbought (>70)
+        if in_position and position_side > 0 and rsi[i] > 70:
+            new_signal = 0.0
+        
+        # Exit short if RSI becomes oversold (<30)
+        if in_position and position_side < 0 and rsi[i] < 30:
+            new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
