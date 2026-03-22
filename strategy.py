@@ -1,28 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #147: 1h KAMA + 4h HMA Trend + RSI Pullback + ATR Stop
+Experiment #148: 4h Donchian Breakout + 1d HMA Trend Filter + ATR Stop
 
-Hypothesis: 1h timeframe with KAMA (Kaufman Adaptive Moving Average) provides
-better noise filtering than EMA during choppy 2022-2025 markets. KAMA adapts
-its smoothing based on market efficiency - slow in ranges, fast in trends.
-Combined with 4h HMA trend bias and RSI pullback entries, this should capture
-momentum moves while avoiding whipsaws.
+Hypothesis: 4h timeframe provides good balance between signal quality and trade
+frequency. Donchian breakout (20-period) captures momentum moves cleanly. 1d HMA
+provides stable higher-timeframe trend bias to avoid counter-trend breakouts.
+Simple conditions ensure adequate trade frequency (≥10 trades per symbol).
 
-Why this might work:
-- KAMA adapts to volatility (critical for 2022 crash and 2025 bear market)
-- 4h HMA provides stable trend filter without excessive lag
-- RSI pullback ensures we enter on dips in uptrends (better risk/reward)
-- Simple conditions avoid 0-trade problem (#142, #143 failures)
-- 1h captures more moves than 4h/12h while staying above noise of 15m/30m
+Why 4h might work:
+- Slower than 15m/30m strategies that failed recently (#145, #146, #147)
+- Fewer false breakouts than lower timeframes
+- 1d HTF filter adds stability without over-filtering
+- Donchian breakout is proven to work in crypto (Turtle Trading adapted)
 
 Learning from failures:
-- #141 (1h asymmetric regime): Sharpe=-1.649 - too complex regime logic
-- #142, #143: Sharpe=0.000 - too many filters = 0 trades
-- #140 (30m Supertrend): Sharpe=0.074 - proves MTF Supertrend concept works
-- Current best (4h KAMA + 1d HMA): Sharpe=0.478 - KAMA works on higher TF
+- #142, #143: Sharpe=0.000 - too many filters = 0 trades (AVOID!)
+- #145, #146, #147: Negative Sharpe on 15m/30m/1h - need slower TF
+- Keep entry conditions SIMPLE: trend bias + breakout only
 
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25-0.35 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
@@ -30,8 +27,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_kama_4h_hma_rsi_pullback_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_donchian_1d_hma_breakout_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -44,38 +41,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA).
-    KAMA adapts smoothing based on market efficiency ratio.
-    Fast in trends, slow in ranges.
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Efficiency Ratio (ER): signal / noise
-    # signal = absolute price change over period
-    # noise = sum of absolute price changes over period
-    for i in range(period, n):
-        signal = np.abs(close[i] - close[i - period])
-        noise = np.sum(np.abs(np.diff(close[i - period:i + 1])))
-        
-        if noise == 0:
-            er = 0.0
-        else:
-            er = signal / noise
-        
-        # Smoothing constant
-        sc = (er * (2.0 / (fast_period + 1) - 2.0 / (slow_period + 1)) + 2.0 / (slow_period + 1)) ** 2
-        
-        if i == period:
-            kama[i] = close[i]
-        else:
-            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
-
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -86,17 +51,21 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI indicator."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+def calculate_donchian(high, low, period=20):
+    """
+    Calculate Donchian Channel.
+    Returns upper band (highest high), lower band (lowest low), and middle.
+    """
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(period, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    middle = (upper + lower) / 2.0
+    return upper, lower, middle
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -105,18 +74,17 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    kama = calculate_kama(close, period=10, fast_period=2, slow_period=30)
-    rsi = calculate_rsi(close, 14)
+    donchian_upper, donchian_lower, donchian_middle = calculate_donchian(high, low, 20)
     
     signals = np.zeros(n)
     
@@ -137,53 +105,37 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(rsi[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # 1d HMA = higher timeframe trend bias
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === KAMA TREND ===
-        # Price above KAMA = bullish, below = bearish
-        kama_bull = close[i] > kama[i]
-        kama_bear = close[i] < kama[i]
-        
-        # === RSI PULLBACK FILTER ===
-        # In uptrend: enter on RSI pullback (40-55)
-        # In downtrend: enter on RSI bounce (45-60)
-        rsi_pullback_long = 35 < rsi[i] < 60
-        rsi_pullback_short = 40 < rsi[i] < 65
+        # === DONCHIAN BREAKOUT SIGNAL ===
+        # Break above upper band = long signal
+        # Break below lower band = short signal
+        breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
+        breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS ===
-        # 4h bullish + KAMA bullish + RSI not overbought (pullback entry)
-        if bull_trend_4h and kama_bull and rsi_pullback_long:
-            # Stronger signal if RSI is in sweet spot (45-55)
-            if 45 < rsi[i] < 55:
-                new_signal = SIZE_STRONG
-            else:
-                new_signal = SIZE_BASE
+        # Simple: 1d bullish + Donchian breakout long
+        # This ensures trades happen (learned from #142, #143 failures)
+        if bull_trend_1d and breakout_long:
+            new_signal = SIZE_BASE
         
         # === SHORT ENTRY CONDITIONS ===
-        # 4h bearish + KAMA bearish + RSI not oversold (bounce entry)
-        if bear_trend_4h and kama_bear and rsi_pullback_short:
-            # Stronger signal if RSI is in sweet spot (45-55)
-            if 45 < rsi[i] < 55:
-                new_signal = -SIZE_STRONG
-            else:
-                new_signal = -SIZE_BASE
+        # Simple: 1d bearish + Donchian breakout short
+        if bear_trend_1d and breakout_short:
+            new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Update trailing highs/lows for active positions
