@@ -1,39 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #173: 12h KAMA Adaptive Trend + 1d HMA Filter + MACD Momentum + ADX
+Experiment #174: 1d KAMA Adaptive Trend + 1w HMA Filter + RSI Momentum + ADX Strength
 
-Hypothesis: 12h timeframe captures major crypto trends with fewer whipsaws than 4h.
-KAMA (Kaufman Adaptive Moving Average) adapts to volatility - fast in trends, slow in chop.
-Combined with 1d HMA for higher timeframe bias, MACD histogram for momentum confirmation,
-and ADX for trend strength filtering. This should outperform simple EMA/HMA strategies.
+Hypothesis: Daily timeframe captures major crypto trends with minimal noise. 
+KAMA adapts to volatility (fast in trends, slow in chop), 1w HMA provides 
+stable higher-timeframe bias, RSI confirms momentum direction (not extremes), 
+and ADX filters weak trends. This combination should outperform 4h/12h strategies.
 
-Why 12h KAMA might work:
-- 12h bars filter intraday noise while catching multi-day trends
-- KAMA adapts to market regime (faster in trends, slower in ranges)
-- 1d HMA provides stable trend bias (avoids counter-trend trades)
-- MACD histogram confirms momentum direction (avoids false breakouts)
-- ADX > 18 filters chop while allowing sufficient trade count
-- Conservative sizing (0.25) protects against 2022-style crashes
+Why 1d might work better:
+- Daily bars naturally filter intraday noise and fakeouts
+- 1w HMA provides very stable trend bias (fewer whipsaws than 1d/4h)
+- KAMA efficiency ratio adapts to crypto's changing volatility regimes
+- RSI > 50/< 50 for momentum confirmation (not mean-reversion extremes)
+- ADX > 15 (lower threshold) ensures sufficient trade count on daily
+- Conservative sizing (0.30) protects against 2022-style crashes
 
 Learning from failures:
-- #161 (12h Donchian): Sharpe=-0.334 - breakout alone fails without momentum filter
-- #167 (12h Supertrend): Sharpe=-0.643 - supertrend whipsaws in ranges
 - #166 (4h CRSI mean rev): Sharpe=-48.7 - mean reversion catastrophic on crypto
-- #172 (4h MACD hist): Sharpe=-0.108 - close to breakeven, needs better HTF filter
+- #167 (12h Supertrend): Sharpe=-0.643 - supertrend whipsaws in ranges
+- #170 (30m Fisher): Sharpe=-1.724 - too many false signals on lower TF
+- #173 (12h KAMA): Sharpe=0.192 - close to working, needs better HTF filter
 - Trend following > mean reversion on crypto (BTC/ETH especially)
 - Need MULTI-CONFIRMATION: trend + momentum + strength filters
 
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels (conservative for drawdown control)
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
+Position sizing: 0.30 discrete levels (conservative for drawdown control)
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_1d_hma_macd_adx_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_1w_hma_rsi_adx_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -100,10 +100,6 @@ def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
     """
     Calculate Kaufman Adaptive Moving Average (KAMA).
     KAMA adapts to market volatility - moves fast in trends, slow in chop.
-    
-    Efficiency Ratio (ER) = |Net Change| / Sum of Absolute Changes
-    Smoothing Constant (SC) = [ER * (fast_sc - slow_sc) + slow_sc]^2
-    fast_sc = 2/(fast_period+1), slow_sc = 2/(slow_period+1)
     """
     n = len(close)
     kama = np.zeros(n)
@@ -136,43 +132,26 @@ def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
     
     return kama
 
-def calculate_macd_histogram(close, fast=12, slow=26, signal=9):
-    """Calculate MACD Histogram (MACD line - Signal line)."""
+def calculate_rsi(close, period=14):
+    """Calculate RSI (Relative Strength Index)."""
     close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
-    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return histogram.values
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi.values
 
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market (mean reversion favored)
-    CHOP < 38.2 = trending market (trend following favored)
-    """
-    n = len(close)
-    chop = np.zeros(n)
-    
-    for i in range(period, n):
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        if highest_high == lowest_low:
-            chop[i] = 100
-        else:
-            atr_sum = 0
-            for j in range(i-period+1, i+1):
-                tr = max(high[j] - low[j], 
-                        abs(high[j] - close[j-1]), 
-                        abs(low[j] - close[j-1]))
-                atr_sum += tr
-            
-            chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
-    
-    chop[:period] = chop[period] if period < n else 50
-    return chop
+def calculate_ema(close, period=21):
+    """Calculate Exponential Moving Average."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    return ema.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -181,25 +160,26 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     adx = calculate_adx(high, low, close, 14)
     kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    macd_hist = calculate_macd_histogram(close, 12, 26, 9)
-    chop = calculate_choppiness_index(high, low, close, 14)
+    rsi = calculate_rsi(close, 14)
+    ema_21 = calculate_ema(close, 21)
+    ema_50 = calculate_ema(close, 50)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25
+    SIZE_BASE = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -213,27 +193,22 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(kama[i]) or np.isnan(macd_hist[i]):
+        if np.isnan(adx[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 1d HMA = higher timeframe trend bias
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
+        # 1w HMA = higher timeframe trend bias (very stable)
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
         
         # === TREND STRENGTH FILTER ===
-        # ADX > 18 = trending market (momentum more likely to continue)
-        # Using 18 instead of 20/25 to ensure enough trades on 12h
-        trend_strength = adx[i] > 18
-        
-        # === CHOPPINESS FILTER ===
-        # CHOP < 50 = more trending than ranging (avoid extreme chop)
-        not_choppy = chop[i] < 55
+        # ADX > 15 = trending market (lower threshold for daily to ensure trades)
+        trend_strength = adx[i] > 15
         
         # === KAMA ADAPTIVE TREND ===
         # Price above KAMA = bullish adaptive trend
@@ -241,21 +216,30 @@ def generate_signals(prices):
         price_above_kama = close[i] > kama[i]
         price_below_kama = close[i] < kama[i]
         
-        # === MACD HISTOGRAM MOMENTUM ===
-        # Histogram positive = bullish momentum
-        # Histogram negative = bearish momentum
-        hist_positive = macd_hist[i] > 0
-        hist_negative = macd_hist[i] < 0
+        # === RSI MOMENTUM ===
+        # RSI > 50 = bullish momentum
+        # RSI < 50 = bearish momentum
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
+        
+        # === EMA CONFIRMATION ===
+        # EMA21 > EMA50 = bullish trend structure
+        # EMA21 < EMA50 = bearish trend structure
+        ema_bullish = ema_21[i] > ema_50[i]
+        ema_bearish = ema_21[i] < ema_50[i]
         
         new_signal = 0.0
         
         # === ENTRY CONDITIONS ===
-        # Long: 1d bullish + ADX trending + not choppy + price>KAMA + MACD hist positive
-        if bull_trend_1d and trend_strength and not_choppy and price_above_kama and hist_positive:
+        # Long: 1w bullish + ADX trending + price>KAMA + RSI>50 + EMA21>EMA50
+        # Using 3 out of 5 conditions to ensure enough trades on daily
+        long_score = sum([bull_trend_1w, trend_strength, price_above_kama, rsi_bullish, ema_bullish])
+        if long_score >= 3:
             new_signal = SIZE_BASE
         
-        # Short: 1d bearish + ADX trending + not choppy + price<KAMA + MACD hist negative
-        if bear_trend_1d and trend_strength and not_choppy and price_below_kama and hist_negative:
+        # Short: 1w bearish + ADX trending + price<KAMA + RSI<50 + EMA21<EMA50
+        short_score = sum([bear_trend_1w, trend_strength, price_below_kama, rsi_bearish, ema_bearish])
+        if short_score >= 3:
             new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
