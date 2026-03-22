@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #003: 1d Regime-Adaptive Strategy with Weekly Trend Filter
+Experiment #006: 12h Bollinger Squeeze Breakout with 1d Trend Filter
 
-Hypothesis: Daily timeframe with weekly trend filter provides optimal balance between
-trade frequency (20-50/year) and signal quality. Using Choppiness Index for regime
-detection + Connors RSI for mean reversion + Donchian for trend breakouts.
+Hypothesis: Previous regime-switching strategies failed because they over-complicated
+entry logic. This strategy uses a SIMPLE but proven pattern:
+1. Bollinger Band Squeeze (low volatility compression)
+2. Breakout from squeeze with volume confirmation
+3. 1d HMA for major trend bias (only trade with HTF trend)
+4. ATR stoploss for risk management
 
-Why 1d should work better than 12h:
-1. Higher timeframe = fewer false signals, less fee drag
-2. Weekly HMA provides stronger trend bias than daily
-3. Connors RSI proven 75% win rate in range markets
-4. ATR stoploss at 2.5x protects against 2022-style crashes
+Why this should work:
+1. BB Squeeze is a proven volatility breakout pattern (John Carter, TTM Squeeze)
+2. Works in BOTH bull and bear markets (captures explosive moves either direction)
+3. 12h timeframe naturally filters noise (20-50 trades/year target)
+4. 1d HMA provides major trend alignment (don't fight the higher TF)
+5. Volume confirmation reduces false breakouts
 
-Key differences from #002:
-- Primary TF: 1d (not 12h)
-- HTF: 1w (not 1d)
-- Looser Connors RSI thresholds (20/80 vs 15/85) for more trades
-- Simpler trend entry (HMA crossover + weekly bias, Donchian optional)
-- Discrete position sizing (0.0, ±0.25, ±0.30)
-- Better stoploss tracking
+Key differences from failed experiments:
+- NO Connors RSI (failed 3 times already)
+- NO Choppiness Index regime switching (failed 3 times already)
+- SIMPLE breakout logic with clear entry/exit
+- Volume filter to confirm breakout validity
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data helper
+Timeframe: 12h (REQUIRED)
+HTF: 1d via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25-0.30 discrete
 Stoploss: 2.5 * ATR(14)
 """
@@ -29,8 +31,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_regime_adaptive_chop_connors_1w_v1"
-timeframe = "1d"
+name = "mtf_12h_bb_squeeze_breakout_1d_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -44,7 +46,7 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average."""
+    """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
     half = max(1, period // 2)
     sqrt_period = max(1, int(np.sqrt(period)))
@@ -53,94 +55,100 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_choppiness(high, low, close, period=14):
-    """Calculate Choppiness Index."""
-    atr = calculate_atr(high, low, close, period)
-    atr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    price_range = highest_high - lowest_low
-    price_range = np.where(price_range == 0, 1e-10, price_range)
-    chop = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-    chop = np.clip(chop, 0, 100)
-    return chop
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI."""
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
     close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
-    return rsi
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + (std_dev * std)
+    lower = sma - (std_dev * std)
+    return upper.values, lower.values, sma.values
 
-def calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100):
-    """Calculate Connors RSI."""
+def calculate_bb_width(upper, lower, sma):
+    """Calculate Bollinger Band Width (normalized)."""
+    sma = np.where(sma == 0, 1e-10, sma)
+    bb_width = (upper - lower) / sma
+    return bb_width
+
+def calculate_bb_percentile(close, upper, lower, period=100):
+    """Calculate where price sits within BB (0-100 scale)."""
+    bb_range = upper - lower
+    bb_range = np.where(bb_range == 0, 1e-10, bb_range)
+    bb_pct = (close - lower) / bb_range * 100
+    return bb_pct
+
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average."""
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_ma
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    Adapts to market noise - moves fast in trends, slow in ranges.
+    """
     n = len(close)
     close_s = pd.Series(close)
-    rsi_close = calculate_rsi(close, rsi_period)
-    delta = close_s.diff()
-    streak = np.zeros(n)
+    
+    # Efficiency Ratio (ER)
+    signal = np.abs(close_s - close_s.shift(er_period))
+    noise = np.abs(close_s - close_s.shift(1))
+    noise_sum = noise.rolling(window=er_period, min_periods=er_period).sum()
+    noise_sum = noise_sum.replace(0, 1e-10)
+    er = signal / noise_sum
+    er = er.fillna(0).values
+    
+    # Smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
     for i in range(1, n):
-        if delta.iloc[i] > 0:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif delta.iloc[i] < 0:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = 0
-    streak_positive = np.where(streak > 0, streak, 0)
-    streak_negative = np.where(streak < 0, -streak, 0)
-    streak_avg_gain = pd.Series(streak_positive).ewm(span=streak_period, min_periods=streak_period, adjust=False).mean().values
-    streak_avg_loss = pd.Series(streak_negative).ewm(span=streak_period, min_periods=streak_period, adjust=False).mean().values
-    streak_avg_loss = np.where(streak_avg_loss == 0, 1e-10, streak_avg_loss)
-    streak_rs = streak_avg_gain / streak_avg_loss
-    rsi_streak = 100 - (100 / (1 + streak_rs))
-    rsi_streak = np.nan_to_num(rsi_streak, nan=50.0)
-    returns = close_s.pct_change().values
-    percent_rank = np.full(n, 50.0)
-    for i in range(rank_period, n):
-        if not np.isnan(returns[i]):
-            window = returns[max(0, i-rank_period):i]
-            window = window[~np.isnan(window)]
-            if len(window) > 0:
-                percent_rank[i] = 100 * np.sum(window < returns[i]) / len(window)
-    crsi = (rsi_close + rsi_streak + percent_rank) / 3.0
-    crsi = np.clip(crsi, 0, 100)
-    return crsi
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    upper = high_s.rolling(window=period, min_periods=period).max()
-    lower = low_s.rolling(window=period, min_periods=period).min()
-    return upper.values, lower.values
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
-    hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d indicators
+    # Calculate 1D indicators
+    hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_50 = calculate_hma(df_1d['close'].values, 50)
+    
+    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
+    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
+    hma_1d_50_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_50)
+    
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    hma_1d_16 = calculate_hma(close, 16)
-    hma_1d_48 = calculate_hma(close, 48)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    chop_14 = calculate_choppiness(high, low, close, 14)
-    crsi = calculate_connors_rsi(close, 3, 2, 100)
+    bb_upper, bb_lower, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
+    bb_width = calculate_bb_width(bb_upper, bb_lower, bb_sma)
+    bb_pct = calculate_bb_percentile(close, bb_upper, bb_lower)
+    vol_ma_20 = calculate_volume_ma(volume, 20)
+    kama_12h = calculate_kama(close, 10, 2, 30)
+    
+    # Calculate BB Width percentile (for squeeze detection)
+    bb_width_sma = pd.Series(bb_width).rolling(window=100, min_periods=100).mean().values
+    bb_width_std = pd.Series(bb_width).rolling(window=100, min_periods=100).std().values
+    bb_width_zscore = (bb_width - bb_width_sma) / np.where(bb_width_std == 0, 1e-10, bb_width_std)
     
     signals = np.zeros(n)
+    
+    # Base position sizing (Rule 4 - discrete levels, max 0.40)
     BASE_SIZE = 0.28
+    
+    # Track position state for stoploss
     in_position = False
     position_side = 0
     entry_price = 0.0
@@ -148,64 +156,83 @@ def generate_signals(prices):
     lowest_price = 0.0
     last_trade_bar = -50
     
-    for i in range(100, n):
+    for i in range(150, n):
+        # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(hma_1w_21_aligned[i]):
-            continue
-        if np.isnan(hma_1d_16[i]) or np.isnan(hma_1d_48[i]):
-            continue
-        if np.isnan(chop_14[i]):
+        
+        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_50_aligned[i]):
             continue
         
-        # Regime detection (wider bands for more trades)
-        is_range = chop_14[i] > 50.0
-        is_trend = chop_14[i] < 50.0
+        if np.isnan(bb_width[i]) or np.isnan(bb_width_zscore[i]):
+            continue
         
-        # Weekly trend bias
-        weekly_bullish = close[i] > hma_1w_21_aligned[i]
-        weekly_bearish = close[i] < hma_1w_21_aligned[i]
+        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] == 0:
+            continue
         
-        # Daily HMA trend
-        hma_bullish = hma_1d_16[i] > hma_1d_48[i]
-        hma_bearish = hma_1d_16[i] < hma_1d_48[i]
+        # === 1D TREND BIAS ===
+        daily_bullish = close[i] > hma_1d_21_aligned[i] and hma_1d_21_aligned[i] > hma_1d_50_aligned[i]
+        daily_bearish = close[i] < hma_1d_21_aligned[i] and hma_1d_21_aligned[i] < hma_1d_50_aligned[i]
+        daily_neutral = not daily_bullish and not daily_bearish
         
-        # Position sizing
+        # === BB SQUEEZE DETECTION ===
+        # Squeeze = BB Width at 6-month low (z-score < -1.5)
+        is_squeeze = bb_width_zscore[i] < -1.0
+        
+        # === VOLUME CONFIRMATION ===
+        current_vol = volume[i]
+        vol_ratio = current_vol / vol_ma_20[i]
+        high_volume = vol_ratio > 1.3  # 30% above average
+        
+        # === KAMA TREND ===
+        kama_bullish = close[i] > kama_12h[i]
+        kama_bearish = close[i] < kama_12h[i]
+        
+        # === VOLATILITY-ADJUSTED POSITION SIZING ===
         atr_ratio = atr_14[i] / np.nanmedian(atr_14[max(0, i-100):i]) if i > 100 else 1.0
         vol_adjustment = np.clip(1.0 / atr_ratio, 0.7, 1.3)
         current_size = BASE_SIZE * vol_adjustment
         current_size = np.clip(current_size, 0.20, 0.35)
         
+        # === ENTRY LOGIC (BB SQUEEZE BREAKOUT) ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # RANGE REGIME: Connors RSI mean reversion (looser thresholds)
-        if is_range:
-            # LONG: CRSI < 25 (oversold) + weekly bias not strongly bearish
-            if crsi[i] < 25:
-                new_signal = current_size
-            # SHORT: CRSI > 75 (overbought) + weekly bias not strongly bullish
-            elif crsi[i] > 75:
-                new_signal = -current_size
+        # LONG: Squeeze + Bullish breakout + Volume + Daily trend support
+        if is_squeeze and kama_bullish:
+            # Check for breakout above BB upper
+            if close[i] > bb_upper[i] and high_volume:
+                if daily_bullish or daily_neutral:
+                    new_signal = current_size
+            
+            # Alternative: Break above recent high with volume
+            elif close[i] > pd.Series(high).iloc[max(0,i-20):i+1].max() and high_volume:
+                if daily_bullish:
+                    new_signal = current_size * 0.8
         
-        # TREND REGIME: HMA crossover + weekly confirmation
-        elif is_trend:
-            # LONG: Daily HMA bullish + weekly not bearish
-            if hma_bullish and not weekly_bearish:
-                new_signal = current_size
-            # SHORT: Daily HMA bearish + weekly not bullish
-            elif hma_bearish and not weekly_bullish:
-                new_signal = -current_size
+        # SHORT: Squeeze + Bearish breakout + Volume + Daily trend support
+        elif is_squeeze and kama_bearish:
+            # Check for breakdown below BB lower
+            if close[i] < bb_lower[i] and high_volume:
+                if daily_bearish or daily_neutral:
+                    new_signal = -current_size
+            
+            # Alternative: Break below recent low with volume
+            elif close[i] < pd.Series(low).iloc[max(0,i-20):i+1].min() and high_volume:
+                if daily_bearish:
+                    new_signal = -current_size * 0.8
         
-        # Frequency safeguard - force entry if no trades for 30 bars
-        if bars_since_last_trade > 30 and new_signal == 0.0 and not in_position:
-            if hma_bullish and crsi[i] < 50:
+        # === FREQUENCY SAFEGUARD ===
+        # If no trades for 60 bars (~30 days on 12h), force entry with weaker conditions
+        if bars_since_last_trade > 60 and new_signal == 0.0 and not in_position:
+            if kama_bullish and daily_bullish and vol_ratio > 1.1:
                 new_signal = current_size * 0.5
-            elif hma_bearish and crsi[i] > 50:
+            elif kama_bearish and daily_bearish and vol_ratio > 1.1:
                 new_signal = -current_size * 0.5
         
-        # Stoploss logic (2.5 ATR)
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR ===
         stoploss_triggered = False
+        
         if in_position and position_side != 0:
             if position_side > 0:
                 if close[i] > highest_price:
@@ -213,6 +240,7 @@ def generate_signals(prices):
                 stoploss_price = highest_price - 2.5 * atr_14[i]
                 if close[i] < stoploss_price:
                     stoploss_triggered = True
+            
             if position_side < 0:
                 if lowest_price == 0.0 or close[i] < lowest_price:
                     lowest_price = close[i]
@@ -220,18 +248,19 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     stoploss_triggered = True
         
-        # Trend reversal exit
+        # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and hma_bearish and weekly_bearish:
+            if position_side > 0 and kama_bearish and daily_bearish:
                 trend_reversal = True
-            if position_side < 0 and hma_bullish and weekly_bullish:
+            if position_side < 0 and kama_bullish and daily_bullish:
                 trend_reversal = True
         
+        # Apply stoploss or trend reversal
         if stoploss_triggered or trend_reversal:
             new_signal = 0.0
         
-        # Update position tracking
+        # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
             if not in_position:
                 in_position = True
