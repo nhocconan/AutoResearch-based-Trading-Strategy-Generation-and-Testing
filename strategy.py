@@ -1,43 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #290: 30m Volatility Spike Mean Reversion with 4h HMA Bias
+Experiment #291: 1h KAMA Trend with 4h HMA Bias and Simple Breakout
 
-Hypothesis: After 289 experiments, trend-following strategies consistently fail
-in bear/range markets (2022 crash, 2025 bear). This strategy uses VOLATILITY
-SPIKE MEAN REVERSION which has shown Sharpe 0.8-1.5 through crashes:
+Hypothesis: After 290 experiments, the pattern is clear - over-filtered strategies fail.
+This strategy simplifies the approach:
 
-1. ATR Ratio Spike: ATR(7)/ATR(30) > 1.8 signals panic/extreme volatility
-2. Bollinger Band Extreme: Price < BB_lower(20, 2.0) for long, > BB_upper for short
-3. 4h HMA(21) Bias: Only trade mean reversion in direction of HTF trend
-4. Volume Confirmation: Spike volume > 1.5x average confirms panic/reversal
-5. Exit on Vol Normalization: ATR ratio < 1.2 signals vol crush = exit
-6. Stoploss: 2.5 * ATR(14) trailing stop
+1. 1h KAMA(10) - adaptive moving average that adjusts to volatility
+2. 4h HMA(21) - smoother trend bias (not 1d which is too slow for 1h entries)
+3. Simple KAMA crossover entry - less filtering = more trades
+4. Volume confirmation at 1.2x (not 1.5x which filters too much)
+5. 2.5*ATR trailing stoploss - appropriate for 1h timeframe
+6. Discrete position sizing: 0.25 base, 0.35 max
 
-Why this might work when others failed:
-- Mean reversion works in bear/range markets (unlike pure trend)
-- Vol spike captures panic bottoms (2022) and FOMO tops
-- 4h HMA bias prevents counter-trend mean reversion (critical filter)
-- 30m timeframe = frequent enough for >=10 trades, not too noisy
-- Discrete position sizing (0.25/0.30) minimizes fee churn
+Why this might work better than #285 (RSI pullback failed):
+- RSI pullback is counter-trend in nature (failed consistently)
+- KAMA crossover is pure trend-following (worked in #287 with Sharpe=0.370)
+- 4h HMA bias is faster than 1d, better suited for 1h entries
+- Fewer filters = more trades (critical for >=10 trades requirement)
+- Lower volume threshold = more valid breakouts
 
-Key differences from failed strategies:
-- NO RSI pullback (failed #284, #285)
-- NO Supertrend (failed #284, #289)
-- NO pure KAMA trend (failed #278, #281, #283)
-- Uses VOLATILITY not momentum for entry signal
-- Mean reversion WITH trend filter (asymmetric)
+Key lessons from failures:
+- #285 (RSI pullback): Sharpe=-2.100 - mean reversion fails in crypto trends
+- #289 (Supertrend 15m): Sharpe=-3.234 - too many false signals on low TF
+- #287 (12h Supertrend): Sharpe=0.370 - trend following works on higher TF
+- #290 (Vol spike meanrev): Sharpe=-31.2 - mean reversion is deadly
 
-Timeframe: 30m (REQUIRED for this experiment)
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.30 discrete, max 0.35
+Position sizing: 0.25-0.35 discrete
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_vol_spike_meanrev_4h_hma_bb_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_kama_trend_4h_hma_volume_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -60,28 +58,50 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market noise - moves fast in trends, slow in ranges.
+    Formula from Kaufman's "Trading Systems and Methods"
+    """
+    n = len(close)
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    # Efficiency Ratio (ER) = |change| / sum(|changes|)
+    for i in range(period, n):
+        change = np.abs(close[i] - close[i - period])
+        sum_changes = np.sum(np.abs(np.diff(close[i - period:i + 1])))
+        
+        if sum_changes == 0:
+            er = 0.0
+        else:
+            er = change / sum_changes
+        
+        # Smoothing constant
+        fast_sc = 2.0 / (fast_period + 1)
+        slow_sc = 2.0 / (slow_period + 1)
+        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+        
+        # KAMA calculation
+        if i == period:
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
+
+def calculate_ema(close, period=21):
+    """Calculate Exponential Moving Average."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper.values, lower.values, sma.values
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    return ema.values
 
 def calculate_volume_sma(volume, period=20):
     """Calculate simple moving average of volume."""
     vol_s = pd.Series(volume)
     vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
     return vol_sma
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score of price relative to rolling mean."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - sma) / std
-    return zscore.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -99,37 +119,29 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
-    atr_14 = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    bb_upper, bb_lower, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
+    # Calculate 1h indicators
+    atr = calculate_atr(high, low, close, 14)
+    kama = calculate_kama(close, 10)
+    ema_50 = calculate_ema(close, 50)
     vol_sma = calculate_volume_sma(volume, 20)
-    zscore = calculate_zscore(close, 20)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.25  # Base position size
-    SIZE_HIGH = 0.30  # Higher size on strong signals
     SIZE_MAX = 0.35  # Maximum position size
+    SIZE_MIN = 0.15  # Minimum position size
     
-    # Track position state for stoploss and exit logic
+    # Track position state for stoploss
     in_position = False
     position_side = 0
     highest_close = 0.0
     lowest_close = 0.0
     entry_price = 0.0
-    entry_atr = 0.0
-    vol_spike_active = False
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] == 0:
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(atr_7[i]) or np.isnan(atr_30[i]) or atr_30[i] == 0:
+        if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
@@ -137,7 +149,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(kama[i]) or np.isnan(ema_50[i]):
             signals[i] = 0.0
             continue
         
@@ -145,68 +157,61 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # === VOLATILITY SPIKE DETECTION ===
-        # ATR ratio > 1.8 signals panic/extreme volatility (entry trigger)
-        atr_ratio = atr_7[i] / atr_30[i] if atr_30[i] > 0 else 0
-        vol_spike = atr_ratio > 1.8
-        
-        # Vol normalization (exit signal)
-        vol_normal = atr_ratio < 1.2
-        
         # === HIGHER TIMEFRAME BIAS ===
-        # 4h HMA = directional bias (asymmetric mean reversion)
+        # 4h HMA = directional bias (softer filter than 1d)
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === BOLLINGER BAND EXTREMES ===
-        # Price at BB extreme during vol spike = mean reversion opportunity
-        price_at_bb_lower = close[i] < bb_lower[i] * 1.002  # slight buffer
-        price_at_bb_upper = close[i] > bb_upper[i] * 0.998  # slight buffer
-        
-        # === Z-SCORE CONFIRMATION ===
-        # Extreme Z-score confirms oversold/overbought
-        zscore_oversold = zscore[i] < -1.5
-        zscore_overbought = zscore[i] > 1.5
-        
         # === VOLUME CONFIRMATION ===
-        # Spike volume confirms panic/reversal
-        volume_spike = volume[i] > 1.5 * vol_sma[i]
+        # Breakout must have volume > 1.2x average (looser than 1.5x)
+        volume_confirmed = volume[i] > 1.2 * vol_sma[i]
         
-        # === DETERMINE POSITION SIZE ===
-        # Higher size when multiple confirmations align
-        if vol_spike and volume_spike:
-            position_size = SIZE_HIGH
+        # === KAMA TREND SIGNAL ===
+        # KAMA crossover with EMA50 for trend confirmation
+        kama_above_ema = kama[i] > ema_50[i]
+        kama_below_ema = kama[i] < ema_50[i]
+        
+        # Price above/below KAMA for momentum confirmation
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        
+        # === VOLATILITY ADJUSTMENT ===
+        # Reduce position size when ATR is elevated
+        atr_recent_avg = np.nanmean(atr[max(0, i-20):i+1])
+        high_volatility = atr[i] > 1.5 * atr_recent_avg if not np.isnan(atr_recent_avg) else False
+        
+        # Determine position size based on volatility
+        if high_volatility:
+            position_size = SIZE_MIN
         else:
             position_size = SIZE_BASE
         
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
         
-        # LONG ENTRY: Vol spike + price at BB lower + 4h bull trend + Z-score oversold
-        # Asymmetric: only long mean reversion when 4h trend is bullish
+        # LONG ENTRY: 4h bias up + KAMA above EMA + price above KAMA + volume
+        # Looser conditions to ensure >=10 trades per symbol
         long_conditions = (
-            vol_spike and  # Volatility spike (panic)
-            price_at_bb_lower and  # Price at BB lower band
-            bull_trend_4h and  # 4h trend bullish (trade with HTF)
-            (zscore_oversold or volume_spike)  # Additional confirmation
+            bull_trend_4h and  # 4h HMA bias bullish
+            kama_above_ema and  # KAMA above EMA50
+            price_above_kama and  # Price above KAMA (momentum)
+            volume_confirmed  # Volume confirms
         )
         
-        # SHORT ENTRY: Mirror of long (only when 4h trend bearish)
+        # SHORT ENTRY: Mirror of long
         short_conditions = (
-            vol_spike and  # Volatility spike (FOMO)
-            price_at_bb_upper and  # Price at BB upper band
-            bear_trend_4h and  # 4h trend bearish (trade with HTF)
-            (zscore_overbought or volume_spike)  # Additional confirmation
+            bear_trend_4h and  # 4h HMA bias bearish
+            kama_below_ema and  # KAMA below EMA50
+            price_below_kama and  # Price below KAMA (momentum)
+            volume_confirmed  # Volume confirms
         )
         
         # === GENERATE SIGNAL ===
         if long_conditions:
             new_signal = position_size
-            vol_spike_active = True
         
         if short_conditions:
             new_signal = -position_size
-            vol_spike_active = True
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Check stoploss on EXISTING position before considering new entry
@@ -216,34 +221,34 @@ def generate_signals(prices):
                 if close[i] > highest_close:
                     highest_close = close[i]
                 # Trailing stop: 2.5 * ATR below highest close
-                stoploss_price = highest_close - 2.5 * atr_14[i]
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
-                    vol_spike_active = False
             
             if position_side < 0:
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
                 # Trailing stop: 2.5 * ATR above lowest close
-                stoploss_price = lowest_close + 2.5 * atr_14[i]
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
-                    vol_spike_active = False
-        
-        # === VOLATILITY NORMALIZATION EXIT ===
-        # Exit when volatility normalizes (vol crush after panic)
-        if in_position and vol_normal and vol_spike_active:
-            new_signal = 0.0
-            vol_spike_active = False
         
         # === TREND REVERSAL EXIT ===
-        # Exit if 4h HTF bias reverses against position
+        # Exit if HTF bias reverses against position
         if in_position and new_signal != 0.0:
             if position_side > 0 and bear_trend_4h:
                 new_signal = 0.0  # 4h trend reversed against long
             if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0  # 4h trend reversed against short
+        
+        # === KAMA CROSSOVER EXIT ===
+        # Exit if KAMA crosses against position
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and kama_below_ema:
+                new_signal = 0.0  # KAMA crossed below EMA
+            if position_side < 0 and kama_above_ema:
+                new_signal = 0.0  # KAMA crossed above EMA
         
         # === UPDATE POSITION TRACKING FOR NEXT BAR ===
         if new_signal != 0.0:
@@ -252,24 +257,21 @@ def generate_signals(prices):
                 in_position = True
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
-                entry_atr = atr_14[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
                 # Reversing position
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
-                entry_atr = atr_14[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             # else: maintaining same position direction
         else:
-            # Exiting position (signal-based, stoploss, or vol normalization)
+            # Exiting position (signal-based or stoploss)
             if in_position:
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
-                entry_atr = 0.0
                 highest_close = 0.0
                 lowest_close = 0.0
         
