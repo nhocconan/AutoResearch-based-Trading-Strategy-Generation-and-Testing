@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #573: 1d Primary + 1w HTF — Connors RSI Mean Reversion with Weekly Trend Filter
+Experiment #574: 4h Primary + 12h/1d HTF — Dual Regime Strategy (Choppiness Switch)
 
-Hypothesis: After 572 failed experiments, the pattern is clear:
-- Simple trend following fails on BTC/ETH (2022 crash whipsaw, 2025 bear market)
-- Mean reversion WITH trend filter works best for daily timeframe
-- Connors RSI (CRSI) has proven edge: 75% win rate in academic studies
-- CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-- Long when CRSI < 15 AND price > 1w HMA(21) (mean revert in uptrend)
-- Short when CRSI > 85 AND price < 1w HMA(21) (mean revert in downtrend)
-- 1w HTF filter prevents counter-trend mean reversion (major loss source)
-- ATR(14) * 2.5 trailing stop for risk management
-- Target: 20-40 trades/year on 1d (Rule 10: 10-30 max for daily)
-- Position size: 0.30 discrete (Rule 4: max 0.40, typical 0.20-0.35)
+Hypothesis: After 511 failed strategies, the pattern shows:
+- Single-regime strategies fail because crypto alternates trend/range frequently
+- #564 (4h HMA+RSI) failed with Sharpe=-0.716 — no regime filter
+- #569, #571 had 0 trades — too many filters
+- Choppiness Index successfully switches between trend-follow and mean-revert
+- 12h HMA for major trend bias, 4h for entries, 1d for regime confirmation
+
+Strategy Logic:
+1. 12h HMA(21) = major trend direction (HTF bias)
+2. 1d Choppiness Index = regime detector (CHOP>61.8 range, CHOP<38.2 trend)
+3. 4h entries:
+   - TREND regime (CHOP<38.2): RSI(14) pullback to 40-55 in direction of 12h trend
+   - RANGE regime (CHOP>61.8): CRSI extremes (<15 long, >85 short) with 12h HMA filter
+4. ADX(14) > 18 minimum movement filter (lower than failed attempts)
+5. ATR(14) 2.5x trailing stop on all positions
+6. Position size: 0.28 discrete (conservative for 4h)
 
 Why this might beat Sharpe=0.435:
-- CRSI specifically designed for short-term mean reversion (Connors Research)
-- 1w HMA filter adds regime awareness without overfitting
-- Fewer trades = less fee drag on daily timeframe
-- Works in both bull (long pullbacks) and bear (short rallies) markets
-- No complex regime switching that caused 0-trade failures (#569, #571)
+- Dual regime adapts to market conditions (trend vs range)
+- 12h HTF prevents major counter-trend losses
+- CRSI for mean-reversion has 75% win rate in literature
+- Simpler than failed #569/#571 (which had 0 trades)
+- Target: 25-45 trades/year on 4h (per Rule 10)
 
-Position sizing: 0.30 base (discrete per Rule 4)
+Position sizing: 0.28 base (discrete, max 0.40 per Rule 4)
 Stoploss: 2.5 * ATR trailing (signal → 0 when hit)
 Target: >=10 trades/symbol on train, >=3 on test, Sharpe > 0 all symbols
 """
@@ -29,8 +34,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_crsi_meanrevert_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_dual_regime_chop_crsi_12h1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -59,61 +64,6 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
-def calculate_crsi(close):
-    """
-    Calculate Connors RSI (CRSI).
-    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    
-    RSI_Streak: RSI of consecutive up/down days
-    PercentRank: percentile of today's return vs last 100 days
-    """
-    n = len(close)
-    close_s = pd.Series(close)
-    
-    # Component 1: RSI(3)
-    rsi_3 = calculate_rsi(close, period=3)
-    
-    # Component 2: RSI of Streak (consecutive up/down days)
-    # Streak: count consecutive days in same direction
-    returns = close_s.diff()
-    streak = np.zeros(n)
-    for i in range(1, n):
-        if returns.iloc[i] > 0:
-            if returns.iloc[i-1] > 0:
-                streak[i] = streak[i-1] + 1
-            else:
-                streak[i] = 1
-        elif returns.iloc[i] < 0:
-            if returns.iloc[i-1] < 0:
-                streak[i] = streak[i-1] - 1
-            else:
-                streak[i] = -1
-        else:
-            streak[i] = 0
-    
-    # RSI of streak values (period=2)
-    streak_s = pd.Series(streak)
-    streak_delta = streak_s.diff()
-    streak_gain = streak_delta.where(streak_delta > 0, 0.0)
-    streak_loss = -streak_delta.where(streak_delta < 0, 0.0)
-    avg_streak_gain = streak_gain.ewm(span=2, min_periods=2, adjust=False).mean()
-    avg_streak_loss = streak_loss.ewm(span=2, min_periods=2, adjust=False).mean()
-    streak_rs = avg_streak_gain / (avg_streak_loss + 1e-10)
-    rsi_streak = 100.0 - (100.0 / (1.0 + streak_rs))
-    
-    # Component 3: PercentRank(100) - percentile of today's return vs last 100
-    percent_rank = np.zeros(n)
-    for i in range(100, n):
-        window_returns = returns.iloc[i-99:i+1]  # 100-day window including today
-        today_return = returns.iloc[i]
-        rank = np.sum(window_returns < today_return)
-        percent_rank[i] = rank / 99.0 * 100.0  # 0-100 scale
-    
-    # Combine components
-    crsi = (rsi_3 + rsi_streak.values + percent_rank) / 3.0
-    
-    return crsi
-
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average (HMA) - reduces lag vs EMA."""
     n = period
@@ -135,31 +85,151 @@ def calculate_hma(close, period=21):
     
     return hma.values
 
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm < 0] = 0
+    
+    mask = (plus_dm > 0) & (minus_dm > 0)
+    plus_dm_vals = plus_dm.values.copy()
+    minus_dm_vals = minus_dm.values.copy()
+    plus_dm_vals[mask] = np.where(plus_dm_vals[mask] > minus_dm_vals[mask], plus_dm_vals[mask], 0)
+    minus_dm_vals[mask] = np.where(minus_dm_vals[mask] > plus_dm_vals[mask], minus_dm_vals[mask], 0)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    plus_dm_s = pd.Series(plus_dm_vals).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm_vals).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    plus_di = 100.0 * plus_dm_s / (tr_s + 1e-10)
+    minus_di = 100.0 * minus_dm_s / (tr_s + 1e-10)
+    
+    dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    CHOP > 61.8 = ranging market
+    CHOP < 38.2 = trending market
+    """
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    highest = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    price_range = highest - lowest
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        chop = 100.0 * np.log10(atr_sum / (price_range + 1e-10)) / np.log10(period)
+    
+    chop = np.nan_to_num(chop, nan=50.0)
+    chop = np.clip(chop, 0.0, 100.0)
+    
+    return chop
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Calculate Connors RSI (CRSI).
+    CRSI = (RSI(close, 3) + RSI(streak, 2) + PercentRank(100)) / 3
+    
+    Streak RSI: consecutive up/down days
+    PercentRank: percentile of today's return vs last 100 days
+    """
+    n = len(close)
+    close_s = pd.Series(close)
+    
+    # RSI(3) component
+    rsi_short = calculate_rsi(close, rsi_period)
+    
+    # Streak RSI component
+    returns = close_s.pct_change()
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if returns.iloc[i] > 0:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif returns.iloc[i] < 0:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = 0
+    
+    streak_rsi = calculate_rsi(streak, streak_period)
+    
+    # PercentRank component
+    percent_rank = np.zeros(n)
+    for i in range(rank_period, n):
+        window = returns.iloc[i-rank_period:i]
+        current = returns.iloc[i]
+        if np.isnan(current):
+            percent_rank[i] = 50.0
+        else:
+            valid_window = window.dropna()
+            if len(valid_window) > 0:
+                percent_rank[i] = 100.0 * (valid_window < current).sum() / len(valid_window)
+            else:
+                percent_rank[i] = 50.0
+    
+    crsi = (rsi_short + streak_rsi + percent_rank) / 3.0
+    crsi = np.nan_to_num(crsi, nan=50.0)
+    
+    return crsi
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     n = len(close)
     
-    # Load 1w HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HTF HMA for major trend direction
-    hma_1w_21 = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_50 = calculate_hma(df_1w['close'].values, period=50)
+    # Calculate 12h HTF HMA for major trend direction
+    hma_12h_21 = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_50 = calculate_hma(df_12h['close'].values, period=50)
+    
+    # Calculate 1d Choppiness Index for regime detection
+    chop_1d = calculate_choppiness(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values,
+        period=14
+    )
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
-    hma_1w_50_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_50)
+    hma_12h_21_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_21)
+    hma_12h_50_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_50)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate 1d indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    crsi = calculate_crsi(close)
+    adx_14 = calculate_adx(high, low, close, 14)
+    rsi_14 = calculate_rsi(close, 14)
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    POSITION_SIZE = 0.30
+    POSITION_SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -168,50 +238,70 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(150, n):  # Need 100+ for CRSI percentRank + indicator warmup
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(hma_1w_21_aligned[i]) or np.isnan(hma_1w_50_aligned[i]):
+        if np.isnan(hma_12h_21_aligned[i]) or np.isnan(hma_12h_50_aligned[i]):
             continue
-        if np.isnan(crsi[i]):
+        if np.isnan(chop_1d_aligned[i]) or np.isnan(adx_14[i]):
+            continue
+        if np.isnan(rsi_14[i]) or np.isnan(crsi[i]):
             continue
         
-        # === 1W MAJOR TREND (primary direction filter) ===
-        bull_regime_1w = close[i] > hma_1w_21_aligned[i]
-        bear_regime_1w = close[i] < hma_1w_21_aligned[i]
+        # === 12H MAJOR TREND (primary direction filter) ===
+        bull_regime_12h = close[i] > hma_12h_21_aligned[i]
+        bear_regime_12h = close[i] < hma_12h_21_aligned[i]
         
-        # 1w HMA slope for trend strength
-        hma_1w_slope_bull = hma_1w_21_aligned[i] > hma_1w_50_aligned[i]
-        hma_1w_slope_bear = hma_1w_21_aligned[i] < hma_1w_50_aligned[i]
+        # 12h HMA slope for trend strength
+        hma_12h_slope_bull = hma_12h_21_aligned[i] > hma_12h_50_aligned[i]
+        hma_12h_slope_bear = hma_12h_21_aligned[i] < hma_12h_50_aligned[i]
         
-        # === CONNORS RSI MEAN REVERSION ENTRY ===
-        # Long: CRSI < 15 (extreme oversold) + in 1w uptrend
-        # Short: CRSI > 85 (extreme overbought) + in 1w downtrend
-        crsi_oversold = crsi[i] < 15.0
-        crsi_overbought = crsi[i] > 85.0
+        # === 1D CHOPPINESS REGIME (switch between trend/mean-revert) ===
+        chop = chop_1d_aligned[i]
+        trend_regime = chop < 38.2  # Trending market
+        range_regime = chop > 61.8  # Ranging market
+        neutral_regime = not trend_regime and not range_regime
         
-        # === ENTRY LOGIC ===
+        # === ADX FILTER (minimum movement) ===
+        # Lower threshold than failed attempts (was >25, now >18)
+        movement_ok = adx_14[i] > 18.0
+        
+        # === ENTRY LOGIC — DUAL REGIME ===
         new_signal = 0.0
         
-        # LONG ENTRY: 1w bull + CRSI oversold
-        if bull_regime_1w and crsi_oversold:
-            # Size based on 1w trend strength
-            if hma_1w_slope_bull:
-                new_signal = POSITION_SIZE
-            else:
-                new_signal = POSITION_SIZE * 0.7  # Weaker trend = smaller size
+        if trend_regime and movement_ok:
+            # TREND FOLLOWING: RSI pullback in direction of 12h trend
+            # Long: 12h bull + RSI 40-55 (pullback, not crash)
+            if bull_regime_12h and 40.0 <= rsi_14[i] <= 55.0:
+                if hma_12h_slope_bull:
+                    new_signal = POSITION_SIZE
+                else:
+                    new_signal = POSITION_SIZE * 0.7
+            
+            # Short: 12h bear + RSI 45-60 (rally into resistance)
+            elif bear_regime_12h and 45.0 <= rsi_14[i] <= 60.0:
+                if hma_12h_slope_bear:
+                    new_signal = -POSITION_SIZE
+                else:
+                    new_signal = -POSITION_SIZE * 0.7
         
-        # SHORT ENTRY: 1w bear + CRSI overbought
-        elif bear_regime_1w and crsi_overbought:
-            # Size based on 1w trend strength
-            if hma_1w_slope_bear:
-                new_signal = -POSITION_SIZE
-            else:
-                new_signal = -POSITION_SIZE * 0.7  # Weaker trend = smaller size
+        elif range_regime and movement_ok:
+            # MEAN REVERSION: CRSI extremes with 12h HMA filter
+            # Long: CRSI < 15 (oversold) + price > 12h HMA (not in major downtrend)
+            if crsi[i] < 15.0 and bull_regime_12h:
+                new_signal = POSITION_SIZE * 0.8
+            
+            # Short: CRSI > 85 (overbought) + price < 12h HMA (not in major uptrend)
+            elif crsi[i] > 85.0 and bear_regime_12h:
+                new_signal = -POSITION_SIZE * 0.8
+        
+        # Neutral regime: stay flat or hold existing
+        elif neutral_regime:
+            if in_position:
+                new_signal = signals[i-1] if i > 0 else 0.0
         
         # === HOLD POSITION LOGIC ===
-        # If already in position, maintain unless exit conditions hit
         if in_position and new_signal == 0.0:
             new_signal = signals[i-1] if i > 0 else 0.0
         
@@ -236,21 +326,15 @@ def generate_signals(prices):
         if stoploss_triggered:
             new_signal = 0.0
         
-        # === EXIT CONDITIONS (regime flip or CRSI mean reversion complete) ===
-        # Exit long on 1w regime flip to bear
+        # === EXIT CONDITIONS (regime flip) ===
+        # Exit long on 12h regime flip to bear with slope confirmation
         if in_position and position_side > 0:
-            if bear_regime_1w and hma_1w_slope_bear:
-                new_signal = 0.0
-            # Also exit if CRSI recovers above 50 (mean reversion complete)
-            if crsi[i] > 50.0:
+            if bear_regime_12h and hma_12h_slope_bear:
                 new_signal = 0.0
         
-        # Exit short on 1w regime flip to bull
+        # Exit short on 12h regime flip to bull with slope confirmation
         if in_position and position_side < 0:
-            if bull_regime_1w and hma_1w_slope_bull:
-                new_signal = 0.0
-            # Also exit if CRSI drops below 50 (mean reversion complete)
-            if crsi[i] < 50.0:
+            if bull_regime_12h and hma_12h_slope_bull:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
