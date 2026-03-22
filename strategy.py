@@ -1,35 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #150: 1d EMA Crossover + 1w HMA Trend Filter + ATR Stop
+Experiment #151: 15m Choppiness Index Regime + 4h HMA Trend + Adaptive Entry
 
-Hypothesis: Daily timeframe captures major trend moves while weekly HMA provides
-stable long-term trend bias. EMA crossover (21/55) is simple enough to generate
-adequate trades but filtered by weekly trend to avoid counter-trend positions.
-RSI filter prevents entries at extremes. ATR stoploss protects from crashes.
+Hypothesis: Market regime detection via Choppiness Index allows adaptive strategy
+that trend-follows in trending markets and mean-reverts in ranging markets.
+4h HMA provides stable trend bias. 15m captures shorter-term entries.
 
-Why 1d might work:
-- Fewer trades = less fee drag (critical for profitability)
-- Weekly trend filter avoids 2022 crash whipsaw
-- Simple EMA crossover ensures trade frequency (learned from #142, #143)
-- Daily timeframe less noisy than 15m/1h for trend following
+Why this might work:
+- Choppiness Index (CHOP) is proven regime filter from research notes
+- CHOP > 61.8 = range (mean revert at BB bounds)
+- CHOP < 38.2 = trend (follow HTF bias with pullback entries)
+- Adapts to 2022 crash (bear/trending) and 2025 range market
+- Different from #145 Supertrend approach which failed
 
 Learning from failures:
-- #142, #143: 0 trades due to too many filters
-- #145: Negative Sharpe on 15m (too much noise)
-- #144: 1d with RSI had Sharpe=0.154 - proves daily can work
-- Keep conditions SIMPLE: trend + crossover + RSI range
+- #145 (15m Supertrend + 4h HMA): Sharpe=-0.896 - Supertrend whipsawed
+- #142, #143: 0 trades - too many filters
+- Need regime-adaptive logic that works in both bull/bear/range
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.35 discrete levels
+Timeframe: 15m (REQUIRED for this experiment)
+HTF: 4h HMA via mtf_data helper (call ONCE before loop)
+Position sizing: 0.20-0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_ema_1w_hma_rsi_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_chop_regime_4h_hma_bb_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -42,11 +41,63 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average."""
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    CHOP > 61.8 = ranging market
+    CHOP < 38.2 = trending market
+    """
+    n = len(close)
+    chop = np.zeros(n)
+    
+    # Calculate ATR for each bar (true range)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 0 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+        else:
+            chop[i] = 50.0  # neutral
+    
+    return chop
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
     close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    return upper, lower, sma
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = np.zeros(len(close))
+    mask = avg_loss != 0
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    rs[~mask] = 100.0
+    
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi[avg_loss == 0] = 100.0
+    return rsi
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -58,19 +109,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI indicator."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50.0).values
-    return rsi
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -78,25 +116,25 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    ema_fast = calculate_ema(close, 21)
-    ema_slow = calculate_ema(close, 55)
+    chop = calculate_choppiness_index(high, low, close, 14)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
     rsi = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.25
-    SIZE_STRONG = 0.35
+    SIZE_STRONG = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -111,53 +149,56 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]):
+        if np.isnan(chop[i]) or np.isnan(bb_upper[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 1w HMA = higher timeframe trend bias
-        bull_trend_1w = close[i] > hma_1w_aligned[i]
-        bear_trend_1w = close[i] < hma_1w_aligned[i]
+        # 4h HMA = higher timeframe trend bias
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === EMA CROSSOVER SIGNAL ===
-        # Fast EMA crosses above slow EMA = bullish
-        # Fast EMA crosses below slow EMA = bearish
-        ema_bull = ema_fast[i] > ema_slow[i]
-        ema_bear = ema_fast[i] < ema_slow[i]
-        
-        # Check for crossover (entry trigger)
-        ema_cross_bull = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
-        ema_cross_bear = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
-        
-        # === RSI FILTER ===
-        # Avoid entries at extremes (RSI < 30 or > 70)
-        # But allow positions to continue if already in
-        rsi_neutral = 35 < rsi[i] < 65
+        # === REGIME DETECTION ===
+        # CHOP > 61.8 = ranging market (mean revert)
+        # CHOP < 38.2 = trending market (trend follow)
+        is_ranging = chop[i] > 55.0  # Slightly relaxed for more signals
+        is_trending = chop[i] < 45.0  # Slightly relaxed for more signals
         
         new_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS ===
-        # Weekly bullish + EMA crossover bullish + RSI not overbought
-        if bull_trend_1w and ema_cross_bull and rsi[i] < 70:
-            new_signal = SIZE_BASE
+        # === TRENDING REGIME: Follow HTF trend with pullback entries ===
+        if is_trending:
+            # Long: 4h bullish + RSI pullback (not overbought)
+            if bull_trend_4h and rsi[i] < 65 and rsi[i] > 35:
+                new_signal = SIZE_BASE
+            
+            # Short: 4h bearish + RSI pullback (not oversold)
+            if bear_trend_4h and rsi[i] > 35 and rsi[i] < 65:
+                new_signal = -SIZE_BASE
         
-        # Strengthen position if trend is strong
-        if bull_trend_1w and ema_bull and rsi_neutral:
-            new_signal = SIZE_STRONG
+        # === RANGING REGIME: Mean revert at Bollinger bands ===
+        elif is_ranging:
+            # Long: Price at lower BB + RSI oversold
+            if close[i] <= bb_lower[i] and rsi[i] < 40:
+                new_signal = SIZE_BASE
+            
+            # Short: Price at upper BB + RSI overbought
+            if close[i] >= bb_upper[i] and rsi[i] > 60:
+                new_signal = -SIZE_BASE
         
-        # === SHORT ENTRY CONDITIONS ===
-        # Weekly bearish + EMA crossover bearish + RSI not oversold
-        if bear_trend_1w and ema_cross_bear and rsi[i] > 30:
-            new_signal = -SIZE_BASE
-        
-        # Strengthen position if trend is strong
-        if bear_trend_1w and ema_bear and rsi_neutral:
-            new_signal = -SIZE_STRONG
+        # === NEUTRAL REGIME: Reduce position or flat ===
+        else:
+            # In neutral regime, only hold if already in position
+            # Don't open new positions
+            if not in_position:
+                new_signal = 0.0
+            else:
+                # Keep current signal if in position
+                new_signal = signals[i-1] if i > 0 else 0.0
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Update trailing highs/lows for active positions
