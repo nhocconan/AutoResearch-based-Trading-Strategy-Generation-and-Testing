@@ -334,7 +334,7 @@ def get_all_combos():
     for trend in TREND_INDICATORS:
         for entry in ENTRY_FILTERS:
             for regime in REGIME_FILTERS:
-                for tf in ["4h", "12h", "1d"]:
+                for tf in ["15m", "30m", "1h", "4h", "12h", "1d"]:
                     combos.append((trend, entry, regime, tf))
     return combos
 
@@ -345,7 +345,7 @@ if __name__ == "__main__":
     print(f"  Trend indicators: {len(TREND_INDICATORS)}")
     print(f"  Entry filters: {len(ENTRY_FILTERS)}")
     print(f"  Regime filters: {len(REGIME_FILTERS)}")
-    print(f"  Timeframes: 3 (4h, 12h, 1d)")
+    print(f"  Timeframes: 6 (15m, 30m, 1h, 4h, 12h, 1d)")
     print(f"\nSample combos:")
     for c in random.sample(combos, min(10, len(combos))):
         print(f"  {c[0]} + {c[1]} + {c[2]} on {c[3]}")

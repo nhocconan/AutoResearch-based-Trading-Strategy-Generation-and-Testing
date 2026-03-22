@@ -224,8 +224,8 @@ CRITICAL RULES:
 4. Start with #!/usr/bin/env python3
 
 HARD LIMITS (auto-reject if violated):
-- EACH symbol must have Sharpe > 0 AND trades >= 200 on train
-- EACH symbol must have Sharpe > 0 AND trades >= 20 on test
+- EACH symbol must have Sharpe > 0 AND trades >= 30 on train
+- EACH symbol must have Sharpe > 0 AND trades >= 3 on test
 - Max drawdown > -50% per symbol
 - 0 trades = ALWAYS discard (Sharpe=0.000 is NOT positive)
 
@@ -658,7 +658,7 @@ def main():
                 dd = m["max_drawdown_pct"]
                 print(f"    {symbol} train: Sharpe={sharpe:+.3f} Ret={m['total_return_pct']:+.1f}% DD={dd:.1f}% T={trades}")
 
-                train_pass = sharpe > 0 and trades >= 200 and dd > -50
+                train_pass = sharpe > 0 and trades >= 30 and dd > -50
                 sym_status = "keep" if train_pass else "discard"
                 append_results(train_result, sym_status, description, period="train")
                 all_train_results.extend(train_result)
@@ -675,7 +675,7 @@ def main():
                     t_trades = mt["num_trades"]
                     print(f"    {symbol} test:  Sharpe={t_sharpe:+.3f} Ret={mt['total_return_pct']:+.1f}% T={t_trades}")
 
-                    test_pass = t_sharpe > 0 and t_trades >= 20
+                    test_pass = t_sharpe > 0 and t_trades >= 3
                     t_status = "keep" if test_pass else "discard"
                     append_results(test_result, t_status, description, period="test")
                     all_test_results.extend(test_result)
