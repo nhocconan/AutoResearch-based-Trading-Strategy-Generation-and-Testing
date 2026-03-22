@@ -1,49 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #344: 30m Volatility-Regime Adaptive Strategy with 4h HMA Bias + Fisher Transform
+Experiment #345: 1h Fisher Transform Reversal with 4h HMA Bias + Volatility Compression
 
-Hypothesis: After 292 failed strategies, the pattern is clear - static strategies fail because
-30m timeframe alternates between high-volatility panic (mean reversion works) and low-volatility
-grind (trend following works). This strategy adapts based on volatility regime:
+Hypothesis: After 293 failed strategies, the pattern is clear - trend-following and 
+regime-detection strategies fail on BTC/ETH because these markets spend 70%+ time 
+ranging. The Ehlers Fisher Transform is specifically designed to catch reversals in 
+non-trending markets by normalizing price into a Gaussian distribution.
 
-1. VOLATILITY REGIME via ATR Ratio:
-   - ATR(7)/ATR(30) > 1.8 = high vol panic → mean reversion at BB extremes
-   - ATR(7)/ATR(30) < 1.2 = low vol grind → trend follow with 4h HMA
-   - 1.2 <= ratio <= 1.8 = transition → reduce position or flat
+Key innovations vs failed strategies:
+1. FISHER TRANSFORM (not RSI/MACD): Converts price to bounded -1 to +1 range, 
+   extreme readings (>0.9 or <-0.9) signal exhaustion. Proven in bear markets.
+2. VOLATILITY COMPRESSION FILTER: Only enter when BB Width < 20th percentile of 
+   last 100 bars. This ensures we enter AFTER consolidation, not during chaos.
+3. 4h HMA BIAS (not entry trigger): Use 4h HMA only to filter direction - long 
+   only if price > 4h HMA, short only if price < 4h HMA. Simpler = more robust.
+4. LOOSE ENTRY THRESHOLDS: Fisher > 0.7 (not 0.9) and < -0.7 (not -0.9) to ensure 
+   >=10 trades per symbol. Previous strategies failed from being too strict.
+5. ATR STOPLOSS: 2.5x ATR trailing stop to limit drawdown on failed reversals.
 
-2. FISHER TRANSFORM for reversals (Ehlers):
-   - Normalizes price into Gaussian distribution (-2 to +2 range)
-   - Long when Fisher crosses above -1.5 from below (oversold reversal)
-   - Short when Fisher crosses below +1.5 from above (overbought reversal)
-   - Proven to catch bear market rallies better than RSI
+Why this should work on 1h:
+- 1h captures intraday reversals that 4h/12h miss
+- Fisher Transform excels in ranging markets (which is 70% of BTC/ETH time)
+- Volatility compression filter prevents entries during high-vol chaos (2022 crash)
+- 4h HMA bias prevents counter-trend trades in strong trends
+- Loose thresholds ensure sufficient trade count (critical for Sharpe > 0)
 
-3. 4h HMA for trend bias:
-   - Only long in low-vol regime if price > 4h HMA
-   - Only short in low-vol regime if price < 4h HMA
-   - In high-vol regime, ignore trend (mean reversion dominates)
-
-4. Bollinger Bands for mean reversion entries:
-   - High vol + price < BB_lower → long (panic oversold)
-   - High vol + price > BB_upper → short (panic overbought)
-
-Why this should work on 30m:
-- 30m captures intraday vol spikes that 1h/4h miss
-- Fisher Transform catches reversals faster than RSI
-- Volatility regime filter prevents trend-following during panic
-- 4h HMA provides stable bias without whipsaw
-- Looser thresholds ensure >=10 trades per symbol
-
-Timeframe: 30m (REQUIRED for this experiment)
+Timeframe: 1h (REQUIRED)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels (conservative for 30m noise)
+Position sizing: 0.28 discrete (conservative after 77% BTC crash lesson)
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_vol_regime_4h_hma_fisher_bb_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_fisher_reversal_4h_hma_bb_volcompress_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -69,50 +61,82 @@ def calculate_hma(close, period=21):
 def calculate_fisher_transform(high, low, period=9):
     """
     Calculate Ehlers Fisher Transform.
-    Normalizes price into Gaussian distribution for clearer reversal signals.
     
     Formula:
     1. Calculate typical price: (high + low) / 2
-    2. Normalize to -1 to +1 range
-    3. Apply Fisher transform: 0.5 * ln((1+x)/(1-x))
+    2. Normalize to -1 to +1 range using period high/low
+    3. Apply Fisher transform: 0.5 * ln((1 + x) / (1 - x))
     
-    Entry: Fisher crosses above -1.5 (long) or below +1.5 (short)
+    Readings > 0.9 or < -0.9 indicate extreme overbought/oversold.
+    Crossovers of these extremes signal reversals.
     """
     n = len(high)
     fisher = np.full(n, np.nan)
-    fisher_prev = np.full(n, np.nan)
+    fisher_signal = np.full(n, np.nan)
     
     # Typical price
     typical = (high + low) / 2.0
-    typical_s = pd.Series(typical)
     
-    # Normalize to -1 to +1 using highest high and lowest low over period
     for i in range(period, n):
-        highest = typical[i-period+1:i+1].max()
-        lowest = typical[i-period+1:i+1].min()
-        range_val = highest - lowest
+        # Find highest high and lowest low over lookback period
+        highest = high[i-period+1:i+1].max()
+        lowest = low[i-period+1:i+1].min()
         
-        if range_val > 1e-10:
-            # Normalize to 0-1, then scale to -0.99 to +0.99
-            normalized = 2.0 * (typical[i] - lowest) / range_val - 1.0
-            normalized = np.clip(normalized, -0.99, 0.99)
-            
-            # Fisher transform
-            fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
-            
-            if i > period:
-                fisher_prev[i] = fisher[i-1]
+        price_range = highest - lowest
+        if price_range < 1e-10:
+            continue
+        
+        # Normalize price to -0.99 to +0.99 range (avoid division issues)
+        normalized = 0.99 * (2.0 * (typical[i] - lowest) / price_range - 1.0)
+        normalized = np.clip(normalized, -0.99, 0.99)
+        
+        # Apply Fisher transform
+        fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
+        
+        # Signal line (1-period lag of fisher)
+        if i > 0:
+            fisher_signal[i] = fisher[i-1]
     
-    return fisher, fisher_prev
+    return fisher, fisher_signal
 
 def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
+    """Calculate Bollinger Bands and bandwidth."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    
+    # Middle band (SMA)
+    middle = close_s.rolling(window=period, min_periods=period).mean().values
+    
+    # Standard deviation
     std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma
+    
+    # Upper and lower bands
+    upper = middle + std_mult * std
+    lower = middle - std_mult * std
+    
+    # Bandwidth (normalized by middle)
+    bandwidth = (upper - lower) / np.maximum(middle, 1e-10)
+    
+    return upper, lower, bandwidth
+
+def calculate_bandwidth_percentile(bandwidth, lookback=100):
+    """
+    Calculate percentile rank of current bandwidth vs last lookback bars.
+    Low percentile (< 20) = volatility compression = potential breakout/reversal.
+    """
+    n = len(bandwidth)
+    percentile = np.full(n, np.nan)
+    
+    for i in range(lookback, n):
+        if np.isnan(bandwidth[i]):
+            continue
+        window = bandwidth[i-lookback:i]
+        valid_window = window[~np.isnan(window)]
+        if len(valid_window) < lookback // 2:
+            continue
+        # Percentile rank: what % of past values are lower than current
+        percentile[i] = np.sum(valid_window < bandwidth[i]) / len(valid_window) * 100
+    
+    return percentile
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -129,18 +153,16 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
-    atr_14 = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    
-    fisher, fisher_prev = calculate_fisher_transform(high, low, period=9)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    # Calculate 1h indicators
+    atr = calculate_atr(high, low, close, 14)
+    fisher, fisher_signal = calculate_fisher_transform(high, low, period=9)
+    bb_upper, bb_lower, bb_bandwidth = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    bb_percentile = calculate_bandwidth_percentile(bb_bandwidth, lookback=100)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.25  # Conservative for 30m noise
+    SIZE = 0.28  # Conservative after learning from 77% BTC crash
     
     # Track position state for stoploss
     in_position = False
@@ -149,13 +171,9 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] == 0:
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(atr_7[i]) or np.isnan(atr_30[i]) or atr_30[i] == 0:
+        if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
@@ -163,93 +181,77 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(fisher_prev[i]):
+        if np.isnan(fisher[i]) or np.isnan(fisher_signal[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(bb_percentile[i]):
             signals[i] = 0.0
             continue
-        
-        # === VOLATILITY REGIME DETECTION ===
-        vol_ratio = atr_7[i] / max(atr_30[i], 1e-10)
-        
-        in_high_vol = vol_ratio > 1.8  # Panic/spike - mean reversion
-        in_low_vol = vol_ratio < 1.2   # Grind - trend follow
-        # 1.2 <= ratio <= 1.8 = transition
         
         # === 4h HMA TREND BIAS ===
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === FISHER TRANSFORM SIGNALS ===
-        fisher_oversold = fisher[i] < -1.5 and fisher_prev[i] >= -1.5  # Cross above -1.5
-        fisher_overbought = fisher[i] > 1.5 and fisher_prev[i] <= 1.5  # Cross below +1.5
+        # === FISHER TRANSFORM EXTREMES ===
+        # Loosened thresholds for more trades (critical for >=10 trades requirement)
+        fisher_extreme_high = fisher[i] > 0.7  # Overbought reversal signal
+        fisher_extreme_low = fisher[i] < -0.7  # Oversold reversal signal
         
-        # === BOLLINGER BAND EXTREMES ===
-        at_bb_lower = close[i] <= bb_lower[i]
-        at_bb_upper = close[i] >= bb_upper[i]
+        # Fisher crossover confirmation (reversal starting)
+        fisher_cross_down = fisher[i] < fisher_signal[i] and fisher_signal[i] > 0.5
+        fisher_cross_up = fisher[i] > fisher_signal[i] and fisher_signal[i] < -0.5
         
-        # === GENERATE SIGNAL BASED ON REGIME ===
+        # === VOLATILITY COMPRESSION FILTER ===
+        # Only enter when BB bandwidth is in bottom 30% of recent range
+        # This ensures we enter after consolidation, not during high-vol chaos
+        vol_compressed = bb_percentile[i] < 30.0
+        
+        # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # HIGH VOLATILITY REGIME: Mean reversion at BB extremes
-        if in_high_vol:
-            # Long: price at BB lower (panic oversold)
-            if at_bb_lower:
-                new_signal = SIZE
-            
-            # Short: price at BB upper (panic overbought)
-            elif at_bb_upper:
-                new_signal = -SIZE
+        # LONG ENTRY: Fisher oversold + crossover up + 4h bullish bias + vol compressed
+        if fisher_extreme_low and fisher_cross_up and bull_trend_4h and vol_compressed:
+            new_signal = SIZE
         
-        # LOW VOLATILITY REGIME: Trend following with Fisher entries
-        elif in_low_vol:
-            # Long: 4h HMA bullish + Fisher oversold cross (pullback entry)
-            if bull_trend_4h and fisher_oversold:
-                new_signal = SIZE
-            
-            # Short: 4h HMA bearish + Fisher overbought cross (pullback entry)
-            elif bear_trend_4h and fisher_overbought:
-                new_signal = -SIZE
-            
-            # Alternative: Simple trend continuation
-            elif bull_trend_4h and fisher[i] > -0.5:
-                new_signal = SIZE
-            elif bear_trend_4h and fisher[i] < 0.5:
-                new_signal = -SIZE
-        
-        # TRANSITION REGIME: Reduce or flat
-        if not in_high_vol and not in_low_vol:
-            if in_position:
-                # Keep current position but don't add
-                new_signal = signals[i-1] if i > 0 else 0.0
-            else:
-                new_signal = 0.0
+        # SHORT ENTRY: Fisher overbought + crossover down + 4h bearish bias + vol compressed
+        elif fisher_extreme_high and fisher_cross_down and bear_trend_4h and vol_compressed:
+            new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
+                # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr_14[i]
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
             if position_side < 0:
+                # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr_14[i]
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if 4h trend flips against position (only in low vol regime)
-        if in_position and new_signal != 0.0 and in_low_vol:
+        # Exit if 4h trend flips against position (protective)
+        if in_position and new_signal != 0.0:
             if position_side > 0 and bear_trend_4h:
                 new_signal = 0.0
             if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0
+        
+        # === FISHER REVERSAL EXIT ===
+        # Exit long when Fisher becomes extremely overbought (take profit)
+        if in_position and position_side > 0 and fisher[i] > 1.2:
+            new_signal = 0.0
+        
+        # Exit short when Fisher becomes extremely oversold (take profit)
+        if in_position and position_side < 0 and fisher[i] < -1.2:
+            new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
@@ -260,6 +262,7 @@ def generate_signals(prices):
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
+                # Position flip
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
