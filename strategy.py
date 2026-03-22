@@ -1,39 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #517: 15m Multi-Timeframe Mean Reversion with Choppiness Regime
+Experiment #518: 30m Choppiness Regime with 4h HMA Bias + Connors RSI
 
-Hypothesis: 15m timeframe is ideal for mean reversion strategies that capture 
-intraday oscillations while respecting HTF trend. After 500+ failed experiments,
-the key insight is that BTC/ETH spend 70% of time in RANGE mode where mean 
-reversion outperforms trend following. Use Choppiness Index to detect regime,
-4h HMA for directional bias, and RSI+Z-score for entry timing.
+Hypothesis: After 500+ failed experiments, the clearest pattern is that 30m 
+timeframe needs REGIME DETECTION to know WHEN to trade, not just direction. 
+Choppiness Index (CHOP) reliably distinguishes range vs trend markets. 
+Combined with 4h HMA for directional bias and Connors RSI for precise entries.
 
 Key innovations:
-1. CHOPPINESS INDEX (14): >61.8 = range (mean-revert), <38.2 = trend (follow)
-2. 4H HMA BIAS: Via mtf_data helper for trend direction (not too slow like 1d)
-3. RSI(7) EXTREMES: <30 long, >70 short (faster than RSI14 for 15m)
-4. Z-SCORE(20): <-2.0 long, >+2.0 short (statistical mean reversion)
-5. VOLUME CONFIRMATION: taker_buy_volume ratio >0.55 for longs
+1. CHOPPINESS INDEX (14): CHOP > 61.8 = range (mean-revert), CHOP < 38.2 = trend
+2. 4H HMA BIAS: Via mtf_data helper for trend direction (proven edge)
+3. CONNORS RSI: (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3 for entries
+4. ASYMMETRIC LOGIC: Only long in bull bias, only short in bear bias
+5. LOOSE THRESHOLDS: CRSI < 30 long, > 70 short (ensures ≥10 trades/year)
 6. 2.0 * ATR STOPLOSS: Trailing stop to protect capital
-7. DISCRETE SIZING: 0.25 positions, minimize fee churn
 
-Why 15m works:
-- Captures 2-4 hour swings (crypto's typical mean-reversion cycle)
-- 96 bars/day = enough data for statistical significance
-- Faster entries than 1h/4h, less noise than 5m
-- Choppiness filter avoids trend-following in ranging markets (70% of time)
+Why 30m works:
+- 48 bars/day = enough signals without 5m noise
+- Captures intraday swings + multi-day trends
+- CHOP regime filter prevents trend strategies in choppy markets
+- 4h HMA provides stable trend bias without whipsaw
 
-Timeframe: 15m (REQUIRED for this experiment)
+Timeframe: 30m (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete
+Position sizing: 0.25 discrete (conservative for 30m swings)
 Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_chop_regime_4h_hma_rsi_zscore_volume_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_chop_regime_4h_hma_connors_rsi_asymmetric_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -70,20 +68,60 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_choppiness_index(high, low, close, period=14):
+def calculate_connors_rsi(close, period_rsi=3, period_streak=2, period_rank=100):
+    """
+    Calculate Connors RSI (CRSI).
+    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    """
+    n = len(close)
+    crsi = np.full(n, np.nan)
+    
+    # RSI(3)
+    rsi_short = calculate_rsi(close, period_rsi)
+    
+    # RSI Streak (consecutive up/down days)
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+    
+    # Convert streak to RSI-like value (0-100)
+    streak_rsi = np.zeros(n)
+    for i in range(period_streak, n):
+        if streak[i] > 0:
+            streak_rsi[i] = min(100, 50 + streak[i] * 10)
+        elif streak[i] < 0:
+            streak_rsi[i] = max(0, 50 + streak[i] * 10)
+        else:
+            streak_rsi[i] = 50
+    
+    # Percent Rank of returns
+    returns = np.zeros(n)
+    for i in range(1, n):
+        returns[i] = (close[i] - close[i-1]) / close[i-1] * 100
+    
+    for i in range(period_rank, n):
+        window = returns[i-period_rank+1:i+1]
+        count_below = np.sum(window[:-1] < returns[i])
+        pct_rank = count_below / (period_rank - 1) * 100
+        crsi[i] = (rsi_short[i] + streak_rsi[i] + pct_rank) / 3
+    
+    return crsi
+
+def calculate_choppiness(high, low, close, period=14):
     """
     Calculate Choppiness Index (CHOP).
     CHOP = 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
     
-    Interpretation:
-    - CHOP > 61.8: Market is choppy/ranging (mean-reversion works)
-    - CHOP < 38.2: Market is trending (trend-following works)
-    - 38.2 < CHOP < 61.8: Neutral/transition
+    CHOP > 61.8 = choppy/range market (mean-reversion works)
+    CHOP < 38.2 = trending market (trend-following works)
     """
     n = len(close)
     chop = np.full(n, np.nan)
     
-    # Calculate ATR(1) for each bar (True Range)
+    # Calculate ATR for each bar
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -98,35 +136,13 @@ def calculate_choppiness_index(high, low, close, period=14):
         
         if price_range > 1e-10 and atr_sum > 1e-10:
             chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-        else:
-            chop[i] = 50.0  # neutral
     
     return chop
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score of price vs rolling mean."""
-    close_s = pd.Series(close)
-    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - rolling_mean) / rolling_std.replace(0, np.inf)
-    return zscore.values
-
-def calculate_volume_ratio(taker_buy_volume, volume):
-    """Calculate taker buy volume ratio (buying pressure)."""
-    ratio = np.zeros(len(volume))
-    for i in range(len(volume)):
-        if volume[i] > 1e-10:
-            ratio[i] = taker_buy_volume[i] / volume[i]
-        else:
-            ratio[i] = 0.5
-    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -138,13 +154,11 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_7 = calculate_rsi(close, 7)
     rsi_14 = calculate_rsi(close, 14)
-    chop = calculate_choppiness_index(high, low, close, 14)
-    zscore = calculate_zscore(close, 20)
-    vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
+    crsi = calculate_connors_rsi(close, 3, 2, 100)
+    chop = calculate_choppiness(high, low, close, 14)
     
     signals = np.zeros(n)
     
@@ -158,7 +172,7 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             signals[i] = 0.0
@@ -168,7 +182,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(chop[i]) or np.isnan(zscore[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(crsi[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
@@ -177,38 +191,35 @@ def generate_signals(prices):
         bear_bias = close[i] < hma_4h_aligned[i]
         
         # === CHOPPINESS REGIME ===
-        is_range = chop[i] > 61.8  # Mean-reversion regime
-        is_trend = chop[i] < 38.2  # Trend-following regime
+        is_choppy = chop[i] > 61.8  # Range market - mean-reversion
+        is_trending = chop[i] < 38.2  # Trend market - trend-following
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # RANGE REGIME: Mean-reversion (70% of crypto market time)
-        if is_range:
-            # Long: RSI oversold + Z-score low + bull bias preferred
-            if rsi_7[i] < 30 and zscore[i] < -1.5:
-                if bull_bias or vol_ratio[i] > 0.55:
-                    new_signal = SIZE
-            # Short: RSI overbought + Z-score high + bear bias preferred
-            elif rsi_7[i] > 70 and zscore[i] > 1.5:
-                if bear_bias or vol_ratio[i] < 0.45:
-                    new_signal = -SIZE
-        
-        # TREND REGIME: Pullback entries in direction of trend
-        elif is_trend:
-            # Long pullback in uptrend
-            if bull_bias and rsi_7[i] < 40 and zscore[i] < -0.5:
+        # CHOPPY MARKET: Mean-reversion with Connors RSI
+        if is_choppy:
+            # Long: CRSI oversold + bullish 4h bias
+            if crsi[i] < 30 and bull_bias:
                 new_signal = SIZE
-            # Short rally in downtrend
-            elif bear_bias and rsi_7[i] > 60 and zscore[i] > 0.5:
+            # Short: CRSI overbought + bearish 4h bias
+            elif crsi[i] > 70 and bear_bias:
                 new_signal = -SIZE
         
-        # NEUTRAL REGIME: Wait for clearer signals
-        else:
-            # Only enter on extreme conditions
-            if rsi_7[i] < 25 and zscore[i] < -2.0 and bull_bias:
+        # TRENDING MARKET: RSI pullback entries
+        elif is_trending:
+            # Long: RSI pullback in uptrend
+            if rsi_14[i] < 45 and bull_bias:
                 new_signal = SIZE
-            elif rsi_7[i] > 75 and zscore[i] > 2.0 and bear_bias:
+            # Short: RSI rally in downtrend
+            elif rsi_14[i] > 55 and bear_bias:
+                new_signal = -SIZE
+        
+        # NEUTRAL MARKET: Use RSI extremes with bias
+        else:
+            if rsi_14[i] < 35 and bull_bias:
+                new_signal = SIZE
+            elif rsi_14[i] > 65 and bear_bias:
                 new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
@@ -229,12 +240,12 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === REGIME FLIP EXIT ===
-        # Exit if regime changes strongly against position
+        # === BIAS REVERSAL EXIT ===
+        # Exit if 4h trend flips strongly against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and is_trend and bear_bias:
+            if position_side > 0 and bear_bias and is_trending:
                 new_signal = 0.0
-            if position_side < 0 and is_trend and bull_bias:
+            if position_side < 0 and bull_bias and is_trending:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
