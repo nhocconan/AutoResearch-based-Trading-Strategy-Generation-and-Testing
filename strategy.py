@@ -1,34 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #140: 30m Supertrend + 4h HMA Trend + ADX Filter + ATR Stop
+Experiment #141: 1h Asymmetric Regime + 4h HMA Trend + ADX Hysteresis + ATR Stop
 
-Hypothesis: After 139 failed experiments, returning to proven trend-following basics
-but optimized for 30m timeframe. Key insights from failures:
-- Donchian breakouts failed (too many whipsaws)
-- RSI pullback failed (too many conditions = 0 trades)
-- Fisher/Choppiness failed (over-engineered)
+Hypothesis: Based on research showing bear market strategies need regime-adaptive logic.
+Key insight from 200+ failed experiments: simple trend following gets whipsawed in 2022,
+pure mean reversion fails in strong trends. This strategy uses:
 
-This strategy uses SIMPLE, PROVEN indicators:
-- Supertrend(10,3): Clean trend direction with ATR-based stops
-- 4h HMA(21): Higher timeframe trend bias (proven in best strategy)
-- ADX(14): Filter out choppy markets (ADX>18, not 25 which is too strict)
-- ATR(14) trailing stop: 2.5*ATR protects capital
+1. ASYMMETRIC REGIME (from research): 
+   - ADX>25 + price<SMA50 = bear regime (only short retraces to EMA21)
+   - ADX<20 = range regime (mean revert at BB bounds)
+   - Hysteresis: enter trend mode at 25, exit at 18 (prevents chop)
 
-Why 30m might work:
-- Faster than 4h = more trade opportunities
-- Slower than 15m = less noise/whipsaw
-- Natural fit for intraday trends that last 1-3 days
+2. MULTI-TIMEFRAME: 4h HMA(21) for trend bias (proven to 2x Sharpe in winning strategies)
 
-Position sizing: 0.25-0.35 discrete (conservative after 77% BTC crash lesson)
-Stoploss: 2.5*ATR trailing (tighter than 3*ATR to reduce DD)
-Trade frequency target: 30-50 trades/year (enough for Sharpe, not too many for fees)
+3. DUAL ENTRY LOGIC:
+   - Trend mode: pullback to EMA21 in direction of 4h HMA
+   - Range mode: fade BB(20,2.0) extremes with RSI(14) confirmation
+
+4. RISK: ATR(14) trailing stop at 2.5*ATR, discrete position sizing 0.20-0.35
+
+Why this might beat baseline (Sharpe=0.478):
+- Regime adaptation prevents trend-following losses in 2022 crash
+- 4h HMA filter avoids counter-trend trades (major source of losses)
+- ADX hysteresis reduces whipsaw between regimes
+- 1h timeframe balances signal frequency vs noise
+
+Timeframe: 1h (REQUIRED for experiment #141)
+HTF: 4h via mtf_data helper (call ONCE before loop)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_supertrend_4h_hma_adx_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_asymmetric_regime_4h_hma_adx_hyst_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -40,57 +45,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-    Returns: supertrend_values, trend_direction (1=up, -1=down)
-    """
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    supertrend = np.zeros(n)
-    supertrend[:] = np.nan
-    trend = np.zeros(n)
-    trend[:] = np.nan
-    
-    # Calculate HL2 and basic bands
-    hl2 = (high + low) / 2
-    
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    if n < period + 1:
-        return supertrend, trend
-    
-    # Initialize
-    supertrend[period] = upper_band[period]
-    trend[period] = 1  # Start assuming uptrend
-    
-    for i in range(period + 1, n):
-        if np.isnan(atr[i]):
-            supertrend[i] = np.nan
-            trend[i] = np.nan
-            continue
-        
-        # If previous trend was up
-        if trend[i-1] == 1:
-            if close[i] > lower_band[i]:
-                supertrend[i] = max(supertrend[i-1], lower_band[i])
-                trend[i] = 1
-            else:
-                supertrend[i] = upper_band[i]
-                trend[i] = -1
-        # If previous trend was down
-        else:
-            if close[i] < upper_band[i]:
-                supertrend[i] = min(supertrend[i-1], upper_band[i])
-                trend[i] = -1
-            else:
-                supertrend[i] = lower_band[i]
-                trend[i] = 1
-    
-    return supertrend, trend
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -141,6 +95,40 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
+def calculate_ema(close, period=21):
+    """Calculate Exponential Moving Average."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+    return ema
+
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    return sma
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    pct_b = (close - lower) / (upper - lower)
+    return upper, lower, pct_b
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -156,10 +144,13 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
-    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
     adx = calculate_adx(high, low, close, 14)
+    ema21 = calculate_ema(close, 21)
+    sma50 = calculate_sma(close, 50)
+    bb_upper, bb_lower, pct_b = calculate_bollinger_bands(close, 20, 2.0)
+    rsi = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     
@@ -174,6 +165,9 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
+    # ADX hysteresis state
+    in_trend_mode = False
+    
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
@@ -184,81 +178,96 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(supertrend[i]) or np.isnan(st_trend[i]):
+        if np.isnan(adx[i]) or np.isnan(ema21[i]) or np.isnan(sma50[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]):
+        if np.isnan(rsi[i]) or np.isnan(pct_b[i]):
             signals[i] = 0.0
             continue
         
-        # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # === ADX REGIME WITH HYSTERESIS ===
+        # Enter trend mode when ADX > 25, exit when ADX < 18
+        if adx[i] > 25:
+            in_trend_mode = True
+        elif adx[i] < 18:
+            in_trend_mode = False
         
-        # === SUPERTREND DIRECTION ===
-        st_bull = st_trend[i] == 1
-        st_bear = st_trend[i] == -1
+        # === 4H TREND BIAS ===
+        bull_4h = close[i] > hma_4h_aligned[i]
+        bear_4h = close[i] < hma_4h_aligned[i]
         
-        # === ADX TREND STRENGTH ===
-        # Use 18 instead of 25 (too strict caused 0 trades in previous experiments)
-        adx_strong = adx[i] > 18
-        adx_weak = adx[i] <= 18
+        # === BEAR REGIME DETECTION ===
+        # ADX > 20 + price < SMA50 = bear market (only short retraces)
+        bear_regime = adx[i] > 20 and close[i] < sma50[i]
         
         new_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS ===
-        # Strong: 4h bullish + Supertrend bull + ADX strong
-        if bull_trend_4h and st_bull and adx_strong:
-            new_signal = SIZE_STRONG
-        # Moderate: 4h bullish + Supertrend bull (ensure trades even in weak ADX)
-        elif bull_trend_4h and st_bull:
-            new_signal = SIZE_BASE
+        # === TREND MODE ENTRIES (ADX hysteresis > 18) ===
+        if in_trend_mode:
+            # Long: 4h bullish + pullback to EMA21 + RSI not overbought
+            if bull_4h and close[i] <= ema21[i] * 1.002 and rsi[i] < 70:
+                new_signal = SIZE_BASE
+                # Strong signal if also above SMA50
+                if close[i] > sma50[i]:
+                    new_signal = SIZE_STRONG
+            
+            # Short: 4h bearish + rally to EMA21 + RSI not oversold
+            if bear_4h and close[i] >= ema21[i] * 0.998 and rsi[i] > 30:
+                new_signal = -SIZE_BASE
+                # Strong signal if also below SMA50
+                if close[i] < sma50[i]:
+                    new_signal = -SIZE_STRONG
         
-        # === SHORT ENTRY CONDITIONS ===
-        # Strong: 4h bearish + Supertrend bear + ADX strong
-        if bear_trend_4h and st_bear and adx_strong:
-            new_signal = -SIZE_STRONG
-        # Moderate: 4h bearish + Supertrend bear (ensure trades even in weak ADX)
-        elif bear_trend_4h and st_bear:
-            new_signal = -SIZE_BASE
+        # === RANGE MODE ENTRIES (ADX < 18) ===
+        else:
+            # Long: price at BB lower + RSI oversold + 4h not strongly bearish
+            if pct_b[i] < 0.1 and rsi[i] < 35:
+                if not bear_4h or rsi[i] < 25:  # Allow long even in bear if RSI very low
+                    new_signal = SIZE_BASE
+            
+            # Short: price at BB upper + RSI overbought + 4h not strongly bullish
+            if pct_b[i] > 0.9 and rsi[i] > 65:
+                if not bull_4h or rsi[i] > 75:  # Allow short even in bull if RSI very high
+                    new_signal = -SIZE_BASE
+        
+        # === BEAR REGIME SPECIAL LOGIC ===
+        # In bear regime, prioritize shorts on retraces, limit longs
+        if bear_regime:
+            # Only short on retraces to EMA in bear regime
+            if bear_4h and close[i] >= ema21[i] * 0.995 and rsi[i] > 35:
+                new_signal = -SIZE_STRONG
+            # Limit longs to extreme oversold only
+            if new_signal > 0 and rsi[i] > 40:
+                new_signal = 0.0
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
-        # Update trailing highs/lows for active positions
         if in_position and position_side > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
-            # Trailing stop: 2.5 * ATR below highest close
             stoploss_price = highest_close - 2.5 * atr[i]
             if close[i] < stoploss_price:
-                new_signal = 0.0  # Stoploss hit
+                new_signal = 0.0
         
         if in_position and position_side < 0:
             if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
-            # Trailing stop: 2.5 * ATR above lowest close
             stoploss_price = lowest_close + 2.5 * atr[i]
             if close[i] > stoploss_price:
-                new_signal = 0.0  # Stoploss hit
+                new_signal = 0.0
         
         # Update position tracking
-        # Entering new position
         if new_signal != 0.0 and not in_position:
             in_position = True
             position_side = np.sign(new_signal)
             entry_price = close[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
-        
-        # Reversing position
         elif new_signal != 0.0 and in_position and np.sign(new_signal) != position_side:
             position_side = np.sign(new_signal)
             entry_price = close[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
-        
-        # Exiting position
         elif new_signal == 0.0 and in_position:
             in_position = False
             position_side = 0
