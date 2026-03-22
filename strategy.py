@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #310: 4h Supertrend with Fisher Transform Entries and 1d HMA Bias
+Experiment #311: 12h EMA Crossover with Dual HTF HMA Bias and ATR Stoploss
 
-Hypothesis: After analyzing 299 experiments, clear patterns emerge:
-1. 4h Supertrend + 1d HMA works best (Sharpe=0.485, current baseline)
-2. Strategies with too many filters generate 0 trades (#307, #308 Sharpe=0.000)
-3. RSI mean reversion consistently fails across timeframes
-4. 12h/1d timeframes show positive Sharpe but may have too few trades
+Hypothesis: After #299 failed (Sharpe=-0.080), the Donchian breakout was too restrictive.
+Analysis of successful strategies (#300 Sharpe=0.358, #304 Sharpe=0.367) shows:
+1. Simple trend following with HTF bias works best
+2. Complex ensembles and filters kill trade generation
+3. 12h needs LOOSER entry conditions to generate >=10 trades
 
-This strategy IMPROVES on the baseline by:
-1. Using EHLERS FISHER TRANSFORM for entry timing (catches reversals cleaner than RSI)
-2. Keeping 4h Supertrend for trend direction (proven edge)
-3. Keeping 1d HMA for directional bias (proven edge from #292, #299)
-4. LOOSE ADX threshold (>12 not >25) to ensure >=10 trades per symbol
-5. Discrete position sizing (0.0, ±0.25, ±0.30) to minimize fee churn
+This strategy SIMPLIFIES the entry logic:
+1. 1d HMA(21) for primary directional bias (proven edge from #300)
+2. 1w HMA(21) for meta-trend CONFIRMATION (soft filter, not hard requirement)
+3. EMA(8)/EMA(21) crossover on 12h for entry timing (simpler than Donchian)
+4. ADX(14)>12 for minimal trend confirmation (very loose for trade generation)
+5. ATR(14) trailing stoploss at 2.5x (proven from successful strategies)
 
-Why Fisher Transform over RSI:
-- Fisher normalizes price to Gaussian distribution (-1 to +1)
-- Crosses at extremes are cleaner signals than RSI thresholds
-- Less prone to staying in overbought/oversold for extended periods
-- Proven in bear/range markets (critical for 2025 test period)
+Key changes from #299:
+- Removed dual HTF HARD requirement (only 1d required, 1w is soft confirm)
+- EMA crossover instead of Donchian (generates more signals)
+- ADX threshold lowered from 15 to 12 (more trades)
+- Simplified position state tracking
 
-Timeframe: 4h (REQUIRED for this experiment)
-HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.30 discrete levels (MAX 0.35)
+Timeframe: 12h (REQUIRED for this experiment)
+HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25-0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_supertrend_fisher_1d_hma_loose_adx_v1"
-timeframe = "4h"
+name = "mtf_12h_ema_crossover_dual_htf_hma_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -44,66 +44,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-    Returns: supertrend_values, supertrend_direction (1=below price=bullish, -1=above=bearish)
-    """
-    atr = calculate_atr(high, low, close, period)
-    
-    n = len(close)
-    hl2 = (high + low) / 2
-    
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)
-    
-    supertrend[0] = lower_band[0]
-    direction[0] = 1
-    
-    for i in range(1, n):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = lower_band[i]
-            direction[i] = 1
-        else:
-            supertrend[i] = upper_band[i]
-            direction[i] = -1
-    
-    return supertrend, direction
-
-def calculate_fisher_transform(close, period=9):
-    """
-    Calculate Ehlers Fisher Transform.
-    Transforms price into a Gaussian normal distribution.
-    Values range approximately -1 to +1.
-    Cross above -0.5 from below = long signal
-    Cross below +0.5 from above = short signal
-    """
-    n = len(close)
-    fisher = np.zeros(n)
-    fisher[:] = np.nan
-    
-    # Calculate highest high and lowest low over period
-    for i in range(period - 1, n):
-        highest = np.max(close[i - period + 1:i + 1])
-        lowest = np.min(close[i - period + 1:i + 1])
-        
-        if highest == lowest:
-            continue
-        
-        # Normalize price to 0-1 range
-        x = (close[i] - lowest) / (highest - lowest)
-        
-        # Constrain to 0.001-0.999 to avoid log(0)
-        x = np.clip(x, 0.001, 0.999)
-        
-        # Fisher transform
-        fisher[i] = 0.5 * np.log((1 + x) / (1 - x))
-    
-    return fisher
-
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -114,18 +54,22 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    return ema.values
+
 def calculate_adx(high, low, close, period=14):
     """Calculate Average Directional Index (ADX)."""
     n = len(close)
     
-    # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    # Directional Movement
     up_move = high - np.roll(high, 1)
     down_move = np.roll(low, 1) - low
     up_move[0] = 0
@@ -134,16 +78,13 @@ def calculate_adx(high, low, close, period=14):
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smooth with Wilder's method
     tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
     plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean()
     minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean()
     
-    # Directional Indicators
     plus_di = 100 * plus_dm_s / tr_s
     minus_di = 100 * minus_dm_s / tr_s
     
-    # DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     dx = dx.replace([np.inf, -np.inf], np.nan)
     adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
@@ -158,24 +99,27 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
     hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
-    # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
+    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    supertrend, supertrend_dir = calculate_supertrend(high, low, close, 10, 3.0)
-    fisher = calculate_fisher_transform(close, 9)
+    ema_fast = calculate_ema(close, 8)
+    ema_slow = calculate_ema(close, 21)
     adx = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25  # Base position size
-    SIZE_STRONG = 0.30  # Increased size in strong trend
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -184,26 +128,13 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
-    # Track Fisher previous value for crossover detection
-    fisher_prev = np.zeros(n)
-    for i in range(1, n):
-        fisher_prev[i] = fisher[i-1] if not np.isnan(fisher[i-1]) else fisher[i]
-    
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(supertrend[i]) or np.isnan(supertrend_dir[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(fisher[i]) or np.isnan(fisher_prev[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]):
             signals[i] = 0.0
             continue
         
@@ -212,55 +143,61 @@ def generate_signals(prices):
             continue
         
         # === HIGHER TIMEFRAME BIAS ===
-        # 1d HMA = primary directional bias
+        # 1d HMA = primary directional bias (REQUIRED)
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === TREND DIRECTION (Supertrend) ===
-        # Supertrend direction: 1 = price above ST (bullish), -1 = price below ST (bearish)
-        st_bullish = supertrend_dir[i] == 1
-        st_bearish = supertrend_dir[i] == -1
+        # 1w HMA = meta-trend confirmation (SOFT - boosts size but not required)
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
         
         # === TREND STRENGTH ===
-        # ADX > 12 = trending market (LOOSE threshold to ensure >=10 trades)
+        # ADX > 12 = minimal trending (very loose for trade generation)
         trending = adx[i] > 12
         strong_trend = adx[i] > 20
         
-        # === FISHER TRANSFORM SIGNALS ===
-        # Fisher cross above -0.5 from below = bullish reversal signal
-        fisher_bullish_cross = (fisher_prev[i] < -0.5) and (fisher[i] >= -0.5)
-        # Fisher cross below +0.5 from above = bearish reversal signal
-        fisher_bearish_cross = (fisher_prev[i] > 0.5) and (fisher[i] <= 0.5)
+        # === EMA CROSSOVER ===
+        # Fast EMA crosses above slow EMA = bullish crossover
+        ema_bullish = ema_fast[i] > ema_slow[i]
+        # Fast EMA crosses below slow EMA = bearish crossover
+        ema_bearish = ema_fast[i] < ema_slow[i]
         
-        # Fisher extreme oversold (potential long even without cross)
-        fisher_oversold = fisher[i] < -0.8
-        # Fisher extreme overbought (potential short even without cross)
-        fisher_overbought = fisher[i] > 0.8
+        # Check for actual crossover (not just state)
+        ema_cross_bull = ema_bullish and (i > 0 and ema_fast[i-1] <= ema_slow[i-1])
+        ema_cross_bear = ema_bearish and (i > 0 and ema_fast[i-1] >= ema_slow[i-1])
         
-        # === POSITION SIZING ===
-        if strong_trend:
+        # Also allow entry if already in trend state (not just crossover)
+        ema_trend_bull = ema_bullish
+        ema_trend_bear = ema_bearish
+        
+        # === VOLATILITY ADJUSTMENT ===
+        atr_recent_avg = np.nanmean(atr[max(0, i-20):i+1])
+        high_volatility = atr[i] > 1.5 * atr_recent_avg if not np.isnan(atr_recent_avg) else False
+        
+        # Determine position size
+        if high_volatility:
+            position_size = SIZE_BASE
+        elif strong_trend and bull_trend_1w:
             position_size = SIZE_STRONG
         else:
             position_size = SIZE_BASE
         
-        # === ENTRY CONDITIONS ===
+        # === ENTRY CONDITIONS (LOOSE for >=10 trades) ===
         new_signal = 0.0
         
-        # LONG ENTRY: Need Supertrend bullish + 1d bias up + Fisher signal + ADX filter
-        # Multiple entry triggers to ensure >=10 trades per symbol
+        # LONG: 1d bias up + EMA bullish + ADX trending
+        # Removed 1w hard requirement - only boosts size
         long_conditions = (
-            st_bullish and  # Supertrend bullish
-            bull_trend_1d and  # 1d HMA bias bullish
-            trending and  # ADX confirms some trend
-            (fisher_bullish_cross or fisher_oversold)  # Fisher entry signal
+            bull_trend_1d and
+            ema_trend_bull and
+            trending
         )
         
-        # SHORT ENTRY: Mirror of long
+        # SHORT: 1d bias down + EMA bearish + ADX trending
         short_conditions = (
-            st_bearish and  # Supertrend bearish
-            bear_trend_1d and  # 1d HMA bias bearish
-            trending and  # ADX confirms some trend
-            (fisher_bearish_cross or fisher_overbought)  # Fisher entry signal
+            bear_trend_1d and
+            ema_trend_bear and
+            trending
         )
         
         # === GENERATE SIGNAL ===
@@ -271,59 +208,49 @@ def generate_signals(prices):
             new_signal = -position_size
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
-        # Check stoploss on EXISTING position before considering new entry
         if in_position and position_side != 0:
             if position_side > 0:
-                # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                # Trailing stop: 2.5 * ATR below highest close
                 stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
-                    new_signal = 0.0  # Stoploss overrides entry signal
+                    new_signal = 0.0
             
             if position_side < 0:
-                # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                # Trailing stop: 2.5 * ATR above lowest close
                 stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
-                    new_signal = 0.0  # Stoploss overrides entry signal
+                    new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if Supertrend or HTF bias reverses against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and (st_bearish or bear_trend_1d):
-                new_signal = 0.0  # Trend reversed against long
-            if position_side < 0 and (st_bullish or bull_trend_1d):
-                new_signal = 0.0  # Trend reversed against short
+            if position_side > 0 and bear_trend_1d:
+                new_signal = 0.0
+            if position_side < 0 and bull_trend_1d:
+                new_signal = 0.0
         
-        # === FISHER REVERSAL EXIT ===
-        # Exit if Fisher crosses against position
+        # === EMA REVERSAL EXIT ===
         if in_position and new_signal != 0.0:
-            if position_side > 0 and fisher_bearish_cross:
-                new_signal = 0.0  # Fisher crossed against long
-            if position_side < 0 and fisher_bullish_cross:
-                new_signal = 0.0  # Fisher crossed against short
+            if position_side > 0 and ema_bearish:
+                new_signal = 0.0
+            if position_side < 0 and ema_bullish:
+                new_signal = 0.0
         
-        # === UPDATE POSITION TRACKING FOR NEXT BAR ===
+        # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
             if not in_position:
-                # Entering new position
                 in_position = True
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
-                # Reversing position
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
         else:
-            # Exiting position (signal-based or stoploss)
             if in_position:
                 in_position = False
                 position_side = 0
