@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #083: 12h Supertrend with 1d HMA Trend Filter + RSI Pullback
-Hypothesis: 12h Supertrend captures sustained trends without whipsaw. 1d HMA provides
-higher-timeframe bias. RSI pullback entries (not breakouts) work better in bear/range markets.
-Key insight from #076 success: Supertrend + 1d HMA + RSI worked on 4h. Adapting for 12h
-with simpler entry conditions to ensure sufficient trades on all symbols.
+Experiment #084: 1d Supertrend with 4h HMA Trend Filter + RSI Pullback
+Hypothesis: 1d Supertrend captures major trends without whipsaw. 4h HMA provides
+responsive trend bias (faster than 1d HMA). RSI pullback entries work better than
+breakouts in bear/range markets (2022 crash, 2025 bear).
 
-Why this might work on 12h:
-- Supertrend(10,3) is proven trend indicator that works on slower timeframes
-- 1d HMA(21) filters counter-trend trades (critical for BTC/ETH in 2022 crash)
-- RSI pullback (not breakout) entries work better in bear/range markets
-- Fewer filters = more trades (learned from #077 negative Sharpe due to over-filtering)
+Why this might work on 1d:
+- 1d Supertrend(10,3) filters out noise, only captures sustained moves
+- 4h HMA(21) is faster than 1d HMA, provides earlier trend signals
+- RSI pullback (30-70 range) ensures entries during trend continuations
+- Looser filters than #083 to ensure >=10 trades on train (critical for 1d)
 - ATR stoploss at 2.5x protects from catastrophic moves
 
-Timeframe: 12h (REQUIRED), HTF: 1d via mtf_data helper (call ONCE before loop).
+Timeframe: 1d (REQUIRED for this experiment), HTF: 4h via mtf_data helper.
 Position sizing: 0.25 base, 0.30 strong signals (discrete levels per Rule 4).
+Stoploss: 2.5 * ATR trailing stop.
+
+Key difference from #083 (12h): Using 1d primary with 4h HTF (not 1d HTF).
+4h is more responsive for trend bias while 1d Supertrend filters noise.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_supertrend_1d_hma_rsi_pullback_v2"
-timeframe = "12h"
+name = "mtf_1d_supertrend_4h_hma_rsi_pullback_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -121,15 +124,15 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     ema_21 = calculate_ema(close, 21)
@@ -158,7 +161,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -167,9 +170,9 @@ def generate_signals(prices):
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 1d HMA = higher timeframe trend bias
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
+        # 4h HMA = higher timeframe trend bias (faster than 1d)
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
         
         # === SUPERTREND SIGNAL ===
         supertrend_long = supertrend_direction[i] == 1
@@ -180,21 +183,20 @@ def generate_signals(prices):
         ema_bearish = ema_21[i] < ema_50[i]
         
         # === RSI FILTER (pullback entries, not extremes) ===
-        # For longs: RSI pulled back but still bullish (40-60 range)
-        rsi_pullback_long = 35 <= rsi[i] <= 60
-        # For shorts: RSI bounced but still bearish (40-65 range)
-        rsi_pullback_short = 40 <= rsi[i] <= 65
+        # Looser ranges to ensure trades on 1d timeframe
+        rsi_neutral_long = 30 <= rsi[i] <= 70
+        rsi_neutral_short = 30 <= rsi[i] <= 70
         
         # RSI momentum
-        rsi_momentum_long = rsi[i] > 45
-        rsi_momentum_short = rsi[i] < 55
+        rsi_momentum_long = rsi[i] > 40
+        rsi_momentum_short = rsi[i] < 60
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS ===
-        # Path 1: Supertrend long + 1d bullish + RSI pullback (primary)
-        if supertrend_long and bull_trend_1d:
-            if rsi_pullback_long or rsi_momentum_long:
+        # Path 1: Supertrend long + 4h bullish + RSI neutral (primary)
+        if supertrend_long and bull_trend_4h:
+            if rsi_neutral_long:
                 if ema_bullish:
                     new_signal = SIZE_STRONG
                 else:
@@ -202,21 +204,21 @@ def generate_signals(prices):
         
         # Path 2: Supertrend long + EMA bullish (simpler, ensures trades)
         if supertrend_long and ema_bullish:
-            if rsi[i] > 40 and rsi[i] < 70:
+            if rsi_momentum_long:
                 if new_signal == 0.0:
                     new_signal = SIZE_BASE
         
-        # Path 3: Price above 1d HMA + Supertrend long (trend continuation)
-        if bull_trend_1d and supertrend_long:
+        # Path 3: Price above 4h HMA + Supertrend long (trend continuation)
+        if bull_trend_4h and supertrend_long:
             if close[i] > ema_21[i]:
-                if rsi[i] > 45 and rsi[i] < 65:
+                if rsi[i] > 35 and rsi[i] < 65:
                     if new_signal == 0.0:
                         new_signal = SIZE_BASE
         
         # === SHORT ENTRY CONDITIONS ===
-        # Path 1: Supertrend short + 1d bearish + RSI pullback (primary)
-        if supertrend_short and bear_trend_1d:
-            if rsi_pullback_short or rsi_momentum_short:
+        # Path 1: Supertrend short + 4h bearish + RSI neutral (primary)
+        if supertrend_short and bear_trend_4h:
+            if rsi_neutral_short:
                 if ema_bearish:
                     new_signal = -SIZE_STRONG
                 else:
@@ -224,14 +226,14 @@ def generate_signals(prices):
         
         # Path 2: Supertrend short + EMA bearish (simpler, ensures trades)
         if supertrend_short and ema_bearish:
-            if rsi[i] > 30 and rsi[i] < 60:
+            if rsi_momentum_short:
                 if new_signal == 0.0:
                     new_signal = -SIZE_BASE
         
-        # Path 3: Price below 1d HMA + Supertrend short (trend continuation)
-        if bear_trend_1d and supertrend_short:
+        # Path 3: Price below 4h HMA + Supertrend short (trend continuation)
+        if bear_trend_4h and supertrend_short:
             if close[i] < ema_21[i]:
-                if rsi[i] > 35 and rsi[i] < 55:
+                if rsi[i] > 35 and rsi[i] < 65:
                     if new_signal == 0.0:
                         new_signal = -SIZE_BASE
         
@@ -254,8 +256,6 @@ def generate_signals(prices):
                 new_signal = 0.0  # Stoploss hit
         
         # Update position tracking
-        prev_signal = signals[i - 1] if i > 0 else 0.0
-        
         # Entering new position
         if new_signal != 0.0 and not in_position:
             in_position = True
