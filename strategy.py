@@ -1,63 +1,51 @@
 #!/usr/bin/env python3
 """
-Experiment #443: 12h Multi-Signal Ensemble with Daily Trend Filter
+Experiment #444: 1d Simplified Trend-RSI with 4h HMA Filter
 
-Hypothesis: After 442 failed experiments, the key lesson is that 12h strategies
-fail when entry conditions are too strict (0 trades like #437) or too simple
-(negative Sharpe). This strategy uses THREE INDEPENDENT ENTRY SIGNALS where
-ANY can trigger an entry, ensuring sufficient trade frequency:
+Hypothesis: After 431 failed experiments, the key insight is that complex ensembles
+on 1d create conflicting signals and negative Sharpe. This strategy SIMPLIFIES:
 
-1. DAILY HMA(21) TREND BIAS (via mtf_data helper):
-   - Long bias when price > 1d HMA
-   - Short bias when price < 1d HMA
-   - More responsive than weekly, better for 12h entry timing
+1. SINGLE HTF FILTER: 4h HMA(21) trend bias (proven in best strategy #442)
+   - Long only when price > 4h HMA
+   - Short only when price < 4h HMA
+   - HMA smoother than EMA, reduces whipsaws
 
-2. THREE INDEPENDENT ENTRY SIGNALS (any can trigger):
-   a) RSI(14) MEAN REVERSION: RSI < 30 (long) or > 70 (short)
-      - Must align with daily trend bias
-      - Looser thresholds ensure trades in ranging markets
-   
-   b) KAMA(10,2,30) CROSSOVER: Fast KAMA crosses slow KAMA
-      - Adaptive to volatility (Kaufman's Adaptive MA)
-      - Works in both trending and ranging regimes
-      - Only requires daily trend alignment
-   
-   c) ROC(10) MOMENTUM BURST: ROC > 4% (long) or < -4% (short)
-      - Captures momentum bursts on 12h timeframe
-      - Confirms entry direction with price momentum
+2. PRIMARY SIGNAL: RSI(14) mean reversion WITH trend bias
+   - Long: RSI < 40 (looser than 30 to ensure trades) + price > 4h HMA
+   - Short: RSI > 60 (looser than 70) + price < 4h HMA
+   - Mean reversion works well in 2025 bear/range market
 
-3. NO ADX FILTER (CRITICAL CHANGE from #437):
-   - ADX was blocking 60%+ of potential entries
-   - Daily HMA handles regime detection instead
-   - Ensures 20-50 trades/year per symbol
+3. REGIME CONFIRMATION: Bollinger Band position
+   - Long: price < BB_lower + trend bull (oversold in uptrend)
+   - Short: price > BB_upper + trend bear (overbought in downtrend)
+   - Adds confluence without over-filtering
 
-4. ATR(14) TRAILING STOP at 2.5x:
-   - Signal → 0 when price moves 2.5*ATR against position
+4. ATR(14) TRAILING STOP at 2.5x
    - Critical for 2022-style crash protection
+   - Signal → 0 when stop hit
 
-5. POSITION SIZING: 0.30 discrete (conservative for 12h volatility)
-   - 30% capital per position max
+5. POSITION SIZING: 0.28 discrete
+   - Conservative for daily volatility
    - Discrete levels minimize fee churn
 
-Why this should work on 12h:
-- Three independent signals = 3x trade opportunities vs single-signal
-- No ADX filter = more entries (learned from #437 zero trades failure)
-- Daily HMA = responsive enough for 12h entries, smoother than 12h MA
-- KAMA adapts to volatility = fewer whipsaws in chop
-- Should generate 30-60 trades/year per symbol (well above 10 minimum)
-- Conservative 0.30 sizing protects against 77% BTC crash
+Why this should beat #432 (Sharpe=-0.181):
+- SIMPLER logic = fewer conflicting signals
+- 4h HMA proven in best strategy (Sharpe=0.676)
+- Looser RSI thresholds (40/60 vs 35/65) = more trades
+- BB position adds confluence without over-filtering
+- Should work on BTC/ETH/SOL individually (not SOL-biased)
 
-Timeframe: 12h (REQUIRED for experiment #443)
-HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.30 discrete levels
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.28 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_rsi_roc_daily_hma_ensemble_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_simplified_rsi_4h_hma_bb_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -80,33 +68,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman's Adaptive Moving Average."""
-    n = len(close)
-    kama = np.full(n, np.nan)
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        change = np.abs(close[i] - close[i - er_period])
-        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        if volatility > 0:
-            er[i] = change / volatility
-        else:
-            er[i] = 0
-    
-    # Calculate smoothing constant (SC)
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama[er_period] = close[er_period]
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama
-
 def calculate_rsi(close, period=14):
     """Calculate Relative Strength Index."""
     close_s = pd.Series(close)
@@ -121,11 +82,14 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_roc(close, period=10):
-    """Calculate Rate of Change (momentum)."""
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
     close_s = pd.Series(close)
-    roc = close_s.pct_change(periods=period) * 100
-    return roc.values
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return upper.values, lower.values, sma.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -134,31 +98,23 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    
-    # RSI for mean reversion
     rsi = calculate_rsi(close, 14)
-    
-    # KAMA crossover (adaptive trend)
-    kama_fast = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    kama_slow = calculate_kama(close, er_period=20, fast_period=5, slow_period=50)
-    
-    # ROC for momentum
-    roc = calculate_roc(close, 10)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.30
+    SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -173,56 +129,39 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
+        if np.isnan(rsi[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(roc[i]):
-            signals[i] = 0.0
-            continue
+        # === 4H HMA TREND BIAS ===
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === DAILY HMA TREND BIAS ===
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
+        # === RSI SIGNAL (looser thresholds for more trades) ===
+        rsi_long = rsi[i] < 40  # Oversold (looser than 30)
+        rsi_short = rsi[i] > 60  # Overbought (looser than 70)
         
-        # === SIGNAL 1: RSI MEAN REVERSION ===
-        rsi_long = rsi[i] < 30  # Oversold
-        rsi_short = rsi[i] > 70  # Overbought
+        # === BOLLINGER BAND POSITION ===
+        bb_oversold = close[i] < bb_lower[i]  # Price below lower band
+        bb_overbought = close[i] > bb_upper[i]  # Price above upper band
         
-        # === SIGNAL 2: KAMA CROSSOVER ===
-        kama_long = kama_fast[i] > kama_slow[i] and kama_fast[i-1] <= kama_slow[i-1]
-        kama_short = kama_fast[i] < kama_slow[i] and kama_fast[i-1] >= kama_slow[i-1]
-        
-        # === SIGNAL 3: ROC MOMENTUM BURST ===
-        roc_long = roc[i] > 4.0  # Strong upward momentum
-        roc_short = roc[i] < -4.0  # Strong downward momentum
-        
-        # === GENERATE SIGNAL (Ensemble - any signal can trigger) ===
+        # === GENERATE SIGNAL (simplified logic) ===
         new_signal = 0.0
         
-        # RSI MEAN REVERSION (works in any regime, must align with trend)
-        if new_signal == 0.0:
-            if rsi_long and bull_trend_1d:
+        # LONG: RSI oversold + bull trend + BB oversold confirmation
+        if rsi_long and bull_trend_4h:
+            # BB oversold adds confluence but not required
+            if bb_oversold or rsi[i] < 35:  # Either BB confirmation or very oversold RSI
                 new_signal = SIZE
-            elif rsi_short and bear_trend_1d:
-                new_signal = -SIZE
         
-        # KAMA CROSSOVER (adaptive trend following)
-        if new_signal == 0.0:
-            if kama_long and bull_trend_1d:
-                new_signal = SIZE
-            elif kama_short and bear_trend_1d:
-                new_signal = -SIZE
-        
-        # ROC MOMENTUM (confirms strong moves)
-        if new_signal == 0.0:
-            if roc_long and bull_trend_1d:
-                new_signal = SIZE
-            elif roc_short and bear_trend_1d:
+        # SHORT: RSI overbought + bear trend + BB overbought confirmation
+        if rsi_short and bear_trend_4h:
+            # BB overbought adds confluence but not required
+            if bb_overbought or rsi[i] > 65:  # Either BB confirmation or very overbought RSI
                 new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
@@ -245,9 +184,9 @@ def generate_signals(prices):
         
         # === TREND REVERSAL EXIT ===
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_1d:
+            if position_side > 0 and bear_trend_4h:
                 new_signal = 0.0
-            if position_side < 0 and bull_trend_1d:
+            if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
