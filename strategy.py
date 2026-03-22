@@ -1,65 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #018: 1d Regime-Adaptive Z-Score + Donchian Breakout + 4h HMA Trend
-Hypothesis: Daily timeframe captures major regime changes better than lower TFs.
-Combines mean reversion (Z-score) in range markets with breakout (Donchian) in trend markets.
-4h HMA provides trend bias to avoid counter-trend trades. Bollinger bandwidth detects regime.
-ATR trailing stop at 2.5*ATR limits drawdown on daily moves.
-Timeframe: 1d (REQUIRED), HTF: 4h via mtf_data helper.
-Position sizing: 0.20-0.35 discrete levels, asymmetric based on regime confidence.
-Key innovation: Regime-adaptive logic switches between mean reversion and breakout strategies.
+Experiment #019: 15m MACD Volume Breakout + 1h HMA Trend Filter
+Hypothesis: MACD momentum with volume confirmation generates more reliable signals than RSI mean-reversion on 15m.
+Combined with 1h HMA trend filter to avoid counter-trend trades. Volume spike (1.5x avg) confirms breakout validity.
+This should generate MORE trades than CRSI strategies (which had 0 trades in exp#014) while maintaining quality.
+Timeframe: 15m (REQUIRED), HTF: 1h via mtf_data helper.
+Position sizing: 0.25 base, 0.30 max, discrete levels to minimize fee churn.
+Key innovation: Volume confirmation reduces false breakouts, MACD histogram crossover provides timely entries.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_regime_adaptive_zscore_donchian_4h_hma_v1"
-timeframe = "1d"
+name = "mtf_15m_macd_vol_1h_hma_trend_v1"
+timeframe = "15m"
 leverage = 1.0
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion signals."""
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    zscore = (close - sma) / std
-    zscore[np.isnan(zscore)] = 0.0
-    return zscore
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian channels for breakout signals."""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and bandwidth."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma
-    bandwidth[np.isnan(bandwidth)] = 0.0
-    return upper, lower, bandwidth, sma
-
-def calculate_atr(high, low, close, period=14):
-    """Calculate ATR using Wilder's smoothing."""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -71,78 +36,68 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX for trend strength."""
-    n = len(close)
-    adx = np.zeros(n)
-    adx[:] = np.nan
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        plus_dm[i] = max(0, high[i] - high[i - 1]) if (high[i] - high[i - 1]) > (low[i - 1] - low[i]) else 0
-        minus_dm[i] = max(0, low[i - 1] - low[i]) if (low[i - 1] - low[i]) > (high[i] - high[i - 1]) else 0
-    
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
+def calculate_atr(high, low, close, period=14):
+    """Calculate ATR using Wilder's smoothing."""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    for i in range(period, n):
-        if atr[i] > 0:
-            plus_di[i] = 100 * plus_dm_s[i] / atr[i]
-            minus_di[i] = 100 * minus_dm_s[i] / atr[i]
-    
-    dx = np.zeros(n)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
+    return atr
+
+def calculate_volume_spike(volume, period=20, threshold=1.5):
+    """Detect volume spikes relative to rolling average."""
+    vol_s = pd.Series(volume)
+    vol_avg = vol_s.rolling(window=period, min_periods=period).mean().values
+    vol_ratio = volume / vol_avg
+    vol_ratio[np.isnan(vol_ratio)] = 1.0
+    vol_ratio[np.isinf(vol_ratio)] = 1.0
+    return vol_ratio
+
+def calculate_ema(close, period):
+    """Calculate exponential moving average."""
+    close_s = pd.Series(close)
+    return close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian channel (highest high and lowest low over period)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    upper = high_s.rolling(window=period, min_periods=period).max().values
+    lower = low_s.rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1h = get_htf_data(prices, '1h')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1h = calculate_hma(df_1h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
+    macd_line, signal_line, histogram = calculate_macd(close, fast=12, slow=26, signal=9)
     atr = calculate_atr(high, low, close, 14)
-    zscore = calculate_zscore(close, 20)
+    vol_ratio = calculate_volume_spike(volume, period=20, threshold=1.5)
+    ema_50 = calculate_ema(close, 50)
+    ema_200 = calculate_ema(close, 200)
     donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    bb_upper, bb_lower, bb_bandwidth, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
-    adx = calculate_adx(high, low, close, 14)
-    
-    # Additional trend filter
-    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels to minimize fee churn (Rule 4)
     SIZE_BASE = 0.25
-    SIZE_MAX = 0.35
-    SIZE_HALF = 0.15
+    SIZE_MAX = 0.30
+    SIZE_EXIT = 0.0
     
     # Track positions for stoploss
     position_side = 0
@@ -151,89 +106,67 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    # Bollinger bandwidth percentile for regime detection
-    bb_percentile = pd.Series(bb_bandwidth).rolling(window=100, min_periods=100).apply(
-        lambda x: np.sum(x[:-1] < x[-1]) / len(x[:-1]) * 100 if len(x) > 1 else 50
-    ).values
-    bb_percentile[np.isnan(bb_percentile)] = 50.0
-    
-    # ADX rolling average for trend confirmation
-    adx_avg = pd.Series(adx).rolling(window=10, min_periods=10).mean().values
-    adx_avg[np.isnan(adx_avg)] = 20.0
-    
-    for i in range(250, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(zscore[i]) or np.isnan(bb_bandwidth[i]):
+        if np.isnan(macd_line[i]) or np.isnan(signal_line[i]) or np.isnan(histogram[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(adx[i]):
+        if np.isnan(ema_50[i]) or np.isnan(ema_200[i]):
             signals[i] = 0.0
             continue
         
-        # 4h trend bias (HTF)
-        bull_trend = close[i] > hma_4h_aligned[i]
-        bear_trend = close[i] < hma_4h_aligned[i]
+        # 1h trend bias (HTF)
+        bull_trend = close[i] > hma_1h_aligned[i]
+        bear_trend = close[i] < hma_1h_aligned[i]
         
-        # Regime detection
-        range_regime = bb_percentile[i] < 40  # Bottom 40% = ranging
-        trend_regime = bb_percentile[i] > 60  # Top 40% = trending
-        strong_trend = adx[i] > 25 and adx_avg[i] > 20
+        # MACD momentum signals
+        macd_bull_cross = histogram[i] > 0 and histogram[i-1] <= 0  # Histogram crosses above zero
+        macd_bear_cross = histogram[i] < 0 and histogram[i-1] >= 0  # Histogram crosses below zero
+        macd_positive = histogram[i] > 0
+        macd_negative = histogram[i] < 0
         
-        # Z-score mean reversion signals
-        zscore_oversold = zscore[i] < -1.5
-        zscore_overbought = zscore[i] > 1.5
-        zscore_extreme_oversold = zscore[i] < -2.0
-        zscore_extreme_overbought = zscore[i] > 2.0
-        
-        # Donchian breakout signals
-        donchian_breakout_long = close[i] > donchian_upper[i] * 0.995
-        donchian_breakout_short = close[i] < donchian_lower[i] * 1.005
-        
-        # Price position vs Bollinger Bands
-        price_near_lower = close[i] < bb_lower[i] * 1.01
-        price_near_upper = close[i] > bb_upper[i] * 0.99
+        # Volume confirmation
+        volume_confirmed = vol_ratio[i] > 1.3  # Volume 30% above average
         
         # EMA trend confirmation
         ema_bullish = close[i] > ema_50[i] and close[i] > ema_200[i]
         ema_bearish = close[i] < ema_50[i] and close[i] < ema_200[i]
         
+        # Donchian breakout
+        breakout_high = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
+        breakout_low = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
+        
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Mean reversion: Z-score extreme oversold + range regime + 4h bull trend
-        if zscore_extreme_oversold and range_regime and bull_trend:
+        # Primary: MACD bull cross + volume confirmed + 1h bull trend
+        if macd_bull_cross and volume_confirmed and bull_trend:
             new_signal = SIZE_MAX
-        # Mean reversion: Z-score oversold + price near lower BB + 4h bull trend
-        elif zscore_oversold and price_near_lower and bull_trend:
+        # Secondary: MACD positive + EMA bullish + 1h bull trend
+        elif macd_positive and ema_bullish and bull_trend:
             new_signal = SIZE_BASE
-        # Breakout: Donchian breakout + strong trend + 4h bull trend
-        elif donchian_breakout_long and strong_trend and bull_trend:
-            new_signal = SIZE_MAX
-        # Breakout: Donchian breakout + EMA bullish + 4h bull trend
-        elif donchian_breakout_long and ema_bullish and bull_trend:
+        # Tertiary: Donchian breakout high + volume + 1h bull trend
+        elif breakout_high and volume_confirmed and bull_trend:
             new_signal = SIZE_BASE
         
         # === SHORT ENTRY ===
-        # Mean reversion: Z-score extreme overbought + range regime + 4h bear trend
-        if zscore_extreme_overbought and range_regime and bear_trend:
+        # Primary: MACD bear cross + volume confirmed + 1h bear trend
+        if macd_bear_cross and volume_confirmed and bear_trend:
             new_signal = -SIZE_MAX
-        # Mean reversion: Z-score overbought + price near upper BB + 4h bear trend
-        elif zscore_overbought and price_near_upper and bear_trend:
+        # Secondary: MACD negative + EMA bearish + 1h bear trend
+        elif macd_negative and ema_bearish and bear_trend:
             new_signal = -SIZE_BASE
-        # Breakout: Donchian breakout + strong trend + 4h bear trend
-        elif donchian_breakout_short and strong_trend and bear_trend:
-            new_signal = -SIZE_MAX
-        # Breakout: Donchian breakout + EMA bearish + 4h bear trend
-        elif donchian_breakout_short and ema_bearish and bear_trend:
+        # Tertiary: Donchian breakout low + volume + 1h bear trend
+        elif breakout_low and volume_confirmed and bear_trend:
             new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -243,7 +176,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for daily)
+            # Calculate trailing stop (2.5*ATR for 15m timeframe)
             current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -258,7 +191,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for daily)
+            # Calculate trailing stop (2.5*ATR for 15m timeframe)
             current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
