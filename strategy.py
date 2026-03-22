@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #043: 15m Multi-Timeframe Trend-Follow with 4h HMA Bias
-Hypothesis: 15m timeframe captures shorter-term momentum while 4h HMA provides strong regime filter.
-Key insight: Previous 15m strategies failed due to over-complexity (CRSI, Choppiness) or weak HTF filters.
-This strategy uses: 4h HMA for trend bias, 15m EMA crossover for entries, ADX filter to avoid ranges,
-RSI confirmation (not extreme values), and ATR trailing stops. Simpler = more robust.
-Timeframe: 15m (REQUIRED for exp#043), HTF: 4h via mtf_data helper.
-Why this might work: 15m has more signals than 1h/4h, 4h HMA smoother than 1h for regime detection.
+Experiment #044: 30m Adaptive Regime Strategy with 4h HMA Trend Bias
+Hypothesis: 30m timeframe captures intraday swings while 4h HMA provides regime filter.
+Key insight: Most failed 30m strategies used单一 logic (only trend or only mean-revert).
+This strategy ADAPTS to market regime using Bollinger Band Width percentile:
+- Low BBW (<30th pct) = squeeze/range → mean reversion entries at BB bounds
+- High BBW (>70th pct) = trending → momentum breakouts with trend
+- 4h HMA bias determines long/short preference (asymmetric positioning)
+Position sizing: 0.20-0.30 discrete levels, ATR stoploss at 2.5*ATR
+Why this might work: Adapts to changing volatility regimes, avoids whipsaw in ranges
 Must generate 10+ trades on train, 3+ on test - entry conditions loosened vs failed experiments.
-Position sizing: 0.20-0.30 discrete levels to minimize fee churn while controlling drawdown.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_trend_4h_hma_ema_rsi_adx_v1"
-timeframe = "15m"
+name = "mtf_30m_adaptive_regime_4h_hma_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -61,74 +62,34 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and bandwidth."""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / (sma + 1e-10)
+    return upper, lower, sma, bandwidth
+
 def calculate_ema(close, period):
     """Calculate EMA."""
     return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX for trend strength."""
-    n = len(close)
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    
-    # Smoothed values
-    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Avoid division by zero
-    plus_di = np.where(atr > 0, 100 * plus_di / atr, 0)
-    minus_di = np.where(atr > 0, 100 * minus_di / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
+def calculate_zscore(close, period=20):
+    """Calculate Z-score for mean reversion filter."""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    zscore = (close - sma) / (std + 1e-10)
+    return zscore
 
-def calculate_supertrend(high, low, close, period=10, mult=3.0):
-    """Calculate Supertrend for trend direction."""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    
-    upper = hl2 + mult * atr
-    lower = hl2 - mult * atr
-    
-    supertrend = np.zeros(len(close))
-    trend = np.ones(len(close))  # 1 = bullish, -1 = bearish
-    
-    supertrend[0] = upper[0]
-    for i in range(1, len(close)):
-        if trend[i-1] == 1:
-            if close[i] < lower[i]:
-                trend[i] = -1
-                supertrend[i] = upper[i]
-            else:
-                trend[i] = 1
-                supertrend[i] = max(lower[i], supertrend[i-1])
-        else:
-            if close[i] > upper[i]:
-                trend[i] = 1
-                supertrend[i] = lower[i]
-            else:
-                trend[i] = -1
-                supertrend[i] = min(upper[i], supertrend[i-1])
-    
-    return supertrend, trend
+def calculate_percentile_rank(series, window=100):
+    """Calculate rolling percentile rank."""
+    def pr(x):
+        if len(x) < 2:
+            return 0.5
+        return (x < x[-1]).sum() / (len(x) - 1)
+    pr_values = pd.Series(series).rolling(window=window, min_periods=max(20, window//2)).apply(pr, raw=False).values
+    return pr_values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -145,20 +106,22 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    ema_9 = calculate_ema(close, 9)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
     ema_200 = calculate_ema(close, 200)
-    adx = calculate_adx(high, low, close, 14)
+    zscore = calculate_zscore(close, 20)
     
-    # Supertrend for trend confirmation
-    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
+    # Bollinger Bands for regime detection
+    bb_upper, bb_lower, bb_mid, bb_bandwidth = calculate_bollinger_bands(close, 20, 2.0)
     
-    # HMA on 15m for faster trend
-    hma_15m = calculate_hma(close, 21)
+    # BBW percentile rank for regime detection
+    bbw_pct_rank = calculate_percentile_rank(bb_bandwidth, 100)
+    
+    # HMA on 30m for faster trend
+    hma_30m = calculate_hma(close, 21)
     
     signals = np.zeros(n)
     
@@ -183,7 +146,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(ema_9[i]) or np.isnan(adx[i]):
+        if np.isnan(rsi[i]) or np.isnan(ema_21[i]) or np.isnan(bb_bandwidth[i]):
             signals[i] = 0.0
             continue
         
@@ -191,40 +154,39 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # 15m trend confirmation
-        bull_trend_15m = ema_9[i] > ema_21[i] and ema_21[i] > ema_50[i]
-        bear_trend_15m = ema_9[i] < ema_21[i] and ema_21[i] < ema_50[i]
-        
-        # Supertrend confirmation
-        st_bullish = st_trend[i] == 1
-        st_bearish = st_trend[i] == -1
+        # 30m trend confirmation
+        bull_trend_30m = close[i] > ema_50[i] and ema_21[i] > ema_50[i]
+        bear_trend_30m = close[i] < ema_50[i] and ema_21[i] < ema_50[i]
         
         # Long-term trend filter
         above_200 = not np.isnan(ema_200[i]) and close[i] > ema_200[i]
         below_200 = not np.isnan(ema_200[i]) and close[i] < ema_200[i]
         
-        # ADX filter - avoid ranging markets (LOOSENED for more trades)
-        trending_market = adx[i] > 18  # Lower threshold for 15m
+        # Regime detection via BBW percentile
+        low_vol_regime = not np.isnan(bbw_pct_rank[i]) and bbw_pct_rank[i] < 0.30
+        high_vol_regime = not np.isnan(bbw_pct_rank[i]) and bbw_pct_rank[i] > 0.70
+        normal_regime = not low_vol_regime and not high_vol_regime
         
-        # RSI conditions - LOOSENED for more trades (not extreme values)
-        rsi_bullish = 40 < rsi[i] < 70  # Wider range for more entries
-        rsi_bearish = 30 < rsi[i] < 60
-        rsi_momentum_long = rsi[i] > 50
-        rsi_momentum_short = rsi[i] < 50
+        # Price position relative to BB
+        near_bb_lower = close[i] <= bb_lower[i] * 1.005
+        near_bb_upper = close[i] >= bb_upper[i] * 0.995
+        near_bb_mid = abs(close[i] - bb_mid[i]) < (bb_upper[i] - bb_lower[i]) * 0.25
         
-        # HMA crossover on 15m
+        # RSI conditions - LOOSENED for more trades
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
+        rsi_neutral_long = 35 < rsi[i] < 55
+        rsi_neutral_short = 45 < rsi[i] < 65
+        
+        # Z-score filter - avoid extreme entries
+        zscore_neutral = abs(zscore[i]) < 2.0
+        
+        # HMA crossover on 30m
         hma_cross_long = False
         hma_cross_short = False
-        if i >= 1 and not np.isnan(hma_15m[i]) and not np.isnan(hma_15m[i-1]):
-            hma_cross_long = hma_15m[i] > ema_21[i] and hma_15m[i-1] <= ema_21[i-1]
-            hma_cross_short = hma_15m[i] < ema_21[i] and hma_15m[i-1] >= ema_21[i-1]
-        
-        # EMA crossover on 15m
-        ema_cross_long = False
-        ema_cross_short = False
-        if i >= 1:
-            ema_cross_long = ema_9[i] > ema_21[i] and ema_9[i-1] <= ema_21[i-1]
-            ema_cross_short = ema_9[i] < ema_21[i] and ema_9[i-1] >= ema_21[i-1]
+        if i >= 1 and not np.isnan(hma_30m[i]) and not np.isnan(hma_30m[i-1]):
+            hma_cross_long = hma_30m[i] > ema_50[i] and hma_30m[i-1] <= ema_50[i-1]
+            hma_cross_short = hma_30m[i] < ema_50[i] and hma_30m[i-1] >= ema_50[i-1]
         
         # Price pullback to EMA21
         price_near_ema21_long = close[i] <= ema_21[i] * 1.015 and close[i] >= ema_21[i] * 0.985
@@ -239,48 +201,60 @@ def generate_signals(prices):
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (only when 4h bullish) ===
-        if bull_trend_4h:
-            # Primary: EMA crossover with trend confirmation
-            if ema_cross_long and bull_trend_15m and trending_market:
-                new_signal = SIZE_BASE
+        # === REGIME 1: LOW VOLATILITY (Range/Mean Reversion) ===
+        if low_vol_regime:
+            # Long: Price at lower BB + oversold RSI + 4h bullish bias preferred
+            if near_bb_lower and rsi_oversold:
+                if bull_trend_4h or (bull_trend_30m and above_200):
+                    new_signal = SIZE_BASE
+                elif zscore[i] < -1.5:
+                    new_signal = SIZE_HALF
             
-            # Secondary: HMA crossover with 4h confirmation
-            elif hma_cross_long and bull_trend_4h and st_bullish:
-                new_signal = SIZE_BASE
-            
-            # Tertiary: RSI momentum in uptrend
-            elif rsi_momentum_long and bull_trend_15m and above_200:
-                new_signal = SIZE_HALF
-            
-            # Pullback: Price near EMA21 with RSI confirmation
-            elif price_near_ema21_long and rsi_bullish and bull_trend_4h:
-                new_signal = SIZE_HALF
-            
-            # Momentum: Higher low with trend
-            elif higher_low and bull_trend_15m and rsi[i] > 45:
-                new_signal = SIZE_HALF
+            # Short: Price at upper BB + overbought RSI + 4h bearish bias preferred
+            elif near_bb_upper and rsi_overbought:
+                if bear_trend_4h or (bear_trend_30m and below_200):
+                    new_signal = -SIZE_BASE
+                elif zscore[i] > 1.5:
+                    new_signal = -SIZE_HALF
         
-        # === SHORT ENTRIES (only when 4h bearish) ===
-        elif bear_trend_4h:
-            # Primary: EMA crossover with trend confirmation
-            if ema_cross_short and bear_trend_15m and trending_market:
+        # === REGIME 2: HIGH VOLATILITY (Trending/Breakout) ===
+        elif high_vol_regime:
+            # Long: HMA crossover + trend confirmation + 4h bullish
+            if hma_cross_long and bull_trend_30m and bull_trend_4h:
+                new_signal = SIZE_BASE
+            
+            # Short: HMA crossover + trend confirmation + 4h bearish
+            elif hma_cross_short and bear_trend_30m and bear_trend_4h:
                 new_signal = -SIZE_BASE
             
-            # Secondary: HMA crossover with 4h confirmation
-            elif hma_cross_short and bear_trend_4h and st_bearish:
-                new_signal = -SIZE_BASE
+            # Momentum: Higher low with strong trend
+            elif higher_low and bull_trend_4h and rsi[i] > 50:
+                new_signal = SIZE_HALF
             
-            # Tertiary: RSI momentum in downtrend
-            elif rsi_momentum_short and bear_trend_15m and below_200:
+            # Momentum: Lower high with strong trend
+            elif lower_high and bear_trend_4h and rsi[i] < 50:
                 new_signal = -SIZE_HALF
+        
+        # === REGIME 3: NORMAL VOLATILITY (Pullback Entries) ===
+        else:
+            # Long: Pullback to EMA21 in uptrend
+            if price_near_ema21_long and rsi_neutral_long:
+                if bull_trend_4h and above_200:
+                    new_signal = SIZE_BASE
+                elif bull_trend_30m:
+                    new_signal = SIZE_HALF
             
-            # Pullback: Price near EMA21 with RSI confirmation
-            elif price_near_ema21_short and rsi_bearish and bear_trend_4h:
-                new_signal = -SIZE_HALF
+            # Short: Bounce to EMA21 in downtrend
+            elif price_near_ema21_short and rsi_neutral_short:
+                if bear_trend_4h and below_200:
+                    new_signal = -SIZE_BASE
+                elif bear_trend_30m:
+                    new_signal = -SIZE_HALF
             
-            # Momentum: Lower high with trend
-            elif lower_high and bear_trend_15m and rsi[i] < 55:
+            # Z-score mean reversion
+            elif zscore[i] < -1.8 and bull_trend_4h:
+                new_signal = SIZE_HALF
+            elif zscore[i] > 1.8 and bear_trend_4h:
                 new_signal = -SIZE_HALF
         
         # === STOPLOSS LOGIC (Rule 6) ===
