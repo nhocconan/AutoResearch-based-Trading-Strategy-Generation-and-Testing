@@ -1,55 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #511: 15m Multi-Timeframe Connors RSI with 4h HMA Bias + 1h ADX Regime
+Experiment #512: 30m Asymmetric Regime-Adaptive with 4h HMA + 1d Volatility Filter
 
-Hypothesis: After analyzing 510 failed experiments, the key insight is that 15m timeframe
-requires STRONGER higher-timeframe filters to avoid noise whipsaws. This strategy combines:
+Hypothesis: After 511 failed experiments, the key insight is that 30m timeframe needs:
+1. Faster regime detection than daily strategies (30m captures intraday swings)
+2. Adaptive RSI thresholds based on rolling percentiles (not fixed 30/70)
+3. Bollinger Band position filter for mean-reversion timing
+4. Volatility regime from 1d ATR ratio to adjust entry sensitivity
+5. Asymmetric logic: bull=buy dips, bear=short rallies (matches BTC/ETH behavior)
 
-1. CONNORS RSI (CRSI) - Proven mean-reversion indicator with 75% win rate in literature
-   CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-   Extreme readings (<10 or >90) signal oversold/overbought conditions
+Why 30m should work:
+- Captures 2-5 day swings (optimal for crypto mean-reversion)
+- Less noise than 15m, more signals than 4h
+- 4h HMA provides trend bias without daily lag
+- 1d ATR ratio detects vol spikes for better entry timing
 
-2. 4h HMA(21) TREND BIAS via mtf_data helper:
-   - Only long when price > 4h HMA (bullish bias)
-   - Only short when price < 4h HMA (bearish bias)
-   - HMA smoother than EMA, less lag than SMA
+Key differences from failed strategies:
+- RSI percentile ranks (adaptive) vs fixed thresholds
+- BB position filter (price within bands) for timing
+- Vol regime adjusts sensitivity (looser in high vol)
+- Ensures sufficient trades with looser combined filters
 
-3. 1h ADX(14) REGIME FILTER via mtf_data helper:
-   - ADX < 25 = ranging market (enable mean-reversion CRSI signals)
-   - ADX >= 25 = trending market (disable mean-reversion, use momentum)
-   - Critical for avoiding CRSI whipsaws in strong trends
-
-4. VOLUME CONFIRMATION:
-   - Volume must be > 0.8 * 20-bar volume MA (avoid low-liquidity traps)
-   - Prevents entries during dead zones
-
-5. ATR(14) TRAILING STOP at 2.5x:
-   - Tighter stop for 15m timeframe volatility
-   - Signal → 0 when price moves 2.5*ATR against position
-
-6. POSITION SIZING: 0.25 discrete (conservative for 15m noise)
-   - Discrete levels minimize fee churn
-   - Lower than daily strategies due to higher frequency
-
-Why this should work on 15m:
-- Connors RSI is specifically designed for short-term mean reversion
-- 4h HMA provides strong trend bias without 15m noise
-- 1h ADX filters out trending periods where mean-reversion fails
-- Volume filter avoids low-liquidity false signals
-- Should generate 50-100 trades/year per symbol (enough for Sharpe)
-- Asymmetric logic (different entry for bull/bear) matches BTC/ETH behavior
-
-Timeframe: 15m (REQUIRED for this experiment)
-HTF: 1h and 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels
-Stoploss: 2.5 * ATR(14) trailing
+Timeframe: 30m (REQUIRED for this experiment)
+HTF: 4h trend bias + 1d volatility regime via mtf_data helper
+Position sizing: 0.25 discrete (conservative for 30m swings)
+Stoploss: 2.5 * ATR(14) trailing (tighter than daily)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_connors_rsi_4h_hma_1h_adx_volume_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_asymmetric_4h_hma_1d_vol_bb_rsi_percentile_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -86,69 +68,22 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_rsi_streak(close, period=2):
-    """
-    Calculate RSI Streak component of Connors RSI.
-    Streak = number of consecutive up/down days
-    RSI_Streak = RSI of the streak values
-    """
-    n = len(close)
-    streak = np.zeros(n)
-    
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif close[i] < close[i-1]:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = 0
-    
-    # Calculate RSI on streak values
-    streak_s = pd.Series(streak)
-    delta = streak_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi_streak = 100 - (100 / (1 + rs))
-    return rsi_streak.values
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return upper.values, lower.values, sma.values
 
-def calculate_percent_rank(close, period=100):
-    """
-    Calculate Percent Rank component of Connors RSI.
-    PercentRank = percentage of past period returns less than current return
-    """
-    n = len(close)
-    percent_rank = np.full(n, np.nan)
-    
-    # Calculate returns
-    returns = np.zeros(n)
-    for i in range(1, n):
-        returns[i] = (close[i] - close[i-1]) / close[i-1] if close[i-1] > 0 else 0
-    
-    for i in range(period, n):
-        current_return = returns[i]
-        past_returns = returns[i-period+1:i]
-        
-        count_lower = np.sum(past_returns < current_return)
-        percent_rank[i] = 100 * count_lower / period
-    
-    return percent_rank
-
-def calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100):
-    """
-    Calculate Connors RSI (CRSI).
-    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    """
-    rsi_close = calculate_rsi(close, rsi_period)
-    rsi_streak = calculate_rsi_streak(close, streak_period)
-    percent_rank = calculate_percent_rank(close, pr_period)
-    
-    crsi = (rsi_close + rsi_streak + percent_rank) / 3
-    return crsi
+def calculate_rsi_percentile(rsi, lookback=50):
+    """Calculate rolling percentile rank of RSI."""
+    rsi_s = pd.Series(rsi)
+    percentile = rsi_s.rolling(window=lookback, min_periods=lookback).apply(
+        lambda x: (x < x.iloc[-1]).sum() / len(x), raw=False
+    )
+    return percentile.values
 
 def calculate_adx(high, low, close, period=14):
     """Calculate Average Directional Index (ADX)."""
@@ -196,34 +131,55 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
-def calculate_volume_ma(volume, period=20):
-    """Calculate volume moving average."""
-    volume_s = pd.Series(volume)
-    return volume_s.rolling(window=period, min_periods=period).mean().values
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average."""
+    n = len(close)
+    kama = np.full(n, np.nan)
+    
+    close_s = pd.Series(close)
+    change = np.abs(close_s.diff(er_period))
+    volatility = close_s.diff().abs().rolling(window=er_period, min_periods=er_period).sum()
+    
+    er = change / volatility.replace(0, np.inf)
+    sc = (er * (2/(fast_period+1) - 2/(slow_period+1)) + 2/(slow_period+1)) ** 2
+    
+    kama[er_period] = close[er_period]
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    df_1h = get_htf_data(prices, '1h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HTF indicators
+    # Calculate 4h HMA for trend bias
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    adx_1h = calculate_adx(df_1h['high'].values, df_1h['low'].values, df_1h['close'].values, 14)
-    
-    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    adx_1h_aligned = align_htf_to_ltf(prices, df_1h, adx_1h)
     
-    # Calculate 15m indicators
+    # Calculate 1d ATR ratio for volatility regime
+    atr_1d = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    atr_1d_sma = pd.Series(atr_1d).rolling(window=30, min_periods=30).mean().values
+    vol_ratio_1d = atr_1d / atr_1d_sma
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    crsi = calculate_connors_rsi(close, 3, 2, 100)
-    volume_ma = calculate_volume_ma(volume, 20)
+    rsi = calculate_rsi(close, 14)
+    rsi_pct = calculate_rsi_percentile(rsi, 50)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
+    adx = calculate_adx(high, low, close, 14)
+    kama = calculate_kama(close, 10, 2, 30)
+    
+    # BB position: where price sits within bands (0=lower, 1=upper)
+    bb_range = bb_upper - bb_lower
+    bb_position = (close - bb_lower) / np.where(bb_range > 1e-10, bb_range, 1)
     
     signals = np.zeros(n)
     
@@ -237,47 +193,74 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(adx_1h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(crsi[i]) or np.isnan(volume_ma[i]) or volume_ma[i] == 0:
+        if np.isnan(rsi[i]) or np.isnan(rsi_pct[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
-        # === 4h HMA TREND BIAS ===
+        if np.isnan(bb_position[i]) or np.isnan(vol_ratio_aligned[i]):
+            signals[i] = 0.0
+            continue
+        
+        # === 4H HMA TREND BIAS ===
         bull_regime = close[i] > hma_4h_aligned[i]
         bear_regime = close[i] < hma_4h_aligned[i]
         
-        # === 1h ADX REGIME FILTER ===
-        adx_value = adx_1h_aligned[i]
-        ranging_market = adx_value < 25
-        trending_market = adx_value >= 25
+        # === 1D VOLATILITY REGIME ===
+        high_vol = vol_ratio_aligned[i] > 1.5
+        low_vol = vol_ratio_aligned[i] < 0.8
         
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > 0.8 * volume_ma[i]
+        # === ADAPTIVE RSI THRESHOLDS ===
+        # Use percentile ranks instead of fixed thresholds
+        rsi_oversold = rsi_pct[i] < 0.20  # Bottom 20% of recent RSI
+        rsi_overbought = rsi_pct[i] > 0.80  # Top 20% of recent RSI
         
-        # === CONNORS RSI EXTREMES ===
-        crsi_oversold = crsi[i] < 10
-        crsi_overbought = crsi[i] > 90
+        # === BB POSITION FILTER ===
+        bb_low = bb_position[i] < 0.25  # Price in lower quarter of bands
+        bb_high = bb_position[i] > 0.75  # Price in upper quarter of bands
         
-        # === ENTRY LOGIC ===
+        # === ASYMMETRIC ENTRY LOGIC ===
         new_signal = 0.0
         
-        # LONG entries (only in bull regime + ranging market + volume confirmed)
-        if bull_regime and ranging_market and volume_confirmed:
-            if crsi_oversold:
+        # BULL REGIME: Favor mean-reversion long (buy dips)
+        if bull_regime:
+            # Looser thresholds in high vol (more opportunities)
+            rsi_threshold = 0.25 if high_vol else 0.20
+            bb_threshold = 0.30 if high_vol else 0.25
+            
+            if rsi_pct[i] < rsi_threshold and bb_position[i] < bb_threshold:
+                # Strong mean-reversion signal: oversold RSI + low BB
+                new_signal = SIZE
+            elif rsi_pct[i] < 0.15 and close[i] > kama[i]:
+                # Very oversold + above KAMA (trend intact)
+                new_signal = SIZE
+            elif bb_position[i] < 0.15 and adx[i] < 25:
+                # Extreme BB low + low ADX (ranging, good for mean-rev)
                 new_signal = SIZE
         
-        # SHORT entries (only in bear regime + ranging market + volume confirmed)
-        if bear_regime and ranging_market and volume_confirmed:
-            if crsi_overbought:
+        # BEAR REGIME: Favor trend-following short (short rallies)
+        if bear_regime:
+            # Looser thresholds in high vol
+            rsi_threshold = 0.75 if high_vol else 0.80
+            bb_threshold = 0.70 if high_vol else 0.75
+            
+            if rsi_pct[i] > rsi_threshold and bb_position[i] > bb_threshold:
+                # Strong mean-reversion signal: overbought RSI + high BB
+                new_signal = -SIZE
+            elif rsi_pct[i] > 0.85 and close[i] < kama[i]:
+                # Very overbought + below KAMA (trend down)
+                new_signal = -SIZE
+            elif bb_position[i] > 0.85 and adx[i] < 25:
+                # Extreme BB high + low ADX (ranging, good for mean-rev)
                 new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
