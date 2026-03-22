@@ -1,59 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #508: 4h Volatility Regime Adaptive with Daily HMA Bias
+Experiment #509: 12h Mean-Reversion with Daily HMA Trend Filter and Volume Confirmation
 
-Hypothesis: After analyzing 496+ failed experiments, the key insight is that 4h 
-timeframe needs VOLATILITY-BASED regime adaptation, not complex asymmetric logic.
-High volatility = mean reversion (panic/reversal trades). Low volatility = trend 
-following (breakout trades). This adapts to both bull (2021) and bear (2022, 2025) 
-markets.
+Hypothesis: After 498 failed experiments, the pattern is clear - complex regime-adaptive
+strategies overfit and fail. BTC/ETH spend 70% of time in range-bound markets. This
+strategy focuses on SIMPLE mean-reversion with loose thresholds that actually trigger
+trades, plus daily HMA trend filter for bias.
 
-1. DAILY HMA(21) TREND BIAS (via mtf_data helper):
-   - Bull: price > 1d HMA (favor long entries)
-   - Bear: price < 1d HMA (favor short entries)
-   - Simple binary filter, not complex asymmetric logic
+Key differences from failed strategies:
+1. LOOSER RSI thresholds (35/65 vs 30/70) - ensures sufficient trades
+2. Volume confirmation (vol > 1.3x 20-bar avg) - filters false breakouts
+3. 1d HMA(21) trend bias (simpler than weekly) - robust trend filter
+4. Faster signal generation (12h captures more moves than 1d)
+5. Tighter stoploss (2.5*ATR) - cuts losses faster in crypto volatility
+6. Minimum trade frequency built into entry logic
 
-2. VOLATILITY REGIME (ATR ratio):
-   - ATR(7)/ATR(30) > 1.8 = HIGH VOL (mean reversion mode)
-   - ATR(7)/ATR(30) < 1.2 = LOW VOL (trend following mode)
-   - Between = neutral (reduced position size)
+Why 12h timeframe:
+- Captures medium-term swings (2-5 day moves)
+- More trades than 1d (avoids 0-trade failure)
+- Less noise than 4h/1h (fewer whipsaws)
+- Good balance for mean-reversion strategies
 
-3. ADAPTIVE ENTRY LOGIC:
-   - HIGH VOL + Bull: RSI(7) < 25 long (panic buy)
-   - HIGH VOL + Bear: RSI(7) > 75 short (panic short)
-   - LOW VOL + Bull: Price > Donchian(20) high long (breakout)
-   - LOW VOL + Bear: Price < Donchian(20) low short (breakdown)
+Entry Logic:
+- Long: price > 1d HMA + RSI(14) < 35 + volume spike + close > SMA(50)
+- Short: price < 1d HMA + RSI(14) > 65 + volume spike + close < SMA(50)
+- Exit: signal flip or 2.5*ATR stoploss
 
-4. BOLLINGER BAND CONFIRMATION:
-   - Mean reversion: price must touch BB(20, 2.5) bands
-   - Trend: price must close outside BB(20, 2.0)
-
-5. ATR(14) TRAILING STOP at 2.5x:
-   - Tighter stop for 4h timeframe
-   - Signal → 0 when price moves 2.5*ATR against position
-
-6. POSITION SIZING: 0.25 discrete (conservative for 4h volatility)
-   - High vol: 0.25 (panic trades have higher win rate)
-   - Low vol: 0.20 (breakouts have more false signals)
-
-Why this should work on 4h:
-- Volatility regime adapts to market conditions (panic vs grind)
-- Daily HMA provides robust trend bias without whipsaw
-- Looser RSI thresholds (25/75) ensure sufficient trades
-- Should generate 30-60 trades/year per symbol
-- Works in both bull (breakout) and bear (panic reversal) markets
-
-Timeframe: 4h (REQUIRED for this experiment)
+Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20-0.25 discrete levels
+Position sizing: 0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_vol_regime_daily_hma_rsi_donchian_bb_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_meanrev_daily_hma_rsi_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -90,31 +73,32 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average."""
+    close_s = pd.Series(close)
+    return close_s.rolling(window=period, min_periods=period).mean().values
+
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs rolling average."""
+    vol_s = pd.Series(volume)
+    vol_avg = vol_s.rolling(window=period, min_periods=period).mean()
+    vol_ratio = vol_s / vol_avg.replace(0, np.inf)
+    return vol_ratio.values
+
+def calculate_bollinger(close, period=20, std_dev=2.0):
     """Calculate Bollinger Bands."""
     close_s = pd.Series(close)
     sma = close_s.rolling(window=period, min_periods=period).mean()
     std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + (std_mult * std)
-    lower = sma - (std_mult * std)
+    upper = sma + (std_dev * std)
+    lower = sma - (std_dev * std)
     return upper.values, lower.values, sma.values
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel."""
-    n = len(high)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        upper[i] = high[i-period+1:i+1].max()
-        lower[i] = low[i-period+1:i+1].min()
-    
-    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -126,27 +110,17 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
-    atr_14 = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    rsi_7 = calculate_rsi(close, 7)
-    rsi_14 = calculate_rsi(close, 14)
-    bb_upper_25, bb_lower_25, bb_mid = calculate_bollinger_bands(close, 20, 2.5)
-    bb_upper_20, bb_lower_20, _ = calculate_bollinger_bands(close, 20, 2.0)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    
-    # Volatility ratio (ATR7 / ATR30)
-    vol_ratio = np.full(n, np.nan)
-    for i in range(30, n):
-        if atr_30[i] > 1e-10:
-            vol_ratio[i] = atr_7[i] / atr_30[i]
+    # Calculate 12h indicators
+    atr = calculate_atr(high, low, close, 14)
+    rsi = calculate_rsi(close, 14)
+    sma_50 = calculate_sma(close, 50)
+    vol_ratio = calculate_volume_ratio(volume, 20)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_HIGH_VOL = 0.25  # Panic trades have higher win rate
-    SIZE_LOW_VOL = 0.20   # Breakouts have more false signals
+    SIZE = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -157,7 +131,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] == 0:
+        if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
@@ -165,11 +139,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(rsi[i]) or np.isnan(sma_50[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper_25[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             continue
         
@@ -177,46 +151,27 @@ def generate_signals(prices):
         bull_regime = close[i] > hma_1d_aligned[i]
         bear_regime = close[i] < hma_1d_aligned[i]
         
-        # === VOLATILITY REGIME ===
-        high_vol = vol_ratio[i] > 1.8
-        low_vol = vol_ratio[i] < 1.2
-        # neutral: between 1.2 and 1.8
+        # === VOLUME CONFIRMATION ===
+        volume_spike = vol_ratio[i] > 1.3
         
-        # === ADAPTIVE ENTRY LOGIC ===
+        # === MEAN-REVERSION ENTRY LOGIC (LOOSE THRESHOLDS) ===
         new_signal = 0.0
-        current_size = SIZE_LOW_VOL  # default
         
-        # HIGH VOLATILITY: Mean Reversion (panic trades)
-        if high_vol:
-            current_size = SIZE_HIGH_VOL
-            if bull_regime:
-                # Bull + High Vol: Buy panic dips
-                if rsi_7[i] < 25 and close[i] <= bb_lower_25[i]:
-                    new_signal = current_size
-            elif bear_regime:
-                # Bear + High Vol: Short panic rallies
-                if rsi_7[i] > 75 and close[i] >= bb_upper_25[i]:
-                    new_signal = -current_size
+        # LONG ENTRY: bull regime + oversold + volume + above SMA50
+        if bull_regime:
+            if rsi[i] < 35 and volume_spike and close[i] > sma_50[i]:
+                new_signal = SIZE
+            # Additional long: price at BB lower band in bull regime
+            elif close[i] < bb_lower[i] * 1.005 and rsi[i] < 45:
+                new_signal = SIZE
         
-        # LOW VOLATILITY: Trend Following (breakouts)
-        elif low_vol:
-            current_size = SIZE_LOW_VOL
-            if bull_regime:
-                # Bull + Low Vol: Breakout long
-                if close[i] > donchian_upper[i-1] and close[i] > bb_upper_20[i]:
-                    new_signal = current_size
-            elif bear_regime:
-                # Bear + Low Vol: Breakdown short
-                if close[i] < donchian_lower[i-1] and close[i] < bb_lower_20[i]:
-                    new_signal = -current_size
-        
-        # NEUTRAL VOLATILITY: Reduced activity
-        else:
-            # Only take strongest signals in neutral vol
-            if bull_regime and rsi_7[i] < 20:
-                new_signal = SIZE_LOW_VOL * 0.5
-            elif bear_regime and rsi_7[i] > 80:
-                new_signal = -SIZE_LOW_VOL * 0.5
+        # SHORT ENTRY: bear regime + overbought + volume + below SMA50
+        if bear_regime:
+            if rsi[i] > 65 and volume_spike and close[i] < sma_50[i]:
+                new_signal = -SIZE
+            # Additional short: price at BB upper band in bear regime
+            elif close[i] > bb_upper[i] * 0.995 and rsi[i] > 55:
+                new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -224,7 +179,7 @@ def generate_signals(prices):
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr_14[i]
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -232,7 +187,7 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr_14[i]
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
@@ -242,6 +197,14 @@ def generate_signals(prices):
             if position_side > 0 and bear_regime:
                 new_signal = 0.0
             if position_side < 0 and bull_regime:
+                new_signal = 0.0
+        
+        # === RSI EXTREME EXIT ===
+        # Exit long if RSI goes > 70, exit short if RSI goes < 30
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and rsi[i] > 70:
+                new_signal = 0.0
+            if position_side < 0 and rsi[i] < 30:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
