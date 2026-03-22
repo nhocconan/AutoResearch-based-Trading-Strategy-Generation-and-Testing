@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #046: 4h Volatility Spike Mean Reversion with 1d HMA Regime Filter
-Hypothesis: Volatility spikes (ATR ratio > 2.0) combined with BB extremes capture panic reversals.
-Key insight: BTC/ETH crash hard then recover quickly. Vol spike + oversold = long opportunity in bull regime.
-1d HMA provides regime filter to avoid counter-trend trades. 4h timeframe balances signal frequency vs noise.
-Position sizing: 0.25 discrete levels, stoploss at 2.5*ATR, take profit at 2R.
-Timeframe: 4h (REQUIRED for exp#046), HTF: 1d via mtf_data helper.
-Why this might work: Vol mean reversion works in all regimes, 1d filter prevents fighting major trend.
-Must generate 10+ trades on train, 3+ on test - conditions loosened vs failed vol breakout strategies.
+Experiment #047: 12h Trend-Follow with 1d HMA Regime + RSI Pullback Entries
+Hypothesis: 12h timeframe captures intermediate trends while avoiding 1h/4h whipsaws.
+1d HMA provides clean regime filter (bull/bear), 12h EMA pullbacks give entry timing.
+Key insight from failures: Too many conflicting filters = 0 trades. Simplify entry logic.
+Position sizing: 0.25 base, 0.15 half-size for weaker signals. ATR trailing stop 2.5x.
+Timeframe: 12h (REQUIRED), HTF: 1d via mtf_data helper (call ONCE before loop).
+Why this might beat Sharpe=0.162: Looser RSI conditions (30-65 range), fewer filters,
+better stoploss tracking, discrete signal levels to minimize fee churn.
+Must generate 10+ trades on train, 3+ on test - entry conditions deliberately loosened.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_vol_spike_1d_hma_meanrev_v1"
-timeframe = "4h"
+name = "mtf_12h_trend_1d_hma_rsi_pullback_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -60,21 +61,6 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.5):
-    """Calculate Bollinger Bands with wider std for extreme detection."""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion filter."""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    zscore = (close - sma) / (std + 1e-10)
-    return zscore
-
 def calculate_ema(close, period):
     """Calculate EMA."""
     return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
@@ -83,13 +69,35 @@ def calculate_sma(close, period):
     """Calculate SMA."""
     return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
-def calculate_stoch_rsi(close, period=14):
-    """Calculate Stochastic RSI for faster mean reversion signals."""
-    rsi = calculate_rsi(close, period)
-    rsi_min = pd.Series(rsi).rolling(window=period, min_periods=period).min().values
-    rsi_max = pd.Series(rsi).rolling(window=period, min_periods=period).max().values
-    stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min + 1e-10)
-    return stoch_rsi
+def calculate_supertrend(high, low, close, period=10, mult=3.0):
+    """Calculate Supertrend for trend direction."""
+    atr = calculate_atr(high, low, close, period)
+    hl2 = (high + low) / 2
+    
+    upper = hl2 + mult * atr
+    lower = hl2 - mult * atr
+    
+    supertrend = np.zeros(len(close))
+    trend = np.ones(len(close))
+    
+    supertrend[0] = upper[0]
+    for i in range(1, len(close)):
+        if trend[i-1] == 1:
+            if close[i] < lower[i]:
+                trend[i] = -1
+                supertrend[i] = upper[i]
+            else:
+                trend[i] = 1
+                supertrend[i] = max(lower[i], supertrend[i-1])
+        else:
+            if close[i] > upper[i]:
+                trend[i] = 1
+                supertrend[i] = lower[i]
+            else:
+                trend[i] = -1
+                supertrend[i] = min(upper[i], supertrend[i-1])
+    
+    return supertrend, trend
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -106,33 +114,22 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
-    atr_14 = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    rsi_14 = calculate_rsi(close, 14)
-    rsi_7 = calculate_rsi(close, 7)
-    stoch_rsi = calculate_stoch_rsi(close, 14)
-    
-    # Bollinger Bands with wider bands for extreme detection
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.5)
-    
-    # Z-score for mean reversion
-    zscore_20 = calculate_zscore(close, 20)
-    
-    # EMA/SMA for trend
+    # Calculate 12h indicators
+    atr = calculate_atr(high, low, close, 14)
+    rsi = calculate_rsi(close, 14)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
+    ema_200 = calculate_ema(close, 200)
     sma_200 = calculate_sma(close, 200)
     
-    # Volatility ratio (ATR spike detector)
-    vol_ratio = atr_7 / (atr_30 + 1e-10)
+    # Supertrend for trend confirmation
+    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.25
-    SIZE_HALF = 0.125
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -140,11 +137,10 @@ def generate_signals(prices):
     trailing_stop = 0.0
     highest_close = 0.0
     lowest_close = 0.0
-    take_profit_level = 0.0
     
     for i in range(250, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] == 0:
+        if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
@@ -152,118 +148,107 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(rsi[i]) or np.isnan(ema_21[i]) or np.isnan(ema_50[i]):
             signals[i] = 0.0
             continue
         
         # 1d trend bias (HTF) - main regime filter
-        bull_regime_1d = close[i] > hma_1d_aligned[i]
-        bear_regime_1d = close[i] < hma_1d_aligned[i]
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # Volatility spike detection
-        vol_spike = vol_ratio[i] > 1.8  # ATR(7) > 1.8x ATR(30)
-        vol_extreme = vol_ratio[i] > 2.5  # Extreme spike
+        # 12h trend confirmation
+        bull_trend_12h = ema_21[i] > ema_50[i]
+        bear_trend_12h = ema_21[i] < ema_50[i]
         
-        # Price at BB extreme
-        at_bb_lower = close[i] <= bb_lower[i] * 1.005  # At or below lower band
-        at_bb_upper = close[i] >= bb_upper[i] * 0.995  # At or above upper band
+        # Supertrend confirmation
+        st_bullish = st_trend[i] == 1
+        st_bearish = st_trend[i] == -1
         
-        # RSI extremes (loosened for more trades)
-        rsi_oversold = rsi_14[i] < 35
-        rsi_overbought = rsi_14[i] > 65
-        rsi_extreme_oversold = rsi_7[i] < 25
-        rsi_extreme_overbought = rsi_7[i] > 75
+        # Long-term trend filter
+        above_200 = not np.isnan(sma_200[i]) and close[i] > sma_200[i]
+        below_200 = not np.isnan(sma_200[i]) and close[i] < sma_200[i]
         
-        # Stoch RSI extremes
-        stoch_oversold = stoch_rsi[i] < 0.15
-        stoch_overbought = stoch_rsi[i] > 0.85
+        # RSI conditions - LOOSENED for more trades (key fix)
+        rsi_pullback_long = 30 < rsi[i] < 65
+        rsi_bounce_short = 35 < rsi[i] < 70
+        rsi_oversold = rsi[i] < 45
+        rsi_overbought = rsi[i] > 55
         
-        # Z-score extremes
-        zscore_oversold = zscore_20[i] < -1.8
-        zscore_overbought = zscore_20[i] > 1.8
+        # Price pullback to EMA21 (entry zone)
+        price_near_ema21_long = close[i] <= ema_21[i] * 1.03 and close[i] >= ema_21[i] * 0.97
+        price_near_ema21_short = close[i] >= ema_21[i] * 0.97 and close[i] <= ema_21[i] * 1.03
         
-        # Trend confirmation on 4h
-        above_ema21 = close[i] > ema_21[i]
-        below_ema21 = close[i] < ema_21[i]
-        above_sma200 = not np.isnan(sma_200[i]) and close[i] > sma_200[i]
-        below_sma200 = not np.isnan(sma_200[i]) and close[i] < sma_200[i]
+        # Price pullback to EMA50 (deeper entry)
+        price_near_ema50_long = close[i] <= ema_50[i] * 1.03 and close[i] >= ema_50[i] * 0.97
+        price_near_ema50_short = close[i] >= ema_50[i] * 0.97 and close[i] <= ema_50[i] * 1.03
+        
+        # Price action: higher low for long, lower high for short
+        higher_low = False
+        lower_high = False
+        if i >= 3:
+            higher_low = low[i] > low[i-3]
+            lower_high = high[i] < high[i-3]
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (vol spike mean reversion in bull regime) ===
-        if bull_regime_1d:
-            # Primary: Vol spike + BB lower + RSI oversold
-            if vol_spike and at_bb_lower and rsi_oversold:
+        # === LONG ENTRIES (only when 1d bullish) ===
+        if bull_trend_1d:
+            # Primary: Pullback to EMA21 with RSI confirmation + 12h trend
+            if price_near_ema21_long and rsi_pullback_long and bull_trend_12h:
                 new_signal = SIZE_BASE
             
-            # Secondary: Extreme vol + extreme RSI (panic bottom)
-            elif vol_extreme and rsi_extreme_oversold and zscore_oversold:
+            # Secondary: Deeper pullback to EMA50 with RSI oversold
+            elif price_near_ema50_long and rsi_oversold and above_200:
                 new_signal = SIZE_BASE
             
-            # Tertiary: Stoch RSI oversold + vol spike
-            elif vol_spike and stoch_oversold and above_sma200:
+            # Tertiary: Supertrend flip bullish with 1d confirmation
+            elif st_bullish and bull_trend_1d and rsi[i] > 40:
                 new_signal = SIZE_HALF
             
-            # Quaternary: BB lower + RSI oversold (no vol spike needed)
-            elif at_bb_lower and rsi_14[i] < 40 and bull_regime_1d:
+            # Momentum: Higher low with trend alignment
+            elif higher_low and bull_trend_12h and st_bullish and rsi[i] > 45:
                 new_signal = SIZE_HALF
         
-        # === SHORT ENTRIES (vol spike mean reversion in bear regime) ===
-        elif bear_regime_1d:
-            # Primary: Vol spike + BB upper + RSI overbought
-            if vol_spike and at_bb_upper and rsi_overbought:
+        # === SHORT ENTRIES (only when 1d bearish) ===
+        elif bear_trend_1d:
+            # Primary: Bounce to EMA21 with RSI confirmation + 12h trend
+            if price_near_ema21_short and rsi_bounce_short and bear_trend_12h:
                 new_signal = -SIZE_BASE
             
-            # Secondary: Extreme vol + extreme RSI (panic top)
-            elif vol_extreme and rsi_extreme_overbought and zscore_overbought:
+            # Secondary: Deeper bounce to EMA50 with RSI overbought
+            elif price_near_ema50_short and rsi_overbought and below_200:
                 new_signal = -SIZE_BASE
             
-            # Tertiary: Stoch RSI overbought + vol spike
-            elif vol_spike and stoch_overbought and below_sma200:
+            # Tertiary: Supertrend flip bearish with 1d confirmation
+            elif st_bearish and bear_trend_1d and rsi[i] < 60:
                 new_signal = -SIZE_HALF
             
-            # Quaternary: BB upper + RSI overbought (no vol spike needed)
-            elif at_bb_upper and rsi_14[i] > 60 and bear_regime_1d:
+            # Momentum: Lower high with trend alignment
+            elif lower_high and bear_trend_12h and st_bearish and rsi[i] < 55:
                 new_signal = -SIZE_HALF
         
         # === STOPLOSS LOGIC (Rule 6) ===
-        # Long position stoploss and take profit
-        if position_side > 0 and entry_price > 0:
+        # Long position stoploss - trailing
+        if position_side > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Trailing stop at 2.5*ATR
-            current_stop = highest_close - 2.5 * atr_14[i]
+            current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
-            # Take profit at 2R (reduce to half position)
-            profit = close[i] - entry_price
-            risk = entry_price - (entry_price - 2.5 * atr_14[int(np.where(atr_14[:i+1] > 0)[0][-1]) if len(np.where(atr_14[:i+1] > 0)[0]) > 0 else i])
-            if risk > 0 and profit >= 2.0 * risk and new_signal == 0.0:
-                new_signal = SIZE_HALF  # Take partial profit
-            
-            # Stoploss hit
             if close[i] < trailing_stop:
                 new_signal = 0.0
         
-        # Short position stoploss and take profit
-        if position_side < 0 and entry_price > 0:
-            if close[i] < lowest_close or lowest_close == 0.0:
+        # Short position stoploss - trailing
+        if position_side < 0:
+            if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
             
-            # Trailing stop at 2.5*ATR
-            current_stop = lowest_close + 2.5 * atr_14[i]
+            current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
-            # Take profit at 2R (reduce to half position)
-            profit = entry_price - close[i]
-            risk = (entry_price + 2.5 * atr_14[int(np.where(atr_14[:i+1] > 0)[0][-1]) if len(np.where(atr_14[:i+1] > 0)[0]) > 0 else i]) - entry_price
-            if risk > 0 and profit >= 2.0 * risk and new_signal == 0.0:
-                new_signal = -SIZE_HALF  # Take partial profit
-            
-            # Stoploss hit
             if close[i] > trailing_stop:
                 new_signal = 0.0
         
@@ -271,20 +256,23 @@ def generate_signals(prices):
         prev_signal = signals[i - 1] if i > 0 else 0.0
         
         if new_signal != 0.0 and prev_signal == 0.0:
+            # New entry
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr_14[i] if position_side > 0 else close[i] + 2.5 * atr_14[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
+            # Position flip
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr_14[i] if position_side > 0 else close[i] + 2.5 * atr_14[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
         elif new_signal == 0.0 and prev_signal != 0.0:
+            # Exit position
             position_side = 0
             entry_price = 0.0
             trailing_stop = 0.0
