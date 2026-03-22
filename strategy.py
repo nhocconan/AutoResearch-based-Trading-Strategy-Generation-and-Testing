@@ -1,39 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #178: 4h Donchian Breakout + 1d HMA Trend Filter + ADX + RSI Momentum
+Experiment #179: 12h Donchian Breakout + 1d HMA Trend + ADX Filter + ATR Stop
 
-Hypothesis: 4h Donchian(20) breakouts capture major crypto trends with clean entry signals.
-1d HMA provides stable higher-timeframe bias to avoid counter-trend breakouts.
-ADX > 20 ensures we only trade in trending markets (not chop). RSI > 50/< 50 confirms
-momentum direction without using extreme mean-reversion levels that failed previously.
+Hypothesis: 12h timeframe captures multi-day trends while filtering intraday noise.
+Donchian breakouts (20-period) capture momentum moves, 1d HMA provides stable
+higher-timeframe bias, ADX > 18 filters weak/choppy markets, and ATR trailing
+stop protects against reversals. This should work better than pure KAMA or
+Supertrend approaches that failed in recent experiments.
 
-Why this combination should work:
-- Donchian breakouts are proven trend-following entries (Turtle Trading)
-- 4h timeframe balances signal quality vs trade frequency (current best TF)
-- 1d HMA filter prevents false breakouts against major trend
-- ADX > 20 (not 25+) ensures enough trades while filtering chop
-- RSI 50-level momentum is more reliable than extreme levels (70/30)
-- Conservative sizing (0.25) protects against 2022-style crashes
+Why 12h might work:
+- 12h bars = 2 per day, captures swing moves without 4h noise
+- Donchian breakouts are proven trend-following (Turtle Trading)
+- 1d HMA filter prevents counter-trend trades in strong trends
+- ADX > 18 (not 25+) ensures sufficient trade count on 12h
+- Conservative sizing (0.25) controls drawdown in 2022-style crashes
 
 Learning from failures:
-- #166 (4h CRSI mean rev): Sharpe=-48.7 - mean reversion catastrophic
-- #170 (30m Fisher): Sharpe=-1.724 - lower TF = too much noise
-- #172 (4h MACD): Sharpe=-0.108 - close, needs better HTF filter
-- #175 (15m trend): Sharpe=-4.69 - lower TF destroyed by whipsaw
-- Trend following > mean reversion on crypto (BTC/ETH especially)
-- 4h and 12h timeframes show best results, avoid 15m/30m
+- #167 (12h Supertrend): Sharpe=-0.643 - Supertrend whipsaws in ranges
+- #173 (12h KAMA): Sharpe=0.192 - worked but can improve with breakout logic
+- #178 (4h Donchian): Sharpe=-0.989 - 4h too noisy, 12h should be better
+- Mean reversion fails on crypto, trend-following works
+- Need HTF filter to avoid counter-trend breakouts
 
-Timeframe: 4h (REQUIRED for this experiment)
+Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels (conservative for drawdown control)
+Position sizing: 0.25 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_1d_hma_adx_rsi_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_1d_hma_adx_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -96,6 +95,22 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (upper/lower bounds)."""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(period-1, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    # Fill initial values
+    upper[:period-1] = upper[period-1]
+    lower[:period-1] = lower[period-1]
+    
+    return upper, lower
+
 def calculate_rsi(close, period=14):
     """Calculate RSI (Relative Strength Index)."""
     close_s = pd.Series(close)
@@ -110,26 +125,6 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     
     return rsi.values
-
-def calculate_donchian_channels(high, low, period=20):
-    """
-    Calculate Donchian Channels (20-period high/low).
-    Upper band = highest high of last 20 periods
-    Lower band = lowest low of last 20 periods
-    """
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    
-    for i in range(period, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    # Fill initial values
-    upper[:period] = upper[period]
-    lower[:period] = lower[period]
-    
-    return upper, lower
 
 def calculate_ema(close, period=21):
     """Calculate Exponential Moving Average."""
@@ -152,13 +147,13 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
     adx = calculate_adx(high, low, close, 14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     rsi = calculate_rsi(close, 14)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, 20)
     
     signals = np.zeros(n)
     
@@ -181,26 +176,22 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(rsi[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(adx[i]) or np.isnan(donchian_upper[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 1d HMA = higher timeframe trend bias (very stable)
+        # 1d HMA = higher timeframe trend bias
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
         # === TREND STRENGTH FILTER ===
-        # ADX > 20 = trending market (lower than 25 to ensure enough trades)
-        trend_strength = adx[i] > 20
+        # ADX > 18 = trending market (lower threshold for 12h to ensure trades)
+        trend_strength = adx[i] > 18
         
         # === DONCHIAN BREAKOUT ===
-        # Price breaks above Donchian upper = bullish breakout
-        # Price breaks below Donchian lower = bearish breakout
+        # Price breaking above upper = bullish breakout
+        # Price breaking below lower = bearish breakout
         breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
         breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
         
@@ -219,16 +210,18 @@ def generate_signals(prices):
         new_signal = 0.0
         
         # === ENTRY CONDITIONS ===
-        # Long: 1d bullish + ADX trending + Donchian breakout + RSI>50 + EMA21>EMA50
-        # Using 3 out of 5 conditions to ensure enough trades
-        long_score = sum([bull_trend_1d, trend_strength, breakout_long, rsi_bullish, ema_bullish])
-        if long_score >= 3 and breakout_long:
-            new_signal = SIZE_BASE
+        # Long: 1d bullish + ADX trending + Donchian breakout + RSI>50 OR EMA bullish
+        # Using flexible conditions to ensure enough trades
+        if bull_trend_1d and trend_strength and breakout_long:
+            # Need at least one momentum confirmation
+            if rsi_bullish or ema_bullish:
+                new_signal = SIZE_BASE
         
-        # Short: 1d bearish + ADX trending + Donchian breakout + RSI<50 + EMA21<EMA50
-        short_score = sum([bear_trend_1d, trend_strength, breakout_short, rsi_bearish, ema_bearish])
-        if short_score >= 3 and breakout_short:
-            new_signal = -SIZE_BASE
+        # Short: 1d bearish + ADX trending + Donchian breakout + RSI<50 OR EMA bearish
+        if bear_trend_1d and trend_strength and breakout_short:
+            # Need at least one momentum confirmation
+            if rsi_bearish or ema_bearish:
+                new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Check stoploss on EXISTING position before considering new entry
