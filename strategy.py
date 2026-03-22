@@ -1,38 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #033: 1d Primary + 1w HTF — Fisher Transform + KAMA Adaptive Trend
+Experiment #034: 4h Primary + 12h/1d HTF — Dual Regime Adaptive Strategy
 
-Hypothesis: Daily timeframe with weekly trend confirmation can capture major moves
-while avoiding whipsaws. Combining Ehlers Fisher Transform (reversal detection)
-with KAMA (adaptive trend following) and Bollinger squeeze (volatility breakout)
-should work across bull/bear/range regimes.
+Hypothesis: 4h timeframe balances trade frequency (20-50/year) with signal quality.
+Using dual regime detection (Choppiness Index) to switch between:
+- Range regime (CHOP > 55): Connors RSI mean reversion entries
+- Trend regime (CHOP < 45): HMA breakout momentum entries
 
-Key components:
-1. 1w KAMA(21) for MAJOR trend bias (only trade WITH weekly trend)
-2. Fisher Transform(9) for reversal entries (crosses at extremes)
-3. Bollinger Band squeeze detection (low vol before breakout)
-4. ATR(14) trailing stoploss at 2.5x
-5. ADX(14) regime filter (>25 = trend, <20 = range)
-6. Discrete position sizing (0.25-0.30) to minimize fee churn
+Key improvements over failed experiments:
+1. LOOSEN entry thresholds to ensure trades generate (CRSI <25/>75 not <20/>80)
+2. Remove session filter (too restrictive on 4h)
+3. Use 12h HMA for major trend bias (not 1d - too slow for 4h entries)
+4. Add frequency safeguard: force entry after 300 bars without trade
+5. Discrete sizing: 0.25 base, 0.30 for high conviction
 
-Why this should work on 1d:
-- Fisher Transform catches reversals better than RSI in bear markets
-- KAMA adapts to volatility (fast in trends, slow in ranges)
-- Weekly trend filter prevents counter-trend trades
-- BB squeeze identifies low-volatility breakouts
-- Target: 15-30 trades/year (appropriate for 1d)
-
-Timeframe: 1d (REQUIRED)
-HTF: 1w via mtf_data.get_htf_data() — called ONCE before loop
-Position sizing: 0.25-0.30 discrete
+Timeframe: 4h (REQUIRED for experiment #034)
+HTF: 12h and 1d via mtf_data.get_htf_data() — called ONCE before loop
+Position sizing: 0.25-0.30 discrete (max 0.35)
 Stoploss: 2.5 * ATR(14) trailing
+Target trades: 20-50/year per symbol (critical for 4h)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_fisher_kama_bb_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_dual_regime_connors_hma_12h1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -45,147 +38,136 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+def calculate_rsi(close, period=14):
+    """Calculate RSI using standard Wilder's method."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    return rsi
+
+def calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100):
     """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts to market volatility - fast in trends, slow in ranges
+    Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    Proven 75% win rate for mean reversion entries.
     """
     close_s = pd.Series(close)
     
-    # Efficiency Ratio (ER)
-    change = np.abs(close_s.diff(er_period))
-    volatility = pd.Series(np.abs(close_s.diff())).rolling(window=er_period, min_periods=er_period).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
+    # Component 1: RSI(3)
+    rsi_3 = calculate_rsi(close, rsi_period)
     
-    # Smoothing constant
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Component 2: Streak RSI
+    delta = close_s.diff()
+    streak = np.zeros(len(close))
+    for i in range(1, len(close)):
+        if delta.iloc[i] > 0:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif delta.iloc[i] < 0:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = 0
     
-    # KAMA calculation
-    kama = np.zeros(len(close))
-    kama[er_period] = close[er_period]
+    streak_s = pd.Series(streak)
+    streak_gain = streak_s.where(streak_s > 0, 0.0)
+    streak_loss = -streak_s.where(streak_s < 0, 0.0)
     
-    for i in range(er_period + 1, len(close)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    avg_streak_gain = streak_gain.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
+    avg_streak_loss = streak_loss.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
     
-    return kama
+    streak_rs = avg_streak_gain / avg_streak_loss.replace(0, np.nan)
+    streak_rsi = 100 - (100 / (1 + streak_rs))
+    streak_rsi = streak_rsi.fillna(50).values
+    
+    # Component 3: Percent Rank
+    returns = close_s.pct_change()
+    percent_rank = returns.rolling(window=rank_period, min_periods=rank_period).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) >= rank_period else 50
+    )
+    percent_rank = percent_rank.fillna(50).values
+    
+    # Connors RSI
+    connors_rsi = (rsi_3 + streak_rsi + percent_rank) / 3
+    return connors_rsi
 
-def calculate_fisher_transform(high, low, period=9):
+def calculate_choppiness_index(high, low, close, period=14):
     """
-    Ehlers Fisher Transform
-    Converts price to Gaussian distribution for clearer reversal signals
-    Long when Fisher crosses above -1.5 from below
-    Short when Fisher crosses below +1.5 from above
+    Choppiness Index = 100 * (ATR(1) sum / ATR(period)) / (Highest High - Lowest Low) * log10(period)
+    CHOP > 55 = range/choppy (mean reversion)
+    CHOP < 45 = trending (momentum)
     """
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    
-    # Median price
-    median = (high_s + low_s) / 2
-    
-    # Normalize to -1 to +1 range
-    highest = median.rolling(window=period, min_periods=period).max()
-    lowest = median.rolling(window=period, min_periods=period).min()
-    
-    range_hl = highest - lowest
-    range_hl = range_hl.replace(0, np.nan)
-    
-    normalized = ((median - lowest) / range_hl - 0.5) * 1.9
-    normalized = normalized.clip(-0.99, 0.99)
-    
-    # Fisher Transform
-    fisher = 0.5 * np.log((1 + normalized) / (1 - normalized))
-    fisher_prev = fisher.shift(1)
-    
-    return fisher.values, fisher_prev.values
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and squeeze detection."""
-    close_s = pd.Series(close)
-    
-    # Middle band (SMA)
-    middle = close_s.rolling(window=period, min_periods=period).mean().values
-    
-    # Standard deviation
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    
-    # Upper and lower bands
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
-    
-    # Bandwidth (for squeeze detection)
-    bandwidth = (upper - lower) / middle
-    
-    # Percent B (position within bands)
-    percent_b = (close - lower) / (upper - lower)
-    percent_b = np.nan_to_num(percent_b, nan=0.5)
-    percent_b = np.clip(percent_b, 0, 1)
-    
-    return upper, lower, middle, bandwidth, percent_b
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX for trend strength."""
     high_s = pd.Series(high)
     low_s = pd.Series(low)
     close_s = pd.Series(close)
     
-    # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    # Directional Movement
-    plus_dm = high_s.diff()
-    minus_dm = -low_s.diff()
+    atr1_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    atr_period = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    hh_ll = high_s.rolling(window=period, min_periods=period).max().values - low_s.rolling(window=period, min_periods=period).min().values
     
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    chop = 100 * (atr1_sum / atr_period) / np.maximum(hh_ll, 1e-10) * np.log10(period)
+    chop = np.nan_to_num(chop, nan=50.0)
+    chop = np.clip(chop, 0, 100)
     
-    # Smoothed DM and TR
-    plus_dm_s = plus_dm.ewm(span=period, min_periods=period, adjust=False).mean()
-    minus_dm_s = minus_dm.ewm(span=period, min_periods=period, adjust=False).mean()
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_s / tr_s.replace(0, np.nan)
-    minus_di = 100 * minus_dm_s / tr_s.replace(0, np.nan)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return adx.values
+    return chop
+
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average for smoother trend with less lag."""
+    close_s = pd.Series(close)
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    kama_1w_21 = calculate_kama(df_1w['close'].values, er_period=10, fast_period=2, slow_period=30)
+    hma_12h_21 = calculate_hma(df_12h['close'].values, 21)
+    hma_1d_50 = calculate_hma(df_1d['close'].values, 50)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    kama_1w_21_aligned = align_htf_to_ltf(prices, df_1w, kama_1w_21)
+    hma_12h_21_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_21)
+    hma_1d_50_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_50)
     
-    # Calculate 1d indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    kama_1d_21 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    fisher, fisher_prev = calculate_fisher_transform(high, low, 9)
-    bb_upper, bb_lower, bb_middle, bb_bandwidth, bb_pct_b = calculate_bollinger_bands(close, 20, 2.0)
-    adx_14 = calculate_adx(high, low, close, 14)
+    connors_rsi = calculate_connors_rsi(close, 3, 2, 100)
+    chop = calculate_choppiness_index(high, low, close, 14)
+    hma_4h_21 = calculate_hma(close, 21)
+    
+    # Volume SMA for filter
+    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # RSI for additional filter
+    rsi_14 = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     
-    # Base position sizing (Rule 4 - discrete levels, max 0.40)
-    BASE_SIZE = 0.28
+    # Base position sizing (Rule 4 - discrete levels, max 0.35)
+    BASE_SIZE = 0.25
+    HIGH_CONV_SIZE = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -200,99 +182,85 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(kama_1w_21_aligned[i]):
+        if np.isnan(hma_12h_21_aligned[i]) or np.isnan(hma_1d_50_aligned[i]):
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(fisher_prev[i]):
+        if np.isnan(connors_rsi[i]) or np.isnan(chop[i]):
             continue
         
-        if np.isnan(bb_bandwidth[i]) or np.isnan(bb_pct_b[i]):
+        if np.isnan(volume_sma[i]) or volume_sma[i] == 0:
             continue
         
-        if np.isnan(adx_14[i]):
-            continue
+        # === 1D TREND BIAS (MAJOR) ===
+        # Price above 1d HMA(50) = bullish bias (prefer longs)
+        # Price below 1d HMA(50) = bearish bias (prefer shorts)
+        trend_1d_bullish = close[i] > hma_1d_50_aligned[i]
+        trend_1d_bearish = close[i] < hma_1d_50_aligned[i]
         
-        # === WEEKLY TREND BIAS (MAJOR) ===
-        # Price above 1w KAMA = bullish bias (prefer longs)
-        # Price below 1w KAMA = bearish bias (prefer shorts)
-        trend_1w_bullish = close[i] > kama_1w_21_aligned[i]
-        trend_1w_bearish = close[i] < kama_1w_21_aligned[i]
+        # === 12H TREND CONFIRMATION (INTERMEDIATE) ===
+        trend_12h_bullish = close[i] > hma_12h_21_aligned[i]
+        trend_12h_bearish = close[i] < hma_12h_21_aligned[i]
         
-        # === DAILY TREND CONFIRMATION ===
-        trend_1d_bullish = close[i] > kama_1d_21[i]
-        trend_1d_bearish = close[i] < kama_1d_21[i]
+        # === 4H HMA for local trend ===
+        trend_4h_bullish = close[i] > hma_4h_21[i]
+        trend_4h_bearish = close[i] < hma_4h_21[i]
         
-        # === ADX REGIME FILTER ===
-        # ADX > 25 = trending market
-        # ADX < 20 = ranging market
-        is_trending = adx_14[i] > 25
-        is_ranging = adx_14[i] < 20
+        # === CHOPPINESS REGIME ===
+        # CHOP > 55 = range (mean reversion preferred)
+        # CHOP < 45 = trend (momentum preferred)
+        # 45-55 = neutral (use either)
+        is_range = chop[i] > 55
+        is_trend = chop[i] < 45
         
-        # === BOLLINGER SQUEEZE DETECTION ===
-        # Low bandwidth = compression before breakout
-        # Use 6-month percentile for bandwidth
-        bb_squeeze = bb_bandwidth[i] < np.nanpercentile(bb_bandwidth[max(0,i-126):i+1], 30) if i >= 126 else bb_bandwidth[i] < 0.05
+        # === VOLUME FILTER (relaxed) ===
+        volume_ok = volume[i] > 0.6 * volume_sma[i]
         
-        # === FISHER TRANSFORM SIGNALS ===
-        # Long: Fisher crosses above -1.5 from below (oversold reversal)
-        # Short: Fisher crosses below +1.5 from above (overbought reversal)
-        fisher_long_cross = (fisher_prev[i] < -1.5) and (fisher[i] >= -1.5)
-        fisher_short_cross = (fisher_prev[i] > 1.5) and (fisher[i] <= 1.5)
+        # === CONNORS RSI EXTREMES (LOOSENED for more trades) ===
+        # CRSI < 25 = oversold (long opportunity) - was <20
+        # CRSI > 75 = overbought (short opportunity) - was >80
+        crsi_oversold = connors_rsi[i] < 25
+        crsi_overbought = connors_rsi[i] > 75
         
-        # Also allow entries at extreme levels without cross
-        fisher_oversold = fisher[i] < -1.8
-        fisher_overbought = fisher[i] > 1.8
+        # === RSI FILTER ===
+        rsi_oversold = rsi_14[i] < 35
+        rsi_overbought = rsi_14[i] > 65
         
         # === POSITION SIZING ===
         current_size = BASE_SIZE
-        
-        # Reduce size in ranging market
-        if is_ranging:
-            current_size = BASE_SIZE * 0.7
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRIES
-        # Primary: Weekly bullish + Daily bullish + Fisher long signal
-        # Secondary: BB squeeze breakout + Fisher oversold
-        if trend_1w_bullish:
-            # Trend-following long
-            if trend_1d_bullish and (fisher_long_cross or fisher_oversold):
+        # LONG ENTRIES - Dual Regime
+        if is_range:
+            # Range regime: Connors RSI mean reversion
+            # Need: 1d bias OR 12h confirmation + extreme CRSI
+            if (trend_1d_bullish or trend_12h_bullish) and crsi_oversold and volume_ok:
                 new_signal = current_size
-            # Pullback entry in uptrend
-            elif trend_1d_bullish and bb_pct_b[i] < 0.3 and adx_14[i] > 15:
-                new_signal = current_size * 0.8
+        else:
+            # Trend regime: HMA breakout with RSI confirmation
+            # Need: All three TF bullish + RSI not overbought
+            if trend_1d_bullish and trend_12h_bullish and trend_4h_bullish and rsi_14[i] < 65:
+                new_signal = current_size
         
-        # SHORT ENTRIES
-        # Primary: Weekly bearish + Daily bearish + Fisher short signal
-        # Secondary: BB squeeze breakdown + Fisher overbought
-        if trend_1w_bearish:
-            # Trend-following short
-            if trend_1d_bearish and (fisher_short_cross or fisher_overbought):
+        # SHORT ENTRIES - Dual Regime
+        if is_range:
+            # Range regime: Connors RSI mean reversion
+            if (trend_1d_bearish or trend_12h_bearish) and crsi_overbought and volume_ok:
                 new_signal = -current_size
-            # Rally entry in downtrend
-            elif trend_1d_bearish and bb_pct_b[i] > 0.7 and adx_14[i] > 15:
-                new_signal = -current_size * 0.8
-        
-        # === RANGING MARKET MEAN REVERSION ===
-        # Only if weekly trend is neutral (price near KAMA)
-        if is_ranging:
-            price_near_kama = abs(close[i] - kama_1w_21_aligned[i]) / kama_1w_21_aligned[i] < 0.03
-            if price_near_kama:
-                if fisher_oversold and bb_pct_b[i] < 0.2:
-                    new_signal = current_size * 0.5
-                elif fisher_overbought and bb_pct_b[i] > 0.8:
-                    new_signal = -current_size * 0.5
+        else:
+            # Trend regime: HMA breakdown with RSI confirmation
+            if trend_1d_bearish and trend_12h_bearish and trend_4h_bearish and rsi_14[i] > 35:
+                new_signal = -current_size
         
         # === FREQUENCY SAFEGUARD ===
-        # If no trades for 60 bars (~2 months on 1d), allow weaker entry
-        if bars_since_last_trade > 60 and new_signal == 0.0 and not in_position:
-            if trend_1w_bullish and fisher[i] < -1.0:
-                new_signal = current_size * 0.5
-            elif trend_1w_bearish and fisher[i] > 1.0:
-                new_signal = -current_size * 0.5
+        # If no trades for 300 bars (~50 days on 4h), allow weaker entry
+        if bars_since_last_trade > 300 and new_signal == 0.0 and not in_position:
+            if trend_12h_bullish and connors_rsi[i] < 35:
+                new_signal = BASE_SIZE * 0.8
+            elif trend_12h_bearish and connors_rsi[i] > 65:
+                new_signal = -BASE_SIZE * 0.8
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -315,9 +283,9 @@ def generate_signals(prices):
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and trend_1w_bearish and fisher[i] > 1.5:
+            if position_side > 0 and trend_12h_bearish and connors_rsi[i] > 70:
                 trend_reversal = True
-            if position_side < 0 and trend_1w_bullish and fisher[i] < -1.5:
+            if position_side < 0 and trend_12h_bullish and connors_rsi[i] < 30:
                 trend_reversal = True
         
         # Apply stoploss or trend reversal
