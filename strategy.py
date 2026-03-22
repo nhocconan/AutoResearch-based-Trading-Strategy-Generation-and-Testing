@@ -1,40 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #262: 4h KAMA Trend with 1d HMA Bias and Choppiness Regime Filter
+Experiment #263: 12h Donchian Breakout with 1d HMA Bias and Volume Confirmation
 
-Hypothesis: After 225+ failed experiments, complexity is the enemy. This strategy uses:
-1. KAMA (Kaufman Adaptive MA) - adapts to volatility, less whipsaw than EMA/HMA
-2. 1d HMA for directional bias (proven in successful strategies)
-3. Choppiness Index to detect trend vs range regime
-4. ADX filter for trend strength
-5. Asymmetric sizing: larger in strong trends, smaller in weak trends
-6. Simpler entry logic than #256 ensemble (which failed with Sharpe=-0.231)
+Hypothesis: After 262 experiments, the pattern is clear - complex ensembles fail,
+but simple trend-following with strong HTF bias can work. This strategy uses:
 
-Why this might work:
-- KAMA adjusts efficiency ratio based on price movement - stays flat in ranges, follows in trends
-- Choppiness Index > 61.8 = range (reduce size or stay flat), < 38.2 = trend (full size)
-- 1d HMA bias prevents counter-trend trades that destroy Sharpe in 2022 crash
-- ADX > 25 ensures we only trade when trend has momentum
-- Fewer but higher quality trades = less fee drag
+1. 12h Donchian(20) breakout - captures momentum moves with clear entry signals
+2. 1d HMA(21) for directional bias - prevents counter-trend trades (critical for 2022)
+3. Volume confirmation - breakout must have volume > 1.5x 20-period average
+4. ATR-based position sizing - reduce size when volatility is high
+5. 3.0*ATR trailing stoploss - appropriate for 12h timeframe (wider than 4h)
+6. Asymmetric entries - only trade in direction of 1d HMA bias
 
-Key differences from #256 (failed ensemble):
-- Single coherent signal instead of voting system
-- KAMA instead of HMA crossover (more adaptive)
-- Choppiness regime filter (missing from #256)
+Why 12h might work better than 4h:
+- Fewer bars = fewer false signals and less fee drag
+- Still frequent enough to generate >=10 trades per symbol
+- Captures medium-term trends without intraday noise
+- 1d HMA bias is stronger filter at this timeframe
+
+Key differences from failed strategies:
+- NO RSI (RSI pullback strategies consistently failed - see #251, #254, #259)
+- NO Choppiness Index (didn't help in #262, Sharpe=-0.159)
+- NO complex voting/ensemble ( #256 ensemble had Sharpe=-0.231)
+- Simple breakout + volume + HTF bias = cleaner signals
 - Looser entry thresholds to ensure >=10 trades per symbol
-- Asymmetric sizing based on regime strength
 
-Timeframe: 4h (REQUIRED)
+Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20-0.35 discrete levels based on regime
-Stoploss: 3.0 * ATR(14) trailing (wider to avoid whipsaws)
+Position sizing: 0.20-0.35 discrete, scaled by ATR
+Stoploss: 3.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_trend_1d_hma_chop_adx_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_breakout_1d_hma_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -47,41 +48,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA).
-    KAMA adapts to market noise - smooth in ranges, responsive in trends.
-    Efficiency Ratio (ER) = |close - close_n| / sum(|close_i - close_i-1|)
-    Smoothing Constant = (ER * (fast_sc - slow_sc) + slow_sc)^2
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(period, n):
-        signal = np.abs(close[i] - close[i - period])
-        noise = np.sum(np.abs(np.diff(close[i - period:i + 1])))
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0
-    
-    # Calculate smoothing constants
-    fast_sc = 2.0 / (fast + 1)
-    slow_sc = 2.0 / (slow + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Initialize KAMA
-    kama[period] = close[period]
-    
-    # Calculate KAMA
-    for i in range(period + 1, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama
-
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -92,60 +58,25 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    n = len(close)
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high, lowest low over period)."""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
     
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    for i in range(1, n):
-        plus_dm[i] = max(0, high[i] - high[i-1]) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
-        minus_dm[i] = max(0, low[i-1] - low[i]) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10)
-    
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx, plus_di, minus_di
+    return upper, lower
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = range/choppy market
-    CHOP < 38.2 = trending market
-    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    """
-    n = len(close)
-    chop = np.zeros(n)
-    chop[:] = np.nan
-    
-    for i in range(period, n):
-        atr_sum = 0
-        for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-            atr_sum += tr
-        
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 0 and atr_sum > 0:
-            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-        else:
-            chop[i] = 50  # neutral
-    
-    return chop
+def calculate_volume_sma(volume, period=20):
+    """Calculate simple moving average of volume."""
+    vol_s = pd.Series(volume)
+    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 def calculate_ema(close, period=21):
     """Calculate Exponential Moving Average."""
@@ -157,6 +88,7 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -168,19 +100,18 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    kama = calculate_kama(close, period=10, fast=2, slow=30)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    vol_sma = calculate_volume_sma(volume, 20)
     ema_50 = calculate_ema(close, 50)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
-    chop = calculate_choppiness(high, low, close, 14)
     
     signals = np.zeros(n)
     
-    # Position sizing - discrete levels based on regime (Rule 4)
-    SIZE_STRONG = 0.35  # Strong trend regime
-    SIZE_MODERATE = 0.25  # Moderate trend
-    SIZE_WEAK = 0.15  # Weak trend / transitional
+    # Position sizing - discrete levels (Rule 4)
+    SIZE_BASE = 0.30  # Base position size
+    SIZE_REDUCED = 0.20  # Reduced size in high vol
+    SIZE_MAX = 0.35  # Maximum position size
     
     # Track position state for stoploss
     in_position = False
@@ -200,71 +131,57 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama[i]) or np.isnan(adx[i]) or np.isnan(chop[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(vol_sma[i]) or vol_sma[i] == 0:
             signals[i] = 0.0
             continue
         
         # === HIGHER TIMEFRAME BIAS ===
-        # 1d HMA = intermediate trend bias (hard filter for direction)
+        # 1d HMA = strong directional bias (hard filter)
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === REGIME DETECTION ===
-        # Choppiness Index: > 61.8 = range, < 38.2 = trend
-        is_trend_regime = chop[i] < 50  # Looser threshold to ensure trades
-        is_range_regime = chop[i] >= 50
+        # === VOLUME CONFIRMATION ===
+        # Breakout must have volume > 1.5x average to be valid
+        volume_confirmed = volume[i] > 1.3 * vol_sma[i]
         
-        # ADX trend strength
-        is_strong_trend = adx[i] > 30
-        is_moderate_trend = 20 < adx[i] <= 30
-        is_weak_trend = adx[i] <= 20
+        # === VOLATILITY ADJUSTMENT ===
+        # Reduce position size when ATR is elevated (>1.5x recent average)
+        atr_recent_avg = np.nanmean(atr[max(0, i-20):i+1])
+        high_volatility = atr[i] > 1.5 * atr_recent_avg if not np.isnan(atr_recent_avg) else False
         
-        # === DIRECTIONAL SIGNALS ===
-        # KAMA slope (trend direction)
-        kama_slope_up = kama[i] > kama[i-3] if not np.isnan(kama[i-3]) else False
-        kama_slope_down = kama[i] < kama[i-3] if not np.isnan(kama[i-3]) else False
+        # Determine position size based on volatility
+        if high_volatility:
+            position_size = SIZE_REDUCED
+        else:
+            position_size = SIZE_BASE
         
-        # Price vs KAMA (trend confirmation)
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        # Long breakout: price breaks above Donchian upper
+        breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
         
-        # Price vs EMA50 (medium-term trend)
-        price_above_ema50 = close[i] > ema_50[i]
-        price_below_ema50 = close[i] < ema_50[i]
-        
-        # DI crossover (momentum)
-        di_bullish = plus_di[i] > minus_di[i]
-        di_bearish = plus_di[i] < minus_di[i]
+        # Short breakout: price breaks below Donchian lower
+        breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
         
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
-        position_size = SIZE_MODERATE
         
-        # Determine position size based on regime
-        if is_strong_trend and is_trend_regime:
-            position_size = SIZE_STRONG
-        elif is_moderate_trend:
-            position_size = SIZE_MODERATE
-        else:
-            position_size = SIZE_WEAK
-        
-        # LONG ENTRY: Need trend alignment across multiple timeframes
-        # Must have: 1d bias up + KAMA up + price above KAMA + ADX confirms trend
+        # LONG ENTRY: Need 1d bias up + Donchian breakout + volume confirmation
+        # Looser conditions to ensure >=10 trades per symbol
         long_conditions = (
-            bull_trend_1d and  # 1d HMA bias
-            kama_slope_up and  # KAMA trending up
-            price_above_kama and  # Price above KAMA
-            di_bullish and  # DI confirms momentum
-            (is_trend_regime or is_moderate_trend)  # Not in extreme range
+            bull_trend_1d and  # 1d HMA bias bullish
+            breakout_long and  # Donchian breakout
+            volume_confirmed  # Volume confirms breakout
         )
         
         # SHORT ENTRY: Mirror of long
         short_conditions = (
-            bear_trend_1d and  # 1d HMA bias
-            kama_slope_down and  # KAMA trending down
-            price_below_kama and  # Price below KAMA
-            di_bearish and  # DI confirms momentum
-            (is_trend_regime or is_moderate_trend)  # Not in extreme range
+            bear_trend_1d and  # 1d HMA bias bearish
+            breakout_short and  # Donchian breakout
+            volume_confirmed  # Volume confirms breakout
         )
         
         # === GENERATE SIGNAL ===
