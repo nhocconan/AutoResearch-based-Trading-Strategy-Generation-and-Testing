@@ -1,42 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #269: 12h Supertrend with 1d HMA Bias and ADX Filter
+Experiment #270: 1d Adaptive Trend Following with Weekly HMA Bias and ADX Filter
 
-Hypothesis: After analyzing 268 experiments, the pattern shows:
-- RSI mean reversion FAILS on crypto (Sharpe -1.6 to -3.1)
-- Simple trend + HTF bias WORKS (current best Sharpe=0.478)
-- Donchian breakout on 12h was CLOSE (#263 Sharpe=-0.076)
+Hypothesis: Daily timeframe offers cleaner trend signals with less noise than intraday.
+After 269 experiments, the pattern shows:
+- Simple trend-following with strong HTF bias works better than mean-reversion
+- KAMA (Kaufman Adaptive) adapts to volatility better than EMA/SMA
+- Weekly HMA provides stronger directional filter than daily
+- ADX filter prevents entries during weak/choppy trends (critical for 2022)
+- Looser entry thresholds needed on 1d to ensure >=10 trades per symbol
 
-This strategy improves on #263 by:
-1. Supertrend(ATR=10, mult=3) instead of Donchian - adapts to volatility better
-2. ADX(14) > 20 filter - only trade when trend has strength (avoid chop)
-3. 1d HMA(21) bias - proven HTF filter from current best strategy
-4. 2.5*ATR trailing stop - tighter than #263's 3.0*ATR for better R:R
-5. Asymmetric entries - only long when 1d HMA bullish, only short when bearish
+Key innovations:
+1. KAMA(21) adaptive trend - responds faster in trends, slower in ranges
+2. 1w HMA(21) bias - strongest HTF filter available (call ONCE before loop)
+3. ADX(14) > 20 filter - only trade when trend has momentum
+4. Price pullback to KAMA entry - better risk/reward than breakout
+5. 2.5*ATR stoploss - appropriate for daily timeframe
+6. Asymmetric sizing - reduce size when ADX weakens
 
-Why 12h Supertrend might beat 4h KAMA:
-- Fewer false signals due to longer timeframe
-- Supertrend inherently includes ATR volatility adjustment
-- 1d HMA bias is stronger at 12h than 4h (more separation)
-- ADX filter prevents whipsaw entries in ranging markets
+Why 1d might work:
+- Less noise = fewer false signals
+- Lower fee drag (fewer trades)
+- Better suited for multi-week trends
+- 2022 crash had clear daily downtrend (ADX stayed elevated)
 
-Key differences from failed strategies:
-- NO RSI (consistently failed - see #251, #254, #257, #259)
-- NO complex ensemble/voting ( #256 failed with Sharpe=-0.231)
-- NO Choppiness Index ( #262 didn't help, Sharpe=-0.159)
-- Simple: Supertrend + ADX + HTF bias + ATR stop
-
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.35 discrete, scaled by ADX strength
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25-0.35 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_supertrend_1d_hma_adx_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_trend_1w_hma_adx_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -49,6 +47,37 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_kama(close, period=21, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    Adapts smoothing based on market efficiency (trend vs noise).
+    More responsive in trends, smoother in ranges.
+    """
+    close_s = pd.Series(close)
+    n = len(close)
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    # Efficiency Ratio (ER)
+    for i in range(period, n):
+        change = np.abs(close[i] - close[i - period])
+        if change == 0:
+            er = 0
+        else:
+            volatility = np.sum(np.abs(np.diff(close[i - period:i + 1])))
+            er = change / volatility if volatility > 0 else 0
+        
+        # Smoothing constant
+        sc = (er * (2 / (fast_period + 1) - 2 / (slow_period + 1)) + 2 / (slow_period + 1)) ** 2
+        
+        # Initialize KAMA
+        if i == period:
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -59,114 +88,67 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-    Returns: supertrend_values, supertrend_direction (1=bullish, -1=bearish)
-    """
-    atr = calculate_atr(high, low, close, period)
-    n = len(close)
-    
-    # Calculate basic upper and lower bands
-    hl2 = (high + low) / 2.0
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Initialize supertrend values
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)  # 1 = bullish (price above ST), -1 = bearish
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = -1  # Start bearish
-    
-    for i in range(1, n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            supertrend[i] = supertrend[i-1]
-            direction[i] = direction[i-1]
-            continue
-        
-        # If previous supertrend was below price (bullish)
-        if direction[i-1] == 1:
-            # New lower band can only move up
-            if lower_band[i] < supertrend[i-1]:
-                supertrend[i] = supertrend[i-1]
-            else:
-                supertrend[i] = lower_band[i]
-            
-            # Check if price breaks below supertrend
-            if close[i] < supertrend[i]:
-                direction[i] = -1
-                supertrend[i] = upper_band[i]
-            else:
-                direction[i] = 1
-        else:
-            # Previous supertrend was above price (bearish)
-            # New upper band can only move down
-            if upper_band[i] > supertrend[i-1]:
-                supertrend[i] = supertrend[i-1]
-            else:
-                supertrend[i] = upper_band[i]
-            
-            # Check if price breaks above supertrend
-            if close[i] > supertrend[i]:
-                direction[i] = 1
-                supertrend[i] = lower_band[i]
-            else:
-                direction[i] = -1
-    
-    return supertrend, direction
-
 def calculate_adx(high, low, close, period=14):
     """
     Calculate Average Directional Index (ADX).
-    ADX > 25 indicates strong trend, ADX < 20 indicates range.
+    Measures trend strength regardless of direction.
+    ADX > 25 = strong trend, ADX < 20 = weak/range
     """
     n = len(close)
+    adx = np.zeros(n)
+    adx[:] = np.nan
     
-    # Calculate True Range and Directional Movement
+    # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
+    # Directional Movement
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
     
     for i in range(1, n):
-        plus_diff = high[i] - high[i-1]
-        minus_diff = low[i-1] - low[i]
+        plus_move = high[i] - high[i - 1]
+        minus_move = low[i - 1] - low[i]
         
-        if plus_diff > minus_diff and plus_diff > 0:
-            plus_dm[i] = plus_diff
-        if minus_diff > plus_diff and minus_diff > 0:
-            minus_dm[i] = minus_diff
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
     
-    # Smooth using Wilder's method (EMA with span=period)
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # Smoothed averages (Wilder's method)
+    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    # Calculate DI+ and DI-
+    # Directional Indicators
     plus_di = np.zeros(n)
     minus_di = np.zeros(n)
     
     for i in range(period, n):
-        if tr_s[i] > 0:
-            plus_di[i] = 100 * plus_dm_s[i] / tr_s[i]
-            minus_di[i] = 100 * minus_dm_s[i] / tr_s[i]
+        if tr_smooth[i] > 0:
+            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
+            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
     
-    # Calculate DX and ADX
+    # DX and ADX
     dx = np.zeros(n)
     for i in range(period, n):
         di_sum = plus_di[i] + minus_di[i]
         if di_sum > 0:
             dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / di_sum
     
-    # Smooth DX to get ADX
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    adx_raw = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    adx[period * 2 - 1:] = adx_raw[period * 2 - 1:]
     
     return adx
+
+def calculate_ema(close, period=50):
+    """Calculate Exponential Moving Average."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    return ema.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -175,25 +157,26 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
+    kama = calculate_kama(close, 21)
     adx = calculate_adx(high, low, close, 14)
+    ema_50 = calculate_ema(close, 50)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.30  # Base position size
-    SIZE_STRONG = 0.35  # Strong trend (ADX > 30)
-    SIZE_WEAK = 0.20  # Weak trend (ADX 20-25)
+    SIZE_REDUCED = 0.20  # Reduced size in weak trend
+    SIZE_MAX = 0.35  # Maximum position size
     
     # Track position state for stoploss
     in_position = False
@@ -208,11 +191,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(supertrend[i]):
+        if np.isnan(kama[i]):
             signals[i] = 0.0
             continue
         
@@ -221,42 +204,58 @@ def generate_signals(prices):
             continue
         
         # === HIGHER TIMEFRAME BIAS ===
-        # 1d HMA = strong directional bias (hard filter)
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
+        # 1w HMA = strongest directional bias (hard filter)
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
         
-        # === SUPERTREND SIGNAL ===
-        # st_direction = 1 means bullish (price above supertrend)
-        # st_direction = -1 means bearish (price below supertrend)
-        st_bullish = st_direction[i] == 1
-        st_bearish = st_direction[i] == -1
+        # === TREND STRENGTH FILTER ===
+        # ADX > 20 = trend has momentum (avoid choppy markets)
+        # ADX > 30 = strong trend (increase position size)
+        trend_strong = adx[i] > 25
+        trend_weak = adx[i] < 20
         
-        # === ADX TREND STRENGTH FILTER ===
-        # Only trade when ADX indicates trend strength
-        adx_strong = adx[i] > 25  # Strong trend
-        adx_moderate = adx[i] > 20  # Moderate trend
+        # === KAMA TREND DIRECTION ===
+        # Price above KAMA = bullish, below = bearish
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
-        # === DETERMINE POSITION SIZE BASED ON ADX ===
-        if adx[i] > 30:
-            position_size = SIZE_STRONG
-        elif adx[i] > 25:
+        # KAMA slope (trend direction)
+        kama_slope_bull = kama[i] > kama[i - 5] if i >= 5 else False
+        kama_slope_bear = kama[i] < kama[i - 5] if i >= 5 else False
+        
+        # === DETERMINE POSITION SIZE ===
+        if trend_strong:
             position_size = SIZE_BASE
-        elif adx[i] > 20:
-            position_size = SIZE_WEAK
+        elif trend_weak:
+            position_size = SIZE_REDUCED
         else:
-            position_size = 0.0  # No trade in range
+            position_size = SIZE_BASE
         
         # === ENTRY CONDITIONS ===
+        # LONG: 1w bias up + ADX confirms trend + price above KAMA + KAMA sloping up
+        # Looser conditions to ensure >=10 trades per symbol on daily data
+        long_conditions = (
+            bull_trend_1w and  # 1w HMA bias bullish
+            adx[i] > 20 and  # Trend has momentum
+            price_above_kama and  # Price above adaptive MA
+            kama_slope_bull  # KAMA sloping upward
+        )
+        
+        # SHORT: Mirror of long
+        short_conditions = (
+            bear_trend_1w and  # 1w HMA bias bearish
+            adx[i] > 20 and  # Trend has momentum
+            price_below_kama and  # Price below adaptive MA
+            kama_slope_bear  # KAMA sloping downward
+        )
+        
+        # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # LONG ENTRY: Need 1d bias up + Supertrend bullish + ADX confirms trend
-        # Asymmetric: only long when 1d HMA is bullish
-        if bull_trend_1d and st_bullish and adx_moderate and position_size > 0:
+        if long_conditions:
             new_signal = position_size
         
-        # SHORT ENTRY: Mirror of long
-        # Asymmetric: only short when 1d HMA is bearish
-        if bear_trend_1d and st_bearish and adx_moderate and position_size > 0:
+        if short_conditions:
             new_signal = -position_size
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
@@ -281,19 +280,20 @@ def generate_signals(prices):
                     new_signal = 0.0  # Stoploss overrides entry signal
         
         # === TREND REVERSAL EXIT ===
-        # Exit if HTF bias reverses against position
+        # Exit if HTF bias reverses against position OR ADX drops too low
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_1d:
-                new_signal = 0.0  # 1d trend reversed against long
-            if position_side < 0 and bull_trend_1d:
-                new_signal = 0.0  # 1d trend reversed against short
+            if position_side > 0 and (bear_trend_1w or adx[i] < 18):
+                new_signal = 0.0  # 1w trend reversed or trend weakened
+            if position_side < 0 and (bull_trend_1w or adx[i] < 18):
+                new_signal = 0.0  # 1w trend reversed or trend weakened
         
-        # Exit if Supertrend reverses against position
+        # === KAMA CROSS EXIT ===
+        # Exit if price crosses KAMA against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and st_bearish:
-                new_signal = 0.0  # Supertrend flipped bearish
-            if position_side < 0 and st_bullish:
-                new_signal = 0.0  # Supertrend flipped bullish
+            if position_side > 0 and price_below_kama:
+                new_signal = 0.0  # Price crossed below KAMA
+            if position_side < 0 and price_above_kama:
+                new_signal = 0.0  # Price crossed above KAMA
         
         # === UPDATE POSITION TRACKING FOR NEXT BAR ===
         if new_signal != 0.0:
