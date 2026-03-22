@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #008: 30m HMA Trend + RSI Pullback with 4h Regime Filter
-Hypothesis: 30m captures intraday swings while 4h HMA provides trend bias.
-Key insight from #005: 12h worked best (+16.6%), so 30m with 4h HTF should
-capture more opportunities while maintaining trend alignment.
-Entry: Price pullback to EMA21 + RSI(14) in 35-50 (long) or 50-65 (short)
-       aligned with 4h HMA trend direction.
-Regime filter: Bollinger Band Width percentile to detect squeeze/expansion.
-Exit: 2.5*ATR trailing stop or opposite signal.
-Sizing: 0.25-0.30 discrete levels to minimize fee churn.
-Must work on BTC/ETH through 2022 crash and 2025 bear market.
-Timeframe: 30m (REQUIRED), HTF: 4h via mtf_data helper.
+Experiment #009: 1h Dual-Regime Strategy with 4h HMA Trend Filter
+Hypothesis: Combine mean-reversion in range markets with trend-following in trending markets.
+Uses Choppiness Index (CHOP) to detect regime, then applies appropriate logic:
+- CHOP > 55 (range): Mean revert using RSI extremes + BB bands
+- CHOP < 45 (trend): Follow 4h HMA direction with pullback entries
+4h HMA provides HTF trend bias. Conservative sizing (0.25-0.30) with 2.5*ATR stop.
+This addresses failures from pure trend (2022 whipsaw) and pure mean-revert (2025 bear).
+Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_hma_rsi_pullback_4h_regime_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_dual_regime_4h_hma_chop_rsi_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -52,31 +49,46 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    CHOP > 61.8 = range/choppy, CHOP < 38.2 = trending
+    """
+    n = len(close)
+    chop = np.zeros(n)
+    chop[:] = np.nan
+    
+    atr = calculate_atr(high, low, close, period)
+    
+    for i in range(period, n):
+        atr_sum = np.sum(atr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        tr_range = highest_high - lowest_low
+        
+        if tr_range > 0 and atr_sum > 0:
+            chop[i] = 100 * np.log10(atr_sum / tr_range) / np.log10(period)
+    
+    chop = np.clip(chop, 0, 100)
+    return chop
+
+def calculate_bollinger(close, period=20, std_dev=2.0):
     """Calculate Bollinger Bands."""
     close_s = pd.Series(close)
     sma = close_s.rolling(window=period, min_periods=period).mean().values
     std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    width = (upper - lower) / sma
-    return upper, lower, width
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    return upper, lower, sma
 
-def calculate_ema(close, period=21):
-    """Calculate Exponential Moving Average."""
-    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-
-def calculate_percentile_rank(values, window=100):
-    """Calculate percentile rank over rolling window."""
-    n = len(values)
-    pr = np.zeros(n)
-    pr[:] = np.nan
-    for i in range(window-1, n):
-        window_vals = values[i-window+1:i+1]
-        current = values[i]
-        rank = np.sum(window_vals <= current) / window
-        pr[i] = rank * 100
-    return pr
+def calculate_keltner(high, low, close, atr_period=10, mult=2.0):
+    """Calculate Keltner Channel for squeeze detection."""
+    atr = calculate_atr(high, low, close, atr_period)
+    ema = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    upper = ema + mult * atr
+    lower = ema - mult * atr
+    return upper, lower, ema
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -93,19 +105,27 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    ema_21 = calculate_ema(close, 21)
-    ema_50 = calculate_ema(close, 50)
-    bb_upper, bb_lower, bb_width = calculate_bollinger(close, 20, 2.0)
+    rsi_3 = calculate_rsi(close, 3)  # Fast RSI for Connors-style
+    chop = calculate_choppiness(high, low, close, 14)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
+    kc_upper, kc_lower, kc_mid = calculate_keltner(high, low, close, 10, 1.5)
     
-    # Bollinger Width percentile for regime detection
-    bb_width_pr = calculate_percentile_rank(bb_width, 100)
+    # EMA for trend
+    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Z-score for mean reversion
+    rolling_mean = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    rolling_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    zscore = (close - rolling_mean) / (rolling_std + 1e-10)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.30
-    SIZE_HALF = 0.15
+    SIZE_LONG = 0.28
+    SIZE_SHORT = -0.28
+    SIZE_HALF = 0.14
     
     # Track positions for stoploss
     position_side = 0
@@ -124,60 +144,68 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(ema_21[i]) or np.isnan(bb_width_pr[i]):
+        if np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(bb_upper[i]):
             signals[i] = 0.0
             continue
         
-        # 4h trend bias (HTF) - primary filter
+        # === REGIME DETECTION ===
+        # CHOP > 55 = range/choppy (mean revert)
+        # CHOP < 45 = trending (trend follow)
+        # 45-55 = neutral (use HTF bias)
+        is_range = chop[i] > 55
+        is_trend = chop[i] < 45
+        
+        # 4h HMA trend bias
         hma_4h_bullish = close[i] > hma_4h_aligned[i]
         hma_4h_bearish = close[i] < hma_4h_aligned[i]
         
-        # 30m trend confirmation
-        ema_bullish = close[i] > ema_21[i] and ema_21[i] > ema_50[i]
-        ema_bearish = close[i] < ema_21[i] and ema_21[i] < ema_50[i]
+        # EMA trend
+        ema_bullish = ema_21[i] > ema_50[i]
+        ema_bearish = ema_21[i] < ema_50[i]
         
-        # Regime detection via BB Width percentile
-        # Low percentile = squeeze (expect breakout), High = expansion (expect mean reversion)
-        regime_squeeze = bb_width_pr[i] < 30
-        regime_expansion = bb_width_pr[i] > 70
+        # Bollinger position
+        bb_pct = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i] + 1e-10)
+        price_below_bb_lower = close[i] < bb_lower[i]
+        price_above_bb_upper = close[i] > bb_upper[i]
         
-        # RSI pullback levels (looser than before to generate more trades)
-        rsi_pullback_long = rsi[i] >= 35 and rsi[i] <= 55
-        rsi_pullback_short = rsi[i] >= 45 and rsi[i] <= 65
-        
-        # Price near EMA21 (pullback entry)
-        price_near_ema_long = close[i] >= ema_21[i] * 0.99 and close[i] <= ema_21[i] * 1.02
-        price_near_ema_short = close[i] <= ema_21[i] * 1.01 and close[i] >= ema_21[i] * 0.98
-        
-        # Price near Bollinger bands for mean reversion
-        price_near_bb_lower = close[i] <= bb_lower[i] * 1.005
-        price_near_bb_upper = close[i] >= bb_upper[i] * 0.995
+        # Keltner squeeze (BB inside KC = low vol, breakout imminent)
+        bb_inside_kc = (bb_upper[i] < kc_upper[i]) and (bb_lower[i] > kc_lower[i])
         
         new_signal = 0.0
         
-        # === LONG ENTRY ===
-        # Primary: 4h HMA bullish + RSI pullback + price near EMA21
-        if hma_4h_bullish and rsi_pullback_long and price_near_ema_long:
-            new_signal = SIZE_ENTRY
-        # Secondary: 4h HMA bullish + price at BB lower (mean reversion in uptrend)
-        elif hma_4h_bullish and price_near_bb_lower and rsi[i] < 45:
-            new_signal = SIZE_ENTRY
-        # Tertiary: EMA bullish + RSI ok (trend continuation)
-        elif ema_bullish and hma_4h_bullish and rsi[i] > 40 and rsi[i] < 60:
-            new_signal = SIZE_ENTRY
+        # === RANGE REGIME: MEAN REVERSION ===
+        if is_range:
+            # Long: RSI oversold + price near BB lower + 4h HMA not strongly bearish
+            if rsi[i] < 35 and bb_pct < 0.25 and not hma_4h_bearish:
+                new_signal = SIZE_LONG
+            # Short: RSI overbought + price near BB upper + 4h HMA not strongly bullish
+            elif rsi[i] > 65 and bb_pct > 0.75 and not hma_4h_bullish:
+                new_signal = SIZE_SHORT
         
-        # === SHORT ENTRY ===
-        # Primary: 4h HMA bearish + RSI pullback + price near EMA21
-        if hma_4h_bearish and rsi_pullback_short and price_near_ema_short:
-            new_signal = -SIZE_ENTRY
-        # Secondary: 4h HMA bearish + price at BB upper (mean reversion in downtrend)
-        elif hma_4h_bearish and price_near_bb_upper and rsi[i] > 55:
-            new_signal = -SIZE_ENTRY
-        # Tertiary: EMA bearish + RSI ok (trend continuation)
-        elif ema_bearish and hma_4h_bearish and rsi[i] > 40 and rsi[i] < 60:
-            new_signal = -SIZE_ENTRY
+        # === TREND REGIME: TREND FOLLOWING ===
+        elif is_trend:
+            # Long: 4h HMA bullish + pullback to EMA21 + RSI not overbought
+            if hma_4h_bullish and ema_bullish and close[i] < ema_21[i] * 1.01 and rsi[i] < 70:
+                new_signal = SIZE_LONG
+            # Short: 4h HMA bearish + rally to EMA21 + RSI not oversold
+            elif hma_4h_bearish and ema_bearish and close[i] > ema_21[i] * 0.99 and rsi[i] > 30:
+                new_signal = SIZE_SHORT
         
-        # === STOPLOSS LOGIC ===
+        # === NEUTRAL REGIME: HTF BIAS + BREAKOUT ===
+        else:
+            # Squeeze breakout long
+            if bb_inside_kc and close[i] > bb_upper[i] and hma_4h_bullish:
+                new_signal = SIZE_LONG
+            # Squeeze breakout short
+            elif bb_inside_kc and close[i] < bb_lower[i] and hma_4h_bearish:
+                new_signal = SIZE_SHORT
+            # Z-score extreme mean reversion
+            elif zscore[i] < -2.0 and rsi[i] < 40:
+                new_signal = SIZE_LONG
+            elif zscore[i] > 2.0 and rsi[i] > 60:
+                new_signal = SIZE_SHORT
+        
+        # === STOPLOSS LOGIC (ATR trailing) ===
         if position_side > 0 and entry_price > 0:
             # Update highest close for trailing
             if close[i] > highest_close:
