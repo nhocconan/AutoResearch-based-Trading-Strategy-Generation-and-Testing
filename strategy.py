@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #302: 30m Supertrend with 4h HMA Bias and RSI Pullback Entries
+Experiment #303: 1h Supertrend with 4h HMA Bias and ADX Filter
 
-Hypothesis: After analyzing 298+ experiments, clear patterns emerge:
-1. Supertrend + HTF HMA bias is the ONLY consistently profitable formula (#292 Sharpe=0.485)
-2. Mean reversion strategies (RSI extremes, CRSI, Bollinger) ALWAYS fail on crypto
-3. Complex ensembles with too many filters reduce trade count and Sharpe
-4. 30m timeframe has more noise than 4h but can capture more intraday trends
+Hypothesis: After analyzing 299 experiments, the winning formula is clear:
+1. 4h Supertrend + 1d HMA (#292) = Sharpe=0.485 (CURRENT BEST)
+2. Simple trend + HTF bias works; complex ensembles fail
+3. Mean reversion ALWAYS fails across all timeframes
+4. 1h timeframe hasn't been properly tested with proven 4h logic
 
-This strategy adapts the winning #292 formula for 30m:
-1. 30m Supertrend(ATR=10, mult=3) for primary trend direction
-2. 4h HMA(21) for higher timeframe bias (proven edge from #292)
-3. RSI(14) pullback entries - NOT mean reversion, but enter on pullbacks WITH trend
-   - Long: Supertrend long + 4h HMA bullish + RSI(14) < 45 (pullback in uptrend)
-   - Short: Supertrend short + 4h HMA bearish + RSI(14) > 55 (pullback in downtrend)
-4. ADX(14) > 18 filter to avoid choppy markets (looser than 25 for more trades)
-5. ATR(14) trailing stoploss at 2.5x for risk management
+This strategy adapts the winning #292 formula to 1h:
+1. 4h HMA(21) for directional bias (proven edge from #292)
+2. 1h Supertrend(10, 3.0) for entry timing (classic trend indicator)
+3. ADX(14)>15 for trend confirmation (loose threshold for >=10 trades)
+4. ATR(14) trailing stoploss at 2.5x (mandatory risk management)
+5. Position sizing: 0.25 base, 0.35 in strong trend (discrete levels)
 
 Why this might beat #292:
-- 30m captures more intraday trends than 4h (more trade opportunities)
-- RSI pullback entries catch better entry prices than pure breakout
-- 4h HMA bias prevents trading against higher timeframe trend
-- Simpler than failed complex ensembles (#295, #297)
+- 1h captures more trend moves than 4h (more opportunities)
+- Supertrend is proven trend-following indicator (works on 4h in #292)
+- 4h HMA bias filters out counter-trend trades (same edge as #292)
+- Simpler logic = fewer whipsaws than complex ensembles (#297 failed)
 
-Timeframe: 30m (REQUIRED for this experiment)
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25-0.35 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
@@ -32,8 +30,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_supertrend_4h_hma_rsi_pullback_adx_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_supertrend_4h_hma_adx_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -46,6 +44,48 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """
+    Calculate Supertrend indicator.
+    Supertrend = (HL2) +/- (multiplier * ATR)
+    When price > Supertrend = bullish (green)
+    When price < Supertrend = bearish (red)
+    Returns: supertrend values, direction (1=bullish, -1=bearish)
+    """
+    atr = calculate_atr(high, low, close, period)
+    hl2 = (high + low) / 2
+    
+    n = len(close)
+    supertrend = np.zeros(n)
+    direction = np.zeros(n)  # 1 = bullish, -1 = bearish
+    
+    # Initialize
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    supertrend[0] = upper_band[0]
+    direction[0] = -1  # Start bearish
+    
+    for i in range(1, n):
+        if direction[i-1] == 1:
+            # Previously bullish
+            if close[i] > lower_band[i]:
+                supertrend[i] = lower_band[i]
+                direction[i] = 1
+            else:
+                supertrend[i] = upper_band[i]
+                direction[i] = -1
+        else:
+            # Previously bearish
+            if close[i] < upper_band[i]:
+                supertrend[i] = upper_band[i]
+                direction[i] = -1
+            else:
+                supertrend[i] = lower_band[i]
+                direction[i] = 1
+    
+    return supertrend, direction
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -56,72 +96,12 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-    Returns: supertrend_values, supertrend_direction (1=long, -1=short)
-    """
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)  # 1 = long (price above ST), -1 = short (price below ST)
-    
-    # Calculate basic bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, n):
-        if direction[i-1] == 1:
-            # Previous trend was long
-            if close[i] > supertrend[i-1]:
-                # Continue long, use lower band
-                supertrend[i] = max(lower_band[i], supertrend[i-1])
-                direction[i] = 1
-            else:
-                # Flip to short
-                supertrend[i] = upper_band[i]
-                direction[i] = -1
-        else:
-            # Previous trend was short
-            if close[i] < supertrend[i-1]:
-                # Continue short, use upper band
-                supertrend[i] = min(upper_band[i], supertrend[i-1])
-                direction[i] = -1
-            else:
-                # Flip to long
-                supertrend[i] = lower_band[i]
-                direction[i] = 1
-    
-    return supertrend, direction
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI using Wilder's smoothing."""
-    n = len(close)
-    delta = np.diff(close, prepend=close[0])
-    
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    gain_s = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    loss_s = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rs = np.zeros(n)
-    mask = loss_s > 0
-    rs[mask] = gain_s[mask] / loss_s[mask]
-    rs[~mask] = 100
-    
-    rsi = 100 - (100 / (1 + rs))
-    rsi[loss_s == 0] = 100
-    
-    return rsi
-
 def calculate_adx(high, low, close, period=14):
-    """Calculate Average Directional Index (ADX)."""
+    """
+    Calculate Average Directional Index (ADX).
+    ADX > 25 = trending, ADX < 20 = ranging.
+    We use 15 as threshold for 1h timeframe (looser for more trades).
+    """
     n = len(close)
     
     # True Range
@@ -140,7 +120,7 @@ def calculate_adx(high, low, close, period=14):
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smooth with Wilder's method
+    # Smooth with Wilder's method (EMA with span=period)
     tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
     plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean()
     minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean()
@@ -171,10 +151,9 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
-    rsi = calculate_rsi(close, 14)
     adx = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
@@ -204,33 +183,24 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]):
-            signals[i] = 0.0
-            continue
-        
         if np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
-        # === HIGHER TIMEFRAME BIAS ===
-        # 4h HMA = directional bias
+        # === HIGHER TIMEFRAME BIAS (4h HMA Filter) ===
+        # 4h HMA = directional bias (proven edge from #292)
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === SUPERTREND DIRECTION ===
-        st_long = st_direction[i] == 1
-        st_short = st_direction[i] == -1
-        
         # === TREND STRENGTH ===
-        # ADX > 18 = trending market (loose threshold for 30m to get >=10 trades)
-        trending = adx[i] > 18
+        # ADX > 15 = trending market (loose threshold for 1h to ensure >=10 trades)
+        trending = adx[i] > 15
         strong_trend = adx[i] > 25
         
-        # === RSI PULLBACK (NOT MEAN REVERSION) ===
-        # Long: RSI < 45 (pullback in uptrend, not oversold)
-        # Short: RSI > 55 (pullback in downtrend, not overbought)
-        rsi_pullback_long = rsi[i] < 45
-        rsi_pullback_short = rsi[i] > 55
+        # === SUPERTREND SIGNAL ===
+        # Supertrend direction: 1 = bullish (price above ST), -1 = bearish
+        st_bullish = st_direction[i] == 1
+        st_bearish = st_direction[i] == -1
         
         # === VOLATILITY ADJUSTMENT ===
         # Reduce position size when ATR is elevated (>1.5x recent average)
@@ -248,20 +218,18 @@ def generate_signals(prices):
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
         
-        # LONG ENTRY: Need Supertrend long + 4h HMA bullish + RSI pullback + ADX filter
-        # These conditions work together, not conflicting
+        # LONG ENTRY: Need 4h bias up + Supertrend bullish + ADX filter
+        # Looser conditions to ensure >=10 trades per symbol
         long_conditions = (
-            st_long and  # Supertrend says long
             bull_trend_4h and  # 4h HMA bias bullish
-            rsi_pullback_long and  # RSI pullback (better entry price)
+            st_bullish and  # Supertrend confirms bullish
             trending  # ADX confirms trend
         )
         
         # SHORT ENTRY: Mirror of long
         short_conditions = (
-            st_short and  # Supertrend says short
             bear_trend_4h and  # 4h HMA bias bearish
-            rsi_pullback_short and  # RSI pullback (better entry price)
+            st_bearish and  # Supertrend confirms bearish
             trending  # ADX confirms trend
         )
         
@@ -294,19 +262,20 @@ def generate_signals(prices):
                     new_signal = 0.0  # Stoploss overrides entry signal
         
         # === TREND REVERSAL EXIT ===
-        # Exit if Supertrend reverses against position
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and st_short:
-                new_signal = 0.0  # Supertrend flipped against long
-            if position_side < 0 and st_long:
-                new_signal = 0.0  # Supertrend flipped against short
-        
         # Exit if HTF bias reverses against position
         if in_position and new_signal != 0.0:
             if position_side > 0 and bear_trend_4h:
                 new_signal = 0.0  # 4h trend reversed against long
             if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0  # 4h trend reversed against short
+        
+        # === SUPERTREND REVERSAL EXIT ===
+        # Exit if Supertrend reverses against position
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and st_bearish:
+                new_signal = 0.0  # Supertrend broke against long
+            if position_side < 0 and st_bullish:
+                new_signal = 0.0  # Supertrend broke against short
         
         # === UPDATE POSITION TRACKING FOR NEXT BAR ===
         if new_signal != 0.0:
