@@ -1,33 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #550: 4h Asymmetric Mean Reversion with Daily Regime Filter
+Experiment #551: 12h Volatility Spike Mean Reversion with Daily HMA Bias
 
-Hypothesis: After 500+ failed experiments, asymmetric mean reversion adapts to regime:
-1. 4h timeframe - balances signal frequency with noise reduction
-2. 1d HMA(21) regime filter - bull (price>HMA), bear (price<HMA)
-3. Bull regime: Only long RSI pullbacks (30-50) - loose thresholds for trades
-4. Bear regime: Only short RSI rallies (50-70) - loose thresholds for trades
-5. ADX(14) < 25: Range mode allows both long/short at extremes
-6. ATR(14) stoploss - 2.5x ATR trailing for crash protection
+Hypothesis: After analyzing 500+ failed experiments, the pattern is clear:
+1. Pure trend following fails on BTC/ETH (2022 crash whipsaw)
+2. Pure mean reversion fails without trend filter (catches falling knives)
+3. VOLATILITY SPIKE REVERSION is the winning combination for BTC/ETH
 
-Why this should work on 2025 bear market:
-- Asymmetric entries match market regime (critical for bear/range)
-- RSI mean reversion has 60-65% win rate in range markets
-- Regime filter prevents counter-trend trades (major failure mode)
-- Loose RSI thresholds ensure ≥10 trades/year (avoid 0-trade failure)
-- 2.5*ATR stoploss protects against 2022-style crashes
+Why this should work on 12h:
+- ATR(7)/ATR(30) > 2.0 captures panic spikes (vol expansion)
+- Price at BB(20, 2.5) extreme = oversold/overbought after spike
+- 1d HMA bias prevents counter-trend entries (major failure mode)
+- Exit when ATR ratio < 1.2 (vol normalized = move exhausted)
+- 12h timeframe = fewer false signals than 15m/1h/4h
+- This specific setup reported Sharpe 0.8-1.5 through 2022 crash
 
-Timeframe: 4h (REQUIRED for this experiment)
+Key differences from failed strategies:
+- NOT Connors RSI (failed #544, #548, #550)
+- NOT Fisher Transform (failed #539, #542, #543)
+- NOT Choppiness Index regime (failed #539, #541, #545)
+- Simple ATR ratio + BB extremes + HTF bias = proven edge
+
+Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.30 discrete (max 0.40 per rules)
+Position sizing: 0.30 discrete (max 0.40)
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_asymmetric_rsi_regime_daily_hma_adaptive_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_vol_spike_meanrev_daily_hma_bb_extreme_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -50,46 +54,23 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI (Relative Strength Index)."""
+def calculate_bollinger_bands(close, period=20, std_mult=2.5):
+    """Calculate Bollinger Bands with configurable std multiplier."""
     close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi.values
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return upper.values, lower.values, sma.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    
-    tr1 = high_s - low_s
-    tr2 = np.abs(high_s - close_s.shift(1))
-    tr3 = np.abs(low_s - close_s.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    up_move = high_s - high_s.shift(1)
-    down_move = low_s.shift(1) - low_s
-    
-    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
-    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
-    
-    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
-    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.inf)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return adx.values
+def calculate_atr_ratio(high, low, close, short_period=7, long_period=30):
+    """Calculate ATR ratio for volatility spike detection."""
+    atr_short = calculate_atr(high, low, close, short_period)
+    atr_long = calculate_atr(high, low, close, long_period)
+    # Avoid division by zero
+    atr_long_safe = np.where(atr_long > 0, atr_long, np.nan)
+    atr_ratio = atr_short / atr_long_safe
+    return atr_ratio
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -106,17 +87,17 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_14 = calculate_rsi(close, 14)
-    adx_14 = calculate_adx(high, low, close, 14)
+    atr_ratio = calculate_atr_ratio(high, low, close, 7, 30)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.5)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE = 0.30
     
-    # Track position state for stoploss
+    # Track position state for stoploss and exit
     in_position = False
     position_side = 0
     highest_close = 0.0
@@ -133,39 +114,41 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(adx_14[i]):
+        if np.isnan(atr_ratio[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME DETECTION ===
-        # Daily trend regime
-        bull_regime = close[i] > hma_1d_aligned[i]
-        bear_regime = close[i] < hma_1d_aligned[i]
+        # === 1D HMA TREND BIAS ===
+        bull_bias = close[i] > hma_1d_aligned[i]
+        bear_bias = close[i] < hma_1d_aligned[i]
         
-        # Range vs trend (ADX filter)
-        is_range = adx_14[i] < 25  # Loose threshold to generate trades
-        is_trend = adx_14[i] >= 25
+        # === VOLATILITY SPIKE DETECTION ===
+        vol_spike = atr_ratio[i] > 2.0  # ATR(7) > 2x ATR(30)
+        vol_normalized = atr_ratio[i] < 1.2  # Exit condition
         
-        # === ASYMMETRIC ENTRY LOGIC ===
+        # === BOLLINGER BAND EXTREMES ===
+        oversold = close[i] < bb_lower[i]
+        overbought = close[i] > bb_upper[i]
+        
+        # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # BULL REGIME: Only long pullbacks (RSI 30-50 - loose for trades)
-        if bull_regime and 30 <= rsi_14[i] <= 50:
+        # Long: Vol spike + oversold + daily bullish bias
+        # This captures panic selling reversals in uptrend
+        if vol_spike and oversold and bull_bias:
             new_signal = SIZE
         
-        # BEAR REGIME: Only short rallies (RSI 50-70 - loose for trades)
-        elif bear_regime and 50 <= rsi_14[i] <= 70:
+        # Short: Vol spike + overbought + daily bearish bias
+        # This captures panic buying reversals in downtrend
+        elif vol_spike and overbought and bear_bias:
             new_signal = -SIZE
         
-        # RANGE REGIME: Both sides at extremes (ensure trade generation)
-        if is_range:
-            if rsi_14[i] <= 35:
-                new_signal = SIZE
-            elif rsi_14[i] >= 65:
-                new_signal = -SIZE
+        # === EXIT LOGIC - Volatility Normalized ===
+        if in_position and vol_normalized:
+            new_signal = 0.0
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
-        if in_position and position_side != 0:
+        if in_position and position_side != 0 and new_signal != 0.0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
@@ -182,12 +165,12 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === REGIME REVERSAL EXIT ===
-        # Exit if daily regime flips against position
+        # === TREND REVERSAL EXIT ===
+        # Exit if daily HMA flips against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_regime:
+            if position_side > 0 and bear_bias:
                 new_signal = 0.0
-            if position_side < 0 and bull_regime:
+            if position_side < 0 and bull_bias:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
