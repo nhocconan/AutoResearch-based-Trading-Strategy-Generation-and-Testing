@@ -1,36 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #131: 4h Primary + 1d/1w HTF — Funding Rate Mean Reversion + Vol Spike
+Experiment #132: 12h Primary + 1d/1w HTF — Adaptive KAMA Trend + RSI Pullback + Choppiness Regime
 
-Hypothesis: Previous 4h strategies failed due to over-filtering (too many confluence 
-requirements = 0 trades). Research shows funding rate mean reversion is the BEST edge 
-for BTC/ETH through bear markets (2022 crash). This strategy combines:
+Hypothesis: Recent failures stem from overly complex filters that prevent trade generation.
+This strategy simplifies entry logic while maintaining edge through:
 
-1. FUNDING RATE Z-SCORE(30): Extreme funding (>2σ) signals crowded positioning → reversals
-2. VOLATILITY SPIKE: ATR(7)/ATR(30) > 1.5 captures panic/extreme moves
-3. 4h RSI(14): Simple oversold/overbought for entry timing (<35 long, >65 short)
-4. 1d HMA(21) SLOPE: Major trend bias (avoid fighting strong trends)
-5. BOLLINGER BANDS: Price at extremes confirms mean reversion setup
+1. KAMA (Kaufman Adaptive Moving Average): Adapts to volatility - fast in trends, slow in chop
+2. 1d HMA(21) Trend Bias: Major direction filter (long only when 1d HMA sloping up)
+3. Choppiness Index Regime: CHOP>55 = mean revert (RSI extremes), CHOP<45 = trend follow
+4. RSI(14) Pullback Entries: RSI<40 in uptrend for longs, RSI>60 in downtrend for shorts
+5. ATR(14) Trailing Stop: 2.5*ATR protects capital during reversals
 
 Why this should work:
-- Funding rate is proven edge for BTC/ETH (Sharpe 0.8-1.5 in research)
-- Fewer filters = more trades (target 30-50/year)
-- 4h timeframe balances signal quality vs trade frequency
-- 1d HTF prevents counter-trend in strong moves
-- Asymmetric sizing: larger positions when funding + vol align
+- KAMA reduces whipsaw in choppy markets (2022, 2025 bear)
+- 1d HTF bias prevents counter-trend trades in strong moves
+- Choppiness regime switch adapts to market conditions
+- Moderate RSI thresholds (40/60) ensure sufficient trade generation
+- 12h TF = 25-40 trades/year target (low fee drag, enough samples)
 
-Timeframe: 4h (REQUIRED)
+Timeframe: 12h (REQUIRED)
 HTF: 1d via mtf_data.get_htf_data() — called ONCE before loop
-Position sizing: 0.25-0.30 discrete
+Position sizing: 0.30 discrete (max 0.35)
 Stoploss: 2.5 * ATR(14) trailing
-Target trades: 30-50/year per symbol
+Target trades: 25-40/year per symbol
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_funding_vol_rsi_meanrevert_1d_v1"
-timeframe = "4h"
+name = "mtf_12h_kama_rsi_chop_regime_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -58,14 +57,36 @@ def calculate_rsi(close, period=14):
     rsi = rsi.fillna(50).values
     return rsi
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market volatility - moves fast in trends, slow in chop.
+    """
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma
+    n = len(close)
+    kama = np.zeros(n)
+    
+    # Change = abs(close - close[period] ago)
+    change = np.abs(close_s - close_s.shift(er_period)).values
+    
+    # Volatility = sum of abs(close - close[1] ago) over period
+    volatility = pd.Series(np.abs(close_s.diff())).rolling(window=er_period, min_periods=er_period).sum().values
+    
+    # Efficiency Ratio (ER) = Change / Volatility (0 to 1)
+    er = change / np.where(volatility > 0, volatility, 1e-10)
+    er = np.clip(er, 0, 1)
+    
+    # Smoothing Constant (SC) = [ER * (fast - slow) + slow]^2
+    fast_sc = 2 / (fast_period + 1)
+    slow_sc = 2 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama[er_period] = close[er_period]
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average."""
@@ -85,31 +106,26 @@ def calculate_hma_slope(hma_values, lookback=5):
             slope[i] = (hma_values[i] - hma_values[i - lookback]) / hma_values[i - lookback] * 100
     return slope
 
-def calculate_zscore(values, period=30):
-    """Calculate rolling z-score."""
-    values_s = pd.Series(values)
-    rolling_mean = values_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = values_s.rolling(window=period, min_periods=period).std()
-    zscore = (values_s - rolling_mean) / rolling_std.replace(0, np.nan)
-    return zscore.fillna(0).values
-
-def load_funding_data(symbol_from_prices):
-    """Load funding rate data for the symbol."""
-    try:
-        # Extract symbol name from prices dataframe (assume it has symbol info or infer from path)
-        # For Binance USDT-M perpetuals, funding data is in data/processed/funding/
-        symbol = "BTCUSDT"  # Default, will be overridden by actual symbol
-        if "ETH" in str(symbol_from_prices):
-            symbol = "ETHUSDT"
-        elif "SOL" in str(symbol_from_prices):
-            symbol = "SOLUSDT"
-        
-        funding_path = f"data/processed/funding/{symbol.lower()}.parquet"
-        funding_df = pd.read_parquet(funding_path)
-        return funding_df['funding_rate'].values
-    except:
-        # Fallback: use price changes as proxy for sentiment if funding unavailable
-        return None
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    CHOP > 61.8 = range market (mean revert)
+    CHOP < 38.2 = trend market (trend follow)
+    """
+    atr_values = calculate_atr(high, low, close, period)
+    
+    atr_sum = pd.Series(atr_values).rolling(window=period, min_periods=period).sum().values
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    price_range = highest_high - lowest_low
+    price_range = np.where(price_range == 0, 1e-10, price_range)
+    
+    chop = 100 * np.log10(atr_sum / price_range) / np.log10(period)
+    chop = np.clip(chop, 0, 100)
+    
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -128,34 +144,16 @@ def generate_signals(prices):
     hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
     hma_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_slope)
     
-    # Calculate 4h indicators
-    atr_7 = calculate_atr(high, low, close, 7)
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    atr_30 = calculate_atr(high, low, close, 30)
-    
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
     rsi_14 = calculate_rsi(close, 14)
-    
-    # Volatility spike ratio
-    atr_ratio = atr_7 / np.where(atr_30 > 0, atr_30, 1e-10)
-    
-    # Price position in Bollinger Bands (0=lower, 1=upper)
-    bb_position = (close - bb_lower) / np.where((bb_upper - bb_lower) > 0, (bb_upper - bb_lower), 1e-10)
-    
-    # Try to load funding data
-    funding_rates = load_funding_data(prices)
-    if funding_rates is not None and len(funding_rates) >= n:
-        funding_zscore = calculate_zscore(funding_rates[:n], 30)
-    else:
-        # Fallback: use RSI as sentiment proxy
-        funding_zscore = calculate_zscore(rsi_14 - 50, 30)
+    kama_12h = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    chop_14 = calculate_choppiness(high, low, close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    BASE_SIZE = 0.28
-    HIGH_CONF_SIZE = 0.35
-    LOW_CONF_SIZE = 0.20
+    BASE_SIZE = 0.30
     
     # Track position state
     in_position = False
@@ -173,126 +171,113 @@ def generate_signals(prices):
         if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_slope_aligned[i]):
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(bb_position[i]):
-            continue
-        
-        if np.isnan(atr_ratio[i]) or np.isnan(funding_zscore[i]):
+        if np.isnan(chop_14[i]) or np.isnan(rsi_14[i]) or np.isnan(kama_12h[i]):
             continue
         
         # === 1D TREND BIAS ===
-        trend_1d_bullish = hma_1d_slope_aligned[i] > 0.5
-        trend_1d_bearish = hma_1d_slope_aligned[i] < -0.5
+        # More lenient slope thresholds to allow more trades
+        trend_1d_bullish = hma_1d_slope_aligned[i] > 0.15
+        trend_1d_bearish = hma_1d_slope_aligned[i] < -0.15
         price_above_1d_hma = close[i] > hma_1d_21_aligned[i]
         price_below_1d_hma = close[i] < hma_1d_21_aligned[i]
         
-        # === VOLATILITY SPIKE ===
-        vol_spike = atr_ratio[i] > 1.5
-        vol_extreme = atr_ratio[i] > 2.0
+        # === CHOPPINESS REGIME ===
+        is_range_market = chop_14[i] > 55
+        is_trend_market = chop_14[i] < 45
+        # Neutral zone: 45-55 (use smaller size)
+        is_neutral = not is_range_market and not is_trend_market
         
-        # === RSI EXTREMES ===
-        rsi_oversold = rsi_14[i] < 35
-        rsi_overbought = rsi_14[i] > 65
-        rsi_extreme_low = rsi_14[i] < 25
-        rsi_extreme_high = rsi_14[i] > 75
+        # === KAMA TREND ===
+        price_above_kama = close[i] > kama_12h[i]
+        price_below_kama = close[i] < kama_12h[i]
         
-        # === BOLLINGER BAND POSITION ===
-        price_at_bb_lower = bb_position[i] < 0.15
-        price_at_bb_upper = bb_position[i] > 0.85
+        # KAMA slope (simple 5-bar lookback)
+        kama_slope = 0.0
+        if i >= 5 and kama_12h[i-5] != 0:
+            kama_slope = (kama_12h[i] - kama_12h[i-5]) / kama_12h[i-5] * 100
+        kama_bullish = kama_slope > 0.1
+        kama_bearish = kama_slope < -0.1
         
-        # === FUNDING RATE Z-SCORE ===
-        funding_extreme_long = funding_zscore[i] > 2.0  # Crowded longs → short
-        funding_extreme_short = funding_zscore[i] < -2.0  # Crowded shorts → long
+        # === RSI SIGNALS ===
+        rsi_oversold = rsi_14[i] < 40
+        rsi_overbought = rsi_14[i] > 60
+        rsi_extreme_low = rsi_14[i] < 30
+        rsi_extreme_high = rsi_14[i] > 70
+        rsi_neutral_low = rsi_14[i] < 45
+        rsi_neutral_high = rsi_14[i] > 55
         
         # === POSITION SIZING ===
         current_size = BASE_SIZE
-        if vol_extreme or funding_extreme_long or funding_extreme_short:
-            current_size = HIGH_CONF_SIZE
-        elif not trend_1d_bullish and not trend_1d_bearish:
-            current_size = LOW_CONF_SIZE
+        if is_neutral:
+            current_size = BASE_SIZE * 0.6
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRIES - Simplified confluence for more trades
-        long_score = 0
+        # LONG ENTRIES - Multiple paths for trade generation
+        long_signal = False
         
-        # Path 1: Funding extreme short + RSI oversold (strong mean reversion)
-        if funding_extreme_short and rsi_oversold:
-            long_score += 3
+        # Path 1: Trend market + 1d bullish + KAMA bullish + RSI pullback
+        if is_trend_market and trend_1d_bullish and kama_bullish and rsi_neutral_low:
+            long_signal = True
         
-        # Path 2: Vol spike + RSI extreme + BB lower (capitulation)
-        if vol_spike and rsi_extreme_low and price_at_bb_lower:
-            long_score += 3
+        # Path 2: Range market + RSI oversold (mean revert)
+        if is_range_market and rsi_oversold:
+            long_signal = True
         
-        # Path 3: RSI oversold + BB lower + 1d bullish bias (pullback in bull)
-        if rsi_oversold and price_at_bb_lower and trend_1d_bullish:
-            long_score += 2
+        # Path 3: Price above 1d HMA + RSI pullback (bull trend continuation)
+        if price_above_1d_hma and rsi_14[i] < 45 and kama_bullish:
+            long_signal = True
         
-        # Path 4: Simple RSI extreme + price below 1d HMA (deep pullback)
-        if rsi_extreme_low and price_below_1d_hma:
-            long_score += 2
+        # Path 4: KAMA cross above + RSI confirmation
+        if price_above_kama and kama_bullish and rsi_14[i] < 50:
+            long_signal = True
         
-        # Path 5: Funding extreme short alone (contrarian)
-        if funding_extreme_short:
-            long_score += 1
+        # Path 5: 1d bullish bias alone (simpler, more trades)
+        if trend_1d_bullish and rsi_14[i] < 40:
+            long_signal = True
         
-        # Path 6: RSI oversold + vol spike (panic buy)
-        if rsi_oversold and vol_spike:
-            long_score += 2
-        
-        if long_score >= 3:
+        if long_signal:
             new_signal = current_size
-        elif long_score == 2 and bars_since_last_trade > 60:
-            new_signal = current_size * 0.7
-        elif long_score >= 1 and bars_since_last_trade > 100:
-            new_signal = current_size * 0.5
         
         # SHORT ENTRIES
-        short_score = 0
+        short_signal = False
         
-        # Path 1: Funding extreme long + RSI overbought (strong mean reversion)
-        if funding_extreme_long and rsi_overbought:
-            short_score += 3
+        # Path 1: Trend market + 1d bearish + KAMA bearish + RSI pullback
+        if is_trend_market and trend_1d_bearish and kama_bearish and rsi_neutral_high:
+            short_signal = True
         
-        # Path 2: Vol spike + RSI extreme + BB upper (blow-off top)
-        if vol_spike and rsi_extreme_high and price_at_bb_upper:
-            short_score += 3
+        # Path 2: Range market + RSI overbought (mean revert)
+        if is_range_market and rsi_overbought:
+            short_signal = True
         
-        # Path 3: RSI overbought + BB upper + 1d bearish bias (rally in bear)
-        if rsi_overbought and price_at_bb_upper and trend_1d_bearish:
-            short_score += 2
+        # Path 3: Price below 1d HMA + RSI rally (bear trend continuation)
+        if price_below_1d_hma and rsi_14[i] > 55 and kama_bearish:
+            short_signal = True
         
-        # Path 4: Simple RSI extreme + price above 1d HMA (rally top)
-        if rsi_extreme_high and price_above_1d_hma:
-            short_score += 2
+        # Path 4: KAMA cross below + RSI confirmation
+        if price_below_kama and kama_bearish and rsi_14[i] > 50:
+            short_signal = True
         
-        # Path 5: Funding extreme long alone (contrarian)
-        if funding_extreme_long:
-            short_score += 1
+        # Path 5: 1d bearish bias alone (simpler, more trades)
+        if trend_1d_bearish and rsi_14[i] > 60:
+            short_signal = True
         
-        # Path 6: RSI overbought + vol spike (panic sell)
-        if rsi_overbought and vol_spike:
-            short_score += 2
-        
-        if short_score >= 3:
+        if short_signal:
             new_signal = -current_size
-        elif short_score == 2 and bars_since_last_trade > 60:
-            new_signal = -current_size * 0.7
-        elif short_score >= 1 and bars_since_last_trade > 100:
-            new_signal = -current_size * 0.5
         
-        # === FREQUENCY SAFEGUARD ===
-        # Force trade if no signal for 120 bars (~20 days on 4h)
-        if bars_since_last_trade > 120 and new_signal == 0.0 and not in_position:
-            if trend_1d_bullish and rsi_14[i] < 40:
+        # === TRADE FREQUENCY BOOSTER ===
+        # If no trades for 100 bars (~50 days), force entry on weaker signals
+        if bars_since_last_trade > 100 and new_signal == 0.0 and not in_position:
+            if trend_1d_bullish and rsi_14[i] < 50:
+                new_signal = current_size * 0.5
+            elif trend_1d_bearish and rsi_14[i] > 50:
+                new_signal = -current_size * 0.5
+            elif rsi_14[i] < 35:
                 new_signal = current_size * 0.4
-            elif trend_1d_bearish and rsi_14[i] > 60:
+            elif rsi_14[i] > 65:
                 new_signal = -current_size * 0.4
-            elif rsi_14[i] < 30:
-                new_signal = current_size * 0.35
-            elif rsi_14[i] > 70:
-                new_signal = -current_size * 0.35
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -312,13 +297,17 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     stoploss_triggered = True
         
-        # === SIGNAL REVERSAL EXIT ===
-        signal_reversal = False
-        if in_position and new_signal != 0.0:
-            if np.sign(new_signal) != position_side:
-                signal_reversal = True
+        # === TREND REVERSAL EXIT ===
+        trend_reversal = False
+        if in_position and position_side != 0:
+            # Exit long if 1d trend turns bearish
+            if position_side > 0 and trend_1d_bearish and price_below_1d_hma:
+                trend_reversal = True
+            # Exit short if 1d trend turns bullish
+            if position_side < 0 and trend_1d_bullish and price_above_1d_hma:
+                trend_reversal = True
         
-        if stoploss_triggered or signal_reversal:
+        if stoploss_triggered or trend_reversal:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
