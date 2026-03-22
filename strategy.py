@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #015: 1h Volume-Confirmed Breakout with 4h HMA Trend Bias + ATR Stop
-Hypothesis: Volume-confirmed breakouts aligned with HTF trend reduce false signals.
-Using 4h HMA for trend bias, 1h Donchian breakouts with volume spike (>1.5x avg),
-and asymmetric entry logic (easier entries with HTF trend, harder against).
-ATR trailing stop (2.5*ATR) protects capital. Conservative sizing (0.25) controls DD.
-Multiple entry paths ensure >=10 trades per symbol. Must beat Sharpe=0.121 baseline.
-Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper.
+Experiment #014: 30m Volatility Squeeze + Funding Rate Contrarian + 4h HMA Bias
+Hypothesis: After 13 failed strategies, pivot to volatility expansion + funding mean reversion.
+BB squeeze (low BW) precedes explosive moves. Extreme funding rates (>0.03% or <-0.03%) 
+signal crowded positions that reverse. 4h HMA provides HTF trend bias to avoid counter-trend.
+30m TF captures squeeze breakouts faster than 1h/4h while filtering 5m/15m noise.
+Conservative sizing (0.22) + 2.5*ATR stop controls DD. Multiple entry paths ensure >=10 trades.
+Timeframe: 30m (REQUIRED), HTF: 4h via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_vol_breakout_4h_hma_donchian_atr_v1"
-timeframe = "1h"
+name = "mtf_30m_bb_squeeze_funding_4h_hma_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -26,6 +26,17 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and bandwidth."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / sma
+    bandwidth = np.where(sma > 0, bandwidth, 0.0)
+    return upper, lower, sma, bandwidth
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -35,26 +46,6 @@ def calculate_hma(close, period=21):
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (20-period high/low)."""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
-
-def calculate_volume_spike(volume, period=20, threshold=1.5):
-    """Detect volume spikes (>threshold * rolling avg volume)."""
-    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    spike = volume > (threshold * vol_avg)
-    return spike
 
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
@@ -68,8 +59,21 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_keltner_channels(high, low, close, period=20, atr_period=14, mult=1.5):
+    """Calculate Keltner Channels for squeeze detection."""
+    close_s = pd.Series(close)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+    atr = calculate_atr(high, low, close, atr_period)
+    
+    upper = ema + mult * atr
+    lower = ema - mult * atr
+    return upper, lower, ema
+
 def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
+    """Calculate ADX for trend strength."""
     n = len(close)
     adx = np.zeros(n)
     adx[:] = np.nan
@@ -106,11 +110,24 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
+def calculate_percentile_rank(values, lookback=100):
+    """Calculate percentile rank of current value vs lookback period."""
+    n = len(values)
+    pr = np.zeros(n)
+    pr[:] = np.nan
+    
+    for i in range(lookback, n):
+        window = values[i-lookback:i]
+        current = values[i]
+        rank = np.sum(window < current) / lookback
+        pr[i] = rank * 100
+    
+    return pr
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -122,24 +139,31 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1h indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    vol_spike = calculate_volume_spike(volume, 20, 1.5)
+    bb_upper, bb_lower, bb_sma, bb_bw = calculate_bollinger_bands(close, 20, 2.0)
+    kc_upper, kc_lower, kc_ema = calculate_keltner_channels(high, low, close, 20, 14, 1.5)
     rsi = calculate_rsi(close, 14)
     adx = calculate_adx(high, low, close, 14)
     
-    # 1h HMA for additional trend confirmation
-    hma_1h = calculate_hma(close, 21)
-    hma_1h_fast = calculate_hma(close, 10)
+    # BB bandwidth percentile for squeeze detection
+    bb_bw_percentile = calculate_percentile_rank(bb_bw, 100)
     
-    # 1h EMA for momentum
-    ema_8 = pd.Series(close).ewm(span=8, min_periods=8, adjust=False).mean().values
-    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # Volatility ratio (ATR short/long)
+    atr_short = calculate_atr(high, low, close, 7)
+    atr_long = calculate_atr(high, low, close, 30)
+    vol_ratio = np.where(atr_long > 0, atr_short / atr_long, 1.0)
+    
+    # Price position within BB
+    bb_position = np.where(
+        (bb_upper - bb_lower) > 0,
+        (close - bb_lower) / (bb_upper - bb_lower),
+        0.5
+    )
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.12
+    SIZE_ENTRY = 0.22
+    SIZE_HALF = 0.11
     
     # Track positions for stoploss
     position_side = 0
@@ -155,7 +179,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(bb_bw[i]):
             signals[i] = 0.0
             continue
         
@@ -164,73 +188,82 @@ def generate_signals(prices):
             continue
         
         # 4h trend bias (HTF)
-        htftrend_bullish = close[i] > hma_4h_aligned[i]
-        htftrend_bearish = close[i] < hma_4h_aligned[i]
-        htftrend_rising = hma_4h_aligned[i] > hma_4h_aligned[i-1] if i > 0 else False
-        htftrend_falling = hma_4h_aligned[i] < hma_4h_aligned[i-1] if i > 0 else False
+        hma_4h_bullish = close[i] > hma_4h_aligned[i]
+        hma_4h_bearish = close[i] < hma_4h_aligned[i]
         
-        # 1h trend confirmation
-        trend_1h_bullish = close[i] > hma_1h[i] and ema_8[i] > ema_21[i]
-        trend_1h_bearish = close[i] < hma_1h[i] and ema_8[i] < ema_21[i]
+        # BB squeeze detection (bandwidth in bottom 20th percentile)
+        bb_squeeze = bb_bw_percentile[i] < 25.0 if not np.isnan(bb_bw_percentile[i]) else False
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        # BB expansion (bandwidth increasing from squeeze)
+        bb_expanding = bb_bw[i] > bb_bw[i-1] * 1.05 if i > 0 and not np.isnan(bb_bw[i-1]) else False
+        
+        # Inside Keltner = squeeze confirmation
+        inside_kc = (close[i] > kc_lower[i]) and (close[i] < kc_upper[i])
+        
+        # Volatility spike (vol ratio > 1.5 = expanding vol)
+        vol_spike = vol_ratio[i] > 1.3
+        
+        # Vol crush (vol ratio < 0.7 = collapsing vol, mean reversion setup)
+        vol_crush = vol_ratio[i] < 0.7
+        
+        # RSI zones
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        rsi_neutral = 40 < rsi[i] < 60
         
         # ADX trend strength
         trend_strong = adx[i] > 20
-        trend_weak = adx[i] < 25
+        trend_weak = adx[i] < 18
         
-        # RSI zones
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
-        rsi_neutral = rsi[i] > 40 and rsi[i] < 60
+        # Price breakout from BB
+        bb_breakout_up = close[i] > bb_upper[i]
+        bb_breakout_down = close[i] < bb_lower[i]
         
         new_signal = 0.0
         
         # === LONG ENTRIES (multiple paths for >=10 trades) ===
         
-        # Path 1: HTF bullish + Donchian breakout + volume spike + ADX strong
-        if htftrend_bullish and breakout_long and vol_spike[i] and trend_strong:
+        # Path 1: BB squeeze + expansion + 4h bullish + breakout up
+        if bb_squeeze and bb_expanding and hma_4h_bullish and bb_breakout_up:
             new_signal = SIZE_ENTRY
         
-        # Path 2: HTF bullish + 1h trend bullish + RSI neutral + EMA crossover up
-        elif htftrend_bullish and trend_1h_bullish and rsi_neutral and ema_8[i] > ema_21[i] and ema_8[i-1] <= ema_21[i-1]:
+        # Path 2: Vol crush + RSI oversold + 4h not bearish (mean reversion)
+        elif vol_crush and rsi_oversold and not hma_4h_bearish:
             new_signal = SIZE_ENTRY
         
-        # Path 3: HTF rising + breakout long + RSI not overbought
-        elif htftrend_rising and breakout_long and rsi[i] < 70:
+        # Path 3: BB squeeze + inside KC + 4h bullish + RSI rising
+        elif bb_squeeze and inside_kc and hma_4h_bullish and rsi[i] > rsi[i-1] if i > 0 else False:
             new_signal = SIZE_ENTRY
         
-        # Path 4: HTF bullish + RSI oversold bounce (mean reversion in uptrend)
-        elif htftrend_bullish and rsi_oversold and rsi[i] > rsi[i-1] if i > 0 else False:
+        # Path 4: Trend weak (range) + BB lower touch + 4h bullish
+        elif trend_weak and close[i] < bb_lower[i] * 1.002 and hma_4h_bullish:
             new_signal = SIZE_ENTRY
         
-        # Path 5: Breakout long + volume spike + ADX building (counter-trend with volume)
-        elif breakout_long and vol_spike[i] and adx[i] > adx[i-1] if i > 0 else False:
-            new_signal = SIZE_ENTRY * 0.8  # Smaller size for counter-trend
+        # Path 5: Vol spike + 4h bullish + RSI neutral (momentum continuation)
+        elif vol_spike and hma_4h_bullish and rsi_neutral and close[i] > bb_sma[i]:
+            new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES (multiple paths for >=10 trades) ===
         
-        # Path 1: HTF bearish + Donchian breakdown + volume spike + ADX strong
-        if htftrend_bearish and breakout_short and vol_spike[i] and trend_strong:
+        # Path 1: BB squeeze + expansion + 4h bearish + breakout down
+        if bb_squeeze and bb_expanding and hma_4h_bearish and bb_breakout_down:
             new_signal = -SIZE_ENTRY
         
-        # Path 2: HTF bearish + 1h trend bearish + RSI neutral + EMA crossover down
-        elif htftrend_bearish and trend_1h_bearish and rsi_neutral and ema_8[i] < ema_21[i] and ema_8[i-1] >= ema_21[i-1]:
+        # Path 2: Vol crush + RSI overbought + 4h not bullish (mean reversion)
+        elif vol_crush and rsi_overbought and not hma_4h_bullish:
             new_signal = -SIZE_ENTRY
         
-        # Path 3: HTF falling + breakdown short + RSI not oversold
-        elif htftrend_falling and breakout_short and rsi[i] > 30:
+        # Path 3: BB squeeze + inside KC + 4h bearish + RSI falling
+        elif bb_squeeze and inside_kc and hma_4h_bearish and rsi[i] < rsi[i-1] if i > 0 else False:
             new_signal = -SIZE_ENTRY
         
-        # Path 4: HTF bearish + RSI overbought drop (mean reversion in downtrend)
-        elif htftrend_bearish and rsi_overbought and rsi[i] < rsi[i-1] if i > 0 else False:
+        # Path 4: Trend weak (range) + BB upper touch + 4h bearish
+        elif trend_weak and close[i] > bb_upper[i] * 0.998 and hma_4h_bearish:
             new_signal = -SIZE_ENTRY
         
-        # Path 5: Breakdown short + volume spike + ADX building (counter-trend with volume)
-        elif breakout_short and vol_spike[i] and adx[i] > adx[i-1] if i > 0 else False:
-            new_signal = -SIZE_ENTRY * 0.8  # Smaller size for counter-trend
+        # Path 5: Vol spike + 4h bearish + RSI neutral (momentum continuation)
+        elif vol_spike and hma_4h_bearish and rsi_neutral and close[i] < bb_sma[i]:
+            new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
         if position_side > 0 and entry_price > 0:
@@ -238,7 +271,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for 1h timeframe)
+            # Calculate trailing stop (2.5*ATR for 30m timeframe)
             current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -259,7 +292,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for 1h timeframe)
+            # Calculate trailing stop (2.5*ATR for 30m timeframe)
             current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
