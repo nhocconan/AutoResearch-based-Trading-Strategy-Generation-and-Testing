@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #249: 1h Supertrend + RSI Pullback + 4h HMA Trend Filter
+Experiment #250: 4h Sentiment Reversal Strategy with Taker Volume + RSI + 1d HMA
 
-Hypothesis: 1h timeframe with strong 4h trend filter can capture intraday swings
-while avoiding whipsaws. Using Supertrend for trend direction + RSI pullback
-entries + 4h HMA for higher timeframe bias.
+Hypothesis: 4h timeframe captures multi-day sentiment extremes that reverse.
+Using taker_buy_volume ratio as sentiment proxy (crowd positioning) +
+RSI for entry timing + 1d HMA for trend bias.
 
-Why this might work on 1h:
-- 1h captures more intraday moves than 4h/12h
-- Supertrend provides clear trend direction with ATR-based stops
-- RSI pullback (not extreme) entries catch trend continuations
-- 4h HMA filter prevents trading against major trend
-- Simpler than failed 1h strategies (#237, #241, #243) - fewer conflicting filters
-- Looser RSI thresholds (35/65) ensure enough trades
+Why this might work on 4h:
+- Taker buy ratio > 0.65 = crowd overly long (reversal likely)
+- Taker buy ratio < 0.35 = crowd overly short (bounce likely)
+- 4h captures sentiment extremes without 15m/1h noise
+- 1d HMA provides trend bias but doesn't block counter-trend reversals
+- Simpler entry conditions = more trades (critical lesson from failures)
+- Conservative sizing (0.25) + ATR stoploss controls drawdown
 
-Key differences from failed 1h strategies:
-- #237 used KAMA+ADX (too many indicators, conflicting signals)
-- #241 used 15m primary with volume (too noisy, volume unreliable)
-- #243 used Z-score regime (mean reversion failed on 1h)
-- This uses cleaner Supertrend + RSI pullback (proven combination)
+Key improvements over failed experiments:
+- #244 (4h Fisher): 0 trades - conditions too strict
+- #238 (4h Chop/Connors): Sharpe=-0.056 - too many filters
+- This uses LOOSE thresholds: RSI 35/65 (not 20/80), taker ratio 0.35/0.65
+- Only 3 conditions for entry (not 5-7 conflicting filters)
+- Allows counter-trend trades when sentiment extreme (not just trend-follow)
 
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.30 discrete levels
-Stoploss: Supertrend provides built-in stop, plus 2*ATR emergency stop
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25 discrete levels
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_supertrend_rsi_pullback_4h_hma_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_sentiment_rsi_1d_hma_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -42,68 +43,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-    Returns: supertrend_line, supertrend_direction (1=bullish, -1=bearish)
-    """
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    # Calculate basic bands
-    hl2 = (high + low) / 2.0
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Initialize final bands
-    final_upper = np.zeros(n)
-    final_lower = np.zeros(n)
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)
-    
-    # First valid bar
-    if period < n:
-        final_upper[period] = upper_band[period]
-        final_lower[period] = lower_band[period]
-        supertrend[period] = upper_band[period]
-        direction[period] = 1  # Start bullish by default
-        
-        # Calculate remaining bars
-        for i in range(period + 1, n):
-            # Update upper band
-            if upper_band[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]:
-                final_upper[i] = upper_band[i]
-            else:
-                final_upper[i] = final_upper[i-1]
-            
-            # Update lower band
-            if lower_band[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]:
-                final_lower[i] = lower_band[i]
-            else:
-                final_lower[i] = final_lower[i-1]
-            
-            # Determine supertrend and direction
-            if supertrend[i-1] == final_upper[i-1]:
-                if close[i] > final_upper[i]:
-                    supertrend[i] = final_lower[i]
-                    direction[i] = 1
-                else:
-                    supertrend[i] = final_upper[i]
-                    direction[i] = -1
-            else:
-                if close[i] < final_lower[i]:
-                    supertrend[i] = final_upper[i]
-                    direction[i] = -1
-                else:
-                    supertrend[i] = final_lower[i]
-                    direction[i] = 1
-    
-    # Fill initial values
-    supertrend[:period] = np.nan
-    direction[:period] = 0
-    
-    return supertrend, direction
 
 def calculate_rsi(close, period=14):
     """Calculate RSI (Relative Strength Index)."""
@@ -130,47 +69,51 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_ema(close, period=21):
-    """Calculate Exponential Moving Average."""
-    close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    return ema.values
+def calculate_taker_ratio(taker_buy_volume, volume):
+    """Calculate taker buy volume ratio (sentiment proxy)."""
+    ratio = np.zeros(len(volume))
+    mask = volume > 0
+    ratio[mask] = taker_buy_volume[mask] / volume[mask]
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    supertrend_line, supertrend_dir = calculate_supertrend(high, low, close, 10, 3.0)
     rsi_14 = calculate_rsi(close, 14)
-    ema_21 = calculate_ema(close, 21)
-    ema_50 = calculate_ema(close, 50)
+    taker_ratio = calculate_taker_ratio(taker_buy_volume, volume)
+    
+    # Calculate 4h HMA for local trend
+    hma_4h = calculate_hma(close, 21)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.30
-    SIZE_HALF = 0.15
+    SIZE_BASE = 0.25
+    SIZE_HALF = 0.12
     
     # Track position state for stoploss
     in_position = False
     position_side = 0
-    entry_price = 0.0
-    entry_price_idx = 0
     highest_close = 0.0
     lowest_close = 0.0
+    entry_price = 0.0
+    entry_price_idx = 0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -178,99 +121,87 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(supertrend_line[i]) or np.isnan(supertrend_dir[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(taker_ratio[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(ema_21[i]) or np.isnan(ema_50[i]):
-            signals[i] = 0.0
-            continue
+        # === HIGHER TIMEFRAME BIAS ===
+        # 1d HMA = trend bias (but we allow counter-trend on extreme sentiment)
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === HIGHER TIMEFRAME BIAS (4h HMA) ===
-        # Only trade in direction of 4h trend
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # === SENTIMENT EXTREMES ===
+        # Taker ratio > 0.65 = crowd overly long (look for short)
+        # Taker ratio < 0.35 = crowd overly short (look for long)
+        sentiment_long_extreme = taker_ratio[i] > 0.65
+        sentiment_short_extreme = taker_ratio[i] < 0.35
         
-        # === SUPERTREND DIRECTION ===
-        st_bullish = supertrend_dir[i] == 1
-        st_bearish = supertrend_dir[i] == -1
+        # === RSI CONFIRMATION ===
+        # RSI > 65 = overbought (supports short)
+        # RSI < 35 = oversold (supports long)
+        rsi_overbought = rsi_14[i] > 65
+        rsi_oversold = rsi_14[i] < 35
         
-        # === RSI PULLBACK DETECTION ===
-        # For longs: RSI pulled back but not oversold (35-50 range in uptrend)
-        # For shorts: RSI rallied but not overbought (50-65 range in downtrend)
-        rsi_pullback_long = 35 <= rsi_14[i] <= 55
-        rsi_pullback_short = 45 <= rsi_14[i] <= 65
-        
-        # === EMA TREND CONFIRMATION ===
-        ema_bullish = ema_21[i] > ema_50[i]
-        ema_bearish = ema_21[i] < ema_50[i]
+        # === LOCAL TREND ===
+        hma_4h_bullish = close[i] > hma_4h[i]
+        hma_4h_bearish = close[i] < hma_4h[i]
         
         # === ENTRY SIGNALS ===
         new_signal = 0.0
         
-        # --- LONG ENTRY: 4h bullish + Supertrend bullish + RSI pullback + EMA bullish ---
-        if bull_trend_4h and st_bullish and rsi_pullback_long and ema_bullish:
-            # Additional confirmation: price above EMA21
-            if close[i] > ema_21[i]:
+        # --- LONG ENTRY: Sentiment short extreme + RSI oversold ---
+        # Can enter even against 1d trend if sentiment is extreme enough
+        if sentiment_short_extreme and rsi_oversold:
+            # Stronger signal if 1d trend is bullish or neutral
+            if bull_trend_1d or (not bear_trend_1d):
+                new_signal = SIZE_BASE
+            # Still enter counter-trend if sentiment VERY extreme
+            elif taker_ratio[i] < 0.30 and rsi_14[i] < 30:
                 new_signal = SIZE_BASE
         
-        # --- SHORT ENTRY: 4h bearish + Supertrend bearish + RSI pullback + EMA bearish ---
-        if bear_trend_4h and st_bearish and rsi_pullback_short and ema_bearish:
-            # Additional confirmation: price below EMA21
-            if close[i] < ema_21[i]:
+        # --- SHORT ENTRY: Sentiment long extreme + RSI overbought ---
+        if sentiment_long_extreme and rsi_overbought:
+            # Stronger signal if 1d trend is bearish or neutral
+            if bear_trend_1d or (not bull_trend_1d):
+                new_signal = -SIZE_BASE
+            # Still enter counter-trend if sentiment VERY extreme
+            elif taker_ratio[i] > 0.70 and rsi_14[i] > 70:
                 new_signal = -SIZE_BASE
         
-        # === STOPLOSS LOGIC (Rule 6) ===
-        # Supertrend provides built-in stop, but add emergency ATR stop
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # Check stoploss on EXISTING position before considering new entry
         if in_position and position_side != 0:
-            stoploss_triggered = False
-            
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                
-                # Supertrend stop: price crosses below supertrend line
-                if close[i] < supertrend_line[i]:
-                    stoploss_triggered = True
-                
-                # Emergency ATR stop: 2.5 * ATR below entry
-                atr_stop = entry_price - 2.5 * atr[entry_price_idx]
-                if close[i] < atr_stop:
-                    stoploss_triggered = True
+                # Trailing stop: 2.5 * ATR below highest close
+                stoploss_price = highest_close - 2.5 * atr[i]
+                if close[i] < stoploss_price:
+                    new_signal = 0.0  # Stoploss overrides entry signal
             
             if position_side < 0:
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                
-                # Supertrend stop: price crosses above supertrend line
-                if close[i] > supertrend_line[i]:
-                    stoploss_triggered = True
-                
-                # Emergency ATR stop: 2.5 * ATR above entry
-                atr_stop = entry_price + 2.5 * atr[entry_price_idx]
-                if close[i] > atr_stop:
-                    stoploss_triggered = True
-            
-            if stoploss_triggered:
-                new_signal = 0.0  # Stoploss overrides entry signal
+                # Trailing stop: 2.5 * ATR above lowest close
+                stoploss_price = lowest_close + 2.5 * atr[i]
+                if close[i] > stoploss_price:
+                    new_signal = 0.0  # Stoploss overrides entry signal
         
         # === TAKE PROFIT: Reduce to half at 2R profit ===
         if in_position and new_signal != 0.0 and position_side != 0:
             if position_side > 0:
                 profit = close[i] - entry_price
-                risk = atr[entry_price_idx]
-                if profit >= 2.0 * risk:
+                if profit >= 2.0 * atr[entry_price_idx]:
                     new_signal = SIZE_HALF  # Take partial profit
             if position_side < 0:
                 profit = entry_price - close[i]
-                risk = atr[entry_price_idx]
-                if profit >= 2.0 * risk:
+                if profit >= 2.0 * atr[entry_price_idx]:
                     new_signal = -SIZE_HALF  # Take partial profit
         
         # === UPDATE POSITION TRACKING FOR NEXT BAR ===
@@ -293,7 +224,7 @@ def generate_signals(prices):
             # else: maintaining same position direction (possibly reduced size)
         else:
             # Exiting position (signal-based or stoploss)
-            if in_position and signals[i-1] != 0.0:
+            if in_position:
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
