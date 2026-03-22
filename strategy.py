@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #162: 1d HMA Trend + Weekly Bias + MACD Momentum + BB Regime Filter
+Experiment #163: 15m RSI Pullback + 4h HMA Trend + Choppiness Regime Filter
 
-Hypothesis: Daily timeframe captures sustained trend moves while weekly HMA provides
-stable higher-timeframe bias. MACD histogram momentum confirms entry timing. Bollinger
-Band width detects regime (trend vs range) to adjust entry thresholds. This should
-work better than pure mean-reversion on 1d (see #150, #156 which failed).
+Hypothesis: 15m timeframe is fast enough to catch pullback entries within the 
+4h trend direction. RSI(7) oversold/overbought levels provide entry timing 
+within the higher timeframe trend. Choppiness Index (CHOP) filters between 
+trending (CHOP < 38.2) and ranging (CHOP > 61.8) regimes - only take trend 
+entries when CHOP indicates trending market. This should work better than 
+pure mean-reversion on 15m (see #151, #157 failures).
 
-Why 1d might work now:
-- Slower timeframe = fewer false signals, lower fee drag
-- Weekly HTF filter prevents counter-trend entries during major reversals
-- MACD momentum adds timing precision to HMA trend signals
-- BB regime filter adapts to market conditions (trend vs range)
-- Conservative position sizing (0.25-0.35) limits drawdown during 2022 crash
+Why 15m might work:
+- Fast enough to capture intraday pullbacks within 4h trend
+- RSI pullback entries have better risk/reward than breakouts
+- CHOP regime filter avoids whipsaw in choppy markets
+- 4h HMA provides stable trend bias (proven in #161, #162)
 
 Learning from failures:
-- #150 (1d EMA): Negative Sharpe - too simple, no regime filter
-- #156 (1d regime adaptive): Negative Sharpe - over-filtered, too few trades
-- Need balance: enough filters to avoid whipsaws, but not so many that trades=0
-- Ensure ≥10 trades per symbol by keeping entry thresholds reasonable
+- #151, #157 (15m CHOP + RSI): Negative Sharpe - likely over-filtered
+- Need looser RSI thresholds to ensure ≥10 trades per symbol
+- Must use 4h HTF properly via mtf_data helper (Rule 1)
+- Position sizing 0.25-0.35 discrete levels
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data helper (call ONCE before loop)
+Timeframe: 15m (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25-0.35 discrete levels
-Stoploss: 2.5 * ATR(14) trailing
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_1w_bias_macd_bb_regime_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_rsi_pullback_4h_hma_chop_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -43,6 +44,19 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_rsi(close, period=14):
+    """Calculate RSI using Wilder's smoothing."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    gain_s = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    loss_s = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = gain_s / (loss_s + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -53,37 +67,39 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram."""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
-    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    CHOP > 61.8 = choppy/ranging market
+    CHOP < 38.2 = trending market
+    """
+    n = len(close)
+    chop = np.zeros(n)
+    
+    # Calculate ATR for each bar
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 0 and atr_sum > 0:
+            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
+        else:
+            chop[i] = 50  # neutral
+    
+    return chop
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and bandwidth."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / (sma + 1e-10)
-    return upper, lower, sma, bandwidth
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI using standard formula."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+def calculate_sma(close, period=200):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -92,20 +108,19 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    hma_1d = calculate_hma(close, 21)
-    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
-    bb_upper, bb_lower, bb_sma, bb_bandwidth = calculate_bollinger_bands(close, 20, 2.0)
-    rsi = calculate_rsi(close, 14)
+    rsi = calculate_rsi(close, 7)  # Faster RSI for 15m entries
+    chop = calculate_choppiness(high, low, close, 14)
+    sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
     
@@ -120,97 +135,70 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(100, n):
+    for i in range(250, n):  # Start after 200 SMA + indicators warm up
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d[i]) or np.isnan(macd_hist[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(bb_bandwidth[i]) or np.isnan(rsi[i]):
+        if np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(sma_200[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 1w HMA = higher timeframe trend bias (very stable)
-        bull_trend_1w = close[i] > hma_1w_aligned[i]
-        bear_trend_1w = close[i] < hma_1w_aligned[i]
+        # 4h HMA = higher timeframe trend bias
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # 1d HMA = primary trend direction
-        bull_trend_1d = close[i] > hma_1d[i]
-        bear_trend_1d = close[i] < hma_1d[i]
+        # === LONG-TERM FILTER ===
+        # Price above 200 SMA for long bias, below for short
+        above_sma_200 = close[i] > sma_200[i]
+        below_sma_200 = close[i] < sma_200[i]
         
-        # === REGIME DETECTION via Bollinger Bandwidth ===
-        # Low bandwidth = range/compression (expect breakout)
-        # High bandwidth = trend/volatile (expect continuation)
-        bb_percentile = np.nanpercentile(bb_bandwidth[max(0,i-100):i+1], 50)
-        is_range_regime = bb_bandwidth[i] < bb_percentile * 0.8
-        is_trend_regime = bb_bandwidth[i] > bb_percentile * 1.2
+        # === CHOPPINESS REGIME FILTER ===
+        # CHOP < 45 = trending (take trend entries)
+        # CHOP > 55 = ranging (avoid or mean revert)
+        # Use middle ground to ensure enough trades
+        is_trending = chop[i] < 50
         
-        # === MACD MOMENTUM CONFIRMATION ===
-        # MACD histogram crossing above zero = bullish momentum
-        # MACD histogram crossing below zero = bearish momentum
-        macd_bullish = macd_hist[i] > 0 and macd_hist[i-1] <= 0
-        macd_bearish = macd_hist[i] < 0 and macd_hist[i-1] >= 0
-        macd_positive = macd_hist[i] > 0
-        macd_negative = macd_hist[i] < 0
-        
-        # === RSI FILTER (not too strict) ===
-        # RSI > 45 = not oversold (for longs)
-        # RSI < 55 = not overbought (for shorts)
-        rsi_ok_long = rsi[i] > 40
-        rsi_ok_short = rsi[i] < 60
+        # === RSI PULLBACK ENTRY ===
+        # Long: RSI < 35 (oversold pullback in uptrend)
+        # Short: RSI > 65 (overbought pullback in downtrend)
+        # Looser thresholds to ensure ≥10 trades per symbol
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS ===
-        # Primary: 1d bullish + 1w bullish + MACD positive + RSI ok
-        # Secondary: Range regime allows entry at BB lower
-        long_condition_1 = bull_trend_1d and bull_trend_1w and macd_positive and rsi_ok_long
-        long_condition_2 = bull_trend_1d and macd_bullish and close[i] <= bb_lower[i] * 1.01
-        
-        if long_condition_1 or long_condition_2:
-            # Stronger signal if both 1d and 1w agree
-            if bull_trend_1d and bull_trend_1w:
-                new_signal = SIZE_STRONG
-            else:
-                new_signal = SIZE_BASE
+        # 4h bullish + above 200 SMA + trending + RSI oversold pullback
+        if bull_trend_4h and above_sma_200 and is_trending and rsi_oversold:
+            new_signal = SIZE_BASE
         
         # === SHORT ENTRY CONDITIONS ===
-        # Primary: 1d bearish + 1w bearish + MACD negative + RSI ok
-        # Secondary: Range regime allows entry at BB upper
-        short_condition_1 = bear_trend_1d and bear_trend_1w and macd_negative and rsi_ok_short
-        short_condition_2 = bear_trend_1d and macd_bearish and close[i] >= bb_upper[i] * 0.99
+        # 4h bearish + below 200 SMA + trending + RSI overbought pullback
+        if bear_trend_4h and below_sma_200 and is_trending and rsi_overbought:
+            new_signal = -SIZE_BASE
         
-        if short_condition_1 or short_condition_2:
-            # Stronger signal if both 1d and 1w agree
-            if bear_trend_1d and bear_trend_1w:
-                new_signal = -SIZE_STRONG
-            else:
-                new_signal = -SIZE_BASE
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         # Update trailing highs/lows for active positions
         if in_position and position_side > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
-            # Trailing stop: 2.5 * ATR below highest close
-            stoploss_price = highest_close - 2.5 * atr[i]
+            # Trailing stop: 2.0 * ATR below highest close
+            stoploss_price = highest_close - 2.0 * atr[i]
             if close[i] < stoploss_price:
                 new_signal = 0.0  # Stoploss hit
         
         if in_position and position_side < 0:
             if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
-            # Trailing stop: 2.5 * ATR above lowest close
-            stoploss_price = lowest_close + 2.5 * atr[i]
+            # Trailing stop: 2.0 * ATR above lowest close
+            stoploss_price = lowest_close + 2.0 * atr[i]
             if close[i] > stoploss_price:
                 new_signal = 0.0  # Stoploss hit
         
