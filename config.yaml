@@ -32,9 +32,12 @@ data:
 # --- Backtesting Settings ---
 backtest:
   # Trading costs
-  taker_fee_pct: 0.04        # Binance futures taker fee (%)
-  slippage_pct: 0.01         # Estimated slippage (%)
-  total_cost_pct: 0.05       # taker_fee + slippage per side
+  # Entry: taker 0.04% + slippage 0.01% = 0.05%
+  # Exit via SL/TP: maker 0% + slippage 0.01% = 0.01%
+  # Average per side: (0.05 + 0.01) / 2 = 0.03%
+  taker_fee_pct: 0.02        # Average of taker(0.04) and maker(0) per side
+  slippage_pct: 0.01         # Slippage both sides
+  total_cost_pct: 0.03       # 0.03% per side = 0.06% round trip
   # Execution model
   fill_delay_bars: 1         # Signal at bar t, fill at bar t+1
   # Position sizing defaults
