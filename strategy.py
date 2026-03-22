@@ -1,87 +1,183 @@
 #!/usr/bin/env python3
 """
-Experiment #033: 1d Donchian Breakout + Weekly HMA Trend + RSI Filter
+Experiment #003: 1d KAMA Trend + 1w HMA Bias + ADX Regime Filter
 
-Hypothesis: Daily timeframe with weekly bias provides stable trend direction while
-Donchian breakouts capture momentum moves. Key lessons from 29 failed experiments:
-1. LOOSE entry conditions are critical (many strategies got 0 trades)
-2. Weekly HMA(21) provides stable major trend filter without whipsaw
-3. Donchian(20) breakout captures sustained moves on daily
-4. RSI thresholds must be wide (40-60 range, not narrow bands)
-5. ATR trailing stop at 2.5x protects capital in 2022-style crashes
-6. Position size 0.30 discrete minimizes fee churn while capturing moves
+Hypothesis: Previous strategies (Choppiness + Connors RSI) failed because they tried to
+mean-revert in strongly trending crypto markets. This strategy uses:
+
+1. 1w HMA(21) Major Trend Bias - via mtf_data helper. Only long if price > 1w HMA,
+   only short if price < 1w HMA. Prevents counter-trend trades in major moves.
+
+2. 1d KAMA(21) Adaptive Trend - Kaufman's Adaptive MA adjusts smoothing based on ER.
+   Fast in trends, slow in chop. More robust than EMA in crypto whipsaws.
+
+3. ADX(14) Regime Filter - ADX > 25 = trending (follow KAMA), ADX < 20 = chop
+   (reduce size or stay flat). Prevents entries in low-signal environments.
+
+4. Bollinger Band Squeeze Release - BB Width < 25th percentile (100-bar) then
+   price breaks BB. Captures volatility expansion after compression.
+
+5. RSI(14) Momentum Confirmation - RSI > 55 for longs, RSI < 45 for shorts.
+   Avoids entering when momentum is fading.
+
+6. ATR(14) Trailing Stop - 2.5x ATR for risk management. Signal → 0 when stopped.
 
 Why this should work on 1d:
-- 1d naturally produces 20-50 trades/year (perfect for fee management)
-- Weekly bias prevents counter-trend trades in major crashes
-- Donchian breakout is proven momentum indicator (Turtle Trading)
-- Loose RSI filter ensures trades actually happen (avoiding 0-trade failure)
-- Simple logic = fewer conflicting conditions = more consistent signals
+- 1d timeframe = 20-50 trades/year target (optimal fee drag)
+- 1w HTF filter prevents major counter-trend failures (2022 crash protection)
+- KAMA adapts to crypto's variable volatility better than fixed EMA
+- ADX filter avoids choppy periods where most strategies fail
+- Conservative sizing (0.25-0.35) protects against 77% crashes
 
-Timeframe: 1d (REQUIRED for this experiment)
+Timeframe: 1d (REQUIRED for Experiment #003)
 HTF: 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.30 discrete (max 0.35)
+Position sizing: 0.25 base, 0.35 high conviction (1d+1w aligned), 0.15 low conviction
 Stoploss: 2.5 * ATR(14) trailing
-Target: 25-40 trades per symbol over train period
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_breakout_1w_hma_v1"
+name = "mtf_1d_kama_adx_bb_1w_v1"
 timeframe = "1d"
 leverage = 1.0
 
-def calculate_atr(high, low, close, period=14):
-    """Calculate ATR using Wilder's smoothing."""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend with less lag."""
+def calculate_kama(close, period=21, fast_period=2, slow_period=30):
+    """
+    Kaufman's Adaptive Moving Average.
+    Adjusts smoothing based on Efficiency Ratio (trend vs noise).
+    """
     close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
+    n = period
+    
+    # Efficiency Ratio: |net change| / sum of absolute changes
+    change = np.abs(close_s.diff(period))
+    noise = np.abs(close_s.diff()).rolling(window=period, min_periods=period).sum()
+    er = change / noise.replace(0, np.nan)
+    er = er.fillna(0)
+    
+    # Smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros(len(close))
+    kama[0] = close[0]
+    
+    for i in range(1, len(close)):
+        if np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    # True Range
+    tr1 = high_s - low_s
+    tr2 = np.abs(high_s - close_s.shift(1))
+    tr3 = np.abs(low_s - close_s.shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    
+    # Smoothed values (Wilder's smoothing)
+    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    adx = adx.replace([np.inf, -np.inf], np.nan)
+    
+    return adx.values, plus_di.values, minus_di.values
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    middle = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
+    return upper.values, lower.values, middle.values
+
+def calculate_bb_width(upper, lower, middle):
+    """Calculate Bollinger Band Width = (Upper - Lower) / Middle."""
+    width = (upper - lower) / middle
+    width = pd.Series(width).replace([np.inf, -np.inf], np.nan)
+    return width.values
+
+def calculate_bb_width_percentile(bb_width, lookback=100):
+    """Calculate percentile rank of BB Width over lookback period."""
+    bb_width_s = pd.Series(bb_width)
+    percentile = bb_width_s.rolling(window=lookback, min_periods=lookback).apply(
+        lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min()) if x.max() > x.min() else 0.5,
+        raw=False
+    )
+    return percentile.values
 
 def calculate_rsi(close, period=14):
-    """Calculate RSI using standard Wilder's method."""
+    """Calculate RSI using Wilder's smoothing."""
     close_s = pd.Series(close)
     delta = close_s.diff()
+    
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
     
     avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    rs = avg_gain / avg_loss
+    rs = avg_gain / avg_loss.replace(0, np.inf)
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
-    return rsi
+    rsi = rsi.replace([np.inf, -np.inf], np.nan)
+    
+    return rsi.values
 
-def calculate_donchian(high, low, period=20):
-    """
-    Calculate Donchian Channel.
-    Upper = highest high over period
-    Lower = lowest low over period
-    Breakout above upper = long signal
-    Breakout below lower = short signal
-    """
+def calculate_atr(high, low, close, period=14):
+    """Calculate ATR using Wilder's smoothing."""
     high_s = pd.Series(high)
     low_s = pd.Series(low)
+    close_s = pd.Series(close)
     
-    upper = high_s.rolling(window=period, min_periods=period).max().values
-    lower = low_s.rolling(window=period, min_periods=period).min().values
+    tr1 = high_s - low_s
+    tr2 = np.abs(high_s - close_s.shift(1))
+    tr3 = np.abs(low_s - close_s.shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    return upper, lower
+    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_hma(close, period=21):
+    """Hull Moving Average - reduces lag while maintaining smoothness."""
+    close_s = pd.Series(close)
+    n = period
+    
+    def wma(series, span):
+        return series.ewm(span=span, min_periods=span, adjust=False).mean()
+    
+    half = int(n / 2)
+    sqrt_n = int(np.sqrt(n))
+    
+    wma_half = wma(close_s, half)
+    wma_full = wma(close_s, n)
+    
+    raw_hma = 2 * wma_half - wma_full
+    hma = wma(raw_hma, sqrt_n)
+    
+    return hma.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -92,22 +188,25 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1W indicators
-    hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
-    
-    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
+    # Calculate 1w HMA for major bias
+    hma_1w_21 = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
     
     # Calculate 1d indicators
+    kama_21 = calculate_kama(close, period=21)
+    adx_14, plus_di, minus_di = calculate_adx(high, low, close, period=14)
+    bb_upper, bb_lower, bb_middle = calculate_bollinger_bands(close, period=20, std_dev=2.0)
+    bb_width = calculate_bb_width(bb_upper, bb_lower, bb_middle)
+    bb_width_pct = calculate_bb_width_percentile(bb_width, lookback=100)
+    rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_14 = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    hma_1d_50 = calculate_hma(close, 50)
     
     signals = np.zeros(n)
     
-    # Base position sizing (Rule 4 - discrete levels, max 0.40)
-    BASE_SIZE = 0.30
+    # Position sizing (Rule 4 - discrete levels, max 0.40)
+    BASE_SIZE = 0.25
+    HIGH_CONV_SIZE = 0.35
+    LOW_CONV_SIZE = 0.15
     
     # Track position state for stoploss
     in_position = False
@@ -115,7 +214,7 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_price = 0.0
     lowest_price = 0.0
-    last_trade_bar = -100
+    last_trade_bar = -50
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -125,55 +224,130 @@ def generate_signals(prices):
         if np.isnan(hma_1w_21_aligned[i]):
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(kama_21[i]) or np.isnan(adx_14[i]) or np.isnan(rsi_14[i]):
             continue
         
-        # === WEEKLY TREND BIAS ===
+        if np.isnan(bb_width_pct[i]):
+            continue
+        
+        # === WEEKLY MAJOR BIAS ===
         weekly_bullish = close[i] > hma_1w_21_aligned[i]
         weekly_bearish = close[i] < hma_1w_21_aligned[i]
         
-        # === DAILY TREND FILTER ===
-        daily_bullish = close[i] > hma_1d_50[i]
-        daily_bearish = close[i] < hma_1d_50[i]
+        # === DAILY TREND (KAMA) ===
+        kama_bullish = close[i] > kama_21[i]
+        kama_bearish = close[i] < kama_21[i]
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Breakout above upper channel
-        breakout_long = close[i] > donchian_upper[i]
-        # Breakout below lower channel
-        breakout_short = close[i] < donchian_lower[i]
+        # KAMA slope (trend direction)
+        kama_slope_bull = kama_21[i] > kama_21[i-5] if i >= 5 else False
+        kama_slope_bear = kama_21[i] < kama_21[i-5] if i >= 5 else False
         
-        # === RSI CONFIRMATION (LOOSE thresholds to ensure trades) ===
-        rsi_ok_long = rsi_14[i] > 40  # Very loose - just not oversold
-        rsi_ok_short = rsi_14[i] < 60  # Very loose - just not overbought
+        # === ADX REGIME FILTER ===
+        adx_trending = adx_14[i] > 25
+        adx_chop = adx_14[i] < 20
         
-        # === POSITION SIZING ===
-        current_size = BASE_SIZE
+        # === BB SQUEEZE DETECTION ===
+        bb_squeeze = bb_width_pct[i] < 0.25
+        bb_breakout_long = close[i] > bb_upper[i]
+        bb_breakout_short = close[i] < bb_lower[i]
         
-        # === ENTRY LOGIC (LOOSE conditions to ensure trades happen) ===
+        # === RSI MOMENTUM ===
+        rsi_bullish = rsi_14[i] > 50
+        rsi_bearish = rsi_14[i] < 50
+        rsi_strong_bull = rsi_14[i] > 55
+        rsi_strong_bear = rsi_14[i] < 45
+        
+        # === ENTRY LOGIC ===
         new_signal = 0.0
-        bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRIES - Weekly bullish + Donchian breakout + RSI confirmation
-        if weekly_bullish and breakout_long and rsi_ok_long:
-            new_signal = current_size
-        # Alternative: Daily bullish + Donchian breakout (when weekly neutral)
-        elif daily_bullish and breakout_long and rsi_ok_long and not weekly_bearish:
-            new_signal = current_size * 0.8
+        # LONG ENTRY
+        long_score = 0
         
-        # SHORT ENTRIES - Weekly bearish + Donchian breakout + RSI confirmation
-        elif weekly_bearish and breakout_short and rsi_ok_short:
-            new_signal = -current_size
-        # Alternative: Daily bearish + Donchian breakout (when weekly neutral)
-        elif daily_bearish and breakout_short and rsi_ok_short and not weekly_bullish:
-            new_signal = -current_size * 0.8
+        # Weekly bias (required for high conviction)
+        if weekly_bullish:
+            long_score += 3
+        
+        # Daily trend alignment
+        if kama_bullish:
+            long_score += 2
+        if kama_slope_bull:
+            long_score += 1
+        
+        # ADX trend strength
+        if adx_trending:
+            long_score += 2
+        elif not adx_chop:  # neutral ADX
+            long_score += 1
+        
+        # BB squeeze breakout
+        if bb_squeeze and bb_breakout_long:
+            long_score += 2
+        elif bb_breakout_long:
+            long_score += 1
+        
+        # RSI momentum
+        if rsi_strong_bull:
+            long_score += 1
+        elif rsi_bullish:
+            long_score += 0.5
+        
+        # Enter long if score >= 6 (moderate threshold)
+        if long_score >= 6:
+            if weekly_bullish and kama_bullish and adx_trending:
+                new_signal = HIGH_CONV_SIZE  # 0.35 - high conviction
+            elif weekly_bullish and kama_bullish:
+                new_signal = BASE_SIZE  # 0.25 - base
+            else:
+                new_signal = LOW_CONV_SIZE  # 0.15 - low conviction
+        
+        # SHORT ENTRY
+        short_score = 0
+        
+        # Weekly bias (required for high conviction)
+        if weekly_bearish:
+            short_score += 3
+        
+        # Daily trend alignment
+        if kama_bearish:
+            short_score += 2
+        if kama_slope_bear:
+            short_score += 1
+        
+        # ADX trend strength
+        if adx_trending:
+            short_score += 2
+        elif not adx_chop:  # neutral ADX
+            short_score += 1
+        
+        # BB squeeze breakout
+        if bb_squeeze and bb_breakout_short:
+            short_score += 2
+        elif bb_breakout_short:
+            short_score += 1
+        
+        # RSI momentum
+        if rsi_strong_bear:
+            short_score += 1
+        elif rsi_bearish:
+            short_score += 0.5
+        
+        # Enter short if score >= 6
+        if short_score >= 6:
+            if weekly_bearish and kama_bearish and adx_trending:
+                new_signal = -HIGH_CONV_SIZE  # -0.35 - high conviction
+            elif weekly_bearish and kama_bearish:
+                new_signal = -BASE_SIZE  # -0.25 - base
+            else:
+                new_signal = -LOW_CONV_SIZE  # -0.15 - low conviction
         
         # === FREQUENCY SAFEGUARD ===
-        # If no trades for 60 bars (~2 months on 1d), force entry with weaker conditions
-        if bars_since_last_trade > 60 and new_signal == 0.0 and not in_position:
-            if weekly_bullish and rsi_14[i] > 45:
-                new_signal = current_size * 0.5
-            elif weekly_bearish and rsi_14[i] < 55:
-                new_signal = -current_size * 0.5
+        # If no trades for 30 bars (~30 days on 1d), allow weaker entry
+        bars_since_last_trade = i - last_trade_bar
+        if bars_since_last_trade > 30 and new_signal == 0.0 and not in_position:
+            if weekly_bullish and kama_bullish and rsi_bullish:
+                new_signal = LOW_CONV_SIZE
+            elif weekly_bearish and kama_bearish and rsi_bearish:
+                new_signal = -LOW_CONV_SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -198,29 +372,31 @@ def generate_signals(prices):
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
+            # Exit long if weekly trend turns bearish
             if position_side > 0 and weekly_bearish:
-                # Weekly trend turned bearish - exit long
                 trend_reversal = True
+            # Exit short if weekly trend turns bullish
             if position_side < 0 and weekly_bullish:
-                # Weekly trend turned bullish - exit short
                 trend_reversal = True
         
-        # Apply stoploss or trend reversal
-        if stoploss_triggered or trend_reversal:
-            new_signal = 0.0
+        # === KAMA CROSSOVER EXIT ===
+        kama_exit = False
+        if in_position and position_side != 0:
+            # Exit long if price crosses below KAMA
+            if position_side > 0 and close[i] < kama_21[i]:
+                kama_exit = True
+            # Exit short if price crosses above KAMA
+            if position_side < 0 and close[i] > kama_21[i]:
+                kama_exit = True
         
-        # === DONCHIAN EXIT (opposite breakout) ===
-        if in_position and position_side > 0 and breakout_short:
-            # Long position + short breakout = exit
-            new_signal = 0.0
-        
-        if in_position and position_side < 0 and breakout_long:
-            # Short position + long breakout = exit
+        # Apply stoploss or exits
+        if stoploss_triggered or trend_reversal or kama_exit:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
             if not in_position:
+                # New entry
                 in_position = True
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
@@ -234,9 +410,9 @@ def generate_signals(prices):
                 highest_price = close[i] if position_side > 0 else 0.0
                 lowest_price = close[i] if position_side < 0 else 0.0
                 last_trade_bar = i
-            # If same direction, keep position (no update needed)
         else:
             if in_position:
+                # Exit position
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
