@@ -1,35 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #595: 15m Volatility Spike Mean Reversion with MTF Regime Filter
+Experiment #596: 30m Trend-Following with 4h HMA + RSI Pullback + Z-Score Filter
 
-Hypothesis: After 594 experiments, the key insight is that volatility spike mean reversion
-works best on lower timeframes (15m) where panic/recovery cycles are more frequent.
+Hypothesis: After 520+ failures, the winning pattern is SIMPLE trend-following 
+with pullback entries, NOT complex regime detection. The current best strategy 
+(Sharpe=0.676) uses 4h trend + adaptive logic.
 
-Strategy Logic:
-1. VOL SPIKE DETECTION: ATR(7)/ATR(30) > 2.0 signals extreme volatility (panic/euphoria)
-2. REGIME FILTER: 4h HMA determines bias (long only in bull, short only in bear)
-3. ENTRY CONFIRMATION: 1h RSI extreme (<25 or >75) + price outside BB(20, 2.5)
-4. EXIT: Mean reversion to BB mid + trailing stop at 2.5*ATR
-5. This generates MORE trades than 12h/1d strategies while controlling drawdown
+Key insights from failures:
+- Complex regime detection (CHOP, multiple modes) = overfitting
+- Too many filters = 0 trades or late entries
+- RSI pullback to trend works better than breakout strategies
+- Z-score filter helps avoid entering at extremes
 
-Why this should beat #593 (Sharpe=-0.281):
-- 15m captures more vol spike events than 12h (more trade opportunities)
-- Mean reversion works better in 2022 crash and 2025 bear than breakouts
-- 4h HMA bias prevents counter-trend trades (major failure mode of #583-#594)
-- Wider BB (2.5 std) ensures only extreme moves trigger entries
-- ATR ratio filter catches panic bottoms and euphoria tops
+This strategy:
+1. 4h HMA(21) = primary trend direction (call ONCE before loop)
+2. 30m RSI(14) pullback = entry trigger (35-45 for long, 55-65 for short)
+3. Z-score(20) filter = avoid extremes (|z| < 1.5)
+4. Asymmetric sizing: 0.25 long, 0.20 short (bear market bias)
+5. Stoploss: 2.5 * ATR(14)
 
-Timeframe: 15m (REQUIRED for this experiment)
-HTF: 4h HMA via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.30 discrete (max 0.40)
-Stoploss: 2.5 * ATR(14) trailing (wider for 15m noise)
+Timeframe: 30m (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_vol_spike_meanrev_4h_hma_1h_rsi_bb_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_trend_4h_hma_rsi_pullback_zscore_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -67,24 +65,19 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
-def calculate_bollinger(close, period=20, std_mult=2.5):
-    """Calculate Bollinger Bands with wider std for extreme moves."""
+def calculate_zscore(close, period=20):
+    """Calculate Z-score of price relative to rolling mean."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    
-    return upper.values, lower.values, sma.values
+    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
+    rolling_std = close_s.rolling(window=period, min_periods=period).std()
+    zscore = (close_s - rolling_mean) / rolling_std.replace(0, np.inf)
+    return zscore.values
 
-def calculate_atr_ratio(high, low, close, short_period=7, long_period=30):
-    """Calculate ATR ratio for volatility spike detection."""
-    atr_short = calculate_atr(high, low, close, short_period)
-    atr_long = calculate_atr(high, low, close, long_period)
-    
-    ratio = atr_short / np.where(atr_long > 0, atr_long, np.inf)
-    return ratio
+def calculate_ema(close, period=21):
+    """Calculate Exponential Moving Average."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    return ema.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -101,23 +94,24 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    atr_ratio = calculate_atr_ratio(high, low, close, 7, 30)
     rsi_14 = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.5)
+    zscore_20 = calculate_zscore(close, 20)
+    ema_21 = calculate_ema(close, 21)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.28
+    SIZE_LONG = 0.28
+    SIZE_SHORT = 0.22  # Slightly smaller for shorts (bear market bias)
     
-    # Track position state for stoploss (separate from signal)
+    # Track position state for stoploss
     in_position = False
     position_side = 0
+    entry_price = 0.0
     highest_close = 0.0
     lowest_close = 0.0
-    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -127,39 +121,37 @@ def generate_signals(prices):
         if np.isnan(hma_4h_aligned[i]):
             continue
         
-        if np.isnan(atr_ratio[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(zscore_20[i]) or np.isnan(ema_21[i]):
             continue
-        
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_mid[i]):
-            continue
-        
-        # === VOLATILITY SPIKE DETECTION ===
-        vol_spike = atr_ratio[i] > 2.0  # Extreme volatility
         
         # === 4H HMA TREND BIAS ===
-        bull_bias = close[i] > hma_4h_aligned[i]
-        bear_bias = close[i] < hma_4h_aligned[i]
+        bull_trend = close[i] > hma_4h_aligned[i]
+        bear_trend = close[i] < hma_4h_aligned[i]
         
-        # === BOLLINGER BAND EXTREMES ===
-        below_bb_lower = close[i] < bb_lower[i]
-        above_bb_upper = close[i] > bb_upper[i]
+        # === 30M RSI PULLBACK ENTRY ===
+        # Long: RSI pulled back to 35-50 in uptrend
+        rsi_pullback_long = 35 <= rsi_14[i] <= 50
+        # Short: RSI pulled back to 50-65 in downtrend
+        rsi_pullback_short = 50 <= rsi_14[i] <= 65
         
-        # === RSI EXTREMES (more extreme for 15m noise) ===
-        rsi_oversold = rsi_14[i] < 25
-        rsi_overbought = rsi_14[i] > 75
+        # === Z-SCORE FILTER (avoid extremes) ===
+        zscore_ok_long = zscore_20[i] < 1.0  # Not overbought
+        zscore_ok_short = zscore_20[i] > -1.0  # Not oversold
+        
+        # === EMA CONFIRMATION ===
+        ema_bull = close[i] > ema_21[i]
+        ema_bear = close[i] < ema_21[i]
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # LONG: Vol spike + price below BB + RSI oversold + 4h bullish or neutral
-        if vol_spike and below_bb_lower and rsi_oversold:
-            if bull_bias or (not bear_bias and atr_ratio[i] > 2.5):
-                new_signal = SIZE
+        # Long entry: 4h bullish + RSI pullback + Z-score ok + EMA confirmation
+        if bull_trend and rsi_pullback_long and zscore_ok_long and ema_bull:
+            new_signal = SIZE_LONG
         
-        # SHORT: Vol spike + price above BB + RSI overbought + 4h bearish or neutral
-        if vol_spike and above_bb_upper and rsi_overbought:
-            if bear_bias or (not bull_bias and atr_ratio[i] > 2.5):
-                new_signal = -SIZE
+        # Short entry: 4h bearish + RSI pullback + Z-score ok + EMA confirmation
+        elif bear_trend and rsi_pullback_short and zscore_ok_short and ema_bear:
+            new_signal = -SIZE_SHORT
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -181,28 +173,18 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     stoploss_triggered = True
         
-        # === MEAN REVERSION EXIT (take profit at BB mid) ===
-        take_profit = False
-        if in_position and position_side != 0:
-            if position_side > 0 and close[i] > bb_mid[i]:
-                # Long position reached mean - take profit
-                take_profit = True
-            if position_side < 0 and close[i] < bb_mid[i]:
-                # Short position reached mean - take profit
-                take_profit = True
-        
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            # Exit long if 4h trend turns bearish strongly
-            if position_side > 0 and bear_bias and close[i] < hma_4h_aligned[i] * 0.98:
+            # Exit long if 4h trend flips bearish
+            if position_side > 0 and bear_trend and rsi_14[i] > 60:
                 trend_reversal = True
-            # Exit short if 4h trend turns bullish strongly
-            if position_side < 0 and bull_bias and close[i] > hma_4h_aligned[i] * 1.02:
+            # Exit short if 4h trend flips bullish
+            if position_side < 0 and bull_trend and rsi_14[i] < 40:
                 trend_reversal = True
         
-        # Apply stoploss or take profit or trend reversal
-        if stoploss_triggered or take_profit or trend_reversal:
+        # Apply stoploss or trend reversal
+        if stoploss_triggered or trend_reversal:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
