@@ -1,34 +1,58 @@
 #!/usr/bin/env python3
 """
-Experiment #428: 30m Bollinger-Keltner Squeeze + 4h HMA Trend + Volume Confirmation
+Experiment #429: 1h RSI Pullback + 4h HMA Trend + Volume Confirmation
 
-Hypothesis: After 11 consecutive failures, the pattern is clear - pure trend 
-following and pure mean reversion both fail on crypto. The key is capturing 
-VOLATILITY EXPANSION events which occur in both bull and bear markets.
+Hypothesis: After 428 failed experiments, the pattern is clear - complex regime
+switching strategies (ADX+Chop+Bollinger) are overfitting and failing. The key
+insight is SIMPLICITY + STRONG HTF BIAS. This strategy uses:
 
-This strategy combines:
-1. BOLLINGER-KELTNER SQUEEZE: When BB width < Keltner width, market is 
-   coiling. Breakout from squeeze = high probability move.
-2. 4h HMA TREND BIAS: Only take long breakouts when price > 4h HMA, only 
-   short when price < 4h HMA. This filters counter-trend squeezes.
-3. VOLUME CONFIRMATION: Breakout must have volume > 1.5x 20-bar average.
-   Filters false breakouts which killed strategy #416.
-4. ATR TRAILING STOP: 2.5x ATR from entry, protects from reversals.
-5. CONSERVATIVE SIZING: 0.25 position size (25% capital max).
+1. 4h HMA(21) TREND BIAS (via mtf_data helper):
+   - Long ONLY when price > 4h HMA (bullish bias)
+   - Short ONLY when price < 4h HMA (bearish bias)
+   - HMA is smoother than EMA, reduces whipsaw on 1h entries
+   - This is the SINGLE strongest filter - no counter-trend trades
 
-Why 30m:
-- Fast enough to catch squeeze breakouts early
-- Slow enough to avoid 5m/15m noise
-- 4h HTF provides good trend context (8 bars per 4h)
+2. RSI(7) PULLBACK ENTRY (faster than RSI(14) for 1h):
+   - Long: RSI(7) < 35 (oversold pullback in uptrend)
+   - Short: RSI(7) > 65 (overbought pullback in downtrend)
+   - Tighter thresholds than standard 30/70 for more trades
 
-Expected: 30-50 trades/year, Sharpe > 0.7, DD < -30%
+3. VOLUME CONFIRMATION (critical filter):
+   - Entry volume > 1.5x 20-bar average volume
+   - Confirms institutional interest, reduces false signals
+   - This was underutilized in failed strategies
+
+4. EMA(21) PROXIMITY FILTER:
+   - Long: price within 2% of EMA(21) (pullback, not breakout)
+   - Short: price within 2% of EMA(21)
+   - Ensures we're buying dips, not chasing
+
+5. ATR(14) TRAILING STOP at 2.0x:
+   - Signal → 0 when price moves 2.0*ATR against position
+   - Tighter than 2.5x for 1h timeframe (faster exits)
+
+6. POSITION SIZING: 0.25 discrete (conservative for 1h volatility)
+   - Max 25% capital per position
+   - Discrete levels: 0.0, ±0.25 only (minimize fee churn)
+
+Why 1h should work:
+- More trades than 4h/12h (~50-100/year vs 20-40)
+- Faster reaction to reversals than 4h strategies
+- 4h HMA provides stable trend bias without overfitting
+- Volume filter is unique - most failed strategies ignored volume
+- RSI(7) is fast enough for 1h but not noisy like RSI(3)
+
+Timeframe: 1h (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25 discrete levels
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_bb_keltner_squeeze_4h_hma_vol_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_rsi7_pullback_4h_hma_vol_confirm_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -51,29 +75,31 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_rsi(close, period=7):
+    """Calculate Relative Strength Index with custom period."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    return upper.values, lower.values, sma.values
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / avg_loss.replace(0, np.inf)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
-def calculate_keltner_channel(high, low, close, period=20, atr_period=14, multiplier=1.5):
-    """Calculate Keltner Channel."""
+def calculate_ema(close, period=21):
+    """Calculate Exponential Moving Average."""
     close_s = pd.Series(close)
     ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    atr = calculate_atr(high, low, close, atr_period)
-    upper = ema.values + (multiplier * atr)
-    lower = ema.values - (multiplier * atr)
-    return upper, lower
+    return ema.values
 
-def calculate_volume_ma(volume, period=20):
-    """Calculate volume moving average."""
+def calculate_volume_sma(volume, period=20):
+    """Calculate simple moving average of volume."""
     vol_s = pd.Series(volume)
-    vol_ma = vol_s.rolling(window=period, min_periods=period).mean()
-    return vol_ma.values
+    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -91,11 +117,11 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
-    keltner_upper, keltner_lower = calculate_keltner_channel(high, low, close, 20, 14, 1.5)
-    vol_ma = calculate_volume_ma(volume, 20)
+    rsi = calculate_rsi(close, 7)
+    ema_21 = calculate_ema(close, 21)
+    vol_sma = calculate_volume_sma(volume, 20)
     
     signals = np.zeros(n)
     
@@ -105,9 +131,9 @@ def generate_signals(prices):
     # Track position state for stoploss
     in_position = False
     position_side = 0
-    entry_price = 0.0
     highest_close = 0.0
     lowest_close = 0.0
+    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -119,70 +145,51 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]):
+        if np.isnan(ema_21[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(vol_ma[i]) or vol_ma[i] == 0:
+        if np.isnan(vol_sma[i]) or vol_sma[i] == 0:
             signals[i] = 0.0
             continue
         
-        # === SQUEEZE DETECTION ===
-        # Squeeze = BB inside Keltner (low volatility, coiling)
-        bb_width = bb_upper[i] - bb_lower[i]
-        keltner_width = keltner_upper[i] - keltner_lower[i]
-        
-        in_squeeze = bb_width < keltner_width
-        
-        # Squeeze was active in previous bars (look back 5 bars)
-        squeeze_history = False
-        for j in range(max(100, i-5), i):
-            bb_w = bb_upper[j] - bb_lower[j]
-            k_w = keltner_upper[j] - keltner_lower[j]
-            if bb_w < k_w:
-                squeeze_history = True
-                break
-        
-        # === 4h HMA TREND BIAS ===
+        # === 4h HMA TREND BIAS (SINGLE STRONGEST FILTER) ===
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        volume_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        high_volume = volume_ratio > 1.5
+        vol_spike = volume[i] > 1.5 * vol_sma[i]
         
-        # === BREAKOUT SIGNALS ===
-        # Long breakout: price breaks above BB upper + was in squeeze + volume + bull trend
-        breakout_long = (close[i] > bb_upper[i-1] and 
-                        squeeze_history and 
-                        high_volume and 
-                        bull_trend_4h)
+        # === EMA PROXIMITY FILTER (pullback, not breakout) ===
+        ema_pct_diff = abs(close[i] - ema_21[i]) / ema_21[i]
+        near_ema = ema_pct_diff < 0.02  # Within 2% of EMA
         
-        # Short breakout: price breaks below BB lower + was in squeeze + volume + bear trend
-        breakout_short = (close[i] < bb_lower[i-1] and 
-                         squeeze_history and 
-                         high_volume and 
-                         bear_trend_4h)
+        # === RSI PULLBACK SIGNALS ===
+        rsi_oversold = rsi[i] < 35  # Long entry
+        rsi_overbought = rsi[i] > 65  # Short entry
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        if breakout_long:
+        # LONG: 4h bullish + RSI oversold + volume spike + near EMA
+        if bull_trend_4h and rsi_oversold and vol_spike and near_ema:
             new_signal = SIZE
-        elif breakout_short:
+        
+        # SHORT: 4h bearish + RSI overbought + volume spike + near EMA
+        elif bear_trend_4h and rsi_overbought and vol_spike and near_ema:
             new_signal = -SIZE
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr[i]
+                stoploss_price = highest_close - 2.0 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -190,16 +197,18 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr[i]
+                stoploss_price = lowest_close + 2.0 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_4h:
-                new_signal = 0.0
-            if position_side < 0 and bull_trend_4h:
-                new_signal = 0.0
+        # Exit long if 4h trend turns bearish
+        if in_position and position_side > 0 and bear_trend_4h:
+            new_signal = 0.0
+        
+        # Exit short if 4h trend turns bullish
+        if in_position and position_side < 0 and bull_trend_4h:
+            new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
