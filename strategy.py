@@ -1,36 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #240: 1d Z-Score Mean Reversion with Trend Filter and Volume Confirmation
+Experiment #241: 15m Multi-Timeframe Trend Pullback with Volume Confirmation
 
-Hypothesis: On daily timeframe, crypto exhibits mean-reverting behavior around 
-longer-term moving averages, especially after extended moves. Using Z-score to 
-measure deviation from SMA(50) combined with RSI and volume confirmation can 
-capture reversals while avoiding counter-trend traps.
-
-Why this might work for 1d:
-- Daily bars filter out noise present in lower timeframes
-- Z-score > 2.0 or < -2.0 captures extreme deviations (statistically significant)
-- SMA(200) provides long-term trend bias filter
-- Volume spike confirms genuine reversal interest
-- ATR trailing stop protects against continued trends
-- Conservative sizing (0.25) controls drawdown in volatile crypto
-
-Key differences from failed strategies:
-- #228, #234 (Donchian breakout): Pure trend-following fails in range markets
-- #232, #237 (KAMA + RSI): Too many whipsaws without Z-score filter
-- This uses statistical deviation (Z-score) rather than fixed thresholds
+Hypothesis: 15m timeframe is noisy, but combining strong HTF trend filter (4h HMA)
+with pullback entries (1h RSI) and volume confirmation can capture trend continuations
+while avoiding false breakouts. Key insights from failed experiments:
+- Pure trend following fails in 2025 bear/range market
+- Lower TF (15m/30m) strategies had Sharpe -3 to -9 due to noise
+- Need STRONG HTF bias to filter 15m noise
 - Volume confirmation reduces false signals
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: None (single TF as per experiment rules)
-Position sizing: 0.25 discrete levels
+Strategy logic:
+1. 4h HMA(21) = primary trend bias (only trade in trend direction)
+2. 1h RSI(14) pullback = entry trigger (RSI < 45 for long, RSI > 55 for short)
+3. Volume > 1.3x 20-bar avg = confirmation (avoids low-volume false breaks)
+4. ATR(14) trailing stop = 2.5x ATR protection
+5. Discrete sizing: 0.20 base, 0.25 strong conviction
+
+Why 15m might work now:
+- Previous 15m failures lacked strong HTF filter
+- Adding 4h HMA + 1h RSI creates multi-layer confirmation
+- Volume filter avoids whipsaw on low-liquidity bars
+- Conservative sizing (0.20-0.25) controls drawdown
+
+Timeframe: 15m (REQUIRED for this experiment)
+HTF: 4h HMA + 1h RSI via mtf_data helper (call ONCE before loop)
+Position sizing: 0.20-0.25 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_zscore_meanrev_sma_rsi_volume_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_trend_pullback_4h_hma_1h_rsi_volume_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -42,14 +45,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_zscore(close, period=50):
-    """Calculate Z-score of price relative to rolling mean."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - sma) / (std + 1e-10)
-    return zscore.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI (Relative Strength Index)."""
@@ -66,60 +61,21 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
-def calculate_sma(close, period):
-    """Calculate Simple Moving Average."""
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    return sma.values
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
 
-def calculate_volume_zscore(volume, period=20):
-    """Calculate Z-score of volume relative to rolling mean."""
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average."""
     vol_s = pd.Series(volume)
-    vol_mean = vol_s.rolling(window=period, min_periods=period).mean()
-    vol_std = vol_s.rolling(window=period, min_periods=period).std()
-    vol_zscore = (vol_s - vol_mean) / (vol_std + 1e-10)
-    return vol_zscore.values
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    n = len(close)
-    adx = np.zeros(n)
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        # True Range
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Directional Movement
-        if high[i] - high[i-1] > low[i-1] - low[i]:
-            plus_dm[i] = max(0, high[i] - high[i-1])
-        else:
-            plus_dm[i] = 0
-            
-        if low[i-1] - low[i] > high[i] - high[i-1]:
-            minus_dm[i] = max(0, low[i-1] - low[i])
-        else:
-            minus_dm[i] = 0
-    
-    # Smooth TR, +DM, -DM using Wilder's method
-    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Calculate +DI, -DI
-    plus_di = 100 * plus_dm_smooth / (tr_smooth + 1e-10)
-    minus_di = 100 * minus_dm_smooth / (tr_smooth + 1e-10)
-    
-    # Calculate DX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    
-    # Smooth DX to get ADX
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -128,20 +84,33 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Calculate all indicators (vectorized where possible)
+    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
+    df_1h = get_htf_data(prices, '1h')
+    
+    # Calculate HTF indicators
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
+    
+    # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
+    
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    zscore_50 = calculate_zscore(close, 50)
-    rsi_14 = calculate_rsi(close, 14)
-    sma_50 = calculate_sma(close, 50)
-    sma_200 = calculate_sma(close, 200)
-    vol_zscore = calculate_volume_zscore(volume, 20)
-    adx_14 = calculate_adx(high, low, close, 14)
+    rsi_15m = calculate_rsi(close, 14)
+    vol_ma = calculate_volume_ma(volume, 20)
+    
+    # Calculate 15m EMA for additional trend confirmation
+    close_s = pd.Series(close)
+    ema_21 = close_s.ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_50 = close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25
-    SIZE_HALF = 0.125
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -149,66 +118,67 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     entry_price = 0.0
-    entry_atr = 0.0
+    entry_idx = 0
     
-    for i in range(250, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(zscore_50[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_1h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_200[i]) or np.isnan(adx_14[i]):
+        if np.isnan(rsi_15m[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0:
             signals[i] = 0.0
             continue
         
-        # === LONG-TERM TREND BIAS ===
-        # Price above SMA200 = bullish bias (prefer longs)
-        # Price below SMA200 = bearish bias (prefer shorts)
-        bull_trend = close[i] > sma_200[i]
-        bear_trend = close[i] < sma_200[i]
+        # === HIGHER TIMEFRAME TREND BIAS (4h HMA) ===
+        # Only trade in direction of 4h trend
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === MEAN REVERSION SIGNALS ===
-        # Z-score < -1.5 = price significantly below mean (oversold)
-        # Z-score > +1.5 = price significantly above mean (overbought)
-        # Relaxed from -2.0/+2.0 to ensure more trades
-        zscore_oversold = zscore_50[i] < -1.5
-        zscore_overbought = zscore_50[i] > 1.5
+        # === 1h RSI PULLBACK FILTER ===
+        # In uptrend: wait for RSI pullback to 40-50 zone
+        # In downtrend: wait for RSI rally to 50-60 zone
+        rsi_1h_neutral = 45 < rsi_1h_aligned[i] < 55
+        rsi_1h_bullish_pullback = 40 < rsi_1h_aligned[i] < 50
+        rsi_1h_bearish_rally = 50 < rsi_1h_aligned[i] < 60
         
-        # RSI confirmation (less extreme than typical for more trades)
-        rsi_oversold = rsi_14[i] < 40
-        rsi_overbought = rsi_14[i] > 60
+        # === 15m VOLUME CONFIRMATION ===
+        # Volume must be above average to confirm move
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
-        # Volume spike confirmation (z-score > 1.0 = above average volume)
-        volume_spike = vol_zscore[i] > 1.0
+        # === 15m TREND STRUCTURE ===
+        ema_bullish = ema_21[i] > ema_50[i]
+        ema_bearish = ema_21[i] < ema_50[i]
         
-        # ADX filter - avoid entering when trend is very strong (ADX > 35)
-        # Prefer mean reversion when ADX < 30 (weaker trend)
-        weak_trend = adx_14[i] < 30
+        # === 15m RSI MOMENTUM ===
+        rsi_15m_oversold = rsi_15m[i] < 45
+        rsi_15m_overbought = rsi_15m[i] > 55
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Z-score oversold + RSI oversold + (volume spike OR weak trend)
-        # Prefer longs when price > SMA200 (bullish bias)
-        if zscore_oversold and rsi_oversold:
-            if volume_spike or weak_trend:
-                if bull_trend or not bear_trend:
-                    new_signal = SIZE_BASE
+        # 4h bullish + 1h RSI pullback + 15m volume + 15m EMA bullish + 15m RSI confirmation
+        if bull_trend_4h and rsi_1h_bullish_pullback and volume_confirmed and ema_bullish and rsi_15m_oversold:
+            new_signal = SIZE_BASE
+        
+        # Strong long: all conditions + 1h RSI very bullish
+        if bull_trend_4h and rsi_1h_aligned[i] < 45 and volume_confirmed and ema_bullish:
+            new_signal = SIZE_STRONG
         
         # === SHORT ENTRY ===
-        # Z-score overbought + RSI overbought + (volume spike OR weak trend)
-        # Prefer shorts when price < SMA200 (bearish bias)
-        if zscore_overbought and rsi_overbought:
-            if volume_spike or weak_trend:
-                if bear_trend or not bull_trend:
-                    new_signal = -SIZE_BASE
+        # 4h bearish + 1h RSI rally + 15m volume + 15m EMA bearish + 15m RSI confirmation
+        if bear_trend_4h and rsi_1h_bearish_rally and volume_confirmed and ema_bearish and rsi_15m_overbought:
+            new_signal = -SIZE_BASE
+        
+        # Strong short: all conditions + 1h RSI very bearish
+        if bear_trend_4h and rsi_1h_aligned[i] > 55 and volume_confirmed and ema_bearish:
+            new_signal = -SIZE_STRONG
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
-        # Check stoploss on EXISTING position before considering new entry
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
@@ -232,38 +202,36 @@ def generate_signals(prices):
         if in_position and new_signal != 0.0 and position_side != 0:
             if position_side > 0:
                 profit = close[i] - entry_price
-                if profit >= 2.0 * entry_atr:
-                    new_signal = SIZE_HALF  # Take partial profit
+                if profit >= 2.0 * atr[entry_idx]:
+                    new_signal = SIZE_BASE / 2  # Take partial profit
             if position_side < 0:
                 profit = entry_price - close[i]
-                if profit >= 2.0 * entry_atr:
-                    new_signal = -SIZE_HALF  # Take partial profit
+                if profit >= 2.0 * atr[entry_idx]:
+                    new_signal = -SIZE_BASE / 2  # Take partial profit
         
-        # === UPDATE POSITION TRACKING FOR NEXT BAR ===
+        # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
             if not in_position:
                 # Entering new position
                 in_position = True
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
-                entry_atr = atr[i]
+                entry_idx = i
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
                 # Reversing position
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
-                entry_atr = atr[i]
+                entry_idx = i
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
-            # else: maintaining same position direction (possibly reduced size)
         else:
             # Exiting position (signal-based or stoploss)
-            if in_position:
+            if in_position and signals[i-1] != 0.0:
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
-                entry_atr = 0.0
                 highest_close = 0.0
                 lowest_close = 0.0
         
