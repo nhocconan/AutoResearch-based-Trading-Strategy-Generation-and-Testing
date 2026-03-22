@@ -1,170 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #038: 30m Supertrend + RSI Pullback + 4h HMA Trend Filter
-Hypothesis: Supertrend captures trend direction cleanly, RSI pullbacks provide low-risk entries
-within the trend. 4h HMA filters counter-trend trades. ADX ensures we only trade in trending
-conditions (not chop). ATR stoploss at 2.5x limits drawdown during reversals.
-
-Key improvements from failed experiments:
-- LOOSENED entry conditions to ensure 10+ trades/year (previous strategies had 0 trades)
-- RSI range widened (30-50 for long pullbacks, 50-70 for short pullbacks)
-- ADX threshold lowered to 18 (ADX>25 too restrictive)
-- Supertrend breakout confirmation ensures momentum
-- Discrete position sizing (0.0, ±0.25, ±0.30) minimizes fee churn
-
-Timeframe: 30m (REQUIRED), HTF: 4h via mtf_data helper
-Position sizing: 0.25 base, 0.30 max, discrete levels
-Stoploss: 2.5*ATR trailing stop
+Experiment #039: 1h RSI Pullback + 4h HMA Trend + Volume Confirmation v2
+Hypothesis: Previous strategies failed due to overly strict entry filters (0 trades).
+This version uses RELAXED thresholds to ensure 10+ trades per symbol.
+Key changes from failed versions:
+- RSI thresholds: 35/65 instead of 30/70 (more signals)
+- Volume filter: >0.7x avg instead of >1.0x (less restrictive)
+- Multiple entry paths (OR logic, not AND) to increase trade frequency
+- Stoploss: 2.5*ATR (wider to avoid premature exits)
+- Position sizing: 0.30 base, 0.35 max (discrete levels)
+Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper.
+Critical: get_htf_data() called ONCE before loop, aligned arrays used inside.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_supertrend_rsi_4h_hma_v1"
-timeframe = "30m"
+name = "mtf_1h_rsi_pullback_4h_hma_vol_v2"
+timeframe = "1h"
 leverage = 1.0
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Supertrend indicator - trend-following indicator based on ATR.
-    Returns: supertrend_line, direction (1=up, -1=down)
-    """
-    n = len(close)
-    atr = np.zeros(n)
-    tr = np.zeros(n)
-    
-    # True Range
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
-    
-    # ATR with Wilder's smoothing
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-    
-    # Basic bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Supertrend calculation
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)
-    supertrend[0] = upper_band[0]
-    direction[0] = -1
-    
-    for i in range(1, n):
-        if direction[i-1] == 1:
-            if close[i] < lower_band[i]:
-                supertrend[i] = upper_band[i]
-                direction[i] = -1
-            else:
-                supertrend[i] = max(lower_band[i], supertrend[i-1])
-                direction[i] = 1
-        else:
-            if close[i] > upper_band[i]:
-                supertrend[i] = lower_band[i]
-                direction[i] = 1
-            else:
-                supertrend[i] = min(upper_band[i], supertrend[i-1])
-                direction[i] = -1
-    
-    return supertrend, direction, atr
-
 def calculate_rsi(close, period=14):
-    """Calculate RSI using standard formula."""
-    n = len(close)
-    rsi = np.zeros(n)
-    rsi[:] = np.nan
-    
-    delta = np.diff(close)
-    gains = np.zeros(n)
-    losses = np.zeros(n)
-    
-    gains[1:] = np.where(delta > 0, delta, 0)
-    losses[1:] = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[period] = np.mean(gains[1:period+1])
-    avg_loss[period] = np.mean(losses[1:period+1])
-    
-    for i in range(period + 1, n):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gains[i]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + losses[i]) / period
-    
-    rs = np.zeros(n)
-    mask = avg_loss > 0
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rsi[mask] = 100 - (100 / (1 + rs[mask]))
-    rsi[~mask] = 100.0
-    
+    """Calculate RSI using standard Wilder's method."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rs = rs.replace([np.inf, -np.inf], np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50.0).values
     return rsi
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)."""
-    n = len(close)
-    adx = np.zeros(n)
-    adx[:] = np.nan
-    
-    # True Range
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
-    
-    # DM+ and DM-
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-    
-    # Smooth TR, +DM, -DM
-    atr = np.zeros(n)
-    atr[period-1] = np.mean(tr[:period])
-    smooth_plus = np.zeros(n)
-    smooth_minus = np.zeros(n)
-    smooth_plus[period-1] = np.mean(plus_dm[:period])
-    smooth_minus[period-1] = np.mean(minus_dm[:period])
-    
-    for i in range(period, n):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-        smooth_plus[i] = (smooth_plus[i-1] * (period - 1) + plus_dm[i]) / period
-        smooth_minus[i] = (smooth_minus[i-1] * (period - 1) + minus_dm[i]) / period
-    
-    # DI+ and DI-
-    di_plus = np.zeros(n)
-    di_minus = np.zeros(n)
-    mask = atr > 0
-    di_plus[mask] = 100 * smooth_plus[mask] / atr[mask]
-    di_minus[mask] = 100 * smooth_minus[mask] / atr[mask]
-    
-    # DX and ADX
-    dx = np.zeros(n)
-    di_sum = di_plus + di_minus
-    mask2 = di_sum > 0
-    dx[mask2] = 100 * np.abs(di_plus[mask2] - di_minus[mask2]) / di_sum[mask2]
-    
-    # ADX smoothing
-    adx[2*period-1] = np.mean(dx[period:2*period])
-    for i in range(2*period, n):
-        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
-    
-    return adx
-
 def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average."""
+    """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
     half = max(1, period // 2)
     sqrt_period = max(1, int(np.sqrt(period)))
@@ -173,10 +44,29 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_atr(high, low, close, period=14):
+    """Calculate ATR using Wilder's smoothing."""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs moving average."""
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean()
+    vol_ratio = vol_s / vol_ma
+    vol_ratio = vol_ratio.fillna(1.0).values
+    return vol_ratio
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -188,10 +78,10 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
-    supertrend, st_direction, atr = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    rsi = calculate_rsi(close, period=14)
-    adx = calculate_adx(high, low, close, period=14)
+    # Calculate 1h indicators
+    rsi = calculate_rsi(close, 14)
+    atr = calculate_atr(high, low, close, 14)
+    vol_ratio = calculate_volume_ratio(volume, 20)
     
     # Additional trend filter
     ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
@@ -200,8 +90,8 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25
-    SIZE_MAX = 0.30
+    SIZE_BASE = 0.30
+    SIZE_MAX = 0.35
     
     # Track positions for stoploss
     position_side = 0
@@ -210,10 +100,7 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    # Minimum lookback period
-    min_lookback = 250
-    
-    for i in range(min_lookback, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
@@ -227,56 +114,52 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]):
-            signals[i] = 0.0
-            continue
-        
         # 4h trend bias (HTF)
         bull_trend = close[i] > hma_4h_aligned[i]
         bear_trend = close[i] < hma_4h_aligned[i]
         
-        # Supertrend direction
-        st_bull = st_direction[i] == 1
-        st_bear = st_direction[i] == -1
+        # Volume confirmation (relaxed - >0.7x average)
+        volume_ok = vol_ratio[i] > 0.7
         
-        # RSI pullback zones (LOOSENED for more trades)
-        rsi_long_pullback = 30 <= rsi[i] <= 50  # Pullback in uptrend
-        rsi_short_pullback = 50 <= rsi[i] <= 70  # Pullback in downtrend
+        # RSI signals (RELAXED thresholds for more trades)
+        rsi_oversold = rsi[i] < 40  # Was <30, too strict = 0 trades
+        rsi_overbought = rsi[i] > 60  # Was >70, too strict = 0 trades
+        rsi_extreme_oversold = rsi[i] < 35
+        rsi_extreme_overbought = rsi[i] > 65
         
-        # ADX trending filter (lowered from 25 to 18)
-        trending = adx[i] >= 18
-        
-        # EMA trend confirmation
-        ema_bullish = close[i] > ema_50[i] and close[i] > ema_200[i]
-        ema_bearish = close[i] < ema_50[i] and close[i] < ema_200[i]
-        
-        # Price vs Supertrend (breakout confirmation)
-        price_above_st = close[i] > supertrend[i]
-        price_below_st = close[i] < supertrend[i]
+        # EMA trend confirmation (secondary filter)
+        ema_bullish = close[i] > ema_50[i]
+        ema_bearish = close[i] < ema_50[i]
         
         new_signal = 0.0
         
-        # === LONG ENTRY ===
-        # Primary: Supertrend bull + RSI pullback + 4h bull trend + trending
-        if st_bull and rsi_long_pullback and bull_trend and trending:
+        # === LONG ENTRY (multiple paths - OR logic for more trades) ===
+        # Path 1: RSI oversold + 4h bull trend + volume ok
+        if rsi_oversold and bull_trend and volume_ok:
             new_signal = SIZE_BASE
-        # Secondary: Supertrend bull + RSI pullback + EMA bullish
-        elif st_bull and rsi_long_pullback and ema_bullish:
+        # Path 2: RSI oversold + 4h bull trend + EMA bullish
+        elif rsi_oversold and bull_trend and ema_bullish:
             new_signal = SIZE_BASE
-        # Tertiary: Strong breakout - price above ST + 4h bull + ADX rising
-        elif price_above_st and bull_trend and adx[i] >= 20 and rsi[i] > 45:
+        # Path 3: Extreme RSI oversold + 4h bull trend (no volume req)
+        elif rsi_extreme_oversold and bull_trend:
             new_signal = SIZE_MAX
+        # Path 4: RSI oversold + EMA bullish + EMA > EMA200
+        elif rsi_oversold and ema_bullish and close[i] > ema_200[i]:
+            new_signal = SIZE_BASE
         
-        # === SHORT ENTRY ===
-        # Primary: Supertrend bear + RSI pullback + 4h bear trend + trending
-        if st_bear and rsi_short_pullback and bear_trend and trending:
+        # === SHORT ENTRY (multiple paths - OR logic for more trades) ===
+        # Path 1: RSI overbought + 4h bear trend + volume ok
+        if rsi_overbought and bear_trend and volume_ok:
             new_signal = -SIZE_BASE
-        # Secondary: Supertrend bear + RSI pullback + EMA bearish
-        elif st_bear and rsi_short_pullback and ema_bearish:
+        # Path 2: RSI overbought + 4h bear trend + EMA bearish
+        elif rsi_overbought and bear_trend and ema_bearish:
             new_signal = -SIZE_BASE
-        # Tertiary: Strong breakdown - price below ST + 4h bear + ADX rising
-        elif price_below_st and bear_trend and adx[i] >= 20 and rsi[i] < 55:
+        # Path 3: Extreme RSI overbought + 4h bear trend (no volume req)
+        elif rsi_extreme_overbought and bear_trend:
             new_signal = -SIZE_MAX
+        # Path 4: RSI overbought + EMA bearish + EMA < EMA200
+        elif rsi_overbought and ema_bearish and close[i] < ema_200[i]:
+            new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) ===
         # Long position stoploss
