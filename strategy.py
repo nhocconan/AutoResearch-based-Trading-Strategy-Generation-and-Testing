@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #551: 4h Primary + 1d HTF — Funding Rate Contrarian + Donchian Breakout
+Experiment #552: 12h Primary + 1d/1w HTF — Dual Regime (Chop + Trend) with HTF Bias
 
-Hypothesis: After 490+ failed strategies, the clearest winning pattern is:
-- Funding rate z-score contrarian signal showed Sharpe 0.8-1.5 through 2022 crash
-- Donchian breakout timing works well on SOL (Sharpe +0.782 in history)
-- 4h HMA trend filter prevents counter-trend trades
-- 1d HTF filter prevents major regime losses (key failure in 2022)
-- SIMPLER entry logic = more trades = better Sharpe (avoid 0-trade failure)
+Hypothesis: After 490+ failed strategies, the clearest pattern is:
+- Single-regime strategies fail in mixed markets (2022 crash + 2025 bear)
+- Dual-regime (chop vs trend) adapts to market conditions
+- 12h timeframe targets 20-50 trades/year (optimal per Rule 10)
+- 1d HTF provides major trend bias (prevents counter-trend disasters)
+- Simpler entry logic = more trades = better Sharpe (avoid 0-trade failure)
 
-This strategy combines:
-1. 4h HMA(21) for primary trend direction
-2. 1d HMA(21) aligned for major trend bias
-3. Funding rate z-score(30) for contrarian entries (extreme funding = reversal)
-4. Donchian(20) breakout for entry timing
-5. ATR(14) 2.5x trailing stop for all positions
-6. Asymmetric sizing: 0.30 bull, 0.25 bear (crypto crashes faster)
+This strategy uses DUAL REGIME logic:
+1. Choppiness Index (14) detects regime: CHOP>61.8=range, CHOP<38.2=trend
+2. RANGE regime: Mean revert at Bollinger Band extremes (BB 2.5 std)
+3. TREND regime: Follow 12h HMA(21) with RSI(14) pullback entries
+4. 1d HMA(50) for major trend bias (only trade with 1d direction)
+5. 1w HMA(50) for secular trend filter (avoid major counter-trend)
+6. ATR(14) 2.5x trailing stop for all positions
+7. Discrete sizing: 0.25 base, 0.30 with HTF confluence
 
 Why this might beat Sharpe=0.435:
-- Funding rate is PROVEN edge for BTC/ETH (research shows 0.8-1.5 Sharpe)
-- Donchian breakout catches momentum without lag
-- 1d HTF prevents 2022-style catastrophic losses
-- 4h TF targets 20-50 trades/year (optimal per rules)
+- Adapts to both trending (2021, 2023) and ranging (2022, 2025) markets
+- 1d/1w HTF prevents major counter-trend losses (key failure in 2022)
+- Dual regime = trades in all market conditions (no dead zones)
+- 12h TF balances trade frequency vs fee drag (20-50/year target)
 - Discrete position sizing (0.0, ±0.25, ±0.30) minimizes fee churn
 
 Position sizing: 0.25-0.30 base (discrete per Rule 4, max 0.40)
@@ -32,8 +33,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_funding_donchian_hma_1d_v1"
-timeframe = "4h"
+name = "mtf_12h_dual_regime_chop_hma_1d1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -45,6 +46,22 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI using Wilder's smoothing."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    
+    return rsi.values
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average (HMA) - reduces lag vs EMA."""
@@ -67,36 +84,43 @@ def calculate_hma(close, period=21):
     
     return hma.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low over period)."""
-    highest = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    mid = (highest + lowest) / 2.0
-    return highest, lowest, mid
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    CHOP > 61.8 = ranging market
+    CHOP < 38.2 = trending market
+    """
+    n = len(close)
+    chop = np.zeros(n)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 0 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+        else:
+            chop[i] = 50.0
+    
+    return chop
 
-def calculate_zscore(series, period=30):
-    """Calculate rolling z-score."""
-    s = pd.Series(series)
-    rolling_mean = s.rolling(window=period, min_periods=period).mean()
-    rolling_std = s.rolling(window=period, min_periods=period).std()
-    zscore = (s - rolling_mean) / (rolling_std + 1e-10)
-    return zscore.values
-
-def load_funding_data(symbol):
-    """Load funding rate data from parquet."""
-    try:
-        # Map symbol to filename
-        symbol_map = {
-            'BTCUSDT': 'BTCUSDT',
-            'ETHUSDT': 'ETHUSDT',
-            'SOLUSDT': 'SOLUSDT'
-        }
-        funding_symbol = symbol_map.get(symbol, symbol)
-        funding_path = f"data/processed/funding/{funding_symbol}.parquet"
-        df = pd.read_parquet(funding_path)
-        return df
-    except:
-        return None
+def calculate_bollinger_bands(close, period=20, std_dev=2.5):
+    """Calculate Bollinger Bands with configurable std dev."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    return upper, lower, sma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -104,56 +128,39 @@ def generate_signals(prices):
     low = prices["low"].values
     n = len(close)
     
-    # Get symbol from prices DataFrame (for funding data)
-    symbol = prices.get('symbol', ['BTCUSDT'])[0] if 'symbol' in prices.columns else 'BTCUSDT'
-    
-    # Load 1d HTF data ONCE before loop (Rule 1 - CRITICAL)
+    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate 1d HTF HMA for major trend direction
     hma_1d_21 = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_50 = calculate_hma(df_1d['close'].values, period=50)
     
+    # Calculate 1w HTF HMA for secular trend
+    hma_1w_50 = calculate_hma(df_1w['close'].values, period=50)
+    
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
     hma_1d_50_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_50)
+    hma_1w_50_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_50)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, 14)
+    rsi_14 = calculate_rsi(close, 14)
+    chop_14 = calculate_choppiness(high, low, close, 14)
     
-    # 4h HMA for trend confirmation
-    hma_4h_21 = calculate_hma(close, period=21)
-    hma_4h_50 = calculate_hma(close, period=50)
+    # 12h HMA for trend confirmation
+    hma_12h_21 = calculate_hma(close, period=21)
+    hma_12h_50 = calculate_hma(close, period=50)
     
-    # Donchian channels for breakout timing
-    donchian_high, donchian_low, donchian_mid = calculate_donchian(high, low, 20)
-    
-    # Load funding rate data for contrarian signal
-    funding_df = load_funding_data(symbol)
-    if funding_df is not None and len(funding_df) > 0:
-        # Align funding data to prices (funding is 8h, prices is 4h)
-        # Use last available funding rate for each 4h bar
-        funding_rates = funding_df['funding_rate'].values if 'funding_rate' in funding_df.columns else np.zeros(len(funding_df))
-        # Calculate z-score of funding rate
-        funding_zscore_full = calculate_zscore(funding_rates, 30)
-        # Align to prices length (repeat/interpolate to match)
-        if len(funding_zscore_full) < n:
-            # Pad with last value
-            funding_zscore = np.full(n, funding_zscore_full[-1] if len(funding_zscore_full) > 0 else 0.0)
-            funding_zscore[:len(funding_zscore_full)] = funding_zscore_full
-        else:
-            funding_zscore = funding_zscore_full[:n]
-    else:
-        # Fallback: use price-based z-score if funding unavailable
-        price_zscore = calculate_zscore(close, 30)
-        funding_zscore = price_zscore
+    # Bollinger Bands for mean reversion
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, period=20, std_dev=2.5)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    # Asymmetric: smaller size in bear regime (crypto crashes faster)
-    POSITION_SIZE_BULL = 0.30
-    POSITION_SIZE_BEAR = 0.25
+    POSITION_SIZE_BASE = 0.25
+    POSITION_SIZE_CONFLUENCE = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -168,72 +175,88 @@ def generate_signals(prices):
             continue
         if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_50_aligned[i]):
             continue
-        if np.isnan(hma_4h_21[i]) or np.isnan(hma_4h_50[i]):
+        if np.isnan(hma_1w_50_aligned[i]):
             continue
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(hma_12h_21[i]) or np.isnan(hma_12h_50[i]):
             continue
-        if np.isnan(funding_zscore[i]):
+        if np.isnan(chop_14[i]) or np.isnan(rsi_14[i]):
+            continue
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             continue
         
         # === 1D MAJOR TREND (primary direction filter) ===
-        bull_regime_1d = close[i] > hma_1d_21_aligned[i]
-        bear_regime_1d = close[i] < hma_1d_21_aligned[i]
+        bull_regime_1d = close[i] > hma_1d_50_aligned[i]
+        bear_regime_1d = close[i] < hma_1d_50_aligned[i]
         
         # 1d HMA slope for trend strength
         hma_1d_slope_bull = hma_1d_21_aligned[i] > hma_1d_50_aligned[i]
         hma_1d_slope_bear = hma_1d_21_aligned[i] < hma_1d_50_aligned[i]
         
-        # === 4H TREND CONFIRMATION ===
-        bull_regime_4h = close[i] > hma_4h_21[i]
-        bear_regime_4h = close[i] < hma_4h_21[i]
+        # === 1W SECULAR TREND (avoid major counter-trend) ===
+        bull_regime_1w = close[i] > hma_1w_50_aligned[i]
+        bear_regime_1w = close[i] < hma_1w_50_aligned[i]
         
-        hma_4h_slope_bull = hma_4h_21[i] > hma_4h_50[i]
-        hma_4h_slope_bear = hma_4h_21[i] < hma_4h_50[i]
+        # === 12H TREND CONFIRMATION ===
+        bull_regime_12h = close[i] > hma_12h_21[i]
+        bear_regime_12h = close[i] < hma_12h_21[i]
         
-        # === FUNDING RATE CONTRARIAN SIGNAL ===
-        # Extreme positive funding (>2.0 z-score) = overbought = short signal
-        # Extreme negative funding (<-2.0 z-score) = oversold = long signal
-        funding_extreme_long = funding_zscore[i] < -1.5
-        funding_extreme_short = funding_zscore[i] > 1.5
+        hma_12h_slope_bull = hma_12h_21[i] > hma_12h_50[i]
+        hma_12h_slope_bear = hma_12h_21[i] < hma_12h_50[i]
         
-        # === DONCHIAN BREAKOUT TIMING ===
-        # Long breakout: price crosses above Donchian high
-        # Short breakout: price crosses below Donchian low
-        donchian_breakout_long = close[i] > donchian_high[i-1] if i > 0 else False
-        donchian_breakout_short = close[i] < donchian_low[i-1] if i > 0 else False
+        # === CHOPPINESS REGIME DETECTION ===
+        # CHOP > 61.8 = ranging market (mean revert)
+        # CHOP < 38.2 = trending market (trend follow)
+        # 38.2 <= CHOP <= 61.8 = transition (no trades or reduced size)
+        chop_range = chop_14[i] > 61.8
+        chop_trend = chop_14[i] < 38.2
+        chop_transition = not chop_range and not chop_trend
         
-        # === ENTRY LOGIC — FUNDING + DONCHIAN + TREND ===
+        # === ENTRY LOGIC — DUAL REGIME ===
         new_signal = 0.0
         
-        # LONG ENTRY: 1d bull + 4h bull + funding oversold OR donchian breakout
-        if bull_regime_1d and bull_regime_4h:
-            if funding_extreme_long:
-                # Contrarian long on extreme negative funding
-                if hma_1d_slope_bull:
-                    new_signal = POSITION_SIZE_BULL
-                else:
-                    new_signal = POSITION_SIZE_BULL * 0.8
-            elif donchian_breakout_long:
-                # Momentum long on breakout
-                if hma_4h_slope_bull:
-                    new_signal = POSITION_SIZE_BULL
-                else:
-                    new_signal = POSITION_SIZE_BULL * 0.8
+        # LONG ENTRY CONDITIONS
+        long_bias = bull_regime_1d and bull_regime_1w
         
-        # SHORT ENTRY: 1d bear + 4h bear + funding overbought OR donchian breakout
-        if bear_regime_1d and bear_regime_4h:
-            if funding_extreme_short:
-                # Contrarian short on extreme positive funding
-                if hma_1d_slope_bear:
-                    new_signal = -POSITION_SIZE_BEAR
-                else:
-                    new_signal = -POSITION_SIZE_BEAR * 0.8
-            elif donchian_breakout_short:
-                # Momentum short on breakdown
-                if hma_4h_slope_bear:
-                    new_signal = -POSITION_SIZE_BEAR
-                else:
-                    new_signal = -POSITION_SIZE_BEAR * 0.8
+        if long_bias:
+            # TREND REGIME: HMA pullback + RSI dip
+            if chop_trend and bull_regime_12h:
+                # RSI pullback to 40-55 in uptrend
+                rsi_pullback_long = 40.0 <= rsi_14[i] <= 55.0
+                if rsi_pullback_long:
+                    if hma_1d_slope_bull:
+                        new_signal = POSITION_SIZE_CONFLUENCE
+                    else:
+                        new_signal = POSITION_SIZE_BASE
+            
+            # RANGE REGIME: Mean revert at BB lower band
+            elif chop_range:
+                # Price at/near BB lower + RSI oversold
+                at_bb_lower = close[i] <= bb_lower[i] * 1.002  # within 0.2%
+                rsi_oversold = rsi_14[i] < 45.0
+                if at_bb_lower and rsi_oversold:
+                    new_signal = POSITION_SIZE_BASE
+        
+        # SHORT ENTRY CONDITIONS
+        short_bias = bear_regime_1d and bear_regime_1w
+        
+        if short_bias:
+            # TREND REGIME: HMA pullback + RSI rally
+            if chop_trend and bear_regime_12h:
+                # RSI rally to 45-60 in downtrend
+                rsi_pullback_short = 45.0 <= rsi_14[i] <= 60.0
+                if rsi_pullback_short:
+                    if hma_1d_slope_bear:
+                        new_signal = -POSITION_SIZE_CONFLUENCE
+                    else:
+                        new_signal = -POSITION_SIZE_BASE
+            
+            # RANGE REGIME: Mean revert at BB upper band
+            elif chop_range:
+                # Price at/near BB upper + RSI overbought
+                at_bb_upper = close[i] >= bb_upper[i] * 0.998  # within 0.2%
+                rsi_overbought = rsi_14[i] > 55.0
+                if at_bb_upper and rsi_overbought:
+                    new_signal = -POSITION_SIZE_BASE
         
         # === HOLD POSITION LOGIC ===
         # If already in position, maintain unless exit conditions hit
@@ -266,14 +289,14 @@ def generate_signals(prices):
         if in_position and position_side > 0:
             if bear_regime_1d and hma_1d_slope_bear:
                 new_signal = 0.0
-            elif bear_regime_4h and hma_4h_slope_bear:
+            elif bear_regime_12h and hma_12h_slope_bear:
                 new_signal = 0.0
         
         # Exit short on 1d regime flip to bull
         if in_position and position_side < 0:
             if bull_regime_1d and hma_1d_slope_bull:
                 new_signal = 0.0
-            elif bull_regime_4h and hma_4h_slope_bull:
+            elif bull_regime_12h and hma_12h_slope_bull:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
