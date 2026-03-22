@@ -42,7 +42,7 @@ def write_strategy(code: str):
     STRATEGY_FILE.write_text(code)
 
 
-BACKTEST_TIMEOUT_S = 90  # Hard kill after 90s per symbol
+BACKTEST_TIMEOUT_S = 120  # Hard kill after 120s per symbol (15m needs more time with warmup)
 
 
 def _run_single_backtest(queue, strategy_path, symbol, period):
