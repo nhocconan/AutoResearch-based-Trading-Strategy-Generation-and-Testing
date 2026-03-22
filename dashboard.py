@@ -421,6 +421,11 @@ def render_html() -> str:
   <label>TF:</label>
   <button class="filter-btn active" onclick="filterTF('test', 'ALL')">All</button>
   {''.join(f'<button class="filter-btn" onclick="filterTF(&#39;test&#39;, &#39;{tf}&#39;)">{tf}</button>' for tf in timeframes)}
+  <span style="margin:0 8px;color:#30363d">|</span>
+  <label>Status:</label>
+  <button class="filter-btn active" onclick="filterStatus('test', 'ALL')">All</button>
+  <button class="filter-btn" onclick="filterStatus('test', 'keep')" style="border-color:#2ecc71;color:#2ecc71">Keep</button>
+  <button class="filter-btn" onclick="filterStatus('test', 'discard')" style="border-color:#e74c3c;color:#e74c3c">Discard</button>
   <span class="filter-info" id="test-filter-info"></span>
 </div>
 <table id="test-table">
