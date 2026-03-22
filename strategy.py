@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #015: 1h Volatility Compression Breakout with 4h HMA Trend Filter
-Hypothesis: BTC/ETH spend most time in consolidation. Wait for BB width compression (volatility < 20th percentile),
-then trade breakout in direction of 4h HMA trend. This reduces whipsaw trades during 2022 crash and 2025 range.
-Key innovation: Only trade when volatility is compressed AND breaks out with RSI confirmation.
-Fewer but higher-quality trades. 4h HMA prevents counter-trend entries.
-Position sizing: 0.25 base, 0.35 max for strong signals, discrete levels to minimize fee churn.
-Stoploss: 2.5*ATR trailing stop to limit drawdown during volatile periods.
-Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper.
+Experiment #006: Daily Trend-Following with Weekly Bias
+Hypothesis: Daily timeframe captures major crypto trends while weekly HMA provides 
+macro trend bias to avoid counter-trend trades. Simpler than regime-adaptive approaches
+that failed in exp#002-005. Key: relaxed entry filters to ensure sufficient trades
+(need 10+ in train, 3+ in test) while maintaining trend alignment.
+
+Strategy: Weekly HMA(21) for bull/bear market bias + Daily HMA(13/34) crossover 
+for entries + RSI(14) momentum filter. ATR(14) trailing stop at 2.5x for risk control.
+Position sizing: 0.25 base, 0.35 max with HTF confirmation.
+
+Why this should work on 1d:
+- Daily bars filter intraday noise that killed 15m/30m strategies
+- Weekly trend bias prevents entering against major trend (2022 crash protection)
+- Faster HMA (13/34 vs 21/50) generates more signals for minimum trade requirement
+- RSI filter relaxed (45/55 not 30/70) to avoid missing trends
+
+Timeframe: 1d (REQUIRED), HTF: 1w via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_bb_squeeze_4h_hma_rsi_v1"
-timeframe = "1h"
+name = "mtf_1d_hma_rsi_1w_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -36,17 +45,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and bandwidth for squeeze detection."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma
-    bandwidth[np.isnan(bandwidth)] = 0.0
-    return upper, lower, bandwidth, sma
 
 def calculate_rsi(close, period=14):
     """Calculate RSI."""
@@ -75,20 +73,6 @@ def calculate_ema(close, period):
     """Calculate EMA."""
     return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
-def calculate_bb_percentile(bandwidth, window=100):
-    """Calculate rolling percentile of BB bandwidth for squeeze detection."""
-    n = len(bandwidth)
-    bb_pct = np.zeros(n)
-    bb_pct[:] = np.nan
-    
-    for i in range(window, n):
-        window_data = bandwidth[i-window:i]
-        valid_data = window_data[~np.isnan(window_data)]
-        if len(valid_data) > 0:
-            bb_pct[i] = np.searchsorted(np.sort(valid_data), bandwidth[i]) / len(valid_data)
-    
-    return bb_pct
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -96,31 +80,33 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    # Use 1w for major trend bias on daily strategy
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
-    # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 1h indicators
+    # Calculate daily indicators
     atr = calculate_atr(high, low, close, 14)
-    bb_upper, bb_lower, bb_bandwidth, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
-    bb_percentile = calculate_bb_percentile(bb_bandwidth, 100)
     rsi = calculate_rsi(close, 14)
     
-    # Additional trend filters
+    # Daily HMA for faster crossover signals
+    hma_13 = calculate_hma(close, 13)
+    hma_34 = calculate_hma(close, 34)
+    hma_50 = calculate_hma(close, 50)
+    
+    # EMA for additional confirmation
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
-    ema_200 = calculate_ema(close, 200)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.25
     SIZE_MAX = 0.35
-    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -129,71 +115,80 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(250, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_percentile[i]) or np.isnan(rsi[i]):
+        if np.isnan(rsi[i]) or np.isnan(hma_13[i]) or np.isnan(hma_34[i]):
             signals[i] = 0.0
             continue
         
-        # 4h trend bias (HTF)
-        bull_trend = close[i] > hma_4h_aligned[i]
-        bear_trend = close[i] < hma_4h_aligned[i]
+        # Weekly trend bias (HTF) - major market direction
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
         
-        # Volatility squeeze detection (BB bandwidth at low percentile)
-        volatility_squeeze = bb_percentile[i] < 0.25  # Bottom 25% of recent volatility
+        # Daily HMA crossover signals (faster than 21/50)
+        hma_cross_long = hma_13[i] > hma_34[i] and hma_13[i - 1] <= hma_34[i - 1]
+        hma_cross_short = hma_13[i] < hma_34[i] and hma_13[i - 1] >= hma_34[i - 1]
         
-        # BB breakout signals (price breaks outside bands after squeeze)
-        breakout_long = close[i] > bb_upper[i-1] if not np.isnan(bb_upper[i-1]) else False
-        breakout_short = close[i] < bb_lower[i-1] if not np.isnan(bb_lower[i-1]) else False
+        # Daily HMA position (already crossed)
+        hma_bullish = hma_13[i] > hma_34[i]
+        hma_bearish = hma_13[i] < hma_34[i]
         
-        # RSI momentum confirmation
-        rsi_bullish = rsi[i] > 50 and rsi[i] > rsi[i-3] if i >= 3 else False
-        rsi_bearish = rsi[i] < 50 and rsi[i] < rsi[i-3] if i >= 3 else False
-        rsi_strong_bull = rsi[i] > 55
-        rsi_strong_bear = rsi[i] < 45
+        # RSI momentum filter (relaxed for more trades)
+        rsi_bullish = rsi[i] > 45
+        rsi_bearish = rsi[i] < 55
+        rsi_strong_bull = rsi[i] > 50
+        rsi_strong_bear = rsi[i] < 50
         
-        # EMA trend confirmation
+        # EMA confirmation
         ema_bullish = close[i] > ema_21[i] and close[i] > ema_50[i]
         ema_bearish = close[i] < ema_21[i] and close[i] < ema_50[i]
-        ema_strong_bull = ema_bullish and close[i] > ema_200[i]
-        ema_strong_bear = ema_bearish and close[i] < ema_200[i]
+        
+        # Price above/below HMA50 for trend confirmation
+        price_above_hma50 = close[i] > hma_50[i]
+        price_below_hma50 = close[i] < hma_50[i]
         
         new_signal = 0.0
         
-        # === VOLATILITY SQUEEZE BREAKOUT (primary signal) ===
-        if volatility_squeeze:
-            # Long: squeeze + breakout + HTF bull + RSI bullish + EMA bullish
-            if breakout_long and bull_trend and rsi_bullish and ema_bullish:
-                new_signal = SIZE_MAX
-            # Long: squeeze + breakout + HTF bull (moderate conviction)
-            elif breakout_long and bull_trend and rsi_strong_bull:
+        # === LONG ENTRIES ===
+        # Strong long: Weekly bull + Daily HMA cross + RSI bull + EMA bull
+        if hma_cross_long and bull_trend_1w and rsi_bullish and ema_bullish:
+            new_signal = SIZE_MAX
+        # Moderate long: Weekly bull + Daily HMA bull + RSI bull
+        elif hma_bullish and bull_trend_1w and rsi_bullish and price_above_hma50:
+            new_signal = SIZE_BASE
+        # Weak long: Weekly bull + HMA cross (RSI filter relaxed)
+        elif hma_cross_long and bull_trend_1w:
+            new_signal = SIZE_BASE
+        # Trend continuation: Weekly bull + HMA already bull + RSI rising
+        elif bull_trend_1w and hma_bullish and rsi[i] > rsi[i - 3] and i >= 3:
+            if signals[i - 1] > 0:  # Already long, maintain
                 new_signal = SIZE_BASE
-            # Short: squeeze + breakout + HTF bear + RSI bearish + EMA bearish
-            elif breakout_short and bear_trend and rsi_bearish and ema_bearish:
-                new_signal = -SIZE_MAX
-            # Short: squeeze + breakout + HTF bear (moderate conviction)
-            elif breakout_short and bear_trend and rsi_strong_bear:
-                new_signal = -SIZE_BASE
         
-        # === TREND CONTINUATION (secondary signal - no squeeze required) ===
-        else:
-            # Long: HTF bull + EMA strong bull + RSI strong bull + price > BB middle
-            if bull_trend and ema_strong_bull and rsi_strong_bull and close[i] > bb_sma[i]:
-                new_signal = SIZE_BASE
-            # Short: HTF bear + EMA strong bear + RSI strong bear + price < BB middle
-            elif bear_trend and ema_strong_bear and rsi_strong_bear and close[i] < bb_sma[i]:
+        # === SHORT ENTRIES ===
+        # Strong short: Weekly bear + Daily HMA cross + RSI bear + EMA bear
+        if hma_cross_short and bear_trend_1w and rsi_bearish and ema_bearish:
+            new_signal = -SIZE_MAX
+        # Moderate short: Weekly bear + Daily HMA bear + RSI bear
+        elif hma_bearish and bear_trend_1w and rsi_bearish and price_below_hma50:
+            new_signal = -SIZE_BASE
+        # Weak short: Weekly bear + HMA cross
+        elif hma_cross_short and bear_trend_1w:
+            new_signal = -SIZE_BASE
+        # Trend continuation: Weekly bear + HMA already bear + RSI falling
+        elif bear_trend_1w and hma_bearish and rsi[i] < rsi[i - 3] and i >= 3:
+            if signals[i - 1] < 0:  # Already short, maintain
                 new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) ===
-        # Long position stoploss
+        # Long position trailing stop
         if position_side > 0 and entry_price > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
@@ -205,7 +200,7 @@ def generate_signals(prices):
             if close[i] < trailing_stop:
                 new_signal = 0.0
         
-        # Short position stoploss
+        # Short position trailing stop
         if position_side < 0 and entry_price > 0:
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
@@ -221,6 +216,7 @@ def generate_signals(prices):
         prev_signal = signals[i - 1] if i > 0 else 0.0
         
         if new_signal != 0.0 and prev_signal == 0.0:
+            # New position entry
             entry_price = close[i]
             position_side = np.sign(new_signal)
             trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
@@ -228,6 +224,7 @@ def generate_signals(prices):
             lowest_close = close[i] if position_side < 0 else 0.0
         
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
+            # Position reversal
             entry_price = close[i]
             position_side = np.sign(new_signal)
             trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
@@ -235,6 +232,7 @@ def generate_signals(prices):
             lowest_close = close[i] if position_side < 0 else 0.0
         
         elif new_signal == 0.0 and prev_signal != 0.0:
+            # Position exit
             position_side = 0
             entry_price = 0.0
             trailing_stop = 0.0
