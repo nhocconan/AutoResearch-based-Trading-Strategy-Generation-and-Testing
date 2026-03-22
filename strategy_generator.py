@@ -108,6 +108,111 @@ TREND_INDICATORS = {
         trend[i] = 1.0 if is_long else -1.0""",
         "params": {},
     },
+    "golden_cross": {
+        "code": """
+    sma50 = close_s.rolling(50, min_periods=50).mean().values
+    sma200 = close_s.rolling(200, min_periods=200).mean().values
+    trend = np.where(sma50 > sma200, 1.0, np.where(sma50 < sma200, -1.0, 0.0))""",
+        "params": {},
+    },
+    "keltner_channel": {
+        "code": """
+    _kc_mid = close_s.ewm(span=20, min_periods=20, adjust=False).mean().values
+    _kc_tr = np.zeros(n)
+    for i in range(1, n): _kc_tr[i] = max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1]))
+    _kc_atr = pd.Series(_kc_tr).rolling(20, min_periods=20).mean().values
+    _kc_upper = _kc_mid + {mult} * _kc_atr
+    _kc_lower = _kc_mid - {mult} * _kc_atr
+    trend = np.zeros(n)
+    for i in range(20, n):
+        if close[i] > _kc_upper[i]: trend[i] = 1.0
+        elif close[i] < _kc_lower[i]: trend[i] = -1.0
+        else: trend[i] = trend[i-1]""",
+        "params": {"mult": [1.5, 2.0, 2.5]},
+    },
+    "heikin_ashi": {
+        "code": """
+    ha_close = (prices["open"].values + high + low + close) / 4
+    ha_open = np.zeros(n); ha_open[0] = (prices["open"].values[0] + close[0]) / 2
+    for i in range(1, n): ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
+    ha_ema = pd.Series(ha_close).ewm(span={period}, min_periods={period}, adjust=False).mean().values
+    trend = np.where(ha_close > ha_ema, 1.0, np.where(ha_close < ha_ema, -1.0, 0.0))""",
+        "params": {"period": [10, 21]},
+    },
+    "ma_ribbon": {
+        "code": """
+    _emas = [close_s.ewm(span=p, min_periods=p, adjust=False).mean().values for p in [8,13,21,34,55]]
+    trend = np.zeros(n)
+    for i in range(55, n):
+        bullish = all(_emas[j][i] > _emas[j+1][i] for j in range(4))
+        bearish = all(_emas[j][i] < _emas[j+1][i] for j in range(4))
+        trend[i] = 1.0 if bullish else (-1.0 if bearish else 0.0)""",
+        "params": {},
+    },
+    "trix": {
+        "code": """
+    _e1 = close_s.ewm(span={period}, min_periods={period}, adjust=False).mean()
+    _e2 = _e1.ewm(span={period}, min_periods={period}, adjust=False).mean()
+    _e3 = _e2.ewm(span={period}, min_periods={period}, adjust=False).mean().values
+    _trix = np.zeros(n)
+    for i in range(1, n): _trix[i] = (_e3[i] - _e3[i-1]) / _e3[i-1] * 10000 if _e3[i-1] != 0 else 0
+    _trix_signal = pd.Series(_trix).rolling(9, min_periods=9).mean().values
+    trend = np.where(_trix > _trix_signal, 1.0, np.where(_trix < _trix_signal, -1.0, 0.0))""",
+        "params": {"period": [12, 15, 18]},
+    },
+    "pivot_breakout": {
+        "code": """
+    # Daily pivot points
+    _prev_h = pd.Series(high).shift(1).rolling(6, min_periods=6).max().values
+    _prev_l = pd.Series(low).shift(1).rolling(6, min_periods=6).min().values
+    _prev_c = pd.Series(close).shift(1).values
+    _pivot = (_prev_h + _prev_l + _prev_c) / 3
+    _r1 = 2 * _pivot - _prev_l
+    _s1 = 2 * _pivot - _prev_h
+    trend = np.zeros(n)
+    for i in range(10, n):
+        if not np.isnan(_r1[i]):
+            if close[i] > _r1[i]: trend[i] = 1.0
+            elif close[i] < _s1[i]: trend[i] = -1.0
+            else: trend[i] = trend[i-1]""",
+        "params": {},
+    },
+    "darvas_box": {
+        "code": """
+    _box_high = np.zeros(n); _box_low = np.zeros(n)
+    _box_high[0] = high[0]; _box_low[0] = low[0]
+    _in_box = True; _box_start = 0
+    trend = np.zeros(n)
+    for i in range(1, n):
+        if _in_box:
+            if high[i] > _box_high[_box_start]:
+                _box_high[i] = high[i]; _box_start = i; _box_low[i] = low[i]
+            elif low[i] < _box_low[_box_start]:
+                _box_low[i] = low[i]
+            else:
+                _box_high[i] = _box_high[i-1]; _box_low[i] = _box_low[i-1]
+            if i - _box_start > {period}:
+                _in_box = False
+        else:
+            _box_high[i] = _box_high[i-1]; _box_low[i] = _box_low[i-1]
+            if close[i] > _box_high[i]: trend[i] = 1.0; _in_box = True; _box_start = i; _box_high[i] = high[i]; _box_low[i] = low[i]
+            elif close[i] < _box_low[i]: trend[i] = -1.0; _in_box = True; _box_start = i; _box_high[i] = high[i]; _box_low[i] = low[i]
+            else: trend[i] = trend[i-1]""",
+        "params": {"period": [10, 20]},
+    },
+    "vwap_trend": {
+        "code": """
+    _cum_vol = np.cumsum(volume)
+    _cum_vp = np.cumsum(close * volume)
+    _vwap = np.where(_cum_vol > 0, _cum_vp / _cum_vol, close)
+    _vwap_std = pd.Series(close - _vwap).rolling(20, min_periods=20).std().values
+    trend = np.zeros(n)
+    for i in range(20, n):
+        if close[i] > _vwap[i] + _vwap_std[i]: trend[i] = 1.0
+        elif close[i] < _vwap[i] - _vwap_std[i]: trend[i] = -1.0
+        else: trend[i] = trend[i-1]""",
+        "params": {},
+    },
 }
 
 ENTRY_FILTERS = {
@@ -195,6 +300,85 @@ ENTRY_FILTERS = {
     entry_ok_short = entry_ok_long.copy()""",
         "params": {"threshold": [1.2, 1.5, 2.0]},
     },
+    "connors_rsi": {
+        "code": """
+    # Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    _d = np.diff(close, prepend=close[0])
+    _g = np.where(_d>0,_d,0); _l = np.where(_d<0,-_d,0)
+    _rsi3 = 100 - 100/(1+np.where(pd.Series(_l).ewm(span=3,min_periods=3,adjust=False).mean().values>0, pd.Series(_g).ewm(span=3,min_periods=3,adjust=False).mean().values/pd.Series(_l).ewm(span=3,min_periods=3,adjust=False).mean().values, 100))
+    _streak = np.zeros(n)
+    for i in range(1,n): _streak[i] = (_streak[i-1]+1 if close[i]>close[i-1] else (_streak[i-1]-1 if close[i]<close[i-1] else 0))
+    _streak_rsi = 100 - 100/(1+np.where(pd.Series(np.where(np.diff(_streak,prepend=0)<0,-np.diff(_streak,prepend=0),0)).ewm(span=2,min_periods=2,adjust=False).mean().values>0, pd.Series(np.where(np.diff(_streak,prepend=0)>0,np.diff(_streak,prepend=0),0)).ewm(span=2,min_periods=2,adjust=False).mean().values/pd.Series(np.where(np.diff(_streak,prepend=0)<0,-np.diff(_streak,prepend=0),0)).ewm(span=2,min_periods=2,adjust=False).mean().values, 100))
+    _pct_rank = pd.Series(close.astype(float)).rolling(100,min_periods=50).rank(pct=True).values * 100
+    _crsi = (_rsi3 + _streak_rsi + np.nan_to_num(_pct_rank, nan=50)) / 3
+    entry_ok_long = np.array([_crsi[i] < {long_max} for i in range(n)])
+    entry_ok_short = np.array([_crsi[i] > {short_min} for i in range(n)])""",
+        "params": {"long_max": [15, 25], "short_min": [75, 85]},
+    },
+    "fisher_transform": {
+        "code": """
+    _hl_mid = (pd.Series(high).rolling(9,min_periods=9).max().values + pd.Series(low).rolling(9,min_periods=9).min().values) / 2
+    _hl_range = pd.Series(high).rolling(9,min_periods=9).max().values - pd.Series(low).rolling(9,min_periods=9).min().values
+    _norm = np.where(_hl_range>0, 2*(close - _hl_mid)/_hl_range, 0)
+    _norm = np.clip(_norm, -0.999, 0.999)
+    _fisher = np.zeros(n)
+    for i in range(1,n): _fisher[i] = 0.5*np.log((1+_norm[i])/(1-_norm[i])) * 0.5 + _fisher[i-1]*0.5
+    entry_ok_long = np.array([_fisher[i] < {long_max} for i in range(n)])
+    entry_ok_short = np.array([_fisher[i] > {short_min} for i in range(n)])""",
+        "params": {"long_max": [-1.0, -1.5], "short_min": [1.0, 1.5]},
+    },
+    "awesome_osc": {
+        "code": """
+    _ao_fast = pd.Series((high+low)/2).rolling(5,min_periods=5).mean().values
+    _ao_slow = pd.Series((high+low)/2).rolling(34,min_periods=34).mean().values
+    _ao = _ao_fast - _ao_slow
+    entry_ok_long = np.array([_ao[i]>0 and (i<1 or _ao[i]>_ao[i-1]) for i in range(n)])
+    entry_ok_short = np.array([_ao[i]<0 and (i<1 or _ao[i]<_ao[i-1]) for i in range(n)])""",
+        "params": {},
+    },
+    "rvi": {
+        "code": """
+    _rvi_num = pd.Series((close - prices["open"].values) if "open" in prices.columns else np.zeros(n)).rolling(10,min_periods=10).mean().values
+    _rvi_den = pd.Series(high - low).rolling(10,min_periods=10).mean().values
+    _rvi = np.where(_rvi_den>0, _rvi_num/_rvi_den, 0)
+    _rvi_sig = pd.Series(_rvi).rolling(4,min_periods=4).mean().values
+    entry_ok_long = np.array([_rvi[i]>_rvi_sig[i] for i in range(n)])
+    entry_ok_short = np.array([_rvi[i]<_rvi_sig[i] for i in range(n)])""",
+        "params": {},
+    },
+    "ad_line": {
+        "code": """
+    _clv = np.where(high-low>0, (2*close-low-high)/(high-low), 0)
+    _ad = np.cumsum(_clv * volume)
+    _ad_ema = pd.Series(_ad).ewm(span=21,min_periods=21,adjust=False).mean().values
+    entry_ok_long = np.array([_ad[i]>_ad_ema[i] if not np.isnan(_ad_ema[i]) else False for i in range(n)])
+    entry_ok_short = np.array([_ad[i]<_ad_ema[i] if not np.isnan(_ad_ema[i]) else False for i in range(n)])""",
+        "params": {},
+    },
+    "pin_bar": {
+        "code": """
+    _body = np.abs(close - prices["open"].values) if "open" in prices.columns else np.ones(n)
+    _range = high - low
+    _upper_wick = high - np.maximum(close, prices["open"].values if "open" in prices.columns else close)
+    _lower_wick = np.minimum(close, prices["open"].values if "open" in prices.columns else close) - low
+    entry_ok_long = np.array([_lower_wick[i] > 2*_body[i] and _range[i]>0 for i in range(n)])
+    entry_ok_short = np.array([_upper_wick[i] > 2*_body[i] and _range[i]>0 for i in range(n)])""",
+        "params": {},
+    },
+    "engulfing": {
+        "code": """
+    _open = prices["open"].values if "open" in prices.columns else close
+    entry_ok_long = np.zeros(n, dtype=bool)
+    entry_ok_short = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        # Bullish engulfing: prev bearish + current bullish + current body engulfs prev
+        if _open[i-1]>close[i-1] and close[i]>_open[i] and close[i]>_open[i-1] and _open[i]<close[i-1]:
+            entry_ok_long[i] = True
+        # Bearish engulfing
+        if close[i-1]>_open[i-1] and _open[i]>close[i] and _open[i]>close[i-1] and close[i]<_open[i-1]:
+            entry_ok_short[i] = True""",
+        "params": {},
+    },
 }
 
 REGIME_FILTERS = {
@@ -247,6 +431,35 @@ REGIME_FILTERS = {
         aroon_dn[i] = (25 - (i - ll_idx)) / 25 * 100
     regime_ok = np.array([abs(aroon_up[i] - aroon_dn[i]) > {threshold} for i in range(n)])""",
         "params": {"threshold": [30, 50]},
+    },
+    "keltner_squeeze": {
+        "code": """
+    _kc_mid = close_s.ewm(span=20, min_periods=20, adjust=False).mean().values
+    _kc_tr = np.zeros(n)
+    for i in range(1, n): _kc_tr[i] = max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1]))
+    _kc_atr = pd.Series(_kc_tr).rolling(20, min_periods=20).mean().values
+    _kc_upper = _kc_mid + 1.5 * _kc_atr; _kc_lower = _kc_mid - 1.5 * _kc_atr
+    _bb_mid = close_s.rolling(20, min_periods=20).mean().values
+    _bb_std = close_s.rolling(20, min_periods=20).std().values
+    _bb_upper = _bb_mid + 2 * _bb_std; _bb_lower = _bb_mid - 2 * _bb_std
+    regime_ok = np.array([not np.isnan(_kc_upper[i]) and _bb_upper[i] < _kc_upper[i] for i in range(n)])""",
+        "params": {},
+    },
+    "sma200_regime": {
+        "code": """
+    _sma200 = close_s.rolling(200, min_periods=200).mean().values
+    regime_ok = np.array([not np.isnan(_sma200[i]) and close[i] > _sma200[i] for i in range(n)])""",
+        "params": {},
+    },
+    "vol_regime": {
+        "code": """
+    _vol_tr = np.zeros(n)
+    for i in range(1, n): _vol_tr[i] = max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1]))
+    _vol_atr = pd.Series(_vol_tr).rolling(14, min_periods=14).mean().values
+    _vol_pct = np.where(close > 0, _vol_atr / close, 0)
+    _vol_pct_median = pd.Series(_vol_pct).rolling(100, min_periods=50).median().values
+    regime_ok = np.array([not np.isnan(_vol_pct_median[i]) and _vol_pct[i] < _vol_pct_median[i] * {max_ratio} for i in range(n)])""",
+        "params": {"max_ratio": [1.5, 2.0]},
     },
 }
 
