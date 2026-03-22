@@ -1,37 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #155: 1h Primary + 4h/1d HTF — Fisher Transform + HMA Trend + Session Filter
+Experiment #156: 12h Primary + 1d HTF — Regime-Adaptive ADX/CHOP Strategy
 
-Hypothesis: Previous 1h strategies failed due to either (1) too many trades → fee drag,
-or (2) too strict filters → 0 trades. This strategy combines:
+Hypothesis: Previous vol-spike strategies failed because they only triggered during
+extreme events (too rare). This strategy uses REGIME-ADAPTIVE logic:
 
-1. EHLERS FISHER TRANSFORM (period=9): Superior reversal detection vs RSI in bear markets.
-   Long when Fisher crosses above -1.5, short when crosses below +1.5.
-2. 4h HMA(21) TREND: Major direction bias — only long if 4h HMA slope > 0, vice versa.
-3. 1d HMA(21) REGIME: Ultra-HTF filter — avoid counter-trend when 1d trend is strong.
-4. SESSION FILTER (8-20 UTC): Only trade during high liquidity hours (reduces noise).
-5. VOLUME CONFIRMATION: Volume > 0.8x 20-bar avg (avoids low-volume fakeouts).
-6. CHOPPINESS INDEX: Regime-aware sizing (reduce size in choppy markets).
+1. TRENDING REGIME (ADX>25, CHOP<45): Pullback entries to EMA21 with HMA trend bias
+2. RANGING REGIME (ADX<20, CHOP>55): Mean reversion at Bollinger extremes
+3. TRANSITION REGIME: Reduced position size, wait for clarity
 
-Why this should work on 1h:
-- Fisher Transform catches reversals better than RSI (proven in literature)
-- 4h/1d HTF filters reduce trade frequency to target 30-60/year
-- Session filter eliminates Asian session noise (low liquidity whipsaws)
-- Volume confirmation prevents fake breakouts
-- Asymmetric: more aggressive in trending regimes, conservative in range
+Why this should work:
+- ADX filters out whipsaw periods (major issue in 2022 BTC crash)
+- CHOP confirms regime (range vs trend)
+- Different logic per regime = adapts to market conditions
+- 1d HMA slope prevents counter-trend trades in strong moves
+- More lenient thresholds = ensures minimum trade count
 
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h + 1d via mtf_data.get_htf_data() — called ONCE before loop
-Position sizing: 0.25 base (smaller for 1h to reduce fee impact)
-Stoploss: 2.0 * ATR(14) trailing
-Target trades: 30-60/year per symbol (critical for 1h profitability)
+Timeframe: 12h (REQUIRED)
+HTF: 1d via mtf_data.get_htf_data() — called ONCE before loop
+Position sizing: 0.25-0.30 discrete
+Stoploss: 2.5 * ATR(14) trailing
+Target trades: 25-50/year per symbol
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_fisher_hma_session_4h1d_v1"
-timeframe = "1h"
+name = "mtf_12h_regime_adx_chop_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -59,62 +55,46 @@ def calculate_rsi(close, period=14):
     rsi = rsi.fillna(50).values
     return rsi
 
-def calculate_fisher_transform(high, low, close, period=9):
-    """
-    Calculate Ehlers Fisher Transform.
-    Fisher = 0.5 * ln((1 + X) / (1 - X)) where X = 0.67 * (price - lowest) / (highest - lowest) - 0.33
-    Signals: cross above -1.5 = long, cross below +1.5 = short
-    """
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)."""
     high_s = pd.Series(high)
     low_s = pd.Series(low)
     close_s = pd.Series(close)
     
-    # Calculate median price (HL2)
-    median = (high_s + low_s) / 2.0
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
     
-    # Highest high and lowest low over period
-    highest = median.rolling(window=period, min_periods=period).max()
-    lowest = median.rolling(window=period, min_periods=period).min()
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
     
-    # Normalize price
-    price_range = highest - lowest
-    price_range = price_range.replace(0, 1e-10)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    x = 0.67 * (median - lowest) / price_range - 0.33
-    x = np.clip(x, -0.999, 0.999)  # Prevent log domain errors
+    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    # Fisher transform
-    fisher = 0.5 * np.log((1 + x) / (1 - x))
+    plus_di_pct = 100 * plus_di / np.where(atr > 0, atr, 1e-10)
+    minus_di_pct = 100 * minus_di / np.where(atr > 0, atr, 1e-10)
     
-    # Signal line (1-bar lag)
-    fisher_prev = fisher.shift(1)
+    dx = 100 * np.abs(plus_di_pct - minus_di_pct) / np.where((plus_di_pct + minus_di_pct) > 0, (plus_di_pct + minus_di_pct), 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    return fisher.values, fisher_prev.values
+    return adx
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average."""
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
     close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
-
-def calculate_hma_slope(hma_values, lookback=5):
-    """Calculate HMA slope as percentage change."""
-    slope = np.zeros(len(hma_values))
-    for i in range(lookback, len(hma_values)):
-        if hma_values[i - lookback] != 0:
-            slope[i] = (hma_values[i] - hma_values[i - lookback]) / hma_values[i - lookback] * 100
-    return slope
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    return upper, lower, sma
 
 def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = range market (mean revert)
-    CHOP < 38.2 = trend market (trend follow)
-    """
+    """Calculate Choppiness Index (CHOP)."""
     atr_values = calculate_atr(high, low, close, period)
     
     atr_sum = pd.Series(atr_values).rolling(window=period, min_periods=period).sum().values
@@ -129,61 +109,51 @@ def calculate_choppiness(high, low, close, period=14):
     
     return chop
 
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs rolling average."""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean().values
-    vol_ratio = volume / np.where(vol_avg > 0, vol_avg, 1e-10)
-    return vol_ratio
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average."""
+    close_s = pd.Series(close)
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
 
-def get_hour_from_open_time(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)."""
-    # open_time is in milliseconds
-    hours = (open_time // (1000 * 60 * 60)) % 24
-    return hours
+def calculate_ema(close, period=21):
+    """Calculate Exponential Moving Average."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+    return ema
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h indicators
-    hma_4h_21 = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_slope = calculate_hma_slope(hma_4h_21, 5)
-    
-    # Calculate 1d indicators
+    # Calculate HTF indicators
     hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_slope = calculate_hma_slope(hma_1d_21, 5)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
-    hma_4h_slope_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_slope)
     hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
-    hma_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_slope)
     
-    # Calculate 1h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    fisher, fisher_prev = calculate_fisher_transform(high, low, close, 9)
+    adx_14 = calculate_adx(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
     chop_14 = calculate_choppiness(high, low, close, 14)
-    vol_ratio = calculate_volume_ratio(volume, 20)
-    
-    # Extract session hours
-    session_hours = np.array([get_hour_from_open_time(ot) for ot in open_time])
+    ema_21 = calculate_ema(close, 21)
     
     signals = np.zeros(n)
     
-    # Position sizing (Rule 4 - discrete, max 0.40, smaller for 1h)
-    BASE_SIZE = 0.25
+    # Position sizing (Rule 4 - discrete, max 0.40)
+    BASE_SIZE = 0.28
     TREND_SIZE = 0.30
-    RANGE_SIZE = 0.20
+    RANGE_SIZE = 0.25
     
     # Track position state
     in_position = False
@@ -191,171 +161,159 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_price = 0.0
     lowest_price = 0.0
-    last_trade_bar = -100
-    
-    # Fisher crossover tracking
-    fisher_crossed_up = np.zeros(n, dtype=bool)
-    fisher_crossed_down = np.zeros(n, dtype=bool)
-    
-    for i in range(1, n):
-        if fisher_prev[i] < -1.5 and fisher[i] >= -1.5:
-            fisher_crossed_up[i] = True
-        if fisher_prev[i] > 1.5 and fisher[i] <= 1.5:
-            fisher_crossed_down[i] = True
+    last_trade_bar = -50
     
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(hma_4h_slope_aligned[i]):
+        if np.isnan(hma_1d_21_aligned[i]):
             continue
         
-        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_slope_aligned[i]):
+        if np.isnan(adx_14[i]) or np.isnan(chop_14[i]):
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(chop_14[i]):
+        if np.isnan(bb_lower[i]) or np.isnan(rsi_14[i]):
             continue
         
-        # === 4H TREND BIAS (primary direction filter) ===
-        trend_4h_bullish = hma_4h_slope_aligned[i] > 0.2
-        trend_4h_bearish = hma_4h_slope_aligned[i] < -0.2
-        price_above_4h_hma = close[i] > hma_4h_21_aligned[i]
-        price_below_4h_hma = close[i] < hma_4h_21_aligned[i]
+        # === 1D TREND BIAS ===
+        hma_1d_slope = (hma_1d_21_aligned[i] - hma_1d_21_aligned[i-10]) / hma_1d_21_aligned[i-10] * 100 if i > 10 and hma_1d_21_aligned[i-10] != 0 else 0
+        trend_1d_bullish = hma_1d_slope > 0.2
+        trend_1d_bearish = hma_1d_slope < -0.2
+        price_above_1d_hma = close[i] > hma_1d_21_aligned[i]
+        price_below_1d_hma = close[i] < hma_1d_21_aligned[i]
         
-        # === 1D REGIME (ultra-HTF filter) ===
-        trend_1d_strong_bull = hma_1d_slope_aligned[i] > 0.5
-        trend_1d_strong_bear = hma_1d_slope_aligned[i] < -0.5
+        # === REGIME CLASSIFICATION ===
+        is_trending = adx_14[i] > 25 and chop_14[i] < 45
+        is_ranging = adx_14[i] < 20 and chop_14[i] > 55
+        is_transition = not is_trending and not is_ranging
         
-        # === CHOPPINESS REGIME ===
-        is_range_market = chop_14[i] > 55
-        is_trend_market = chop_14[i] < 45
-        
-        # === SESSION FILTER (8-20 UTC only) ===
-        in_session = (session_hours[i] >= 8) and (session_hours[i] <= 20)
-        
-        # === VOLUME CONFIRMATION ===
-        volume_ok = vol_ratio[i] > 0.8
-        
-        # === FISHER SIGNALS ===
-        fisher_oversold = fisher[i] < -1.0
-        fisher_overbought = fisher[i] > 1.0
-        fisher_cross_up = fisher_crossed_up[i]
-        fisher_cross_down = fisher_crossed_down[i]
-        
-        # === RSI CONFIRMATION ===
-        rsi_oversold = rsi_14[i] < 40
-        rsi_overbought = rsi_14[i] > 60
-        
-        # === POSITION SIZING BASED ON REGIME ===
-        if is_trend_market:
+        # === POSITION SIZE BY REGIME ===
+        current_size = BASE_SIZE
+        if is_trending:
             current_size = TREND_SIZE
-        elif is_range_market:
+        elif is_ranging:
             current_size = RANGE_SIZE
         else:
-            current_size = BASE_SIZE
+            current_size = BASE_SIZE * 0.6
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRIES - require 3+ confluence
-        long_confluence = 0
+        # LONG ENTRIES
+        long_conditions = 0
         
-        # Must be in session (critical for 1h)
-        if not in_session:
-            long_confluence = -10
-        else:
-            # Confluence 1: 4h trend bullish or neutral
-            if trend_4h_bullish or (not trend_4h_bearish and price_above_4h_hma):
-                long_confluence += 1
-            
-            # Confluence 2: Fisher oversold or cross up
-            if fisher_oversold or fisher_cross_up:
-                long_confluence += 1
-            
-            # Confluence 3: RSI confirmation
-            if rsi_oversold:
-                long_confluence += 1
-            
-            # Confluence 4: Volume confirmation
-            if volume_ok:
-                long_confluence += 1
-            
-            # Confluence 5: Not fighting 1d strong bear
-            if not trend_1d_strong_bear:
-                long_confluence += 1
+        # Trending regime: pullback to EMA21 + 1d bullish
+        if is_trending and trend_1d_bullish:
+            if close[i] <= ema_21[i] * 1.01 and close[i] >= ema_21[i] * 0.98:
+                long_conditions += 2
+            if rsi_14[i] < 45:
+                long_conditions += 1
+            if price_above_1d_hma:
+                long_conditions += 1
         
-        # Require 3+ confluence for entry (reduces trade frequency)
-        if long_confluence >= 3:
+        # Ranging regime: mean reversion at BB lower
+        if is_ranging:
+            if close[i] <= bb_lower[i] * 1.005:
+                long_conditions += 2
+            if rsi_14[i] < 40:
+                long_conditions += 2
+            if rsi_14[i] < 30:
+                long_conditions += 1
+        
+        # Transition regime: wait for stronger signals
+        if is_transition:
+            if close[i] <= bb_lower[i] * 0.99 and rsi_14[i] < 35:
+                long_conditions += 2
+            if trend_1d_bullish and rsi_14[i] < 40:
+                long_conditions += 1
+        
+        # General oversold (ensure minimum trades)
+        if rsi_14[i] < 32 and close[i] <= bb_lower[i] * 1.01:
+            long_conditions += 1
+        
+        if long_conditions >= 3:
             new_signal = current_size
-        elif long_confluence == 2 and bars_since_last_trade > 120:
-            # Allow weaker signal if no trade for 5+ days
-            new_signal = current_size * 0.5
+        elif long_conditions == 2 and bars_since_last_trade > 60:
+            new_signal = current_size * 0.6
         
         # SHORT ENTRIES
-        short_confluence = 0
+        short_conditions = 0
         
-        if not in_session:
-            short_confluence = -10
-        else:
-            # Confluence 1: 4h trend bearish or neutral
-            if trend_4h_bearish or (not trend_4h_bullish and price_below_4h_hma):
-                short_confluence += 1
-            
-            # Confluence 2: Fisher overbought or cross down
-            if fisher_overbought or fisher_cross_down:
-                short_confluence += 1
-            
-            # Confluence 3: RSI confirmation
-            if rsi_overbought:
-                short_confluence += 1
-            
-            # Confluence 4: Volume confirmation
-            if volume_ok:
-                short_confluence += 1
-            
-            # Confluence 5: Not fighting 1d strong bull
-            if not trend_1d_strong_bull:
-                short_confluence += 1
+        # Trending regime: pullback to EMA21 + 1d bearish
+        if is_trending and trend_1d_bearish:
+            if close[i] >= ema_21[i] * 0.99 and close[i] <= ema_21[i] * 1.02:
+                short_conditions += 2
+            if rsi_14[i] > 55:
+                short_conditions += 1
+            if price_below_1d_hma:
+                short_conditions += 1
         
-        if short_confluence >= 3:
+        # Ranging regime: mean reversion at BB upper
+        if is_ranging:
+            if close[i] >= bb_upper[i] * 0.995:
+                short_conditions += 2
+            if rsi_14[i] > 60:
+                short_conditions += 2
+            if rsi_14[i] > 70:
+                short_conditions += 1
+        
+        # Transition regime: wait for stronger signals
+        if is_transition:
+            if close[i] >= bb_upper[i] * 1.01 and rsi_14[i] > 65:
+                short_conditions += 2
+            if trend_1d_bearish and rsi_14[i] > 60:
+                short_conditions += 1
+        
+        # General overbought (ensure minimum trades)
+        if rsi_14[i] > 68 and close[i] >= bb_upper[i] * 0.99:
+            short_conditions += 1
+        
+        if short_conditions >= 3:
             new_signal = -current_size
-        elif short_confluence == 2 and bars_since_last_trade > 120:
-            new_signal = -current_size * 0.5
+        elif short_conditions == 2 and bars_since_last_trade > 60:
+            new_signal = -current_size * 0.6
         
         # === FREQUENCY SAFEGUARD ===
-        # Force trade if no signal for 200 bars (~8 days on 1h)
-        if bars_since_last_trade > 200 and new_signal == 0.0 and not in_position:
-            if trend_4h_bullish and fisher[i] < -0.5:
+        # Force trade if no signal for 120 bars (~60 days on 12h)
+        if bars_since_last_trade > 120 and new_signal == 0.0 and not in_position:
+            if trend_1d_bullish and rsi_14[i] < 45:
                 new_signal = current_size * 0.4
-            elif trend_4h_bearish and fisher[i] > 0.5:
+            elif trend_1d_bearish and rsi_14[i] > 55:
                 new_signal = -current_size * 0.4
+            elif rsi_14[i] < 30:
+                new_signal = current_size * 0.3
+            elif rsi_14[i] > 70:
+                new_signal = -current_size * 0.3
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
         
         if in_position and position_side != 0:
             if position_side > 0:
                 if close[i] > highest_price:
                     highest_price = close[i]
-                stoploss_price = highest_price - 2.0 * atr_14[i]
+                stoploss_price = highest_price - 2.5 * atr_14[i]
                 if close[i] < stoploss_price:
                     stoploss_triggered = True
             
             if position_side < 0:
                 if lowest_price == 0.0 or close[i] < lowest_price:
                     lowest_price = close[i]
-                stoploss_price = lowest_price + 2.0 * atr_14[i]
+                stoploss_price = lowest_price + 2.5 * atr_14[i]
                 if close[i] > stoploss_price:
                     stoploss_triggered = True
         
         # === REGIME REVERSAL EXIT ===
         regime_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and trend_4h_bearish and price_below_4h_hma:
+            # Exit long if regime shifts to strong bearish trend
+            if position_side > 0 and is_trending and trend_1d_bearish and adx_14[i] > 30:
                 regime_reversal = True
-            if position_side < 0 and trend_4h_bullish and price_above_4h_hma:
+            # Exit short if regime shifts to strong bullish trend
+            if position_side < 0 and is_trending and trend_1d_bullish and adx_14[i] > 30:
                 regime_reversal = True
         
         if stoploss_triggered or regime_reversal:
