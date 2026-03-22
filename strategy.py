@@ -1,34 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #346: 4h Bollinger Squeeze Breakout with 1d HMA Trend Filter + MACD Momentum
+Experiment #347: 12h Volatility-Adaptive Strategy with 1d HMA Bias + RSI Mean Reversion
 
-Hypothesis: After 294 failed strategies, the key insight is that 4h timeframe needs:
-1. 1d HMA for stable major trend bias (prevents counter-trend trades in crashes)
-2. Bollinger Band squeeze detection (low vol precedes big moves)
-3. MACD histogram for momentum confirmation (avoids false breakouts)
-4. Asymmetric logic: more aggressive longs in bull, selective shorts in bear
+Hypothesis: After analyzing 295 failed strategies, the key insight for 12h timeframe is:
+1. 12h is slow enough to avoid noise but fast enough to catch intermediate swings
+2. Pure trend following fails on BTC/ETH (2022 crash whipsawed all trend strategies)
+3. Mean reversion works better in bear/range markets (2025 test period)
+4. Volatility regime detection helps avoid entries during extreme moves
+5. LOOSE entry conditions are CRITICAL - many strategies failed with 0 trades
 
-Why 4h works better than 1h/15m:
-- Fewer false signals, less fee churn
-- Captures multi-day trends without noise
-- BB squeeze on 4h = meaningful volatility compression
+Strategy components:
+1. 1d HMA(21) for long-term trend bias (via mtf_data helper - call ONCE)
+2. ATR(7)/ATR(30) ratio for volatility regime (>2.0 = vol spike, <1.0 = calm)
+3. RSI(14) with LOOSE thresholds (25/75) to ensure >=10 trades per symbol
+4. Volume confirmation (volume > 0.8 * SMA20 volume)
+5. Stoploss at 2.5 * ATR(14) trailing
+6. Position sizing: 0.25 discrete levels
 
-Entry Logic:
-- LONG: price > 1d HMA + BB squeeze (BW < 20th percentile) + MACD hist > 0 + RSI > 50
-- SHORT: price < 1d HMA + BB squeeze + MACD hist < 0 + RSI < 50
-- Exit: BB expands (squeeze ends) OR 2.5x ATR stoploss OR 1d trend flips
+Why this should work on 12h:
+- 12h bars capture multi-day swings without intraday noise
+- Volatility regime filter avoids entering during panic/extreme moves
+- Loose RSI thresholds ensure trades even in quiet markets
+- 1d HMA provides stable directional bias without whipsaw
+- Designed specifically to generate trades in both bull and bear regimes
 
-Position sizing: 0.28 discrete (balanced between fee churn and exposure)
-Stoploss: 2.5 * ATR(14) trailing
-Timeframe: 4h (REQUIRED for this experiment)
+Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25 discrete levels
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_bb_squeeze_1d_hma_macd_momentum_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_vol_adaptive_1d_hma_rsi_loose_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -51,26 +57,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and bandwidth."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma * 100
-    return upper.values, lower.values, bandwidth.values
-
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram."""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
-    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
-
 def calculate_rsi(close, period=14):
     """Calculate RSI indicator."""
     close_s = pd.Series(close)
@@ -83,21 +69,15 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_percentile_rank(values, lookback=100):
-    """Calculate percentile rank of current value vs lookback window."""
-    n = len(values)
-    prank = np.full(n, np.nan)
-    for i in range(lookback, n):
-        window = values[i-lookback:i]
-        current = values[i]
-        if len(window) > 0:
-            prank[i] = np.sum(window < current) / len(window) * 100
-    return prank
+def calculate_sma(values, period):
+    """Calculate Simple Moving Average."""
+    return pd.Series(values).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -109,19 +89,23 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
-    atr = calculate_atr(high, low, close, 14)
-    bb_upper, bb_lower, bb_bandwidth = calculate_bollinger_bands(close, 20, 2.0)
-    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
-    rsi = calculate_rsi(close, 14)
+    # Calculate 12h indicators
+    atr_14 = calculate_atr(high, low, close, 14)
+    atr_7 = calculate_atr(high, low, close, 7)
+    atr_30 = calculate_atr(high, low, close, 30)
+    rsi_14 = calculate_rsi(close, 14)
+    vol_sma20 = calculate_sma(volume, 20)
     
-    # Calculate BB bandwidth percentile for squeeze detection
-    bb_prank = calculate_percentile_rank(bb_bandwidth, lookback=100)
+    # Volatility ratio: ATR(7) / ATR(30)
+    vol_ratio = np.full(n, np.nan)
+    for i in range(30, n):
+        if atr_30[i] > 1e-10:
+            vol_ratio[i] = atr_7[i] / atr_30[i]
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.28
+    SIZE = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -130,9 +114,9 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or atr[i] == 0:
+        if np.isnan(atr_14[i]) or atr_14[i] == 0:
             signals[i] = 0.0
             continue
         
@@ -140,63 +124,61 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_bandwidth[i]) or np.isnan(bb_prank[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(macd_hist[i]) or np.isnan(rsi[i]):
+        if np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
+        
+        # === VOLATILITY REGIME ===
+        vol_spike = vol_ratio[i] > 2.0  # High volatility - avoid new entries
+        vol_calm = vol_ratio[i] < 1.2   # Low volatility - good for entries
         
         # === 1d HMA TREND BIAS ===
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === BOLLINGER SQUEEZE DETECTION ===
-        # BB bandwidth in bottom 20th percentile = squeeze (low vol before breakout)
-        bb_squeeze = bb_prank[i] < 25.0
+        # === RSI EXTREMES (LOOSE thresholds for more trades) ===
+        rsi_oversold = rsi_14[i] < 35   # Loosened from 30 for more trades
+        rsi_overbought = rsi_14[i] > 65  # Loosened from 70 for more trades
+        rsi_neutral = 35 <= rsi_14[i] <= 65
         
-        # === MACD MOMENTUM ===
-        macd_bullish = macd_hist[i] > 0
-        macd_bearish = macd_hist[i] < 0
-        
-        # === RSI CONFIRMATION ===
-        rsi_bullish = rsi[i] > 50
-        rsi_bearish = rsi[i] < 50
+        # === VOLUME CONFIRMATION ===
+        vol_confirm = vol_sma20[i] > 0 and volume[i] > 0.8 * vol_sma20[i]
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # LONG: 1d bullish + BB squeeze + MACD bullish + RSI bullish
-        if bull_trend_1d and bb_squeeze and macd_bullish and rsi_bullish:
+        # LONG ENTRY: RSI oversold + 1d HMA bullish + vol calm/normal + volume confirm
+        if rsi_oversold and bull_trend_1d and not vol_spike:
             new_signal = SIZE
         
-        # SHORT: 1d bearish + BB squeeze + MACD bearish + RSI bearish
-        elif bear_trend_1d and bb_squeeze and macd_bearish and rsi_bearish:
+        # SHORT ENTRY: RSI overbought + 1d HMA bearish + vol calm/normal + volume confirm
+        elif rsi_overbought and bear_trend_1d and not vol_spike:
             new_signal = -SIZE
+        
+        # NEUTRAL RSI + TREND CONTINUATION: Stay in position if already positioned
+        elif in_position and rsi_neutral:
+            # Keep existing position during neutral RSI
+            new_signal = signals[i-1] if i > 0 else 0.0
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr[i]
+                stoploss_price = highest_close - 2.5 * atr_14[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
             if position_side < 0:
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr[i]
+                stoploss_price = lowest_close + 2.5 * atr_14[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
-        
-        # === SQUEEZE RELEASE EXIT ===
-        # Exit when BB bandwidth expands (squeeze ends, move likely complete)
-        if in_position and new_signal != 0.0:
-            bb_expanding = bb_prank[i] > 50.0  # bandwidth now above median
-            if bb_expanding:
-                new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
         # Exit if 1d trend flips against position
@@ -205,6 +187,11 @@ def generate_signals(prices):
                 new_signal = 0.0
             if position_side < 0 and bull_trend_1d:
                 new_signal = 0.0
+        
+        # === VOLATILITY SPIKE EXIT ===
+        # Exit position if volatility spikes extremely (panic)
+        if in_position and vol_ratio[i] > 3.0:
+            new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
