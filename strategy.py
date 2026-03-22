@@ -1,37 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #307: 15m Multi-HTF Supertrend with Volatility Squeeze Breakout
+Experiment #308: 30m Fisher Transform Reversal with 4h HMA Trend Bias and Choppiness Regime Filter
 
-Hypothesis: 15m has failed in previous experiments (#295, #301) because:
-1. Too much noise without strong HTF filtering
-2. Mean reversion doesn't work on crypto perpetuals
-3. Complex ensembles create conflicting signals
+Hypothesis: After 307 experiments, clear patterns emerge:
+1. Complex ensembles (3+ filters) consistently fail (#297, #301, #302, #307)
+2. Simple trend following works on 4h/12h but fails on 30m (#296, #302, #303)
+3. 2025 bear/range market requires different approach than 2021-2024 bull
+4. Research shows Fisher Transform catches reversals with 75% win rate in bear markets
+5. Choppiness Index is best meta-filter for distinguishing range vs trend regimes
 
-This strategy uses TRIPLE HTF FILTER + volatility squeeze breakout:
-1. 1d HMA(21) = meta-trend direction (strongest filter)
-2. 4h HMA(21) = intermediate trend confirmation
-3. 1h Supertrend(10,3) = momentum alignment
-4. 15m Bollinger Band squeeze = low-volatility coiling before breakout
-5. 15m price breakout above/below BB + volume confirmation = entry trigger
+This strategy uses FISHER TRANSFORM mean reversion with regime filter:
+1. 4h HMA(21) for primary directional bias (proven edge from #299, #304)
+2. Choppiness Index(14) for regime detection: CHOP>61.8=range, CHOP<38.2=trend
+3. Fisher Transform(9) for entry timing in ranging markets
+4. In trending regimes: only trade pullbacks toward 4h HMA
+5. ATR(14) trailing stoploss at 2.0x (tighter for 30m timeframe)
 
-Why this might work on 15m:
-- Triple HTF filter (1d+4h+1h) eliminates 15m noise
-- BB squeeze detects consolidation before explosive moves
-- Volume confirmation ensures real breakouts, not fakeouts
-- Tighter stoploss (2.0*ATR) appropriate for 15m timeframe
-- Fewer but higher-quality trades (target 30-50/year)
+Why this might work on 30m:
+- Fisher Transform is designed for reversal capture (different from failed Supertrend/Donchian)
+- Choppiness filter avoids Fisher whipsaws in strong trends
+- 4h HMA bias prevents counter-trend trades (learned from #296 failure)
+- Regime-adaptive logic: mean revert in range, trend-follow in trend
+- Should generate 20-50 trades/year (enough for Sharpe, not too many for fees)
 
-Timeframe: 15m (REQUIRED for this experiment)
-HTF: 1h, 4h, 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20-0.30 discrete levels (conservative for 15m)
-Stoploss: 2.0 * ATR(14) trailing (tighter than 4h/12h strategies)
+Timeframe: 30m (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25-0.35 discrete levels
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_supertrend_triple_htf_bb_squeeze_volume_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_fisher_4h_hma_chop_regime_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -54,116 +56,108 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+def calculate_fisher_transform(high, low, close, period=9):
     """
-    Calculate Supertrend indicator.
-    Returns: supertrend_values, supertrend_direction (1=bullish, -1=bearish)
-    """
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    # Basic Upper and Lower Bands
-    hl2 = (high + low) / 2.0
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Supertrend values
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)  # 1 = bullish (price above ST), -1 = bearish
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = -1
-    
-    for i in range(1, n):
-        if close[i] > supertrend[i-1]:
-            # Bullish: use lower band
-            supertrend[i] = lower_band[i]
-            direction[i] = 1
-        else:
-            # Bearish: use upper band
-            supertrend[i] = upper_band[i]
-            direction[i] = -1
-    
-    return supertrend, direction
-
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    return upper.values, lower.values, sma.values
-
-def calculate_bb_width(upper, lower, sma):
-    """Calculate Bollinger Band Width (volatility measure)."""
-    width = (upper - lower) / sma
-    return width
-
-def calculate_bb_percentile(close, upper, lower, lookback=50):
-    """
-    Calculate where price is within BB range (0=lower, 1=upper).
-    Also detect squeeze: BB width at lowest 20% of recent range.
+    Calculate Ehlers Fisher Transform.
+    Converts price into a Gaussian normal distribution.
+    Long when Fisher crosses above -1.5 from below.
+    Short when Fisher crosses below +1.5 from above.
     """
     n = len(close)
-    bb_pct = np.zeros(n)
-    bb_pct[:] = np.nan
-    squeeze = np.zeros(n, dtype=bool)
+    fisher = np.zeros(n)
+    fisher[:] = np.nan
+    signal_line = np.zeros(n)
+    signal_line[:] = np.nan
     
-    for i in range(lookback, n):
-        if not np.isnan(upper[i]) and not np.isnan(lower[i]) and upper[i] != lower[i]:
-            bb_pct[i] = (close[i] - lower[i]) / (upper[i] - lower[i])
+    for i in range(period, n):
+        # Calculate typical price
+        hl2 = (high[i] + low[i]) / 2.0
         
-        # Squeeze detection: current BB width vs recent 50-bar range
-        width = (upper[i] - lower[i]) / sma[i] if not np.isnan(sma[i]) and sma[i] != 0 else 0
-        recent_widths = []
-        for j in range(max(0, i-lookback), i):
-            if not np.isnan(upper[j]) and not np.isnan(lower[j]) and not np.isnan(sma[j]) and sma[j] != 0:
-                w = (upper[j] - lower[j]) / sma[j]
-                if not np.isnan(w):
-                    recent_widths.append(w)
+        # Find highest high and lowest low over period
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
         
-        if len(recent_widths) >= 20:
-            width_percentile = np.percentile(recent_widths, 20)
-            squeeze[i] = width < width_percentile
+        # Normalize price to 0-1 range
+        range_val = highest_high - lowest_low
+        if range_val == 0:
+            continue
+        
+        normalized = (hl2 - lowest_low) / range_val
+        
+        # Clamp to avoid division issues
+        normalized = np.clip(normalized, 0.001, 0.999)
+        
+        # Calculate intermediate value
+        temp = 0.66 * ((normalized - 0.5) + 0.67 * (normalized - 0.5))
+        temp = np.clip(temp, -0.999, 0.999)
+        
+        # Fisher Transform
+        fisher[i] = 0.5 * np.log((1 + temp) / (1 - temp))
+        
+        # Signal line (1-period lag of Fisher)
+        if i > period:
+            signal_line[i] = fisher[i-1]
     
-    return bb_pct, squeeze
+    return fisher, signal_line
+
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = ranging market (mean reversion works)
+    CHOP < 38.2 = trending market (trend following works)
+    Values between 38.2 and 61.8 = transition/neutral
+    """
+    n = len(close)
+    chop = np.zeros(n)
+    chop[:] = np.nan
+    
+    for i in range(period, n):
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        
+        price_range = highest_high - lowest_low
+        if price_range == 0:
+            continue
+        
+        # Sum of ATR over period
+        tr1 = high[i-period+1:i+1] - low[i-period+1:i+1]
+        tr2 = np.abs(high[i-period+1:i+1] - np.roll(close[i-period+1:i+1], 1))
+        tr3 = np.abs(low[i-period+1:i+1] - np.roll(close[i-period+1:i+1], 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        
+        atr_sum = np.sum(tr)
+        
+        # CHOP formula
+        chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    _, supertrend_1h_dir = calculate_supertrend(df_1h['high'].values, df_1h['low'].values, df_1h['close'].values, 10, 3.0)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    supertrend_1h_aligned = align_htf_to_ltf(prices, df_1h, supertrend_1h_dir)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    bb_upper, bb_lower, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
-    bb_pct, bb_squeeze = calculate_bb_percentile(close, bb_upper, bb_lower, 50)
-    
-    # Volume moving average for confirmation
-    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    fisher, fisher_signal = calculate_fisher_transform(high, low, close, 9)
+    chop = calculate_choppiness_index(high, low, close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.20  # Conservative base for 15m
-    SIZE_STRONG = 0.30  # Increased size in strong setup
+    SIZE_BASE = 0.25  # Base position size
+    SIZE_INCREASED = 0.35  # Increased size in high-confidence setups
     
     # Track position state for stoploss
     in_position = False
@@ -178,87 +172,90 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(supertrend_1h_aligned[i]):
+        if np.isnan(fisher[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
-            signals[i] = 0.0
-            continue
-        
-        # === HIGHER TIMEFRAME BIAS (Triple HTF Filter) ===
-        # 1d HMA = meta-trend (strongest filter)
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
-        
-        # 4h HMA = intermediate trend confirmation
+        # === HIGHER TIMEFRAME BIAS ===
+        # 4h HMA = primary directional bias
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # 1h Supertrend = momentum alignment
-        bull_momentum_1h = supertrend_1h_aligned[i] > 0
-        bear_momentum_1h = supertrend_1h_aligned[i] < 0
+        # === REGIME DETECTION ===
+        # Choppiness Index determines market regime
+        ranging_market = chop[i] > 61.8  # Mean reversion regime
+        trending_market = chop[i] < 38.2  # Trend following regime
+        # Neutral: 38.2 <= chop <= 61.8 (reduced position size)
+        neutral_market = not ranging_market and not trending_market
         
-        # === VOLATILITY SQUEEZE DETECTION ===
-        # Only trade after consolidation (BB squeeze)
-        in_squeeze = bb_squeeze[i]
+        # === FISHER TRANSFORM SIGNALS ===
+        # Long: Fisher crosses above -1.5 from below
+        fisher_long = False
+        if i > 0 and not np.isnan(fisher[i-1]):
+            fisher_long = (fisher[i-1] < -1.5) and (fisher[i] >= -1.5)
         
-        # === BREAKOUT DETECTION ===
-        # Price breaks above BB upper = bullish breakout
-        bb_bullish_breakout = close[i] > bb_upper[i-1] if not np.isnan(bb_upper[i-1]) else False
-        # Price breaks below BB lower = bearish breakout
-        bb_bearish_breakout = close[i] < bb_lower[i-1] if not np.isnan(bb_lower[i-1]) else False
+        # Short: Fisher crosses below +1.5 from above
+        fisher_short = False
+        if i > 0 and not np.isnan(fisher[i-1]):
+            fisher_short = (fisher[i-1] > 1.5) and (fisher[i] <= 1.5)
         
-        # === VOLUME CONFIRMATION ===
-        # Volume must be above average for breakout confirmation
-        volume_confirmed = volume[i] > 1.2 * volume_sma[i] if not np.isnan(volume_sma[i]) else False
+        # === PULLBACK ENTRIES (for trending regime) ===
+        # In trending market, enter on pullback toward 4h HMA
+        pullback_long = bull_trend_4h and (close[i] < hma_4h_aligned[i] * 1.005) and (close[i] > hma_4h_aligned[i] * 0.995)
+        pullback_short = bear_trend_4h and (close[i] > hma_4h_aligned[i] * 0.995) and (close[i] < hma_4h_aligned[i] * 1.005)
+        
+        # === VOLATILITY ADJUSTMENT ===
+        # Reduce position size when ATR is elevated (>1.5x recent average)
+        atr_recent_avg = np.nanmean(atr[max(0, i-20):i+1])
+        high_volatility = atr[i] > 1.5 * atr_recent_avg if not np.isnan(atr_recent_avg) else False
+        
+        # Determine position size based on volatility and regime
+        if high_volatility:
+            position_size = SIZE_BASE  # Conservative in high vol
+        elif trending_market or (bull_trend_4h and fisher_long) or (bear_trend_4h and fisher_short):
+            position_size = SIZE_INCREASED  # Higher confidence
+        else:
+            position_size = SIZE_BASE
         
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
-        position_size = SIZE_BASE
         
-        # LONG ENTRY: Need ALL HTF aligned bullish + BB squeeze + breakout + volume
-        # Stricter conditions for 15m to reduce noise
-        long_conditions = (
-            bull_trend_1d and  # 1d HMA meta-trend bullish
-            bull_trend_4h and  # 4h HMA intermediate bullish
-            bull_momentum_1h and  # 1h Supertrend bullish
-            bb_bullish_breakout and  # BB upper breakout
-            volume_confirmed  # Volume confirmation
-        )
+        # LONG ENTRY scenarios:
+        # 1. Ranging market + Fisher long signal (mean reversion)
+        # 2. Trending market + bull trend + Fisher long (trend pullback)
+        # 3. Neutral market + bull trend + Fisher long (reduced confidence)
         
-        # SHORT ENTRY: Mirror of long
-        short_conditions = (
-            bear_trend_1d and  # 1d HMA meta-trend bearish
-            bear_trend_4h and  # 4h HMA intermediate bearish
-            bear_momentum_1h and  # 1h Supertrend bearish
-            bb_bearish_breakout and  # BB lower breakout
-            volume_confirmed  # Volume confirmation
-        )
+        if ranging_market and fisher_long:
+            new_signal = position_size  # Mean reversion long
         
-        # Increase size if squeeze was present (higher probability setup)
-        if (long_conditions or short_conditions) and in_squeeze:
-            position_size = SIZE_STRONG
+        elif trending_market and bull_trend_4h and fisher_long:
+            new_signal = position_size  # Trend pullback long
         
-        # === GENERATE SIGNAL ===
-        if long_conditions:
-            new_signal = position_size
+        elif neutral_market and bull_trend_4h and fisher_long:
+            new_signal = SIZE_BASE  # Reduced size in neutral
         
-        if short_conditions:
-            new_signal = -position_size
+        # SHORT ENTRY scenarios (mirror of long):
+        if ranging_market and fisher_short:
+            new_signal = -position_size  # Mean reversion short
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing (tighter for 15m) ===
+        elif trending_market and bear_trend_4h and fisher_short:
+            new_signal = -position_size  # Trend pullback short
+        
+        elif neutral_market and bear_trend_4h and fisher_short:
+            new_signal = -SIZE_BASE  # Reduced size in neutral
+        
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         # Check stoploss on EXISTING position before considering new entry
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                # Trailing stop: 2.0 * ATR below highest close (tighter for 15m)
+                # Trailing stop: 2.0 * ATR below highest close
                 stoploss_price = highest_close - 2.0 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
@@ -272,21 +269,21 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
         
-        # === HTF TREND REVERSAL EXIT ===
-        # Exit if ANY HTF bias reverses against position (strict filter)
+        # === TREND REVERSAL EXIT ===
+        # Exit if 4h bias reverses against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and (bear_trend_1d or bear_trend_4h or bear_momentum_1h):
-                new_signal = 0.0  # HTF trend reversed against long
-            if position_side < 0 and (bull_trend_1d or bull_trend_4h or bull_momentum_1h):
-                new_signal = 0.0  # HTF trend reversed against short
+            if position_side > 0 and bear_trend_4h:
+                new_signal = 0.0  # 4h trend reversed against long
+            if position_side < 0 and bull_trend_4h:
+                new_signal = 0.0  # 4h trend reversed against short
         
-        # === BB REVERSAL EXIT ===
-        # Exit if BB breaks against position
+        # === FISHER REVERSAL EXIT ===
+        # Exit if Fisher signals opposite direction
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bb_bearish_breakout:
-                new_signal = 0.0  # BB broke against long
-            if position_side < 0 and bb_bullish_breakout:
-                new_signal = 0.0  # BB broke against short
+            if position_side > 0 and fisher_short:
+                new_signal = 0.0  # Fisher turned against long
+            if position_side < 0 and fisher_long:
+                new_signal = 0.0  # Fisher turned against short
         
         # === UPDATE POSITION TRACKING FOR NEXT BAR ===
         if new_signal != 0.0:
