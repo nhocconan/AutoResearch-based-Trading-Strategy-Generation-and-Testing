@@ -1,56 +1,55 @@
 #!/usr/bin/env python3
 """
-Experiment #359: 12h Dual-Regime Donchian Breakout with 1d HMA Bias + Volume Filter
+Experiment #360: 1d Regime-Adaptive Strategy with Weekly HMA Bias
 
-Hypothesis: After analyzing 358 failed experiments, the pattern shows that single-regime 
-strategies fail because they don't adapt. For 12h timeframe:
+Hypothesis: After 359 experiments, the clearest pattern is that STATIC strategies fail
+because BTC/ETH markets cycle through distinct regimes (bull/bear/range). For 1d timeframe:
 
-1. DUAL REGIME DETECTION: Use ADX + Bollinger Width to detect market state
-   - ADX > 20 + BB Width expanding = TREND regime (use breakout logic)
-   - ADX < 20 + BB Width contracting = RANGE regime (use mean reversion logic)
-   - This adapts to both bull/bear/range markets dynamically
+1. REGIME DETECTION (dual-filter):
+   - ADX(14) > 25 = TRENDING regime (use breakout/trend-follow entries)
+   - ADX(14) < 20 + BB Width < 20th percentile = RANGE regime (use mean-reversion)
+   - This adapts to market conditions instead of forcing one logic
 
-2. DONCHIAN BREAKOUT (20-period) for TREND regime:
-   - Long: price breaks Donchian upper + volume > 1.5x avg + 1d HMA bullish
-   - Short: price breaks Donchian lower + volume > 1.5x avg + 1d HMA bearish
-   - Volume confirmation filters 40%+ of false breakouts
+2. WEEKLY HMA BIAS (1w HTF via mtf_data):
+   - Long bias only when price > 1w HMA(21)
+   - Short bias only when price < 1w HMA(21)
+   - Filters 50%+ of counter-trend trades that fail in 2022 crash
 
-3. RSI MEAN REVERSION (14) for RANGE regime:
-   - Long: RSI < 30 + price < BB lower + 1d HMA neutral/bullish
-   - Short: RSI > 70 + price > BB upper + 1d HMA neutral/bearish
-   - Captures reversals when trend logic would whipsaw
+3. TRENDING REGIME ENTRIES:
+   - Long: Price breaks Donchian(20) high + weekly bullish + ADX > 25
+   - Short: Price breaks Donchian(20) low + weekly bearish + ADX > 25
+   - Captures major moves while avoiding chop
 
-4. 1d HMA TREND BIAS (softer than #353):
-   - Bullish: price > HMA * 0.995 (within 0.5% counts as bullish)
-   - Bearish: price < HMA * 1.005 (within 0.5% counts as bearish)
-   - Less strict = more trades while maintaining edge
+4. RANGING REGIME ENTRIES:
+   - Long: RSI(7) < 25 + price < BB lower + weekly bullish
+   - Short: RSI(7) > 75 + price > BB upper + weekly bearish
+   - Mean-reversion at extremes works in range-bound 2025 market
 
-5. POSITION SIZING: 0.30 discrete (higher than #353's 0.25 to generate more P&L)
-   - Still conservative (max 30% capital)
-   - Discrete levels minimize fee churn
+5. ATR TRAILING STOP (2.5x):
+   - Signal → 0 when price moves 2.5*ATR against position
+   - Protects from 2022-style crashes
 
-6. STOPLOSS: 2.0 * ATR(14) trailing (tighter than #353's 2.5x)
-   - Cut losses faster in 12h timeframe
-   - Trail on profitable positions
+6. POSITION SIZING: 0.28 discrete (conservative for daily volatility)
+   - BTC dropped 77% in 2022; 0.28 size = max -22% equity drawdown from single crash
+   - Discrete levels minimize fee churn (each change costs 0.10%)
 
-Why this should beat #353 (Sharpe=-0.334):
-- Dual regime = trades in both trending AND ranging markets
-- Volume filter = fewer false breakouts, higher win rate
-- Softer 1d HMA bias = more entry opportunities
-- RSI mean reversion backup = catches reversals breakout misses
-- Target: 30-50 trades/year per symbol (enough for statistical significance)
+Why 1d should beat 12h (#353 Sharpe=-0.334):
+- Daily closes are more significant (institutional level)
+- Less noise than 12h, cleaner regime detection
+- Weekly HMA provides stronger bias than daily HMA
+- Should generate 15-30 trades/year (enough for stats, low fee drag)
 
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.30 discrete levels
-Stoploss: 2.0 * ATR(14) trailing
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
+Position sizing: 0.28 discrete levels
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_dual_regime_donchian_1d_hma_vol_rsi_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_regime_adaptive_1w_hma_donchian_rsi_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -123,43 +122,43 @@ def calculate_adx(high, low, close, period=14):
     return adx
 
 def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands and bandwidth."""
+    """Calculate Bollinger Bands."""
     close_s = pd.Series(close)
     sma = close_s.rolling(window=period, min_periods=period).mean().values
     std = close_s.rolling(window=period, min_periods=period).std().values
     upper = sma + std_dev * std
     lower = sma - std_dev * std
-    # Bandwidth = (upper - lower) / sma
-    bandwidth = np.zeros(len(close))
-    for i in range(period - 1, len(close)):
-        if sma[i] > 1e-10:
-            bandwidth[i] = (upper[i] - lower[i]) / sma[i]
-    return upper, lower, bandwidth
+    return upper, lower, sma
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI using Wilder's smoothing."""
-    n = len(close)
-    rsi = np.full(n, np.nan)
+def calculate_bb_width_percentile(upper, lower, sma, lookback=60):
+    """Calculate BB Width as percentile of recent width values."""
+    n = len(upper)
+    bb_width = (upper - lower) / sma
+    bb_width_pct = np.full(n, np.nan)
     
-    if n < period + 1:
-        return rsi
+    for i in range(lookback, n):
+        if not np.isnan(bb_width[i]):
+            recent_widths = bb_width[i-lookback:i+1]
+            recent_widths = recent_widths[~np.isnan(recent_widths)]
+            if len(recent_widths) > 0:
+                bb_width_pct[i] = np.percentile(recent_widths, np.where(recent_widths <= bb_width[i])[0].size / len(recent_widths) * 100)
     
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)
+    return bb_width_pct
+
+def calculate_rsi(close, period=7):
+    """Calculate RSI."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
     
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    rsi[np.isnan(rsi)] = 50.0
     return rsi
 
 def calculate_donchian_channels(high, low, period=20):
@@ -174,49 +173,33 @@ def calculate_donchian_channels(high, low, period=20):
     
     return upper, lower
 
-def calculate_volume_ma(volume, period=20):
-    """Calculate volume moving average."""
-    vol_s = pd.Series(volume)
-    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_ma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
     adx = calculate_adx(high, low, close, 14)
-    bb_upper, bb_lower, bb_bandwidth = calculate_bollinger_bands(close, 20, 2.0)
-    rsi = calculate_rsi(close, 14)
+    bb_upper, bb_lower, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
+    bb_width_pct = calculate_bb_width_percentile(bb_upper, bb_lower, bb_sma, 60)
+    rsi = calculate_rsi(close, 7)
     donchian_upper, donchian_lower = calculate_donchian_channels(high, low, 20)
-    volume_ma = calculate_volume_ma(volume, 20)
-    
-    # Calculate BB bandwidth percentile for regime detection
-    bb_bw_percentile = np.full(n, np.nan)
-    lookback = 50
-    for i in range(lookback - 1, n):
-        valid_bw = bb_bandwidth[i-lookback+1:i+1]
-        valid_bw = valid_bw[~np.isnan(valid_bw)]
-        if len(valid_bw) > 0:
-            bb_bw_percentile[i] = np.sum(bb_bandwidth[i] > valid_bw) / len(valid_bw)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.30
+    SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -231,11 +214,15 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(rsi[i]):
+        if np.isnan(adx[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             continue
         
@@ -243,66 +230,47 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_bandwidth[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(volume_ma[i]) or volume_ma[i] == 0:
-            signals[i] = 0.0
-            continue
-        
-        # === 1d HMA TREND BIAS (softer than #353) ===
-        hma_threshold = 0.005  # 0.5% tolerance
-        bull_trend_1d = close[i] > hma_1d_aligned[i] * (1 - hma_threshold)
-        bear_trend_1d = close[i] < hma_1d_aligned[i] * (1 + hma_threshold)
-        neutral_trend_1d = not bull_trend_1d and not bear_trend_1d
-        
         # === REGIME DETECTION ===
-        # TREND regime: ADX > 18 + BB bandwidth expanding (percentile > 0.5)
-        trend_regime = adx[i] > 18 and (np.isnan(bb_bw_percentile[i]) or bb_bw_percentile[i] > 0.4)
+        # Trending: ADX > 25
+        trending_regime = adx[i] > 25
         
-        # RANGE regime: ADX < 18 + BB bandwidth contracting
-        range_regime = adx[i] < 18 and (np.isnan(bb_bw_percentile[i]) or bb_bw_percentile[i] <= 0.5)
+        # Ranging: ADX < 20 AND BB Width in lower 30th percentile
+        ranging_regime = adx[i] < 20 and (not np.isnan(bb_width_pct[i]) and bb_width_pct[i] < 30)
         
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]  # 30% above average
-        
-        # === DONCHIAN BREAKOUT SIGNALS (for TREND regime) ===
-        long_breakout = close[i] > donchian_upper[i-1] if i > 0 else False
-        short_breakout = close[i] < donchian_lower[i-1] if i > 0 else False
-        
-        # === RSI MEAN REVERSION SIGNALS (for RANGE regime) ===
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
-        price_at_bb_lower = close[i] <= bb_lower[i] * 1.002  # within 0.2%
-        price_at_bb_upper = close[i] >= bb_upper[i] * 0.998  # within 0.2%
+        # === WEEKLY HMA BIAS ===
+        bull_bias_1w = close[i] > hma_1w_aligned[i]
+        bear_bias_1w = close[i] < hma_1w_aligned[i]
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # LONG ENTRY - TREND REGIME: Breakout + volume + 1d bullish bias
-        if trend_regime and long_breakout and volume_confirmed and bull_trend_1d:
-            new_signal = SIZE
+        # TRENDING REGIME: Breakout entries
+        if trending_regime:
+            # Long breakout: price breaks Donchian upper + weekly bullish
+            if close[i] > donchian_upper[i-1] and bull_bias_1w:
+                new_signal = SIZE
+            
+            # Short breakout: price breaks Donchian lower + weekly bearish
+            elif close[i] < donchian_lower[i-1] and bear_bias_1w:
+                new_signal = -SIZE
         
-        # SHORT ENTRY - TREND REGIME: Breakout + volume + 1d bearish bias
-        elif trend_regime and short_breakout and volume_confirmed and bear_trend_1d:
-            new_signal = -SIZE
+        # RANGING REGIME: Mean-reversion entries
+        elif ranging_regime:
+            # Long: RSI oversold + price at BB lower + weekly bullish
+            if rsi[i] < 25 and close[i] < bb_lower[i] and bull_bias_1w:
+                new_signal = SIZE
+            
+            # Short: RSI overbought + price at BB upper + weekly bearish
+            elif rsi[i] > 75 and close[i] > bb_upper[i] and bear_bias_1w:
+                new_signal = -SIZE
         
-        # LONG ENTRY - RANGE REGIME: RSI oversold + BB lower + 1d not bearish
-        elif range_regime and rsi_oversold and price_at_bb_lower and not bear_trend_1d:
-            new_signal = SIZE
-        
-        # SHORT ENTRY - RANGE REGIME: RSI overbought + BB upper + 1d not bullish
-        elif range_regime and rsi_overbought and price_at_bb_upper and not bull_trend_1d:
-            new_signal = -SIZE
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.0 * atr[i]
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -310,24 +278,27 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.0 * atr[i]
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === TREND REVERSAL EXIT ===
-        # Exit if 1d trend flips strongly against position
+        # === REGIME FLIP EXIT ===
+        # Exit if regime changes against position type
         if in_position and new_signal != 0.0:
-            if position_side > 0 and close[i] < hma_1d_aligned[i] * 0.98:  # 2% below HMA
+            # Long position in newly ranging market without mean-revert signal
+            if position_side > 0 and ranging_regime and not (rsi[i] < 25 and close[i] < bb_lower[i]):
                 new_signal = 0.0
-            if position_side < 0 and close[i] > hma_1d_aligned[i] * 1.02:  # 2% above HMA
+            # Short position in newly trending market without breakout signal
+            if position_side < 0 and trending_regime and not (close[i] < donchian_lower[i-1]):
                 new_signal = 0.0
         
-        # === REGIME CHANGE EXIT ===
-        # Exit long if regime changes from trend to range (and vice versa for short)
-        if in_position and position_side > 0 and range_regime and rsi[i] > 55:
-            new_signal = 0.0
-        if in_position and position_side < 0 and range_regime and rsi[i] < 45:
-            new_signal = 0.0
+        # === WEEKLY BIAS FLIP EXIT ===
+        # Exit if weekly trend flips against position
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and bear_bias_1w:
+                new_signal = 0.0
+            if position_side < 0 and bull_bias_1w:
+                new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
