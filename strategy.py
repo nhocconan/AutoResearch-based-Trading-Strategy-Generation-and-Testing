@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #459: 4h Primary + 1d HTF — Donchian Breakout + HMA Trend + RSI Filter
+Experiment #460: 1h Primary + 4h/12h HTF — Fisher Transform + KAMA Trend + Volume
 
-Hypothesis: After analyzing 445+ failed experiments, clear pattern emerges:
-1. Complex regime switching (CRSI+CHOP) leads to 0 trades or negative Sharpe
-2. Simpler breakout strategies worked best historically (SOL Sharpe +0.879)
-3. 4h timeframe is proven to work (20-50 trades/year target)
-4. 1d HMA provides clean trend bias without over-filtering
-5. Donchian(20) breakout catches major moves without whipsaw
-6. RSI(14) > 50/< 50 is simpler and more reliable than extreme CRSI
+Hypothesis: After 459 failed experiments, clear pattern emerges:
+1. Fisher Transform catches reversals better than RSI/CRSI in bear/range markets
+2. KAMA (Kaufman Adaptive MA) adapts to volatility, less whipsaw than HMA/EMA
+3. 4h/12h HTF trend filter provides major direction bias
+4. Volume confirmation reduces false breakouts
+5. Simpler entry logic = more trades (critical after many 0-trade failures)
 
 Why this might beat current best (Sharpe=0.435):
-- Fewer conflicting filters = more trades = better statistical significance
-- Donchian breakout proven in research notes for SOL/ETH
-- 1d HMA trend filter prevents counter-trend trades
-- ATR 2.5x trailing stop protects in crashes
-- Asymmetric sizing (0.30 long, 0.25 short) for bear market protection
+- Fisher Transform proven edge in research notes for reversal entries
+- KAMA efficiency ratio adapts to market regime automatically
+- 1h TF with HTF filter = HTF trade frequency with 1h execution precision
+- Asymmetric sizing protects in 2022-style crashes
+- Target: 40-80 trades/year on 1h (fee drag controlled)
 
-Position sizing: 0.25-0.30 (discrete levels, max 0.40)
+Position sizing: 0.30 long, 0.25 short (discrete, max 0.40)
 Stoploss: 2.5 * ATR trailing (signal → 0 when hit)
-Target: 20-50 trades/year on 4h, >=30 trades/symbol on train, >=3 on test
+Target: >=30 trades/symbol on train, >=3 on test, Sharpe > 0 each symbol
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_rsi_1d_trend_v1"
-timeframe = "4h"
+name = "mtf_1h_fisher_kama_htf_vol_asym_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -38,6 +37,79 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market noise via Efficiency Ratio (ER).
+    
+    ER = |close - close[n]| / sum(|close[i] - close[i-1]|)
+    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    KAMA = KAMA_prev + SC * (close - KAMA_prev)
+    """
+    n = len(close)
+    close_s = pd.Series(close)
+    
+    # Calculate Efficiency Ratio
+    signal = np.abs(close_s - close_s.shift(er_period))
+    noise = np.abs(close_s - close_s.shift(1)).rolling(window=er_period, min_periods=er_period).sum()
+    
+    er = signal / (noise + 1e-10)
+    er = er.fillna(0)
+    
+    # Smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Adaptive smoothing constant
+    sc = (er.values * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[er_period] = close[er_period]  # Initialize
+    
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
+def calculate_fisher_transform(high, low, close, period=9):
+    """
+    Calculate Ehlers Fisher Transform.
+    Transforms price into a Gaussian normal distribution for clearer signals.
+    
+    Fisher = 0.5 * ln((1 + X) / (1 - X))
+    X = 0.67 * (close - lowest) / (highest - lowest) - 0.33
+    
+    Long: Fisher crosses above -1.5 (oversold reversal)
+    Short: Fisher crosses below +1.5 (overbought reversal)
+    """
+    n = len(close)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    # Highest high and lowest low over period
+    highest = high_s.rolling(window=period, min_periods=period).max().values
+    lowest = low_s.rolling(window=period, min_periods=period).min().values
+    
+    # Normalize price position
+    range_hl = highest - lowest
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    
+    x = 0.67 * (close - lowest) / range_hl - 0.33
+    
+    # Clamp to avoid log issues
+    x = np.clip(x, -0.99, 0.99)
+    
+    # Fisher transform
+    fisher = 0.5 * np.log((1 + x) / (1 - x))
+    
+    # Signal line (1-period lag)
+    fisher_signal = np.roll(fisher, 1)
+    fisher_signal[0] = fisher[0]
+    
+    return fisher, fisher_signal
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average (HMA)."""
@@ -76,71 +148,42 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high, lowest low over period)."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    
-    upper = high_s.rolling(window=period, min_periods=period).max().values
-    lower = low_s.rolling(window=period, min_periods=period).min().values
-    mid = (upper + lower) / 2.0
-    
-    return upper, lower, mid
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    
-    # True Range
-    tr1 = high_s - low_s
-    tr2 = np.abs(high_s - close_s.shift(1))
-    tr3 = np.abs(low_s - close_s.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Directional Movement
-    plus_dm = high_s.diff()
-    minus_dm = -low_s.diff()
-    
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    
-    # Smoothed values
-    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
-    plus_di = 100.0 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    minus_di = 100.0 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    
-    # DX and ADX
-    dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return adx.values
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs moving average."""
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)
+    return vol_ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # Load 1d HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d HTF indicators (major trend direction)
-    hma_1d_21 = calculate_hma(df_1d['close'].values, period=21)
+    # Calculate HTF indicators
+    hma_4h_21 = calculate_hma(df_4h['close'].values, period=21)
+    hma_12h_50 = calculate_hma(df_12h['close'].values, period=50)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
+    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
+    hma_12h_50_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_50)
     
-    # Calculate 4h indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_14 = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=20)
-    adx_14 = calculate_adx(high, low, close, period=14)
+    kama_1h = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    fisher, fisher_signal = calculate_fisher_transform(high, low, close, period=9)
+    rsi_14 = calculate_rsi(close, 14)
+    vol_ratio = calculate_volume_ratio(volume, 20)
     
-    # 4h HMA for local trend
-    hma_4h_21 = calculate_hma(close, period=21)
-    hma_4h_50 = calculate_hma(close, period=50)
+    # KAMA slope (trend direction)
+    kama_slope = kama_1h - np.roll(kama_1h, 5)
+    kama_slope[:5] = 0
     
     signals = np.zeros(n)
     
@@ -155,79 +198,76 @@ def generate_signals(prices):
     lowest_price = 0.0
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(hma_1d_21_aligned[i]):
+        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(hma_12h_50_aligned[i]):
             continue
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            continue
-        if np.isnan(rsi_14[i]) or np.isnan(adx_14[i]):
+        if np.isnan(kama_1h[i]) or np.isnan(fisher[i]) or np.isnan(rsi_14[i]):
             continue
         
-        # === 1D MAJOR TREND (primary direction filter) ===
-        # Price above 1d HMA = bull bias (favor longs)
-        # Price below 1d HMA = bear bias (favor shorts)
-        bull_regime = close[i] > hma_1d_21_aligned[i]
-        bear_regime = close[i] < hma_1d_21_aligned[i]
+        # === HTF MAJOR TREND (primary direction filter) ===
+        # Price above 4h HMA = bull bias (favor longs)
+        # Price below 12h HMA = bear bias (favor shorts)
+        bull_htf = close[i] > hma_4h_21_aligned[i]
+        bear_htf = close[i] < hma_12h_50_aligned[i]
         
-        # === 4H LOCAL TREND ===
-        hma_bullish = hma_4h_21[i] > hma_4h_50[i]
-        hma_bearish = hma_4h_21[i] < hma_4h_50[i]
+        # === 1H LOCAL TREND (KAMA) ===
+        kama_bullish = kama_slope[i] > 0 and close[i] > kama_1h[i]
+        kama_bearish = kama_slope[i] < 0 and close[i] < kama_1h[i]
         
-        # === RSI MOMENTUM ===
-        rsi_bullish = rsi_14[i] > 50.0
-        rsi_bearish = rsi_14[i] < 50.0
+        # === FISHER TRANSFORM SIGNALS (reversal entries) ===
+        fisher_oversold = fisher[i] < -1.5 and fisher_signal[i] < fisher[i]  # crossing up
+        fisher_overbought = fisher[i] > 1.5 and fisher_signal[i] > fisher[i]  # crossing down
+        fisher_extreme_oversold = fisher[i] < -2.0
+        fisher_extreme_overbought = fisher[i] > 2.0
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Breakout above upper channel
-        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        # Breakout below lower channel
-        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        # === RSI CONFIRMATION ===
+        rsi_oversold = rsi_14[i] < 35.0
+        rsi_overbought = rsi_14[i] > 65.0
         
-        # === ADX TREND STRENGTH ===
-        strong_trend = adx_14[i] > 25.0
-        weak_trend = adx_14[i] < 20.0
+        # === VOLUME CONFIRMATION ===
+        vol_confirmed = vol_ratio[i] > 0.8  # at least 80% of avg volume
         
         # === ENTRY LOGIC — SIMPLIFIED FOR MORE TRADES ===
         new_signal = 0.0
         
-        # LONG ENTRIES (multiple confluence, but not too strict)
-        if bull_regime:
-            # Donchian breakout + RSI confirmation + trend alignment
-            if breakout_long and rsi_bullish and hma_bullish:
+        # LONG ENTRIES (need HTF bull + local confirmation)
+        if bull_htf or kama_bullish:
+            # Fisher reversal + RSI confirmation
+            if fisher_oversold and rsi_oversold and vol_confirmed:
                 new_signal = LONG_SIZE
-            # HMA crossover + RSI confirmation (pullback entry)
-            elif hma_bullish and rsi_14[i] > 55.0 and close[i] > hma_4h_21[i]:
+            # Extreme Fisher oversold (works without RSI)
+            elif fisher_extreme_oversold and kama_bullish:
                 new_signal = LONG_SIZE * 0.8
-            # Simple momentum entry in bull regime
-            elif rsi_14[i] > 60.0 and hma_bullish and strong_trend:
+            # KAMA bullish + Fisher turning up
+            elif kama_bullish and fisher[i] > fisher_signal[i] and fisher[i] < 0:
                 new_signal = LONG_SIZE * 0.7
         
-        # SHORT ENTRIES (multiple confluence, but not too strict)
-        if bear_regime:
-            # Donchian breakdown + RSI confirmation + trend alignment
-            if breakout_short and rsi_bearish and hma_bearish:
+        # SHORT ENTRIES (need HTF bear + local confirmation)
+        if bear_htf or kama_bearish:
+            # Fisher reversal + RSI confirmation
+            if fisher_overbought and rsi_overbought and vol_confirmed:
                 if new_signal == 0.0:
                     new_signal = -SHORT_SIZE
-            # HMA crossover + RSI confirmation (bounce entry)
-            elif hma_bearish and rsi_14[i] < 45.0 and close[i] < hma_4h_21[i]:
+            # Extreme Fisher overbought (works without RSI)
+            elif fisher_extreme_overbought and kama_bearish:
                 if new_signal == 0.0:
                     new_signal = -SHORT_SIZE * 0.8
-            # Simple momentum entry in bear regime
-            elif rsi_14[i] < 40.0 and hma_bearish and strong_trend:
+            # KAMA bearish + Fisher turning down
+            elif kama_bearish and fisher[i] < fisher_signal[i] and fisher[i] > 0:
                 if new_signal == 0.0:
                     new_signal = -SHORT_SIZE * 0.7
         
         # === FREQUENCY BOOST (ensure >=30 trades/symbol on train) ===
-        # If no position and no signal, enter on simpler conditions
+        # If no position and weak signal, enter on simpler conditions
         if not in_position and new_signal == 0.0:
-            # Long: RSI > 55 + HMA bullish + bull regime (simpler entry)
-            if bull_regime and hma_bullish and rsi_14[i] > 55.0:
+            # Long: Fisher < -1.0 + KAMA bullish (simpler entry)
+            if bull_htf and kama_bullish and fisher[i] < -1.0:
                 new_signal = LONG_SIZE * 0.5
-            # Short: RSI < 45 + HMA bearish + bear regime (simpler entry)
-            elif bear_regime and hma_bearish and rsi_14[i] < 45.0:
+            # Short: Fisher > 1.0 + KAMA bearish (simpler entry)
+            elif bear_htf and kama_bearish and fisher[i] > 1.0:
                 if new_signal == 0.0:
                     new_signal = -SHORT_SIZE * 0.5
         
@@ -253,22 +293,16 @@ def generate_signals(prices):
             new_signal = 0.0
         
         # === EXIT CONDITIONS ===
-        # RSI extreme exit (take profit on exhaustion)
-        if in_position and position_side > 0 and rsi_14[i] > 75.0:
+        # Fisher extreme exit (take profit on exhaustion)
+        if in_position and position_side > 0 and fisher[i] > 2.0:
             new_signal = 0.0
-        if in_position and position_side < 0 and rsi_14[i] < 25.0:
-            new_signal = 0.0
-        
-        # Trend reversal exit (1d regime flip)
-        if in_position and position_side > 0 and bear_regime:
-            new_signal = 0.0
-        if in_position and position_side < 0 and bull_regime:
+        if in_position and position_side < 0 and fisher[i] < -2.0:
             new_signal = 0.0
         
-        # HMA crossover exit
-        if in_position and position_side > 0 and hma_bearish:
+        # Trend reversal exit (HTF regime flip)
+        if in_position and position_side > 0 and bear_htf and kama_bearish:
             new_signal = 0.0
-        if in_position and position_side < 0 and hma_bullish:
+        if in_position and position_side < 0 and bull_htf and kama_bullish:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
