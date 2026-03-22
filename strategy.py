@@ -1,47 +1,48 @@
 #!/usr/bin/env python3
 """
-Experiment #420: 1d Connors RSI + Weekly HMA Trend + Choppiness Regime Filter
+Experiment #421: 15m Multi-Regime Strategy with 4h HMA Trend + 1h Choppiness Filter
 
-Hypothesis: After 419 failed experiments, the key insight is that 1d timeframe
-needs MEAN REVERSION with strong trend bias, not pure trend following.
-BTC/ETH 2022-2025 are mostly bear/range markets where trend strategies fail.
+Hypothesis: After analyzing 420+ failed experiments, the key insight is that 15m
+timeframe needs ADAPTIVE logic based on market regime. Simple trend-following
+fails in bear/range markets (2022 crash, 2025 bear). This strategy uses:
 
-This strategy uses:
+1. 4h HMA(21) TREND BIAS (via mtf_data helper):
+   - Long bias when price > 4h HMA
+   - Short bias when price < 4h HMA
+   - HMA smoother than EMA, critical for MTF alignment
 
-1. CONNORS RSI (CRSI) - Proven 75% win rate for mean reversion:
-   CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-   - Long when CRSI < 10 (extreme oversold)
-   - Short when CRSI > 90 (extreme overbought)
-   - Much more reliable than standard RSI(14)
+2. 1h CHOPPINESS INDEX REGIME DETECTION (via mtf_data helper):
+   - CHOP > 61.8 = ranging market (use mean-reversion entries)
+   - CHOP < 38.2 = trending market (use breakout entries)
+   - 38.2-61.8 = neutral (reduce position size or stay flat)
+   - This is the KEY differentiator from failed strategies
 
-2. WEEKLY HMA(21) TREND BIAS (via mtf_data helper):
-   - Long ONLY when price > 1w HMA (bullish bias)
-   - Short ONLY when price < 1w HMA (bearish bias)
-   - HMA smoother than EMA, critical for weekly alignment
-   - This prevents counter-trend mean reversion (deadly in crashes)
+3. 15m ENTRY LOGIC (adaptive per regime):
+   - TRENDING: Donchian(20) breakout in direction of 4h trend
+   - RANGING: RSI(7) extremes (30/70) with 4h trend bias
+   - This avoids counter-trend mean-reversion in strong trends
 
-3. CHOPPINESS INDEX REGIME FILTER:
-   - CHOP(14) > 61.8 = ranging market (enable mean reversion)
-   - CHOP(14) < 38.2 = trending market (reduce position or skip)
-   - Best meta-filter for identifying when mean reversion works
+4. VOLUME CONFIRMATION:
+   - Entry volume > 0.8 * 20-bar avg volume
+   - Filters false breakouts on low liquidity
 
-4. ATR(14) TRAILING STOP at 2.5x:
+5. ATR(14) TRAILING STOP at 2.5x:
    - Signal → 0 when price moves 2.5*ATR against position
-   - Critical for 2022-style crashes
+   - Protects from 2022-style crashes
 
-5. POSITION SIZING: 0.25 discrete (conservative for 1d volatility)
+6. POSITION SIZING: 0.25 discrete (conservative for 15m volatility)
    - Max 25% capital per position
    - Discrete levels minimize fee churn
 
-Why 1d should work now:
-- Connors RSI specifically designed for daily mean reversion
-- Weekly HMA provides major trend filter (avoid counter-trend)
-- Choppiness Index filters out trending periods where mean reversion fails
-- Should generate 20-40 trades/year (enough for stats, not too many for fees)
+Why 15m with this approach should work:
+- Adaptive regime detection avoids trend-following in chop
+- 4h HMA provides strong trend filter (not 1h which is too noisy)
+- 1h Choppiness gives cleaner regime signal than ADX on 15m
 - Works on BTC/ETH/SOL individually (not SOL-biased)
+- Should generate 50-100 trades/year (enough for stats, not too many for fees)
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data helper (call ONCE before loop)
+Timeframe: 15m (REQUIRED for this experiment)
+HTF: 4h HMA + 1h Choppiness via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
@@ -49,8 +50,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_connors_rsi_weekly_hma_chop_regime_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_regime_chop_4h_hma_1h_donchian_rsi_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -73,8 +74,35 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = ranging market
+    CHOP < 38.2 = trending market
+    
+    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    # Calculate ATR for each bar (simplified: just high-low for this calculation)
+    tr = high - low
+    
+    for i in range(period, n):
+        atr_sum = tr[i-period+1:i+1].sum()
+        highest_high = high[i-period+1:i+1].max()
+        lowest_low = low[i-period+1:i+1].min()
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 1e-10:
+            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
+        else:
+            chop[i] = 50.0  # neutral
+    
+    return chop
+
+def calculate_rsi(close, period=7):
+    """Calculate Relative Strength Index with shorter period for 15m."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -87,115 +115,47 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_connors_rsi(close, period_rsi=3, period_streak=2, period_rank=100):
-    """
-    Calculate Connors RSI (CRSI).
-    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high, lowest low over period)."""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    This is proven to have 75% win rate for mean reversion on daily data.
-    """
-    n = len(close)
-    close_s = pd.Series(close)
+    for i in range(period - 1, n):
+        upper[i] = high[i-period+1:i+1].max()
+        lower[i] = low[i-period+1:i+1].min()
     
-    # Component 1: RSI(3)
-    rsi_short = calculate_rsi(close, period_rsi)
-    
-    # Component 2: RSI of Streak Length
-    # Streak = consecutive up/down days
-    delta = close_s.diff()
-    streak = np.zeros(n)
-    for i in range(1, n):
-        if delta.iloc[i] > 0:
-            if delta.iloc[i-1] > 0:
-                streak[i] = streak[i-1] + 1
-            else:
-                streak[i] = 1
-        elif delta.iloc[i] < 0:
-            if delta.iloc[i-1] < 0:
-                streak[i] = streak[i-1] - 1
-            else:
-                streak[i] = -1
-        else:
-            streak[i] = 0
-    
-    # RSI of streak (using absolute values for calculation)
-    streak_s = pd.Series(streak)
-    streak_gain = streak_s.where(streak_s > 0, 0.0)
-    streak_loss = -streak_s.where(streak_s < 0, 0.0)
-    
-    avg_streak_gain = streak_gain.ewm(span=period_streak, min_periods=period_streak, adjust=False).mean()
-    avg_streak_loss = streak_loss.ewm(span=period_streak, min_periods=period_streak, adjust=False).mean()
-    
-    streak_rs = avg_streak_gain / avg_streak_loss.replace(0, np.inf)
-    rsi_streak = 100 - (100 / (1 + streak_rs))
-    rsi_streak = rsi_streak.fillna(50).values
-    
-    # Component 3: Percentile Rank of today's return vs last 100 days
-    returns = close_s.pct_change()
-    percent_rank = np.full(n, np.nan)
-    for i in range(period_rank, n):
-        window = returns.iloc[i-period_rank+1:i+1]
-        current_return = returns.iloc[i]
-        if not np.isnan(current_return):
-            rank = (window < current_return).sum()
-            percent_rank[i] = rank / period_rank * 100
-    
-    # Combine all three components
-    crsi = (rsi_short + rsi_streak + percent_rank) / 3
-    crsi = np.nan_to_num(crsi, nan=50.0)
-    
-    return crsi
+    return upper, lower
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market
-    CHOP < 38.2 = trending market
-    
-    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    """
-    n = len(close)
-    chop = np.full(n, np.nan)
-    
-    # Calculate ATR for each bar (True Range)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    for i in range(period, n):
-        atr_sum = tr[i-period+1:i+1].sum()
-        highest_high = high[i-period+1:i+1].max()
-        lowest_low = low[i-period+1:i+1].min()
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-        else:
-            chop[i] = 50.0
-    
-    return chop
+def calculate_volume_avg(volume, period=20):
+    """Calculate rolling average volume."""
+    vol_s = pd.Series(volume)
+    return vol_s.rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1h = get_htf_data(prices, '1h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    chop_1h = calculate_choppiness(df_1h['high'].values, df_1h['low'].values, df_1h['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    chop_1h_aligned = align_htf_to_ltf(prices, df_1h, chop_1h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    crsi = calculate_connors_rsi(close, 3, 2, 100)
-    chop = calculate_choppiness(high, low, close, 14)
+    rsi = calculate_rsi(close, 7)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    vol_avg = calculate_volume_avg(volume, 20)
     
     signals = np.zeros(n)
     
@@ -209,64 +169,77 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(crsi[i]):
+        if np.isnan(chop_1h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME DETECTION ===
-        ranging_market = chop[i] > 61.8  # Mean reversion works here
-        trending_market = chop[i] < 38.2  # Trend following works here
-        # neutral = 38.2 <= CHOP <= 61.8 (reduce size or stay flat)
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            signals[i] = 0.0
+            continue
         
-        # === WEEKLY HMA TREND BIAS ===
-        bull_trend_1w = close[i] > hma_1w_aligned[i]
-        bear_trend_1w = close[i] < hma_1w_aligned[i]
+        if np.isnan(vol_avg[i]) or vol_avg[i] == 0:
+            signals[i] = 0.0
+            continue
         
-        # === CONNORS RSI SIGNALS ===
-        crsi_extreme_low = crsi[i] < 10   # Extreme oversold
-        crsi_extreme_high = crsi[i] > 90  # Extreme overbought
+        # === REGIME DETECTION (1h Choppiness) ===
+        trending_market = chop_1h_aligned[i] < 38.2
+        ranging_market = chop_1h_aligned[i] > 61.8
+        neutral_market = not trending_market and not ranging_market
+        
+        # === 4h HMA TREND BIAS ===
+        bull_trend_4h = close[i] > hma_4h_aligned[i]
+        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        
+        # === VOLUME CONFIRMATION ===
+        volume_confirmed = volume[i] > 0.8 * vol_avg[i]
+        
+        # === DONCHIAN BREAKOUT SIGNALS (for trending regime) ===
+        donchian_long = close[i] > donchian_upper[i-1]  # Break above previous high
+        donchian_short = close[i] < donchian_lower[i-1]  # Break below previous low
+        
+        # === RSI MEAN REVERSION SIGNALS (for ranging regime) ===
+        rsi_long = rsi[i] < 30  # Oversold
+        rsi_short = rsi[i] > 70  # Overbought
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # RANGING REGIME: Mean reversion with weekly trend bias
-        if ranging_market:
-            # Long: CRSI extreme low + weekly bullish bias
-            if crsi_extreme_low and bull_trend_1w:
+        # TRENDING REGIME: Donchian breakout with 4h HMA filter + volume
+        if trending_market:
+            if bull_trend_4h and donchian_long and volume_confirmed:
                 new_signal = SIZE
-            # Short: CRSI extreme high + weekly bearish bias
-            elif crsi_extreme_high and bear_trend_1w:
+            elif bear_trend_4h and donchian_short and volume_confirmed:
                 new_signal = -SIZE
         
-        # TRENDING REGIME: Reduce position size or skip mean reversion
-        elif trending_market:
-            # Only enter with strong trend confirmation
-            if crsi_extreme_low and bull_trend_1w:
-                new_signal = SIZE * 0.6  # Reduced size in trending market
-            elif crsi_extreme_high and bear_trend_1w:
-                new_signal = -SIZE * 0.6
+        # RANGING REGIME: RSI mean-reversion with 4h HMA filter
+        elif ranging_market:
+            # Only enter with trend bias (avoid counter-trend mean reversion)
+            if bull_trend_4h and rsi_long:
+                new_signal = SIZE
+            elif bear_trend_4h and rsi_short:
+                new_signal = -SIZE
         
-        # NEUTRAL REGIME: Stay flat or small positions
-        else:
-            # Small positions only with strong CRSI signal
-            if crsi_extreme_low and bull_trend_1w:
-                new_signal = SIZE * 0.5
-            elif crsi_extreme_high and bear_trend_1w:
-                new_signal = -SIZE * 0.5
+        # NEUTRAL REGIME: Reduce position size or stay flat
+        elif neutral_market:
+            # Only take strongest signals in neutral regime
+            if bull_trend_4h and donchian_long and volume_confirmed and rsi[i] < 50:
+                new_signal = SIZE / 2  # Half position in neutral
+            elif bear_trend_4h and donchian_short and volume_confirmed and rsi[i] > 50:
+                new_signal = -SIZE / 2  # Half position in neutral
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -286,22 +259,22 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === TREND REVERSAL EXIT ===
+        # === REGIME FLIP EXIT ===
+        # Exit if regime changes against position type
         if in_position and new_signal != 0.0:
-            # Exit long if weekly trend turns bearish
-            if position_side > 0 and bear_trend_1w:
+            # Long position in trending regime should exit if market becomes ranging without RSI signal
+            if position_side > 0 and ranging_market and not rsi_long:
                 new_signal = 0.0
-            # Exit short if weekly trend turns bullish
-            if position_side < 0 and bull_trend_1w:
+            # Short position in trending regime should exit if market becomes ranging without RSI signal
+            if position_side < 0 and ranging_market and not rsi_short:
                 new_signal = 0.0
         
-        # === CRSI REVERSAL EXIT ===
-        # Exit when CRSI crosses back through neutral (50)
+        # === TREND REVERSAL EXIT (for trending regime positions) ===
         if in_position and new_signal != 0.0:
-            if position_side > 0 and crsi[i] > 50:
-                new_signal = 0.0  # Take profit on long
-            if position_side < 0 and crsi[i] < 50:
-                new_signal = 0.0  # Take profit on short
+            if position_side > 0 and bear_trend_4h:
+                new_signal = 0.0
+            if position_side < 0 and bull_trend_4h:
+                new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
