@@ -1,28 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #086: 30m Supertrend with 4h HMA Trend Filter + Simplified RSI
-Hypothesis: 30m Supertrend captures intraday trends. 4h HMA provides appropriate HTF bias
-(not 1d which is too slow for 30m). Simplified RSI conditions (single threshold, not range)
-to avoid over-filtering that killed #079 (Sharpe=-7.623). Wider ATR stops (3.0x) for 30m noise.
+Experiment #087: 1h Regime-Adaptive Strategy with Choppiness Index + 4h HMA Trend Filter
+Hypothesis: 1h timeframe failed before (#075, #081) because they used single-regime logic.
+This strategy adapts to market regime using Choppiness Index (CHOP):
+- CHOP > 61.8 = Range/Chop → Mean reversion (RSI extremes, Bollinger bounds)
+- CHOP < 38.2 = Trend → Trend following (Supertrend, EMA alignment)
+- 38.2-61.8 = Transition → Reduce position size or stay flat
 
-Why this might work on 30m (learning from failures):
-- #074 (30m KAMA): -1.600 Sharpe - KAMA too slow for 30m
-- #079 (30m RSI + 4h HMA + 1h ST): -7.623 Sharpe - TOO MANY TIMEFRAMES (3 conflicting)
-- #080 (30m EMA momentum): -3.202 Sharpe - momentum whipsaw on 30m
-- #085 (30m RSI mean reversion): -4.051 Sharpe - pure mean reversion fails on 30m
+HTF: 4h HMA for trend bias (faster than 1d, appropriate for 1h entries).
+Volume confirmation on breakouts to avoid false signals.
+Conservative sizing (0.20-0.30) with 2.5*ATR trailing stops.
 
-Key insight: Use ONLY 2 timeframes (30m + 4h), NOT 3. Supertrend proven on 4h (#076 success).
-Simplify RSI to single threshold (not range). Wider stops for 30m volatility.
+Why this might work on 1h (learning from failures):
+- #075 (1h Z-score): -2.734 Sharpe - pure mean reversion, no regime filter
+- #081 (1h Supertrend): -2.382 Sharpe - pure trend following, whipsaw in ranges
+- #076 (4h Supertrend): +0.162 Sharpe - 4h is better TF, but we must use 1h here
 
-Timeframe: 30m (REQUIRED), HTF: 4h via mtf_data helper (call ONCE before loop).
-Position sizing: 0.20 base, 0.25 strong signals (conservative for 30m noise).
+Key innovation: Regime-adaptive logic switches between mean reversion and trend following
+based on Choppiness Index. This handles both 2021-2024 (trending) and 2025 (range/bear).
+
+Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper (call ONCE before loop).
+Position sizing: 0.20 base, 0.30 strong signals, discrete levels.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_supertrend_4h_hma_rsi_simplified_v1"
-timeframe = "30m"
+name = "mtf_1h_regime_adaptive_chop_4h_hma_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -115,10 +120,63 @@ def calculate_ema(close, period):
     """Calculate EMA."""
     return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    return upper, lower, sma
+
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    CHOP > 61.8 = Range/Chop
+    CHOP < 38.2 = Trend
+    """
+    n = len(close)
+    chop = np.zeros(n)
+    chop[:] = np.nan
+    
+    atr = calculate_atr(high, low, close, 14)
+    
+    for i in range(period, n):
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        atr_sum = np.sum(atr[i-period+1:i+1])
+        
+        price_range = highest_high - lowest_low
+        
+        if price_range > 0 and atr_sum > 0:
+            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
+
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average."""
+    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel."""
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
+    
+    for i in range(period-1, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    return upper, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -130,7 +188,7 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
     ema_21 = calculate_ema(close, 21)
@@ -139,11 +197,23 @@ def generate_signals(prices):
     # Supertrend
     supertrend, supertrend_direction = calculate_supertrend(high, low, close, 10, 3.0)
     
+    # Bollinger Bands
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
+    
+    # Choppiness Index (regime filter)
+    chop = calculate_choppiness_index(high, low, close, 14)
+    
+    # Volume MA
+    vol_ma = calculate_volume_ma(volume, 20)
+    
+    # Donchian Channel
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    
     signals = np.zeros(n)
     
-    # Position sizing - discrete levels (Rule 4) - CONSERVATIVE for 30m
+    # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.20
-    SIZE_STRONG = 0.25
+    SIZE_STRONG = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -166,10 +236,22 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        if np.isnan(chop[i]) or np.isnan(bb_upper[i]):
+            signals[i] = 0.0
+            continue
+        
+        # === REGIME DETECTION (Choppiness Index) ===
+        is_range_regime = chop[i] > 61.8
+        is_trend_regime = chop[i] < 38.2
+        # 38.2-61.8 = transition (reduce size or flat)
+        
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias (appropriate for 30m entries)
+        # 4h HMA = higher timeframe trend bias
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
+        
+        # === VOLUME CONFIRMATION ===
+        volume_confirmed = volume[i] > 1.2 * vol_ma[i] if vol_ma[i] > 0 else False
         
         # === SUPERTREND SIGNAL ===
         supertrend_long = supertrend_direction[i] == 1
@@ -179,58 +261,68 @@ def generate_signals(prices):
         ema_bullish = ema_21[i] > ema_50[i]
         ema_bearish = ema_21[i] < ema_50[i]
         
-        # === SIMPLIFIED RSI FILTER (single threshold, not range) ===
-        # Avoid over-filtering that killed #079
-        rsi_bullish = rsi[i] > 45  # Simple threshold
-        rsi_bearish = rsi[i] < 55  # Simple threshold
+        # === BOLLINGER POSITION ===
+        price_near_bb_lower = close[i] < bb_lower[i] * 1.005  # Within 0.5% of lower band
+        price_near_bb_upper = close[i] > bb_upper[i] * 0.995  # Within 0.5% of upper band
         
-        # === RSI MOMENTUM ===
-        rsi_momentum_long = rsi[i] > 50
-        rsi_momentum_short = rsi[i] < 50
+        # === RSI EXTREMES ===
+        rsi_oversold = rsi[i] < 35
+        rsi_overbought = rsi[i] > 65
         
         new_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS (simplified - 2 paths max) ===
-        # Path 1: Supertrend long + 4h bullish + RSI bullish (primary)
-        if supertrend_long and bull_trend_4h and rsi_bullish:
-            if ema_bullish:
-                new_signal = SIZE_STRONG
-            else:
-                new_signal = SIZE_BASE
+        # === TREND REGIME (CHOP < 38.2) - Trend Following ===
+        if is_trend_regime:
+            # LONG: Supertrend + 4h bullish + EMA bullish + volume confirmation
+            if supertrend_long and bull_trend_4h and ema_bullish:
+                if volume_confirmed:
+                    new_signal = SIZE_STRONG
+                else:
+                    new_signal = SIZE_BASE
+            
+            # SHORT: Supertrend + 4h bearish + EMA bearish + volume confirmation
+            if new_signal == 0.0 and supertrend_short and bear_trend_4h and ema_bearish:
+                if volume_confirmed:
+                    new_signal = -SIZE_STRONG
+                else:
+                    new_signal = -SIZE_BASE
         
-        # Path 2: Supertrend long + EMA bullish (simpler, ensures trades)
-        if new_signal == 0.0 and supertrend_long and ema_bullish:
-            if rsi_momentum_long:
+        # === RANGE REGIME (CHOP > 61.8) - Mean Reversion ===
+        elif is_range_regime:
+            # LONG: RSI oversold + price near BB lower + 4h not strongly bearish
+            if rsi_oversold and price_near_bb_lower and not bear_trend_4h:
                 new_signal = SIZE_BASE
-        
-        # === SHORT ENTRY CONDITIONS (simplified - 2 paths max) ===
-        # Path 1: Supertrend short + 4h bearish + RSI bearish (primary)
-        if supertrend_short and bear_trend_4h and rsi_bearish:
-            if ema_bearish:
-                new_signal = -SIZE_STRONG
-            else:
+            
+            # SHORT: RSI overbought + price near BB upper + 4h not strongly bullish
+            if new_signal == 0.0 and rsi_overbought and price_near_bb_upper and not bull_trend_4h:
                 new_signal = -SIZE_BASE
         
-        # Path 2: Supertrend short + EMA bearish (simpler, ensures trades)
-        if new_signal == 0.0 and supertrend_short and ema_bearish:
-            if rsi_momentum_short:
+        # === TRANSITION REGIME (38.2 <= CHOP <= 61.8) - Reduced Activity ===
+        else:
+            # Only take strong signals in transition
+            # LONG: All trend conditions + volume
+            if supertrend_long and bull_trend_4h and ema_bullish and volume_confirmed:
+                new_signal = SIZE_BASE
+            
+            # SHORT: All trend conditions + volume
+            if new_signal == 0.0 and supertrend_short and bear_trend_4h and ema_bearish and volume_confirmed:
                 new_signal = -SIZE_BASE
         
-        # === STOPLOSS LOGIC (Rule 6) - Wider stops for 30m noise ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5*ATR trailing stop ===
         # Update trailing highs/lows for active positions
         if in_position and position_side > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
-            # Trailing stop: 3.0 * ATR below highest close (wider for 30m)
-            stoploss_price = highest_close - 3.0 * atr[i]
+            # Trailing stop: 2.5 * ATR below highest close
+            stoploss_price = highest_close - 2.5 * atr[i]
             if close[i] < stoploss_price:
                 new_signal = 0.0  # Stoploss hit
         
         if in_position and position_side < 0:
             if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
-            # Trailing stop: 3.0 * ATR above lowest close (wider for 30m)
-            stoploss_price = lowest_close + 3.0 * atr[i]
+            # Trailing stop: 2.5 * ATR above lowest close
+            stoploss_price = lowest_close + 2.5 * atr[i]
             if close[i] > stoploss_price:
                 new_signal = 0.0  # Stoploss hit
         
