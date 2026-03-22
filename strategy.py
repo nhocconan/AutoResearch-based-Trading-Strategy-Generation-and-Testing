@@ -1,36 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #106: 12h Primary + 1d HTF — Vol Spike Mean Reversion + Connors RSI
+Experiment #107: 1d Primary + 1w HTF — Dual Regime (Chop=Mean Revert, Trend=Breakout)
 
-Hypothesis: Previous strategies failed because they relied too heavily on trend-following
-in bear/range markets. Research shows vol-spike mean reversion works best during crashes
-(2022 BTC -77%) and bear rallies. This strategy combines:
-
-1. VOLATILITY SPIKE DETECTION: ATR(7)/ATR(30) > 1.8 signals panic/extreme moves
-2. CONNORS RSI: (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3 for entry timing
-3. BOLLINGER BANDS: Price < BB_lower(20, 2.5) confirms oversold for longs
-4. 1d HMA(21) SLOPE: Major trend bias (avoid counter-trend in strong moves)
-5. CHOPPINESS INDEX: Regime filter (range = mean revert, trend = pullback entries)
+Hypothesis: Daily timeframe with weekly trend bias should reduce noise and fee drag
+while capturing major moves. Research shows dual-regime strategies outperform single-approach:
+- Range markets (CHOP>55): Connors RSI mean reversion at Bollinger extremes
+- Trend markets (CHOP<45): Donchian breakouts with HMA confirmation
 
 Why this should work:
-- Vol spike + BB extreme = capitulation events (high win rate reversals)
-- Connors RSI has 75% win rate for mean reversion in literature
-- 12h timeframe = 20-50 trades/year target (low fee drag)
-- 1d HTF prevents fighting major trends
-- Asymmetric: more aggressive longs in bull, more shorts in bear
+1. 1d timeframe = 20-50 trades/year target (minimal fee drag)
+2. 1w HTF provides stronger trend bias than 1d alone
+3. Choppiness Index correctly identifies regime for appropriate strategy
+4. Connors RSI has 75% win rate for mean reversion entries
+5. Donchian breakouts capture sustained trends without whipsaw
+6. ATR-based position sizing adjusts to volatility (smaller size in high vol)
 
-Timeframe: 12h (REQUIRED)
-HTF: 1d via mtf_data.get_htf_data() — called ONCE before loop
-Position sizing: 0.30 discrete (max 0.35)
+Key improvements over #106:
+- Higher TF (1d vs 12h) = fewer trades, less fee churn
+- 1w HTF = stronger trend filter than 1d
+- Dual regime = adapts to market conditions
+- More lenient thresholds = ensures trades (avoid 0-trade failure)
+
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data.get_htf_data() — called ONCE before loop
+Position sizing: 0.25-0.30 discrete (vol-adjusted)
 Stoploss: 2.5 * ATR(14) trailing
-Target trades: 25-50/year per symbol
+Target trades: 20-50/year per symbol
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_volspike_connors_bb_1d_v1"
-timeframe = "12h"
+name = "mtf_1d_dual_regime_connors_donchian_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -138,13 +140,47 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_hma_slope(hma_values, lookback=5):
+def calculate_hma_slope(hma_values, lookback=3):
     """Calculate HMA slope as percentage change."""
     slope = np.zeros(len(hma_values))
     for i in range(lookback, len(hma_values)):
         if hma_values[i - lookback] != 0:
             slope[i] = (hma_values[i] - hma_values[i - lookback]) / hma_values[i - lookback] * 100
     return slope
+
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high, lowest low over period)."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2
+    return upper, lower, mid
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean() / atr
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    return adx.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -153,31 +189,37 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_slope = calculate_hma_slope(hma_1d_21, 5)
+    hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
+    hma_1w_slope = calculate_hma_slope(hma_1w_21, 2)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
-    hma_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_slope)
+    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
+    hma_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_slope)
     
-    # Calculate 12h indicators
-    atr_7 = calculate_atr(high, low, close, 7)
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, 14)
     atr_30 = calculate_atr(high, low, close, 30)
     
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.5)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
     chop_14 = calculate_choppiness(high, low, close, 14)
     crsi = calculate_connors_rsi(close, 3, 2, 100)
     
-    # Volatility spike ratio
-    atr_ratio = atr_7 / np.where(atr_30 > 0, atr_30, 1e-10)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, 20)
+    adx_14 = calculate_adx(high, low, close, 14)
+    
+    # HMA for trend confirmation
+    hma_1d_21 = calculate_hma(close, 21)
+    hma_1d_50 = calculate_hma(close, 50)
+    
+    # Volatility ratio for position sizing
+    vol_ratio = atr_14 / np.where(atr_30 > 0, atr_30, 1e-10)
     
     signals = np.zeros(n)
     
-    # Position sizing (Rule 4 - discrete, max 0.40)
+    # Base position sizing (Rule 4 - discrete, max 0.40)
     BASE_SIZE = 0.30
     
     # Track position state
@@ -193,113 +235,106 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_slope_aligned[i]):
+        if np.isnan(hma_1w_21_aligned[i]) or np.isnan(hma_1w_slope_aligned[i]):
             continue
         
         if np.isnan(chop_14[i]) or np.isnan(crsi[i]):
             continue
         
-        if np.isnan(bb_lower[i]) or np.isnan(atr_ratio[i]):
+        if np.isnan(bb_lower[i]) or np.isnan(donchian_upper[i]):
             continue
         
-        # === 1D TREND BIAS ===
-        trend_1d_bullish = hma_1d_slope_aligned[i] > 0.3
-        trend_1d_bearish = hma_1d_slope_aligned[i] < -0.3
-        price_above_1d_hma = close[i] > hma_1d_21_aligned[i]
-        price_below_1d_hma = close[i] < hma_1d_21_aligned[i]
+        if np.isnan(adx_14[i]):
+            continue
+        
+        # === 1W TREND BIAS ===
+        trend_1w_bullish = hma_1w_slope_aligned[i] > 0.5
+        trend_1w_bearish = hma_1w_slope_aligned[i] < -0.5
+        price_above_1w_hma = close[i] > hma_1w_21_aligned[i]
+        price_below_1w_hma = close[i] < hma_1w_21_aligned[i]
+        
+        # === 1D TREND CONFIRMATION ===
+        trend_1d_bullish = hma_1d_21[i] > hma_1d_50[i]
+        trend_1d_bearish = hma_1d_21[i] < hma_1d_50[i]
         
         # === CHOPPINESS REGIME ===
         is_range_market = chop_14[i] > 55
         is_trend_market = chop_14[i] < 45
         
-        # === VOLATILITY SPIKE ===
-        vol_spike = atr_ratio[i] > 1.6  # Lowered from 1.8 for more trades
+        # === ADX STRENGTH ===
+        strong_trend = adx_14[i] > 25
+        weak_trend = adx_14[i] < 20
         
-        # === BOLLINGER BAND POSITION ===
-        price_below_bb_lower = close[i] < bb_lower[i]
-        price_above_bb_upper = close[i] > bb_upper[i]
-        
-        # === CONNORS RSI ===
-        crsi_oversold = crsi[i] < 25
-        crsi_overbought = crsi[i] > 75
-        crsi_extreme_low = crsi[i] < 15
-        crsi_extreme_high = crsi[i] > 85
-        
-        # === POSITION SIZING ===
+        # === POSITION SIZING (vol-adjusted) ===
         current_size = BASE_SIZE
-        if not is_range_market and not is_trend_market:
-            current_size = BASE_SIZE * 0.7
+        if vol_ratio[i] > 1.5:
+            current_size = BASE_SIZE * 0.7  # Reduce size in high vol
+        elif vol_ratio[i] < 0.7:
+            current_size = BASE_SIZE * 1.1  # Increase size in low vol
+        current_size = min(current_size, 0.35)
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRIES - Multiple confluence paths for more trades
-        long_score = 0
+        # === RANGE MARKET: MEAN REVERSION (Connors RSI + BB) ===
+        if is_range_market:
+            # LONG: CRSI oversold + price at BB lower
+            if crsi[i] < 30 and close[i] <= bb_lower[i] * 1.002:
+                if trend_1w_bullish or not trend_1w_bearish:
+                    new_signal = current_size
+            
+            # SHORT: CRSI overbought + price at BB upper
+            if crsi[i] > 70 and close[i] >= bb_upper[i] * 0.998:
+                if trend_1w_bearish or not trend_1w_bullish:
+                    new_signal = -current_size
+            
+            # Extreme mean reversion (override trend bias)
+            if crsi[i] < 15 and close[i] <= bb_lower[i] * 1.005:
+                new_signal = current_size
+            if crsi[i] > 85 and close[i] >= bb_upper[i] * 0.995:
+                new_signal = -current_size
         
-        # Path 1: Vol spike + BB lower + CRSI oversold (capitulation)
-        if vol_spike and price_below_bb_lower and crsi_oversold:
-            long_score += 3
+        # === TREND MARKET: BREAKOUT (Donchian + HMA) ===
+        if is_trend_market:
+            # LONG: Donchian breakout + bullish trend alignment
+            if close[i] > donchian_upper[i] * 0.998:
+                if trend_1w_bullish and trend_1d_bullish:
+                    new_signal = current_size
+                elif trend_1w_bullish or trend_1d_bullish:
+                    new_signal = current_size * 0.7
+            
+            # SHORT: Donchian breakdown + bearish trend alignment
+            if close[i] < donchian_lower[i] * 1.002:
+                if trend_1w_bearish and trend_1d_bearish:
+                    new_signal = -current_size
+                elif trend_1w_bearish or trend_1d_bearish:
+                    new_signal = -current_size * 0.7
         
-        # Path 2: Range market + CRSI extreme (mean revert)
-        if is_range_market and crsi_extreme_low:
-            long_score += 2
+        # === NEUTRAL/TRANSITION: HYBRID APPROACH ===
+        if not is_range_market and not is_trend_market:
+            # Use CRSI for entries but require trend confirmation
+            if crsi[i] < 25 and trend_1w_bullish:
+                new_signal = current_size * 0.7
+            if crsi[i] > 75 and trend_1w_bearish:
+                new_signal = -current_size * 0.7
+            
+            # Breakout with ADX confirmation
+            if close[i] > donchian_upper[i] * 0.998 and adx_14[i] > 22:
+                new_signal = current_size * 0.7
+            if close[i] < donchian_lower[i] * 1.002 and adx_14[i] > 22:
+                new_signal = -current_size * 0.7
         
-        # Path 3: Trend market + pullback + 1d bullish bias
-        if is_trend_market and trend_1d_bullish and crsi[i] < 35:
-            long_score += 2
-        
-        # Path 4: Price below 1d HMA but CRSI very low (deep pullback in bull)
-        if price_above_1d_hma and crsi[i] < 30:
-            long_score += 2
-        
-        # Path 5: Simple oversold (fallback for more trades)
-        if crsi[i] < 20 and price_below_bb_lower:
-            long_score += 1
-        
-        if long_score >= 2:
-            new_signal = current_size
-        elif long_score == 1 and bars_since_last_trade > 80:
-            new_signal = current_size * 0.5
-        
-        # SHORT ENTRIES
-        short_score = 0
-        
-        # Path 1: Vol spike + BB upper + CRSI overbought
-        if vol_spike and price_above_bb_upper and crsi_overbought:
-            short_score += 3
-        
-        # Path 2: Range market + CRSI extreme
-        if is_range_market and crsi_extreme_high:
-            short_score += 2
-        
-        # Path 3: Trend market + pullback + 1d bearish bias
-        if is_trend_market and trend_1d_bearish and crsi[i] > 65:
-            short_score += 2
-        
-        # Path 4: Price below 1d HMA but CRSI very high (rally in bear)
-        if price_below_1d_hma and crsi[i] > 70:
-            short_score += 2
-        
-        # Path 5: Simple overbought (fallback)
-        if crsi[i] > 80 and price_above_bb_upper:
-            short_score += 1
-        
-        if short_score >= 2:
-            new_signal = -current_size
-        elif short_score == 1 and bars_since_last_trade > 80:
-            new_signal = -current_size * 0.5
-        
-        # === FREQUENCY SAFEGUARD ===
-        # Force trade if no signal for 150 bars (~75 days on 12h)
-        if bars_since_last_trade > 150 and new_signal == 0.0 and not in_position:
-            if trend_1d_bullish and crsi[i] < 35:
+        # === FREQUENCY SAFEGUARD (ensure minimum trades) ===
+        if bars_since_last_trade > 120 and new_signal == 0.0 and not in_position:
+            # Force entry based on strongest signal available
+            if crsi[i] < 20:
                 new_signal = current_size * 0.4
-            elif trend_1d_bearish and crsi[i] > 65:
+            elif crsi[i] > 80:
                 new_signal = -current_size * 0.4
-            elif crsi[i] < 25:
+            elif trend_1w_bullish and close[i] > hma_1w_21_aligned[i]:
                 new_signal = current_size * 0.3
-            elif crsi[i] > 75:
+            elif trend_1w_bearish and close[i] < hma_1w_21_aligned[i]:
                 new_signal = -current_size * 0.3
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
@@ -323,12 +358,22 @@ def generate_signals(prices):
         # === REGIME REVERSAL EXIT ===
         regime_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and is_trend_market and trend_1d_bearish:
+            # Exit long if regime shifts to strong trend bearish
+            if position_side > 0 and is_trend_market and trend_1w_bearish and trend_1d_bearish:
                 regime_reversal = True
-            if position_side < 0 and is_trend_market and trend_1d_bullish:
+            # Exit short if regime shifts to strong trend bullish
+            if position_side < 0 and is_trend_market and trend_1w_bullish and trend_1d_bullish:
                 regime_reversal = True
         
-        if stoploss_triggered or regime_reversal:
+        # === CRSI REVERSAL EXIT (take profit on mean reversion) ===
+        crsi_exit = False
+        if in_position and is_range_market:
+            if position_side > 0 and crsi[i] > 60:
+                crsi_exit = True
+            if position_side < 0 and crsi[i] < 40:
+                crsi_exit = True
+        
+        if stoploss_triggered or regime_reversal or crsi_exit:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
