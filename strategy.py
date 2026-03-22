@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 1d Regime-Adaptive Hybrid (Mean Reversion + Trend Follow)
-Hypothesis: Daily timeframe needs LOOSE entry conditions to generate sufficient trades.
-Combines 1w HMA trend bias with 1d RSI/Z-score mean reversion entries.
-Key insight from failures: Multiple conflicting filters = 0 trades. Use OR logic for entries.
-Timeframe: 1d (REQUIRED), HTF: 1w via mtf_data helper (call ONCE before loop).
-Position sizing: 0.25 base, 0.30 max, discrete levels to minimize fee churn.
-Stoploss: 2.5*ATR trailing stop (wider for daily timeframe volatility).
-Entry logic: ANY of (RSI extreme, Z-score extreme, BB touch) + trend filter = trade
-This ensures ≥10 trades/symbol on train, ≥3 on test.
+Experiment #025: 15m RSI + EMA Momentum + 4h HMA Trend Filter
+Hypothesis: 15m timeframe needs looser entry conditions than 1h/4h to generate sufficient trades.
+Previous CRSI/Fisher strategies failed with 0 trades due to extreme thresholds (RSI<10, CRSI<10).
+This uses standard RSI(14) with 35/65 thresholds (much more frequent signals) + EMA crossover for momentum.
+4h HMA provides trend bias to avoid counter-trend trades. ATR stoploss at 2.5*ATR controls drawdown.
+Timeframe: 15m (REQUIRED), HTF: 4h via mtf_data helper.
+Position sizing: 0.25 base, 0.35 max, discrete levels to minimize fee churn.
+Key innovation: Looser RSI thresholds + EMA momentum filter = more trades while maintaining edge.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_regime_hybrid_1w_hma_v1"
-timeframe = "1d"
+name = "mtf_15m_rsi_ema_4h_hma_trend_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_rsi(close, period=14):
-    """Calculate RSI using vectorized pandas."""
+    """Calculate RSI using standard Wilder's method."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -28,28 +27,8 @@ def calculate_rsi(close, period=14):
     avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50.0)
-    return rsi.values
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score of price relative to rolling mean."""
-    close_s = pd.Series(close)
-    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - rolling_mean) / rolling_std
-    zscore = zscore.fillna(0.0)
-    return zscore.values
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma
-    bandwidth = np.nan_to_num(bandwidth, nan=0.0)
-    return upper, lower, bandwidth, sma
+    rsi = rsi.fillna(50.0).values
+    return rsi
 
 def calculate_atr(high, low, close, period=14):
     """Calculate ATR using Wilder's smoothing."""
@@ -59,11 +38,10 @@ def calculate_atr(high, low, close, period=14):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    atr = np.nan_to_num(atr, nan=0.0)
     return atr
 
 def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average."""
+    """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
     half = max(1, period // 2)
     sqrt_period = max(1, int(np.sqrt(period)))
@@ -71,6 +49,11 @@ def calculate_hma(close, period=21):
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
+
+def calculate_ema(close, period):
+    """Calculate EMA with proper min_periods."""
+    close_s = pd.Series(close)
+    return close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
 
 def calculate_adx(high, low, close, period=14):
     """Calculate ADX for trend strength."""
@@ -85,9 +68,9 @@ def calculate_adx(high, low, close, period=14):
     minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
     
     tr1 = high_s - low_s
-    tr2 = np.abs(high_s - close_s.shift(1))
-    tr3 = np.abs(low_s - close_s.shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr2 = (high_s - close_s.shift(1)).abs()
+    tr3 = (low_s - close_s.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
     atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
     plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
@@ -95,8 +78,8 @@ def calculate_adx(high, low, close, period=14):
     
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)
     adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    adx = adx.fillna(0.0)
-    return adx.values
+    
+    return adx.fillna(0).values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -105,32 +88,28 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
+    hma_4h = calculate_hma(df_4h['close'].values, 21)
     
-    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi_14 = calculate_rsi(close, 14)
-    rsi_7 = calculate_rsi(close, 7)
-    zscore = calculate_zscore(close, 20)
-    bb_upper, bb_lower, bb_bandwidth, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
+    rsi = calculate_rsi(close, 14)
+    ema_8 = calculate_ema(close, 8)
+    ema_21 = calculate_ema(close, 21)
+    ema_50 = calculate_ema(close, 50)
     adx = calculate_adx(high, low, close, 14)
-    
-    # Additional trend filters
-    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
     signals = np.zeros(n)
     
-    # Position sizing - discrete levels (Rule 4)
+    # Position sizing - discrete levels to minimize fee churn (Rule 4)
     SIZE_BASE = 0.25
-    SIZE_MAX = 0.30
+    SIZE_MAX = 0.35
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -139,96 +118,75 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(250, n):  # Need 200 for EMA200 + 50 for warmup
+    # ADX percentile for regime detection
+    adx_percentile = pd.Series(adx).rolling(window=100, min_periods=50).apply(
+        lambda x: np.sum(x[:-1] < x[-1]) / max(1, len(x[:-1])) * 100, raw=False
+    ).values
+    adx_percentile[np.isnan(adx_percentile)] = 50.0
+    
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(zscore[i]):
+        if np.isnan(rsi[i]) or np.isnan(ema_8[i]) or np.isnan(ema_21[i]):
             signals[i] = 0.0
             continue
         
-        # 1w trend bias (HTF)
-        bull_trend = close[i] > hma_1w_aligned[i]
-        bear_trend = close[i] < hma_1w_aligned[i]
+        # 4h trend bias (HTF) - primary filter
+        bull_trend = close[i] > hma_4h_aligned[i]
+        bear_trend = close[i] < hma_4h_aligned[i]
+        
+        # 15m momentum - EMA crossover
+        ema_bullish = ema_8[i] > ema_21[i]
+        ema_bearish = ema_8[i] < ema_21[i]
+        
+        # RSI signals - LOOSER thresholds for more trades
+        rsi_oversold = rsi[i] < 40  # Not extreme 10-15, but 40 for more signals
+        rsi_overbought = rsi[i] > 60  # Not extreme 85-90, but 60 for more signals
+        rsi_neutral = 40 <= rsi[i] <= 60
         
         # ADX regime
-        trending = adx[i] > 25
-        ranging = adx[i] < 20
-        
-        # RSI signals (LOOSE thresholds to ensure trades)
-        rsi_oversold = rsi_14[i] < 40  # Was 30, too strict
-        rsi_overbought = rsi_14[i] > 60  # Was 70, too strict
-        rsi_extreme_oversold = rsi_7[i] < 30
-        rsi_extreme_overbought = rsi_7[i] > 70
-        
-        # Z-score signals
-        zscore_oversold = zscore[i] < -1.0  # Was -1.5, too strict
-        zscore_overbought = zscore[i] > 1.0  # Was +1.5, too strict
-        
-        # Bollinger Band signals
-        price_at_lower = close[i] <= bb_lower[i] * 1.01
-        price_at_upper = close[i] >= bb_upper[i] * 0.99
+        trending = adx[i] > 25  # Trending market
+        ranging = adx[i] < 20  # Ranging market
         
         # EMA trend confirmation
-        ema_bullish = close[i] > ema_20[i] and close[i] > ema_50[i]
-        ema_bearish = close[i] < ema_20[i] and close[i] < ema_50[i]
+        ema_strong_bull = ema_8[i] > ema_21[i] and ema_21[i] > ema_50[i]
+        ema_strong_bear = ema_8[i] < ema_21[i] and ema_21[i] < ema_50[i]
         
         new_signal = 0.0
         
-        # === LONG ENTRY (ANY of these conditions = trade) ===
-        # Condition 1: RSI oversold + bull trend
-        if rsi_oversold and bull_trend:
+        # === LONG ENTRY ===
+        # Primary: RSI oversold + EMA bullish + 4h bull trend
+        if rsi_oversold and ema_bullish and bull_trend:
             new_signal = SIZE_BASE
-        
-        # Condition 2: Z-score oversold + bull trend
-        elif zscore_oversold and bull_trend:
-            new_signal = SIZE_BASE
-        
-        # Condition 3: Price at lower BB + bull trend
-        elif price_at_lower and bull_trend:
-            new_signal = SIZE_BASE
-        
-        # Condition 4: Extreme RSI (any trend)
-        elif rsi_extreme_oversold:
-            new_signal = SIZE_BASE
-        
-        # Condition 5: Strong confluence (RSI + Z-score + trend)
-        elif rsi_oversold and zscore_oversold and bull_trend:
+        # Strong: RSI very oversold + strong EMA + 4h bull
+        elif rsi[i] < 35 and ema_strong_bull and bull_trend:
             new_signal = SIZE_MAX
-        
-        # Condition 6: Ranging market + mean reversion
-        elif ranging and rsi_oversold and price_at_lower:
+        # Range market mean reversion: RSI oversold + ranging + 4h bull
+        elif rsi_oversold and ranging and bull_trend:
+            new_signal = SIZE_BASE
+        # Trending pullback: RSI oversold + trending + EMA bullish + 4h bull
+        elif rsi_oversold and trending and ema_bullish and bull_trend:
             new_signal = SIZE_BASE
         
-        # === SHORT ENTRY (ANY of these conditions = trade) ===
-        # Condition 1: RSI overbought + bear trend
-        if rsi_overbought and bear_trend:
+        # === SHORT ENTRY ===
+        # Primary: RSI overbought + EMA bearish + 4h bear trend
+        if rsi_overbought and ema_bearish and bear_trend:
             new_signal = -SIZE_BASE
-        
-        # Condition 2: Z-score overbought + bear trend
-        elif zscore_overbought and bear_trend:
-            new_signal = -SIZE_BASE
-        
-        # Condition 3: Price at upper BB + bear trend
-        elif price_at_upper and bear_trend:
-            new_signal = -SIZE_BASE
-        
-        # Condition 4: Extreme RSI (any trend)
-        elif rsi_extreme_overbought:
-            new_signal = -SIZE_BASE
-        
-        # Condition 5: Strong confluence (RSI + Z-score + trend)
-        elif rsi_overbought and zscore_overbought and bear_trend:
+        # Strong: RSI very overbought + strong EMA + 4h bear
+        elif rsi[i] > 65 and ema_strong_bear and bear_trend:
             new_signal = -SIZE_MAX
-        
-        # Condition 6: Ranging market + mean reversion
-        elif ranging and rsi_overbought and price_at_upper:
+        # Range market mean reversion: RSI overbought + ranging + 4h bear
+        elif rsi_overbought and ranging and bear_trend:
+            new_signal = -SIZE_BASE
+        # Trending pullback: RSI overbought + trending + EMA bearish + 4h bear
+        elif rsi_overbought and trending and ema_bearish and bear_trend:
             new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -238,7 +196,7 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for daily)
+            # Calculate trailing stop (2.5*ATR)
             current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
@@ -253,7 +211,7 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for daily)
+            # Calculate trailing stop (2.5*ATR)
             current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
