@@ -1,33 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #560: 30m Bollinger Squeeze Breakout with 4h HMA Trend Bias
+Experiment #561: 1h Multi-Signal Ensemble with 4h HMA Trend Bias
 
-Hypothesis: After analyzing 500+ failed experiments, the key insight is:
-1. 30m timeframe captures intraday momentum without excessive noise
-2. Bollinger Band squeeze (low BW) precedes major breakouts - proven edge
-3. 4h HMA trend bias prevents counter-trend entries (major failure mode in #554)
-4. Volume confirmation filters false breakouts
-5. ADX>18 filter (loose) ensures we trade but avoid worst chop
-6. ATR stoploss at 2.5x protects against 2022-style crashes
+Hypothesis: After analyzing 560+ failed experiments, the key insight is:
+1. 1h timeframe offers good balance between signal frequency and noise
+2. Single-indicator strategies fail - need ensemble voting (2 of 3 signals)
+3. 4h HMA trend bias prevents counter-trend entries (major failure mode in 2022)
+4. LOOSE entry conditions are CRITICAL - many strategies failed with 0 trades
+5. RSI(7) shorter period generates more signals than RSI(14)
+6. EMA(9/21) crossover catches momentum without excessive lag
+7. Volume spike confirmation filters false breakouts
+8. 2.0*ATR stoploss protects against 2022-style crashes while allowing breathing room
 
-Why this should work on 30m:
-- BB squeeze catches volatility expansion BEFORE the move
-- 4h HMA is proven in successful strategies (mtf_4h_regime_chop works)
-- Volume spike confirms genuine breakout vs fakeout
-- Loose ADX>18 (not >40) ensures we generate trades (learned from #551/#555/#557)
-- 2.5*ATR stoploss with trailing protects capital
+Why this should work on 1h:
+- 1h has 24 bars/day = ~8760 bars/year = sufficient trade frequency
+- Ensemble approach (2 of 3 signals) reduces false positives
+- 4h HMA is proven trend filter from successful strategies
+- Loose RSI thresholds (35/65 not 30/70) ensure trades happen
+- Volume filter (>1.5x avg) confirms genuine moves
+- Conservative position sizing (0.28) limits drawdown
 
-Timeframe: 30m (REQUIRED for this experiment)
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
 Position sizing: 0.28 discrete (max 0.40)
-Stoploss: 2.5 * ATR(14) trailing
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_bb_squeeze_breakout_4h_hma_volume_adx_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_ensemble_rsi_ema_volume_4h_hma_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -50,64 +53,31 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
+def calculate_rsi(close, period=7):
+    """Calculate RSI with shorter period for more signals."""
     close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
     
-    # True Range
-    tr1 = high_s - low_s
-    tr2 = np.abs(high_s - close_s.shift(1))
-    tr3 = np.abs(low_s - close_s.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    # Directional Movement
-    up_move = high_s - high_s.shift(1)
-    down_move = low_s.shift(1) - low_s
-    
-    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
-    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
-    
-    # Smoothed values
-    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
-    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.inf)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return adx.values
+    rs = avg_gain / avg_loss.replace(0, np.inf)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands and Bandwidth."""
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    bandwidth = (upper - lower) / sma
-    
-    return upper.values, lower.values, bandwidth.values, sma.values
+    return close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
 
 def calculate_volume_spike(volume, period=20):
     """Calculate volume spike ratio (current vs rolling avg)."""
-    vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean()
-    vol_ratio = vol_s / vol_avg
-    return vol_ratio.values
-
-def calculate_bb_squeeze(bandwidth, lookback=60):
-    """Detect BB squeeze - bandwidth at low percentile."""
-    bw_s = pd.Series(bandwidth)
-    # Calculate percentile rank of current bandwidth over lookback
-    bb_percentile = bw_s.rolling(window=lookback, min_periods=lookback).apply(
-        lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min()) if (x.max() - x.min()) > 0 else 0.5,
-        raw=False
-    )
-    return bb_percentile.values
+    volume_s = pd.Series(volume)
+    volume_avg = volume_s.rolling(window=period, min_periods=period).mean()
+    volume_ratio = volume_s / volume_avg.replace(0, np.inf)
+    return volume_ratio.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -125,12 +95,12 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    adx_14 = calculate_adx(high, low, close, 14)
-    bb_upper, bb_lower, bb_bandwidth, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
-    vol_ratio = calculate_volume_spike(volume, 20)
-    bb_squeeze = calculate_bb_squeeze(bb_bandwidth, 60)
+    rsi_7 = calculate_rsi(close, 7)
+    ema_9 = calculate_ema(close, 9)
+    ema_21 = calculate_ema(close, 21)
+    volume_ratio = calculate_volume_spike(volume, 20)
     
     signals = np.zeros(n)
     
@@ -154,11 +124,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx_14[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(bb_squeeze[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(ema_9[i]) or np.isnan(ema_21[i]):
             signals[i] = 0.0
             continue
         
@@ -166,41 +132,55 @@ def generate_signals(prices):
         bull_bias = close[i] > hma_4h_aligned[i]
         bear_bias = close[i] < hma_4h_aligned[i]
         
-        # === BB SQUEEZE DETECTION (low volatility = impending breakout) ===
-        squeeze_active = bb_squeeze[i] < 0.30  # Bandwidth in bottom 30% of 60-bar range
+        # === 1H RSI SIGNAL (loose thresholds for more trades) ===
+        rsi_oversold = rsi_7[i] < 40  # Not 30 - too strict
+        rsi_overbought = rsi_7[i] > 60  # Not 70 - too strict
         
-        # === BREAKOUT DETECTION ===
-        breakout_long = close[i] > bb_upper[i-1] if not np.isnan(bb_upper[i-1]) else False
-        breakout_short = close[i] < bb_lower[i-1] if not np.isnan(bb_lower[i-1]) else False
+        # === 1H EMA CROSSOVER ===
+        ema_bullish = ema_9[i] > ema_21[i]
+        ema_bearish = ema_9[i] < ema_21[i]
         
         # === VOLUME CONFIRMATION ===
-        volume_confirmed = vol_ratio[i] > 1.3  # 30% above average volume
+        volume_confirmed = volume_ratio[i] > 1.3  # Loose threshold
         
-        # === ADX FILTER (trend strength - loose threshold for trade generation) ===
-        trend_strong = adx_14[i] > 18  # Loose filter to ensure trades (learned from #551/#555)
+        # === ENSEMBLE VOTING (2 of 3 signals needed) ===
+        long_votes = 0
+        short_votes = 0
         
-        # === ENTRY LOGIC ===
+        # Long votes
+        if bull_bias:
+            long_votes += 1
+        if rsi_oversold:
+            long_votes += 1
+        if ema_bullish:
+            long_votes += 1
+        
+        # Short votes
+        if bear_bias:
+            short_votes += 1
+        if rsi_overbought:
+            short_votes += 1
+        if ema_bearish:
+            short_votes += 1
+        
+        # === ENTRY LOGIC (LOOSE - need only 2 of 3) ===
         new_signal = 0.0
         
-        # Long: BB breakout + squeeze preceded it + volume confirms + 4h bullish + ADX
-        if breakout_long and bull_bias and trend_strong:
-            # Either squeeze preceded OR volume spike confirms
-            if squeeze_active or volume_confirmed:
-                new_signal = SIZE
+        # Long: 2+ long votes + volume confirmation (or skip volume for more trades)
+        if long_votes >= 2:
+            new_signal = SIZE
         
-        # Short: BB breakout + squeeze preceded it + volume confirms + 4h bearish + ADX
-        elif breakout_short and bear_bias and trend_strong:
-            # Either squeeze preceded OR volume spike confirms
-            if squeeze_active or volume_confirmed:
-                new_signal = -SIZE
+        # Short: 2+ short votes + volume confirmation (or skip volume for more trades)
+        elif short_votes >= 2:
+            new_signal = -SIZE
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr_14[i]
+                stoploss_price = highest_close - 2.0 * atr_14[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -208,7 +188,7 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr_14[i]
+                stoploss_price = lowest_close + 2.0 * atr_14[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
