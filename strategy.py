@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #527: 12h Dual HMA Crossover with Daily Trend Filter
+Experiment #528: Daily HMA Trend with Weekly Bias and RSI Pullback
 
-Hypothesis: After 500+ failed experiments, the pattern is clear - complex regime-switching
-and multi-condition strategies FAIL on 12h timeframe. The winning approach is SIMPLICITY:
-1. Dual HMA crossover (fast/slow) for trend detection - HMA has less lag than EMA
-2. 1d HMA for directional bias - only trade in direction of higher timeframe trend
-3. RSI filter to avoid entering at extremes - prevents buying tops/selling bottoms
-4. Loose thresholds to ensure ≥10 trades/year - this was the #1 failure mode
-5. 2.5*ATR stoploss - tighter than 3.0*ATR for 12h swings
+Hypothesis: After 500+ failed experiments, the clearest pattern is that COMPLEXITY fails.
+Daily timeframe needs SIMPLE logic with loose filters to ensure sufficient trades.
+This strategy uses:
+1. Weekly HMA(21) for long-term trend bias - only trade with weekly trend
+2. Daily HMA(9/21) crossover for entry timing - HMA has less lag than EMA
+3. RSI(14) filter with WIDE bounds (25-75) - avoids extremes but allows entries
+4. 2.5*ATR stoploss - protects capital during 2022-style crashes
+5. Discrete position sizing (0.30) - limits drawdown during bear markets
 
-Why this should work:
-- HMA crossover is proven to work better than EMA (less lag, smoother)
-- 12h captures multi-day moves without 1d's slowness (2 bars/day)
-- Daily trend filter prevents counter-trend trades that destroy Sharpe
-- RSI 35-65 range ensures we enter on pullbacks, not extremes
-- Simple logic = more trades = statistical significance
+Why this should work on 1d:
+- Weekly trend filter prevents counter-trend trades (major Sharpe killer)
+- Daily HMA crossover captures multi-week moves
+- Loose RSI bounds ensure ≥10 trades/year (critical requirement)
+- Simple logic = fewer whipsaws = better risk-adjusted returns
+- 1d timeframe naturally filters noise compared to lower TFs
 
-Timeframe: 12h (REQUIRED)
-HTF: 1d via mtf_data helper (call ONCE before loop)
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
 Position sizing: 0.30 discrete
 Stoploss: 2.5 * ATR(14) trailing
 """
@@ -26,8 +27,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_dual_hma_crossover_daily_trend_rsi_filter_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_hma_weekly_bias_rsi_pullback_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -71,19 +72,19 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
     
-    # Dual HMA crossover on 12h
+    # Dual HMA crossover on 1d
     hma_fast = calculate_hma(close, 9)
     hma_slow = calculate_hma(close, 21)
     
@@ -105,7 +106,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -113,26 +114,26 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # === DAILY HMA TREND BIAS ===
-        bull_bias = close[i] > hma_1d_aligned[i]
-        bear_bias = close[i] < hma_1d_aligned[i]
+        # === WEEKLY HMA TREND BIAS ===
+        bull_bias = close[i] > hma_1w_aligned[i]
+        bear_bias = close[i] < hma_1w_aligned[i]
         
-        # === 12h HMA CROSSOVER ===
+        # === 1d HMA CROSSOVER ===
         hma_bullish = hma_fast[i] > hma_slow[i]
         hma_bearish = hma_fast[i] < hma_slow[i]
         
-        # === RSI FILTER (avoid extremes) ===
-        rsi_ok_long = rsi_14[i] < 65  # Don't buy when overbought
-        rsi_ok_short = rsi_14[i] > 35  # Don't sell when oversold
+        # === RSI FILTER (wide bounds for more trades) ===
+        rsi_ok_long = rsi_14[i] < 75  # Don't buy when extremely overbought
+        rsi_ok_short = rsi_14[i] > 25  # Don't sell when extremely oversold
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # Long: 12h HMA bullish + Daily bullish + RSI not overbought
+        # Long: 1d HMA bullish + Weekly bullish + RSI not overbought
         if hma_bullish and bull_bias and rsi_ok_long:
             new_signal = SIZE
         
-        # Short: 12h HMA bearish + Daily bearish + RSI not oversold
+        # Short: 1d HMA bearish + Weekly bearish + RSI not oversold
         elif hma_bearish and bear_bias and rsi_ok_short:
             new_signal = -SIZE
         
@@ -155,7 +156,7 @@ def generate_signals(prices):
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if 12h HMA flips against position
+        # Exit if 1d HMA flips against position
         if in_position and new_signal != 0.0:
             if position_side > 0 and hma_bearish:
                 new_signal = 0.0
