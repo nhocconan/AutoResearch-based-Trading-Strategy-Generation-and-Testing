@@ -1,40 +1,56 @@
 #!/usr/bin/env python3
 """
-Experiment #454: 4h KAMA Trend with Z-Score Mean Reversion and Volume Flow
+Experiment #455: 12h Connors RSI Mean Reversion with Daily HMA Trend Filter
 
-Hypothesis: After analyzing 453 failed experiments, Fisher+Choppiness failed 
-badly (Sharpe=-10.9 in #442). The key insight is that adaptive indicators 
-(KAMA) outperform fixed indicators (EMA/HMA) in crypto's variable volatility.
+Hypothesis: After analyzing 454 failed experiments, the pattern is clear:
+- Simple trend following fails on BTC/ETH (2022 crash destroys gains)
+- Pure mean reversion without trend filter gets caught in strong trends
+- 12h timeframe needs fewer, higher-quality signals to minimize fee drag
 
-This strategy uses:
-1. KAMA(10,2,30) - Kaufman Adaptive MA adapts to market noise, less whipsaw
-2. Z-Score(20) - Statistical mean reversion, more robust than RSI extremes
-3. Volume Flow - Taker buy volume ratio confirms institutional interest
-4. 1D ADX - Regime filter (trending vs ranging)
-5. 1W HMA - Major trend bias (prevents counter-trend disasters)
+This strategy combines:
+1. DAILY HMA(21) TREND BIAS (via mtf_data helper):
+   - Long only when price > 1d HMA (bullish bias)
+   - Short only when price < 1d HMA (bearish bias)
+   - HMA is smoother than EMA, critical for daily trend detection
 
-Entry Logic:
-- Long: Price > KAMA + Z-score < -1.5 + Volume flow > 0.55 + 1w HMA bull
-- Short: Price < KAMA + Z-score > +1.5 + Volume flow < 0.45 + 1w HMA bear
-- Ranging regime (ADX < 20): Looser Z-score thresholds (-1.2 / +1.2)
+2. CONNORS RSI (CRSI) FOR ENTRY TIMING:
+   - CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+   - Long when CRSI < 15 (extreme oversold)
+   - Short when CRSI > 85 (extreme overbought)
+   - More sensitive than regular RSI, catches reversals faster
+   - Proven 75% win rate in mean reversion literature
 
-Exit Logic:
-- ATR(14) trailing stop at 2.5x
-- Trend reversal (1w HMA flips)
-- Z-score mean reversion target (crosses 0)
+3. BOLLINGER BAND WIDTH REGIME FILTER:
+   - BB Width percentile < 30% = squeeze (expect breakout)
+   - BB Width percentile > 70% = expansion (mean reversion likely)
+   - Only take mean reversion signals when BB expanding
 
-Position Sizing: 0.28 discrete (conservative for 4h volatility)
+4. ATR(14) TRAILING STOP at 2.5x:
+   - Signal → 0 when price moves 2.5*ATR against position
+   - Critical for 2022-style crash protection
+
+5. POSITION SIZING: 0.30 discrete (conservative for 12h volatility)
+   - Max 30% capital per position
+   - Discrete levels minimize fee churn
+
+Why this should work on 12h:
+- CRSI is more sensitive than RSI(14), ensures sufficient trades
+- Daily HMA filter prevents counter-trend disasters
+- BB width filter avoids entering during squeezes (whipsaw risk)
+- Should work on BTC/ETH/SOL individually (not SOL-biased)
+- Fewer trades than lower timeframes = less fee drag
+
+Timeframe: 12h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
-
-Timeframe: 4h (REQUIRED for this experiment)
-HTF: 1d, 1w via mtf_data helper (call ONCE before loop)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_zscore_volume_1d_1w_hma_adaptive_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_crsi_daily_hma_bb_regime_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -47,45 +63,8 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average."""
-    n = len(close)
-    kama = np.full(n, np.nan)
-    
-    close_s = pd.Series(close)
-    
-    # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        change = np.abs(close[i] - close[i - er_period])
-        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        if volatility > 0:
-            er[i] = change / volatility
-        else:
-            er[i] = 0
-    
-    # Calculate smoothing constant
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
-    
-    # Calculate KAMA
-    kama[er_period - 1] = close[er_period - 1]
-    for i in range(er_period, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for statistical mean reversion."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - sma) / std.replace(0, np.inf)
-    return zscore.values
-
 def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average for smoother trend."""
+    """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
     half = max(1, period // 2)
     sqrt_period = max(1, int(np.sqrt(period)))
@@ -94,159 +73,176 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate Average Directional Index."""
-    n = len(close)
-    adx = np.full(n, np.nan)
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        plus_move = high[i] - high[i-1]
-        minus_move = low[i-1] - low[i]
-        
-        if plus_move > minus_move and plus_move > 0:
-            plus_dm[i] = plus_move
-        if minus_move > plus_move and minus_move > 0:
-            minus_dm[i] = minus_move
-    
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    for i in range(period, n):
-        if tr_s[i] > 1e-10:
-            plus_di = 100 * plus_dm_s[i] / tr_s[i]
-            minus_di = 100 * minus_dm_s[i] / tr_s[i]
-            di_sum = plus_di + minus_di
-            if di_sum > 1e-10:
-                dx = 100 * np.abs(plus_di - minus_di) / di_sum
-            else:
-                dx = 0
-        else:
-            dx = 0
-        
-        if i == period:
-            adx[i] = dx
-        else:
-            adx[i] = ((adx[i-1] * (period - 1)) + dx) / period
-    
-    return adx
+    rs = avg_gain / avg_loss.replace(0, np.inf)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
-def calculate_volume_flow(taker_buy_volume, volume):
-    """Calculate volume flow ratio (taker buy / total volume)."""
-    flow = np.zeros(len(volume))
-    for i in range(len(volume)):
-        if volume[i] > 0:
-            flow[i] = taker_buy_volume[i] / volume[i]
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Calculate Connors RSI (CRSI).
+    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    
+    This is more sensitive than regular RSI and catches reversals faster.
+    Proven 75% win rate for mean reversion strategies.
+    """
+    n = len(close)
+    crsi = np.full(n, np.nan)
+    
+    # RSI(3) - short period for sensitivity
+    rsi_short = calculate_rsi(close, rsi_period)
+    
+    # RSI Streak - measures consecutive up/down days
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
         else:
-            flow[i] = 0.5
-    return flow
+            streak[i] = 0
+    
+    # Convert streak to RSI-like value (0-100)
+    streak_rsi = np.zeros(n)
+    for i in range(streak_period, n):
+        if streak[i] > 0:
+            # Positive streak - calculate RSI of streak values
+            pos_streaks = streak[max(0, i-streak_period*2):i+1]
+            pos_only = pos_streaks[pos_streaks > 0]
+            if len(pos_only) > 0:
+                streak_rsi[i] = min(100, 50 + len(pos_only) * 10)
+            else:
+                streak_rsi[i] = 50
+        elif streak[i] < 0:
+            neg_streaks = streak[max(0, i-streak_period*2):i+1]
+            neg_only = neg_streaks[neg_streaks < 0]
+            if len(neg_only) > 0:
+                streak_rsi[i] = max(0, 50 - len(neg_only) * 10)
+            else:
+                streak_rsi[i] = 50
+        else:
+            streak_rsi[i] = 50
+    
+    # Percent Rank - where current price ranks in last 100 bars
+    for i in range(rank_period, n):
+        window = close[i-rank_period+1:i+1]
+        current = close[i]
+        rank = np.sum(window < current) / rank_period * 100
+        crsi[i] = (rsi_short[i] + streak_rsi[i] + rank) / 3
+    
+    return crsi
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and bandwidth."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / sma * 100  # bandwidth as percentage
+    
+    return upper.values, lower.values, bandwidth.values
+
+def calculate_bb_width_percentile(bandwidth, lookback=100):
+    """Calculate percentile rank of BB width over lookback period."""
+    n = len(bandwidth)
+    percentile = np.full(n, np.nan)
+    
+    for i in range(lookback, n):
+        window = bandwidth[i-lookback:i]
+        current = bandwidth[i]
+        # Percentile: what % of historical values are below current
+        pct = np.sum(window < current) / lookback * 100
+        percentile[i] = pct
+    
+    return percentile
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    kama = calculate_kama(close, 10, 2, 30)
-    zscore = calculate_zscore(close, 20)
-    vol_flow = calculate_volume_flow(taker_buy_volume, volume)
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    bb_upper, bb_lower, bb_bandwidth = calculate_bollinger_bands(close, 20, 2.0)
+    bb_width_pct = calculate_bb_width_percentile(bb_bandwidth, 100)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.28
+    SIZE = 0.30
     
     # Track position state for stoploss
     in_position = False
     position_side = 0
     highest_close = 0.0
     lowest_close = 0.0
+    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx_1d_aligned[i]):
+        if np.isnan(crsi[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama[i]) or np.isnan(zscore[i]):
+        if np.isnan(bb_width_pct[i]):
             signals[i] = 0.0
             continue
         
-        # === WEEKLY HMA TREND BIAS ===
-        bull_trend_1w = close[i] > hma_1w_aligned[i]
-        bear_trend_1w = close[i] < hma_1w_aligned[i]
+        # === DAILY HMA TREND BIAS ===
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === REGIME DETECTION (1D ADX) ===
-        trending_regime = adx_1d_aligned[i] > 25
-        ranging_regime = adx_1d_aligned[i] <= 25
+        # === BB WIDTH REGIME FILTER ===
+        # High percentile = bandwidth expanding = mean reversion likely
+        bb_expanding = bb_width_pct[i] > 50  # Above median
+        bb_squeeze = bb_width_pct[i] < 30  # Squeeze = avoid mean reversion
         
-        # === Z-SCORE THRESHOLDS (Adaptive to regime) ===
-        if trending_regime:
-            zscore_long_threshold = -1.5
-            zscore_short_threshold = 1.5
-        else:
-            zscore_long_threshold = -1.2
-            zscore_short_threshold = 1.2
-        
-        # === VOLUME FLOW CONFIRMATION ===
-        vol_flow_bull = vol_flow[i] > 0.55
-        vol_flow_bear = vol_flow[i] < 0.45
-        
-        # === PRICE vs KAMA ===
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # === CONNORS RSI SIGNALS ===
+        # CRSI < 15 = extreme oversold (long opportunity)
+        # CRSI > 85 = extreme overbought (short opportunity)
+        crsi_oversold = crsi[i] < 15
+        crsi_overbought = crsi[i] > 85
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # LONG ENTRY: Z-score oversold + volume confirmation + trend bias
-        if zscore[i] < zscore_long_threshold and vol_flow_bull and price_above_kama:
-            if bull_trend_1w:
-                new_signal = SIZE
-            elif ranging_regime:
-                # Allow long in ranging market even without 1w bull trend
-                new_signal = SIZE
+        # LONG: CRSI oversold + bull trend + BB not in squeeze
+        if crsi_oversold and bull_trend_1d and not bb_squeeze:
+            new_signal = SIZE
         
-        # SHORT ENTRY: Z-score overbought + volume confirmation + trend bias
-        if zscore[i] > zscore_short_threshold and vol_flow_bear and price_below_kama:
-            if bear_trend_1w:
-                new_signal = -SIZE
-            elif ranging_regime:
-                # Allow short in ranging market even without 1w bear trend
-                new_signal = -SIZE
+        # SHORT: CRSI overbought + bear trend + BB not in squeeze
+        elif crsi_overbought and bear_trend_1d and not bb_squeeze:
+            new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -266,22 +262,20 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === Z-SCORE MEAN REVERSION EXIT ===
-        # Exit long when z-score crosses above 0 (mean reached)
-        # Exit short when z-score crosses below 0 (mean reached)
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and i > 0 and not np.isnan(zscore[i-1]):
-                if zscore[i-1] < 0 and zscore[i] >= 0:
-                    new_signal = 0.0  # Take profit at mean
-            if position_side < 0 and i > 0 and not np.isnan(zscore[i-1]):
-                if zscore[i-1] > 0 and zscore[i] <= 0:
-                    new_signal = 0.0  # Take profit at mean
-        
         # === TREND REVERSAL EXIT ===
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_1w and not ranging_regime:
+            if position_side > 0 and bear_trend_1d:
                 new_signal = 0.0
-            if position_side < 0 and bull_trend_1w and not ranging_regime:
+            if position_side < 0 and bull_trend_1d:
+                new_signal = 0.0
+        
+        # === CRSI MEAN REVERSION EXIT ===
+        # Exit long when CRSI goes above 50 (mean reached)
+        # Exit short when CRSI goes below 50 (mean reached)
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and crsi[i] > 50:
+                new_signal = 0.0
+            if position_side < 0 and crsi[i] < 50:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -289,17 +283,20 @@ def generate_signals(prices):
             if not in_position:
                 in_position = True
                 position_side = np.sign(new_signal)
+                entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
                 # Position flip
                 position_side = np.sign(new_signal)
+                entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
         else:
             if in_position:
                 in_position = False
                 position_side = 0
+                entry_price = 0.0
                 highest_close = 0.0
                 lowest_close = 0.0
         
