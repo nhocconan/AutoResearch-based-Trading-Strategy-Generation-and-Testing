@@ -42,7 +42,12 @@ def write_strategy(code: str):
     STRATEGY_FILE.write_text(code)
 
 
-BACKTEST_TIMEOUT_S = 120  # Hard kill after 120s per symbol (15m needs more time with warmup)
+# Timeout scales with timeframe — lower TF = more bars = more time needed
+BACKTEST_TIMEOUT_BY_TF = {
+    "5m": 180, "15m": 150, "30m": 120, "1h": 90,
+    "4h": 60, "6h": 60, "12h": 45, "1d": 30,
+}
+BACKTEST_TIMEOUT_DEFAULT = 120
 
 
 def _run_single_backtest(queue, strategy_path, symbol, period):
@@ -68,22 +73,47 @@ class EarlyDiscardError(Exception):
         self.partial_results = partial_results or []
 
 
+def _get_timeout(strategy_path: str) -> int:
+    """Get timeout based on strategy's timeframe."""
+    try:
+        import re
+        code = Path(strategy_path).read_text()
+        m = re.search(r'timeframe\s*=\s*["\'](\w+)["\']', code)
+        if m:
+            tf = m.group(1)
+            return BACKTEST_TIMEOUT_BY_TF.get(tf, BACKTEST_TIMEOUT_DEFAULT)
+    except Exception:
+        pass
+    return BACKTEST_TIMEOUT_DEFAULT
+
+
+# Track timeout stats for monitoring
+_timeout_log = Path("timeout_log.txt")
+
+
 def run_backtest_all(symbols: list[str], strategy_path: str, period: str = "train",
                      early_discard: bool = True) -> list[dict]:
     """Run backtest on all symbols. Early exit if first symbol Sharpe < 0 or 0 trades."""
     from multiprocessing import Process, Queue
 
+    timeout_s = _get_timeout(strategy_path)
     results = []
     for symbol in symbols:
         q = Queue()
         p = Process(target=_run_single_backtest, args=(q, strategy_path, symbol, period))
         p.start()
-        p.join(timeout=BACKTEST_TIMEOUT_S)
+        p.join(timeout=timeout_s)
 
         if p.is_alive():
             p.kill()
             p.join(timeout=5)
-            raise TimeoutError(f"{symbol} backtest killed after {BACKTEST_TIMEOUT_S}s")
+            # Log timeout for monitoring
+            from datetime import datetime
+            msg = f"{datetime.now():%Y-%m-%d %H:%M} | TIMEOUT {timeout_s}s | {symbol} {period} | {Path(strategy_path).stem}\n"
+            with open(_timeout_log, "a") as f:
+                f.write(msg)
+            print(f"  [TIMEOUT] {symbol} killed after {timeout_s}s — logged to timeout_log.txt")
+            raise TimeoutError(f"{symbol} backtest killed after {timeout_s}s")
 
         if q.empty():
             raise RuntimeError(f"{symbol} backtest returned no result")
@@ -613,8 +643,12 @@ def main():
                 except Exception as e:
                     print(f"    {symbol} test ERROR: {e}")
 
+            except TimeoutError as e:
+                print(f"    {symbol} train TIMEOUT: {e} — skipping")
+                continue
             except Exception as e:
                 print(f"    {symbol} train ERROR: {e}")
+                continue
 
         # --- Prefix look-ahead test (once, on first symbol) ---
         if any_kept:
