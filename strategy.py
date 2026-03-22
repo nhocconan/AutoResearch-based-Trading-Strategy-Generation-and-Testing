@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #103: 15m RSI Mean Reversion + 4h HMA Trend Filter + Volume Confirmation
-Hypothesis: 15m timeframe is too noisy for pure trend following (see #091, #097 failures).
-Mean reversion with HTF trend bias works better on intraday TFs.
-4h HMA provides stable trend direction without excessive lag.
-RSI(14) pullback entries (30-70 range, not extremes) ensure enough trades.
-Volume confirmation (taker_buy_ratio > 0.55 for longs) filters false signals.
-ATR(14) stoploss at 2.0*ATR protects against adverse moves.
+Experiment #104: 30m KAMA Adaptive Trend + 4h HMA Filter + RSI Pullback + Volume
+Hypothesis: 30m timeframe needs adaptive trend following (KAMA) to handle crypto volatility.
+4h HMA provides stable trend bias without whipsaws. RSI pullback entries (not extremes)
+ensure we enter on dips in established trends. Volume confirmation filters false breakouts.
+ATR stoploss at 2.0x protects capital during reversals.
 
-Why this might work on 15m (learning from failed 15m experiments):
-- #091 (15m Supertrend) failed: Sharpe=-0.559, too many whipsaws
-- #097 (15m Supertrend + 4h HMA + 1h RSI + BB) failed: Sharpe=-1.612, too complex
-- Key insight: SIMPLER entry conditions + mean reversion bias = more trades, less churn
-- RSI pullback (not extremes) catches more entries than RSI<30 or RSI>70
-- 4h HMA is stable enough to filter noise but fast enough for 15m entries
-- Volume confirmation ensures we trade with market flow, not against it
+Why this might work on 30m (learning from failures):
+- #092 (30m CRSI mean reversion): Sharpe=-3.147 — mean reversion fails on 30m
+- #098 (30m EMA crossover): Sharpe=-0.836 — simple EMA too slow, too many whipsaws
+- #100 (4h KAMA adaptive): Sharpe=0.436 — KAMA works! Adapt to volatility
+- Key insight: KAMA adapts to market noise, slows in chop, speeds in trends
+- 4h HMA filter prevents counter-trend trades on 30m
+- Volume ratio > 1.2 confirms real moves vs fakeouts
+- Conservative sizing (0.20-0.30) limits drawdown
 
-Timeframe: 15m (REQUIRED), HTF: 4h via mtf_data helper (call ONCE before loop).
-Position sizing: 0.25 base, 0.35 strong signals. Stoploss at 2.0*ATR.
-Target: ≥10 trades per symbol on train, ≥3 on test, Sharpe > 0.436 (beat #100).
+Timeframe: 30m (REQUIRED), HTF: 4h via mtf_data helper (call ONCE before loop).
+Position sizing: 0.20 base, 0.30 strong signals. Stoploss at 2.0*ATR.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_rsi_meanrev_4h_hma_volume_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_kama_4h_hma_rsi_pullback_volume_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -61,6 +59,48 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market noise: fast in trends, slow in chop.
+    ER (Efficiency Ratio) = |price change| / sum of individual changes
+    SC (Smoothing Constant) = ER * (fast_SC - slow_SC) + slow_SC
+    """
+    n = len(close)
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    # Calculate Efficiency Ratio (ER)
+    price_change = np.abs(close - np.roll(close, er_period))
+    price_change[:er_period] = np.nan
+    
+    sum_changes = np.zeros(n)
+    for i in range(er_period, n):
+        sum_changes[i] = np.sum(np.abs(np.diff(close[i-er_period:i+1])))
+    
+    er = np.zeros(n)
+    mask = sum_changes > 0
+    er[mask] = price_change[mask] / sum_changes[mask]
+    er[:er_period] = np.nan
+    
+    # Smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Calculate SC (Smoothing Constant)
+    sc = er * (fast_sc - slow_sc) + slow_sc
+    sc[:er_period] = np.nan
+    
+    # Calculate KAMA
+    kama[er_period] = close[er_period]
+    for i in range(er_period + 1, n):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -71,24 +111,54 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_ema(close, period):
-    """Calculate EMA."""
-    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    n = len(close)
+    adx = np.zeros(n)
+    adx[:] = np.nan
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+    
+    dx = np.zeros(n)
+    mask = (plus_di + minus_di) > 0
+    dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / (plus_di[mask] + minus_di[mask])
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs moving average."""
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    vol_ratio = volume / vol_ma
+    vol_ratio[:period] = np.nan
+    return vol_ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
-    taker_buy_vol = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -100,23 +170,20 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
+    adx = calculate_adx(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    ema_21 = calculate_ema(close, 21)
-    ema_50 = calculate_ema(close, 50)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
-    
-    # Volume ratio (taker buy / total volume)
-    vol_ratio = np.zeros(n)
-    mask = volume > 0
-    vol_ratio[mask] = taker_buy_vol[mask] / volume[mask]
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    vol_ratio = calculate_volume_ratio(volume, 20)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.35
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -135,89 +202,86 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(bb_upper[i]):
+        if np.isnan(adx[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias
+        # 4h HMA = higher timeframe trend bias (stable, avoids whipsaws)
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === EMA ALIGNMENT (15m) ===
+        # === KAMA ADAPTIVE TREND ===
+        # KAMA adapts to volatility: fast in trends, slow in chop
+        kama_bullish = close[i] > kama[i] and kama[i] > kama[i-1] if i > 0 else False
+        kama_bearish = close[i] < kama[i] and kama[i] < kama[i-1] if i > 0 else False
+        
+        # === EMA ALIGNMENT ===
         ema_bullish = ema_21[i] > ema_50[i]
         ema_bearish = ema_21[i] < ema_50[i]
         
-        # === RSI MEAN REVERSION SIGNALS ===
-        # For longs in uptrend: RSI pullback to 35-50 (not oversold, just dip)
-        # For shorts in downtrend: RSI rally to 50-65 (not overbought, just bounce)
+        # === ADX REGIME FILTER (avoid choppy markets) ===
+        # ADX > 18 = trending market (lower for 30m to ensure trades)
+        trending_market = adx[i] > 18
+        strong_trend = adx[i] > 25
+        
+        # === RSI PULLBACK (not extremes - catch entries in trend) ===
+        # For longs: RSI 35-55 (pullback in uptrend)
+        # For shorts: RSI 45-65 (pullback in downtrend)
         rsi_pullback_long = 35 <= rsi[i] <= 55
         rsi_pullback_short = 45 <= rsi[i] <= 65
         
-        # RSI extreme mean reversion (works in range markets)
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
+        # RSI momentum confirmation
+        rsi_momentum_long = rsi[i] > 40
+        rsi_momentum_short = rsi[i] < 60
         
         # === VOLUME CONFIRMATION ===
-        # Long: taker buy ratio > 0.52 (buying pressure)
-        # Short: taker buy ratio < 0.48 (selling pressure)
-        vol_bullish = vol_ratio[i] > 0.52
-        vol_bearish = vol_ratio[i] < 0.48
-        
-        # === BOLLINGER BAND POSITION ===
-        near_bb_lower = close[i] <= bb_lower[i] * 1.005  # within 0.5% of lower band
-        near_bb_upper = close[i] >= bb_upper[i] * 0.995  # within 0.5% of upper band
-        near_bb_mid = (bb_lower[i] < close[i] < bb_upper[i])
+        # Volume ratio > 1.2 confirms real moves
+        volume_confirmed = vol_ratio[i] > 1.0
         
         new_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS (mean reversion in uptrend) ===
-        # Path 1: 4h bullish + RSI pullback + volume confirmation (primary)
-        if bull_trend_4h and rsi_pullback_long and vol_bullish:
-            if ema_bullish or near_bb_lower:
+        # === LONG ENTRY CONDITIONS ===
+        # Path 1: Strong trend + 4h bullish + KAMA bullish + volume (primary)
+        if strong_trend and bull_trend_4h and kama_bullish:
+            if volume_confirmed and (ema_bullish or rsi_momentum_long):
                 new_signal = SIZE_STRONG
-            else:
+            elif ema_bullish or rsi_pullback_long:
                 new_signal = SIZE_BASE
         
-        # Path 2: 4h bullish + RSI oversold (strong mean reversion)
-        if new_signal == 0.0 and bull_trend_4h and rsi_oversold:
-            if vol_bullish or ema_bullish:
+        # Path 2: 4h bullish + KAMA bullish + trending (simpler, ensures trades)
+        if new_signal == 0.0 and bull_trend_4h and kama_bullish and trending_market:
+            if ema_bullish or rsi_pullback_long:
                 new_signal = SIZE_BASE
         
-        # Path 3: 4h bullish + near BB lower + volume (BB bounce)
-        if new_signal == 0.0 and bull_trend_4h and near_bb_lower:
-            if vol_bullish or rsi_pullback_long:
+        # Path 3: 4h bullish + EMA bullish + RSI momentum (fallback)
+        if new_signal == 0.0 and bull_trend_4h and ema_bullish and rsi_momentum_long:
+            if trending_market:
                 new_signal = SIZE_BASE
         
-        # Path 4: Range market (4h neutral) + RSI oversold + BB lower (pure mean reversion)
-        if new_signal == 0.0 and rsi_oversold and near_bb_lower:
-            if vol_bullish:
-                new_signal = SIZE_BASE
-        
-        # === SHORT ENTRY CONDITIONS (mean reversion in downtrend) ===
-        # Path 1: 4h bearish + RSI pullback + volume confirmation (primary)
-        if bear_trend_4h and rsi_pullback_short and vol_bearish:
-            if ema_bearish or near_bb_upper:
+        # === SHORT ENTRY CONDITIONS ===
+        # Path 1: Strong trend + 4h bearish + KAMA bearish + volume (primary)
+        if strong_trend and bear_trend_4h and kama_bearish:
+            if volume_confirmed and (ema_bearish or rsi_momentum_short):
                 new_signal = -SIZE_STRONG
-            else:
+            elif ema_bearish or rsi_pullback_short:
                 new_signal = -SIZE_BASE
         
-        # Path 2: 4h bearish + RSI overbought (strong mean reversion)
-        if new_signal == 0.0 and bear_trend_4h and rsi_overbought:
-            if vol_bearish or ema_bearish:
+        # Path 2: 4h bearish + KAMA bearish + trending (simpler, ensures trades)
+        if new_signal == 0.0 and bear_trend_4h and kama_bearish and trending_market:
+            if ema_bearish or rsi_pullback_short:
                 new_signal = -SIZE_BASE
         
-        # Path 3: 4h bearish + near BB upper + volume (BB rejection)
-        if new_signal == 0.0 and bear_trend_4h and near_bb_upper:
-            if vol_bearish or rsi_pullback_short:
+        # Path 3: 4h bearish + EMA bearish + RSI momentum (fallback)
+        if new_signal == 0.0 and bear_trend_4h and ema_bearish and rsi_momentum_short:
+            if trending_market:
                 new_signal = -SIZE_BASE
         
-        # Path 4: Range market (4h neutral) + RSI overbought + BB upper (pure mean reversion)
-        if new_signal == 0.0 and rsi_overbought and near_bb_upper:
-            if vol_bearish:
-                new_signal = -SIZE_BASE
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR for 15m ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR for 30m ===
         # Update trailing highs/lows for active positions
         if in_position and position_side > 0:
             if close[i] > highest_close:
@@ -236,7 +300,6 @@ def generate_signals(prices):
                 new_signal = 0.0  # Stoploss hit
         
         # Update position tracking
-        # Entering new position
         if new_signal != 0.0 and not in_position:
             in_position = True
             position_side = np.sign(new_signal)
@@ -244,14 +307,12 @@ def generate_signals(prices):
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
-        # Reversing position
         elif new_signal != 0.0 and in_position and np.sign(new_signal) != position_side:
             position_side = np.sign(new_signal)
             entry_price = close[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
-        # Exiting position
         elif new_signal == 0.0 and in_position:
             in_position = False
             position_side = 0
