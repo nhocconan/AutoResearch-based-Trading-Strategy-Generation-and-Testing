@@ -1,64 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #422: 30m Volatility Squeeze + 4h HMA Trend + RSI Volume Confirmation
+Experiment #423: 1h Bollinger Squeeze + 4h HMA Trend + Volatility Expansion
 
-Hypothesis: After 421 experiments, 30m timeframe needs a DIFFERENT approach than 4h/12h.
-30m has more noise but also more opportunities. Key insights:
+Hypothesis: After 422 failed experiments, the pattern is clear:
+1. Pure trend-following fails on BTC/ETH (2022 crash + 2025 bear)
+2. Pure mean-reversion fails in strong trends  
+3. Need VOLATILITY-BASED entry with TREND BIAS
 
-1. VOLATILITY SQUEEZE REGIME (not ADX):
-   - Bollinger Band Width at 20-bar low = compression = breakout imminent
-   - BB Width percentile < 20% = squeeze (prepare for breakout)
-   - BB Width percentile > 60% = expansion (trend following)
-   - This works better than ADX on 30m (ADX too laggy for intraday)
+This strategy uses:
+1. BOLLINGER BAND SQUEEZE on 1h: BW < 25th percentile = low vol (coiling)
+2. VOLATILITY EXPANSION: BBW expanding from squeeze = breakout imminent
+3. 4h HMA(21) TREND BIAS: Long only when price > 4h HMA, short when <
+4. RSI(14) FILTER: Avoid entries at extremes (RSI 40-60 sweet spot for breakouts)
+5. ATR(14) STOPLOSS: 2.0x ATR trailing stop
 
-2. 4h HMA(21) TREND BIAS (via mtf_data helper):
-   - 4h is the RIGHT HTF for 30m (not 1d, which is too slow)
-   - 4h HMA smoother than EMA, critical for 30m/4h alignment
-   - Long only when price > 4h HMA in squeeze breakout
-   - Short only when price < 4h HMA in squeeze breakout
+Why this should work:
+- Squeeze captures "calm before storm" - works in both bull/bear
+- 4h HMA provides trend bias without being too strict
+- RSI filter avoids chasing extended moves
+- Conservative sizing (0.25) limits drawdown in 2022-style crashes
+- Works on 1h = more trades than 4h/12h strategies (meets trade count requirement)
 
-3. RSI(7) FAST MOMENTUM for 30m:
-   - RSI(7) instead of RSI(14) for faster 30m signals
-   - Long: RSI crosses above 40 from below (momentum building)
-   - Short: RSI crosses below 60 from above (momentum fading)
-   - More responsive than RSI(14) on 30m timeframe
-
-4. VOLUME CONFIRMATION:
-   - Volume > 1.5 * Volume_SMA(20) confirms breakout validity
-   - Reduces false breakouts on low-volume 30m bars
-   - Critical for 30m where noise is higher than 4h/12h
-
-5. DONCHIAN(20) BREAKOUT TRIGGER:
-   - Long: price breaks 20-bar high + volume confirmation + 4h HMA bullish
-   - Short: price breaks 20-bar low + volume confirmation + 4h HMA bearish
-   - Only enter during BB squeeze (percentile < 20%)
-
-6. ATR(14) TRAILING STOP at 2.5x:
-   - Signal → 0 when price moves 2.5*ATR against position
-   - Protects from 2022-style crashes on 30m timeframe
-
-7. POSITION SIZING: 0.25 discrete (conservative for 30m volatility)
-   - Max 25% capital per position (30m more volatile than 4h)
-   - Discrete levels minimize fee churn
-
-Why 30m with this approach should work:
-- BB squeeze catches breakouts before they happen (leading indicator)
-- 4h HMA provides trend filter without being too slow (like 1d)
-- RSI(7) + Volume reduces false signals on noisy 30m bars
-- Should generate 30-60 trades/year (more than 12h, less than 15m)
-- Works on BTC/ETH/SOL individually (not SOL-biased)
-
-Timeframe: 30m (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels
-Stoploss: 2.5 * ATR(14) trailing
+Timeframe: 1h (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper
+Position sizing: 0.25 discrete
+Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_bb_squeeze_4h_hma_rsi_vol_donchian_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_bb_squeeze_4h_hma_vol_expansion_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -81,8 +54,18 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=7):
-    """Calculate Relative Strength Index with faster period for 30m."""
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands and Bandwidth."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / sma * 100
+    return upper.values, lower.values, bandwidth.values, sma.values
+
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -95,56 +78,26 @@ def calculate_rsi(close, period=7):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands and Band Width."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    bandwidth = (upper - lower) / sma
-    return upper, lower, bandwidth
-
-def calculate_bb_width_percentile(bandwidth, lookback=100):
-    """Calculate percentile rank of BB Width over lookback period."""
-    n = len(bandwidth)
+def calculate_bbw_percentile(bb_width, lookback=100):
+    """Calculate rolling percentile of BB Width for squeeze detection."""
+    n = len(bb_width)
     percentile = np.full(n, np.nan)
     
     for i in range(lookback, n):
-        window = bandwidth[i-lookback:i+1]
+        window = bb_width[i-lookback:i+1]
         valid = window[~np.isnan(window)]
         if len(valid) > 0:
-            rank = np.sum(valid < bandwidth[i]) / len(valid)
-            percentile[i] = rank * 100
+            percentile[i] = np.sum(valid <= bb_width[i]) / len(valid) * 100
     
     return percentile
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high, lowest low over period)."""
-    n = len(high)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        upper[i] = high[i-period+1:i+1].max()
-        lower[i] = low[i-period+1:i+1].min()
-    
-    return upper, lower
-
-def calculate_volume_sma(volume, period=20):
-    """Calculate SMA of volume for volume confirmation."""
-    vol_s = pd.Series(volume)
-    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    # Load 4h HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
     
     # Calculate HTF indicators
@@ -153,13 +106,11 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 7)
-    bb_upper, bb_lower, bb_bandwidth = calculate_bollinger_bands(close, 20, 2.0)
-    bb_percentile = calculate_bb_width_percentile(bb_bandwidth, 100)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    volume_sma = calculate_volume_sma(volume, 20)
+    rsi = calculate_rsi(close, 14)
+    bb_upper, bb_lower, bb_width, bb_sma = calculate_bollinger(close, 20, 2.0)
+    bbw_percentile = calculate_bbw_percentile(bb_width, 100)
     
     signals = np.zeros(n)
     
@@ -171,9 +122,8 @@ def generate_signals(prices):
     position_side = 0
     highest_close = 0.0
     lowest_close = 0.0
-    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
@@ -183,69 +133,49 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        if np.isnan(bb_width[i]) or np.isnan(bbw_percentile[i]):
+            signals[i] = 0.0
+            continue
+        
         if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_percentile[i]):
-            signals[i] = 0.0
-            continue
+        # === SQUEEZE DETECTION ===
+        squeeze = bbw_percentile[i] < 25  # BW in bottom 25% = compression
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(volume_sma[i]) or volume_sma[i] == 0:
-            signals[i] = 0.0
-            continue
-        
-        # === VOLATILITY REGIME DETECTION ===
-        bb_squeeze = bb_percentile[i] < 20  # Bandwidth at 20% low = squeeze
-        bb_expansion = bb_percentile[i] > 60  # Bandwidth expanding = trend
+        # === VOLATILITY EXPANSION ===
+        vol_expansion = False
+        if i > 0 and not np.isnan(bb_width[i-1]) and bb_width[i-1] > 0:
+            vol_expansion = bb_width[i] > bb_width[i-1] * 1.03  # 3% expansion
         
         # === 4h HMA TREND BIAS ===
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        volume_spike = volume[i] > 1.5 * volume_sma[i]
-        
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        donchian_long = close[i] > donchian_upper[i-1]  # Break above previous high
-        donchian_short = close[i] < donchian_lower[i-1]  # Break below previous low
-        
-        # === RSI MOMENTUM CROSSOVER ===
-        rsi_momentum_long = rsi[i] > 40 and rsi[i-1] <= 40  # Cross above 40
-        rsi_momentum_short = rsi[i] < 60 and rsi[i-1] >= 60  # Cross below 60
+        # === RSI FILTER ===
+        # For breakouts: avoid extreme RSI (chasing) but allow momentum
+        rsi_ok_long = 40 < rsi[i] < 70  # Not oversold, not extremely overbought
+        rsi_ok_short = 30 < rsi[i] < 60  # Not overbought, not extremely oversold
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # BB SQUEEZE BREAKOUT (primary entry signal)
-        if bb_squeeze:
-            # Long: squeeze + bullish 4h trend + Donchian breakout + volume
-            if bull_trend_4h and donchian_long and volume_spike:
-                new_signal = SIZE
-            # Short: squeeze + bearish 4h trend + Donchian breakout + volume
-            elif bear_trend_4h and donchian_short and volume_spike:
-                new_signal = -SIZE
+        # Long: squeeze + expansion + bull trend + RSI ok
+        if squeeze and vol_expansion and bull_trend_4h and rsi_ok_long:
+            new_signal = SIZE
         
-        # BB EXPANSION TREND FOLLOWING (secondary entry)
-        elif bb_expansion:
-            # Long: expansion + bullish 4h + RSI momentum
-            if bull_trend_4h and rsi_momentum_long:
-                new_signal = SIZE
-            # Short: expansion + bearish 4h + RSI momentum
-            elif bear_trend_4h and rsi_momentum_short:
-                new_signal = -SIZE
+        # Short: squeeze + expansion + bear trend + RSI ok
+        elif squeeze and vol_expansion and bear_trend_4h and rsi_ok_short:
+            new_signal = -SIZE
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr[i]
+                stoploss_price = highest_close - 2.0 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -253,7 +183,7 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr[i]
+                stoploss_price = lowest_close + 2.0 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
@@ -264,32 +194,22 @@ def generate_signals(prices):
             if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0
         
-        # === RSI EXTREME EXIT (overbought/oversold) ===
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and rsi[i] > 80:
-                new_signal = 0.0  # Take profit on overbought
-            if position_side < 0 and rsi[i] < 20:
-                new_signal = 0.0  # Take profit on oversold
-        
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
             if not in_position:
                 in_position = True
                 position_side = np.sign(new_signal)
-                entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
                 # Position flip
                 position_side = np.sign(new_signal)
-                entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
         else:
             if in_position:
                 in_position = False
                 position_side = 0
-                entry_price = 0.0
                 highest_close = 0.0
                 lowest_close = 0.0
         
