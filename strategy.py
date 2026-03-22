@@ -1,36 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #175: 15m Multi-Timeframe Trend Pullback with Regime Filter
+Experiment #176: 30m KAMA Adaptive Trend + 4h HMA Filter + RSI Momentum + ADX Strength
 
-Hypothesis: 15m timeframe can work IF we use strong HTF filters to avoid noise.
-Key insight from failures: 15m mean-reversion is catastrophic (Sharpe=-31 in #169).
-Solution: Pure trend-following with 4h HMA bias + 1h ADX strength + 15m RSI pullback.
+Hypothesis: 30m timeframe captures intermediate trends with better signal frequency than 1h/4h.
+KAMA adapts to 30m volatility (fast in trends, slow in chop), 4h HMA provides stable 
+higher-timeframe bias, RSI confirms momentum direction (>50/<50 not extremes), and ADX 
+filters weak trends. This should generate enough trades while avoiding 30m noise.
 
-Why this might work on 15m:
-- 4h HMA provides stable trend bias (avoid counter-trend trades)
-- 1h ADX > 25 filters out choppy periods (major issue on 15m)
-- Choppiness Index < 50 confirms trending regime (avoid range whipsaws)
-- RSI pullback (40-60) enters on dips in uptrend, rallies in downtrend
-- Conservative sizing (0.25) + 2.5*ATR stoploss controls drawdown
-- Fewer, higher-quality trades than pure 15m strategies
+Why 30m might work:
+- 30m bars filter 5m/15m noise but capture more moves than 1h/4h
+- 4h HMA provides stable trend bias without 1w being too slow
+- KAMA efficiency ratio adapts to crypto's intraday volatility shifts
+- RSI > 50/< 50 for momentum (proven better than extreme mean-reversion on crypto)
+- ADX > 18 ensures sufficient trade count on 30m (lower than daily threshold)
+- Conservative sizing (0.25) protects against 2022-style crashes
 
-Learning from 15m failures (#163, #169, #170):
-- Mean reversion on 15m = disaster (Sharpe -2.6 to -31)
-- Need STRONG HTF filter (4h minimum, not just 1h)
-- Need regime filter (Choppiness/ADX) to avoid range markets
-- Need pullback entries, not breakouts (breakouts fake out on 15m)
+Learning from failures:
+- #170 (30m Fisher): Sharpe=-1.724, Return=-68.7% - Fisher too noisy on 30m
+- #175 (30m pullback): Sharpe=-4.690, Return=-87.5% - too many conflicting filters
+- #169 (15m vol spike): Sharpe=-31.583 - vol spike mean-reversion catastrophic
+- Mean reversion ALWAYS fails on crypto trend markets
+- Need 3/4 confirmation (not 5/5) to ensure enough trades on 30m
 
-Timeframe: 15m (REQUIRED for this experiment)
-HTF: 4h HMA + 1h ADX via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels (conservative for 15m volatility)
+Timeframe: 30m (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25 discrete levels (conservative for drawdown control)
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_trend_pullback_4h_hma_1h_adx_chop_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_kama_4h_hma_rsi_adx_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -47,6 +49,7 @@ def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index) for trend strength."""
     n = len(close)
     
+    # Calculate True Range and Directional Movement
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -65,15 +68,18 @@ def calculate_adx(high, low, close, period=14):
         if low_diff > high_diff and low_diff > 0:
             minus_dm[i] = low_diff
     
+    # Smooth with Wilder's method (EMA with span=period)
     plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     
+    # Avoid division by zero
     tr_s = np.where(tr_s == 0, 1e-10, tr_s)
     
     plus_di = 100 * plus_dm_s / tr_s
     minus_di = 100 * minus_dm_s / tr_s
     
+    # Calculate DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
     
@@ -88,6 +94,42 @@ def calculate_hma(close, period=21):
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market volatility - moves fast in trends, slow in chop.
+    """
+    n = len(close)
+    kama = np.zeros(n)
+    
+    # Calculate Efficiency Ratio
+    net_change = np.abs(close - np.roll(close, er_period))
+    net_change[:er_period] = np.abs(close[:er_period] - close[0])
+    
+    sum_abs_change = np.zeros(n)
+    for i in range(er_period, n):
+        sum_abs_change[i] = np.sum(np.abs(close[i-er_period+1:i+1] - np.roll(close[i-er_period+1:i+1], 1)))
+    sum_abs_change[:er_period] = sum_abs_change[er_period]
+    
+    # Avoid division by zero
+    sum_abs_change = np.where(sum_abs_change == 0, 1e-10, sum_abs_change)
+    er = net_change / sum_abs_change
+    er = np.clip(er, 0, 1)
+    
+    # Smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Calculate SC
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
 def calculate_rsi(close, period=14):
     """Calculate RSI (Relative Strength Index)."""
@@ -104,35 +146,6 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market (mean revert)
-    CHOP < 38.2 = trending market (trend follow)
-    We use CHOP < 50 as trending filter for 15m.
-    """
-    n = len(close)
-    chop = np.zeros(n)
-    
-    for i in range(period, n):
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        if highest_high == lowest_low:
-            chop[i] = 100
-        else:
-            atr_sum = 0
-            for j in range(i-period+1, i+1):
-                tr = max(high[j] - low[j], 
-                        abs(high[j] - close[j-1]), 
-                        abs(low[j] - close[j-1]))
-                atr_sum += tr
-            
-            chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
-    
-    chop[:period] = 50  # Default for initial bars
-    return chop
-
 def calculate_ema(close, period=21):
     """Calculate Exponential Moving Average."""
     close_s = pd.Series(close)
@@ -147,20 +160,18 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    df_1h = get_htf_data(prices, '1h')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    adx_1h = calculate_adx(df_1h['high'].values, df_1h['low'].values, df_1h['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    adx_1h_aligned = align_htf_to_ltf(prices, df_1h, adx_1h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
+    adx = calculate_adx(high, low, close, 14)
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     rsi = calculate_rsi(close, 14)
-    chop = calculate_choppiness(high, low, close, 14)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
     
@@ -181,32 +192,34 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(adx_1h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(chop[i]):
+        if np.isnan(adx[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias (stable)
+        # 4h HMA = higher timeframe trend bias (stable for 30m entries)
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
         # === TREND STRENGTH FILTER ===
-        # 1h ADX > 25 = strong trend (avoid chop on 15m)
-        trend_strength = adx_1h_aligned[i] > 25
+        # ADX > 18 = trending market (lower threshold for 30m to ensure trades)
+        trend_strength = adx[i] > 18
         
-        # === CHOPPINESS REGIME FILTER ===
-        # CHOP < 50 = trending market (avoid range whipsaws)
-        trending_regime = chop[i] < 50
+        # === KAMA ADAPTIVE TREND ===
+        # Price above KAMA = bullish adaptive trend
+        # Price below KAMA = bearish adaptive trend
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
-        # === RSI PULLBACK ENTRY ===
-        # In uptrend: enter on RSI pullback to 40-55 (not overbought)
-        # In downtrend: enter on RSI rally to 45-60 (not oversold)
-        rsi_pullback_long = 40 <= rsi[i] <= 55
-        rsi_pullback_short = 45 <= rsi[i] <= 60
+        # === RSI MOMENTUM ===
+        # RSI > 50 = bullish momentum
+        # RSI < 50 = bearish momentum
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
         
         # === EMA CONFIRMATION ===
         # EMA21 > EMA50 = bullish trend structure
@@ -217,15 +230,15 @@ def generate_signals(prices):
         new_signal = 0.0
         
         # === ENTRY CONDITIONS ===
-        # Long: 4h bullish + 1h ADX strong + CHOP trending + RSI pullback + EMA bullish
-        # Need 4 out of 5 conditions for high-confidence entry
-        long_score = sum([bull_trend_4h, trend_strength, trending_regime, rsi_pullback_long, ema_bullish])
-        if long_score >= 4:
+        # Long: 4h bullish + ADX trending + price>KAMA + RSI>50
+        # Using 3 out of 4 conditions to ensure enough trades on 30m
+        long_score = sum([bull_trend_4h, trend_strength, price_above_kama, rsi_bullish])
+        if long_score >= 3:
             new_signal = SIZE_BASE
         
-        # Short: 4h bearish + 1h ADX strong + CHOP trending + RSI pullback + EMA bearish
-        short_score = sum([bear_trend_4h, trend_strength, trending_regime, rsi_pullback_short, ema_bearish])
-        if short_score >= 4:
+        # Short: 4h bearish + ADX trending + price<KAMA + RSI<50
+        short_score = sum([bear_trend_4h, trend_strength, price_below_kama, rsi_bearish])
+        if short_score >= 3:
             new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
