@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #031: 4h Primary + 1d/1w HTF — Donchian Breakout with HMA Trend
+Experiment #032: 12h Primary + 1d/1w HTF — Simplified Trend Following
 
-Hypothesis: Previous failures due to over-filtering (too many conditions = 0 trades).
-This strategy uses SIMPLER confluence for reliable trade generation:
+Hypothesis: Recent failures caused by excessive filters (0 trades or whipsaw).
+This strategy SIMPLIFIES to core trend-following with minimal filters:
 
-1. 1d HMA(21) for MAJOR trend bias (only trade WITH 1d trend)
-2. 1w HMA(21) for SECULAR trend confirmation (avoid counter-trend in bear)
-3. Donchian(20) breakout for entry timing (proven on SOL)
-4. RSI(14) momentum filter (40-60 neutral, >55 long, <45 short)
-5. ATR(14) trailing stoploss at 2.5x
-6. Position sizing: 0.25-0.30 discrete based on trend strength
+1. 1d HMA(21) for major trend direction
+2. 1w HMA(21) for secular trend bias  
+3. 12h Donchian(20) breakout for entry signal
+4. 12h RSI(14) for pullback confirmation (not extreme)
+5. ATR(14) trailing stop at 2.5x
 
 Why this should work:
-- Donchian breakouts catch sustained moves (not whipsaws)
-- 1d + 1w HMA alignment filters out counter-trend trades
-- RSI filter avoids entering at exhaustion
-- 4h timeframe = 20-50 trades/year target (fee manageable)
-- Simpler logic = more trades generated (avoid 0-trade failure)
+- Fewer filters = more trades (target 20-50/year)
+- Donchian breakout catches sustained moves
+- HMA trend filter avoids counter-trend trades
+- RSI pullback ensures entry on retracement, not chase
+- Simple = robust across BTC/ETH/SOL
 
-Timeframe: 4h (REQUIRED per experiment #031)
+Timeframe: 12h (REQUIRED)
 HTF: 1d and 1w via mtf_data.get_htf_data() — called ONCE before loop
 Position sizing: 0.25-0.30 discrete
 Stoploss: 2.5 * ATR(14) trailing
@@ -29,8 +28,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_rsi_1d1w_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_hma_rsi_1d1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -68,7 +67,7 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_donchian_channels(high, low, period=20):
+def calculate_donchian(high, low, period=20):
     """Calculate Donchian Channel upper and lower bands."""
     high_s = pd.Series(high)
     low_s = pd.Series(low)
@@ -96,19 +95,18 @@ def generate_signals(prices):
     hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
     hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, 20)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
-    # 4h HMA for intermediate trend
-    hma_4h_21 = calculate_hma(close, 21)
+    # Donchian middle for reference
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
     signals = np.zeros(n)
     
     # Base position sizing (Rule 4 - discrete levels, max 0.40)
-    BASE_SIZE = 0.25
-    STRONG_SIZE = 0.30
+    BASE_SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -129,77 +127,57 @@ def generate_signals(prices):
         if np.isnan(rsi_14[i]) or np.isnan(donchian_upper[i]):
             continue
         
-        # === 1W SECULAR TREND (MAJOR BIAS) ===
-        # Price above 1w HMA = bull market (prefer longs)
-        # Price below 1w HMA = bear market (prefer shorts)
-        secular_bull = close[i] > hma_1w_21_aligned[i]
-        secular_bear = close[i] < hma_1w_21_aligned[i]
+        # === 1W SECULAR TREND BIAS ===
+        # Price above 1w HMA = bullish secular trend (prefer longs)
+        # Price below 1w HMA = bearish secular trend (prefer shorts)
+        trend_1w_bullish = close[i] > hma_1w_21_aligned[i]
+        trend_1w_bearish = close[i] < hma_1w_21_aligned[i]
         
-        # === 1D INTERMEDIATE TREND ===
+        # === 1D MAJOR TREND ===
         trend_1d_bullish = close[i] > hma_1d_21_aligned[i]
         trend_1d_bearish = close[i] < hma_1d_21_aligned[i]
         
-        # === 4H SHORT-TERM TREND ===
-        trend_4h_bullish = close[i] > hma_4h_21[i]
-        trend_4h_bearish = close[i] < hma_4h_21[i]
+        # === DONCHIAN BREAKOUT SIGNAL ===
+        # Breakout above upper = long signal
+        # Breakout below lower = short signal
+        breakout_long = close[i] > donchian_upper[i-1]  # Use previous bar's level
+        breakout_short = close[i] < donchian_lower[i-1]
         
-        # === RSI MOMENTUM FILTER ===
-        # RSI > 55 = bullish momentum
-        # RSI < 45 = bearish momentum
-        # 45-55 = neutral (no entry)
-        rsi_bullish = rsi_14[i] > 55
-        rsi_bearish = rsi_14[i] < 45
+        # === RSI PULLBACK FILTER ===
+        # For longs: RSI > 45 (momentum confirmed, not oversold trap)
+        # For shorts: RSI < 55 (momentum confirmed, not overbought trap)
+        rsi_ok_long = rsi_14[i] > 45
+        rsi_ok_short = rsi_14[i] < 55
         
-        # === DONCHIAN BREAKOUT ===
-        # Break above upper = long signal
-        # Break below lower = short signal
-        breakout_long = close[i] > donchian_upper[i]
-        breakout_short = close[i] < donchian_lower[i]
-        
-        # === POSITION SIZING BASED ON TREND CONFLUENCE ===
-        # Strong signal: all 3 TF aligned (1w + 1d + 4h)
-        # Normal signal: 1d + 4h aligned
-        long_confluence_strong = secular_bull and trend_1d_bullish and trend_4h_bullish
-        short_confluence_strong = secular_bear and trend_1d_bearish and trend_4h_bearish
-        
-        long_confluence_normal = trend_1d_bullish and trend_4h_bullish
-        short_confluence_normal = trend_1d_bearish and trend_4h_bearish
+        # === POSITION SIZING ===
+        current_size = BASE_SIZE
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRIES
-        # Require: Donchian breakout + RSI momentum + trend alignment
-        if breakout_long and rsi_bullish:
-            if long_confluence_strong:
-                new_signal = STRONG_SIZE
-            elif long_confluence_normal:
-                new_signal = BASE_SIZE
+        # LONG ENTRY: 1w bullish + 1d bullish + Donchian breakout + RSI ok
+        if trend_1w_bullish and trend_1d_bullish and breakout_long and rsi_ok_long:
+            new_signal = current_size
         
-        # SHORT ENTRIES
-        # Require: Donchian breakout + RSI momentum + trend alignment
-        if breakout_short and rsi_bearish:
-            if short_confluence_strong:
-                new_signal = -STRONG_SIZE
-            elif short_confluence_normal:
-                new_signal = -BASE_SIZE
+        # SHORT ENTRY: 1w bearish + 1d bearish + Donchian breakout + RSI ok
+        if trend_1w_bearish and trend_1d_bearish and breakout_short and rsi_ok_short:
+            new_signal = -current_size
         
         # === FREQUENCY SAFEGUARD ===
-        # If no trades for 300 bars (~50 days on 4h), allow weaker entry
-        # This ensures we generate minimum trades (Rule 9)
+        # If no trades for 300 bars (~15 days on 12h), allow weaker entry
         if bars_since_last_trade > 300 and new_signal == 0.0 and not in_position:
-            if trend_1d_bullish and trend_4h_bullish and rsi_14[i] > 50:
-                new_signal = BASE_SIZE * 0.8
-            elif trend_1d_bearish and trend_4h_bearish and rsi_14[i] < 50:
-                new_signal = -BASE_SIZE * 0.8
+            # Single timeframe trend + breakout
+            if trend_1d_bullish and breakout_long:
+                new_signal = current_size * 0.5
+            elif trend_1d_bearish and breakout_short:
+                new_signal = -current_size * 0.5
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
         
         if in_position and position_side != 0:
             if position_side > 0:
-                # Update highest price for long position
                 if close[i] > highest_price:
                     highest_price = close[i]
                 stoploss_price = highest_price - 2.5 * atr_14[i]
@@ -207,7 +185,6 @@ def generate_signals(prices):
                     stoploss_triggered = True
             
             if position_side < 0:
-                # Update lowest price for short position
                 if lowest_price == 0.0 or close[i] < lowest_price:
                     lowest_price = close[i]
                 stoploss_price = lowest_price + 2.5 * atr_14[i]
@@ -215,12 +192,13 @@ def generate_signals(prices):
                     stoploss_triggered = True
         
         # === TREND REVERSAL EXIT ===
-        # Exit if major trend reverses against position
         trend_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and trend_1d_bearish and rsi_14[i] < 40:
+            # Exit long if 1d trend turns bearish
+            if position_side > 0 and trend_1d_bearish:
                 trend_reversal = True
-            if position_side < 0 and trend_1d_bullish and rsi_14[i] > 60:
+            # Exit short if 1d trend turns bullish
+            if position_side < 0 and trend_1d_bullish:
                 trend_reversal = True
         
         # Apply stoploss or trend reversal
@@ -237,7 +215,6 @@ def generate_signals(prices):
                 lowest_price = close[i] if position_side < 0 else 0.0
                 last_trade_bar = i
             elif np.sign(new_signal) != position_side:
-                # Flip position
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_price = close[i] if position_side > 0 else 0.0
