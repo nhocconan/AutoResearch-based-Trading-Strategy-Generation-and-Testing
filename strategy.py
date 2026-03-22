@@ -1,40 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #236: 30m Fisher Transform + KAMA Trend + 4h HMA + ADX Regime + ATR Stop
+Experiment #237: 1h KAMA Adaptive Trend + 4h HMA Bias + ADX Filter + ATR Stop
 
-Hypothesis: 30m timeframe captures intraday swings while 4h HMA provides stable trend bias.
-Fisher Transform excels at identifying reversals in bear/range markets (2025 conditions).
-KAMA adapts to volatility - fast in trends, slow in ranges. ADX regime filter switches
-between trend-following (ADX>25) and mean-reversion (ADX<20) logic. This adaptive
-approach should work better than pure trend or pure mean-reversion strategies that
-have failed recently.
+Hypothesis: 1h timeframe balances noise reduction with trade frequency. KAMA (Kaufman Adaptive Moving Average) 
+adapts to market volatility - fast in trends, slow in ranges. Combined with 4h HMA for higher-timeframe bias,
+ADX for trend strength (threshold 15 to ensure trades), and ATR trailing stop for risk management.
 
-Why 30m + Fisher might work:
-- 30m = 48 bars/day, captures intraday reversals without 15m noise
-- Fisher Transform normalizes price to Gaussian distribution, extreme values = reversals
-- KAMA (Kaufman Adaptive) reduces whipsaws in choppy markets
-- 4h HMA filter prevents counter-trend trades
-- ADX regime switching adapts to market conditions (trend vs range)
-- Conservative sizing (0.25) controls drawdown
+Why this might work:
+- KAMA adapts to volatility better than fixed EMA/SMA (proven in literature)
+- 4h HMA provides stable trend bias without excessive lag
+- ADX > 15 (not 25) ensures sufficient trade count on 1h
+- ATR 2.5x stop protects against reversals
+- Conservative sizing (0.28) controls drawdown
 
 Learning from failures:
-- #224 (30m Supertrend): Sharpe=0.000 - pure trend failed
-- #230 (30m KAMA+BB): Sharpe=-0.582 - regime filter too strict
-- #235 (30m RSI+Chop): Sharpe=-3.648 - too many conflicting filters
-- Mean reversion alone fails, trend alone fails - need adaptive regime
-- Fisher Transform has shown promise for bear market reversals
+- #231 (1h RSI pullback): Sharpe=-1.409 - mean reversion fails on crypto
+- #235 (15m trend pullback): Sharpe=-3.648 - shorter TF = more noise
+- #236 (30m Fisher KAMA): Sharpe=-9.213 - too complex, overfitted
+- Trend-following with HTF bias works (current best uses 4h KAMA + 1d HMA)
+- Need to ensure enough trades - don't over-filter
 
-Timeframe: 30m (REQUIRED for this experiment)
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels
-Stoploss: 2.0 * ATR(14) trailing
+Position sizing: 0.28 discrete levels
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_fisher_kama_4h_hma_adx_regime_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_kama_4h_hma_adx_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -83,91 +79,44 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
-def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
-    """Calculate Kaufman Adaptive Moving Average."""
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market noise - fast during trends, slow during ranges.
+    Efficiency Ratio (ER) measures trend vs noise.
+    """
     n = len(close)
     kama = np.zeros(n)
     
     # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        change = np.abs(close[i] - close[i - er_period])
-        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        if noise > 0:
-            er[i] = change / noise
-        else:
-            er[i] = 0
+    change = np.abs(close - np.roll(close, period))
+    change[0] = 0
     
-    # Calculate Smoothing Constant
-    sc = (er * (2 / (fast_sc + 1) - 2 / (slow_sc + 1)) + 2 / (slow_sc + 1)) ** 2
+    volatility = np.zeros(n)
+    for i in range(period, n):
+        volatility[i] = np.sum(np.abs(close[i-period+1:i+1] - np.roll(close[i-period+1:i+1], 1)))
+    
+    er = np.zeros(n)
+    mask = volatility > 0
+    er[mask] = change[mask] / volatility[mask]
+    er = np.clip(er, 0, 1)
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
     # Initialize KAMA
-    kama[er_period] = close[er_period]
+    kama[period-1] = close[period-1]
     
     # Calculate KAMA
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    for i in range(period, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     # Fill initial values
-    kama[:er_period] = close[:er_period].mean()
+    kama[:period-1] = kama[period-1]
     
     return kama
-
-def calculate_fisher(close, period=9):
-    """Calculate Ehlers Fisher Transform for reversal detection."""
-    n = len(close)
-    fisher = np.zeros(n)
-    trigger = np.zeros(n)
-    
-    # Calculate highest high and lowest low over period
-    hh = np.zeros(n)
-    ll = np.zeros(n)
-    
-    for i in range(period - 1, n):
-        hh[i] = np.max(close[i - period + 1:i + 1])
-        ll[i] = np.min(close[i - period + 1:i + 1])
-    
-    hh[:period - 1] = hh[period - 1]
-    ll[:period - 1] = ll[period - 1]
-    
-    # Calculate normalized price
-    norm = np.zeros(n)
-    for i in range(period - 1, n):
-        if hh[i] > ll[i]:
-            norm[i] = 0.999 * (close[i] - ll[i]) / (hh[i] - ll[i]) - 0.5
-        else:
-            norm[i] = 0
-    
-    # Calculate Fisher Transform
-    for i in range(period - 1, n):
-        if np.abs(norm[i]) < 0.999:
-            fisher[i] = 0.5 * np.log((1 + norm[i]) / (1 - norm[i]))
-        else:
-            fisher[i] = fisher[i - 1] if i > 0 else 0
-    
-    # Trigger line (1-period lag of Fisher)
-    trigger[1:] = fisher[:-1]
-    
-    # Fill initial values
-    fisher[:period - 1] = 0
-    trigger[:period - 1] = 0
-    
-    return fisher, trigger
-
-def calculate_bollinger(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    
-    # Fill initial values
-    upper[:period - 1] = np.nan
-    lower[:period - 1] = np.nan
-    
-    return upper, lower, sma
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -209,18 +158,16 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     adx = calculate_adx(high, low, close, 14)
-    kama = calculate_kama(close, er_period=10)
-    fisher, fisher_trigger = calculate_fisher(close, period=9)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, period=20, std_dev=2.0)
+    kama = calculate_kama(close, period=10, fast_period=2, slow_period=30)
     rsi = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25
+    SIZE_BASE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -238,11 +185,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(kama[i]) or np.isnan(fisher[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(adx[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
@@ -251,66 +194,51 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === REGIME DETECTION ===
-        # ADX > 25 = trending market (use trend-following logic)
-        # ADX < 20 = ranging market (use mean-reversion logic)
-        # ADX 20-25 = transition (no new entries)
-        trending_regime = adx[i] > 25
-        ranging_regime = adx[i] < 20
+        # === TREND STRENGTH FILTER ===
+        # ADX > 15 = trending market (lower threshold for 1h to ensure trades)
+        trend_strength = adx[i] > 15
         
-        # === KAMA TREND ===
-        # Price above KAMA = bullish
-        # Price below KAMA = bearish
+        # === KAMA ADAPTIVE TREND ===
+        # Price above KAMA = bullish adaptive trend
+        # Price below KAMA = bearish adaptive trend
         kama_bullish = close[i] > kama[i]
         kama_bearish = close[i] < kama[i]
         
-        # === FISHER TRANSFORM REVERSAL ===
-        # Fisher crosses above -1.5 from below = long reversal signal
-        # Fisher crosses below +1.5 from above = short reversal signal
-        fisher_long_signal = fisher[i] > -1.5 and fisher_trigger[i] <= -1.5
-        fisher_short_signal = fisher[i] < 1.5 and fisher_trigger[i] >= 1.5
+        # === KAMA SLOPE ===
+        # KAMA sloping up = bullish momentum
+        # KAMA sloping down = bearish momentum
+        kama_slope_bullish = kama[i] > kama[i-1] if i > 0 else False
+        kama_slope_bearish = kama[i] < kama[i-1] if i > 0 else False
         
-        # === BOLLINGER BAND MEAN REVERSION ===
-        # Price at lower band = oversold (long opportunity in range)
-        # Price at upper band = overbought (short opportunity in range)
-        bb_long_signal = close[i] <= bb_lower[i] * 1.002  # Within 0.2% of lower band
-        bb_short_signal = close[i] >= bb_upper[i] * 0.998  # Within 0.2% of upper band
-        
-        # === RSI CONFIRMATION ===
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
+        # === RSI MOMENTUM ===
+        # RSI > 50 = bullish momentum
+        # RSI < 50 = bearish momentum
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
         
         new_signal = 0.0
         
-        # === TRENDING REGIME ENTRIES (ADX > 25) ===
-        if trending_regime:
-            # Long: 4h bullish + KAMA bullish + Fisher reversal confirmation
-            if bull_trend_4h and kama_bullish and fisher_long_signal:
+        # === ENTRY CONDITIONS ===
+        # Long: 4h bullish + ADX trending + KAMA bullish + (KAMA slope up OR RSI > 50)
+        # Using flexible conditions to ensure enough trades
+        if bull_trend_4h and trend_strength and kama_bullish:
+            if kama_slope_bullish or rsi_bullish:
                 new_signal = SIZE_BASE
-            
-            # Short: 4h bearish + KAMA bearish + Fisher reversal confirmation
-            if bear_trend_4h and kama_bearish and fisher_short_signal:
+        
+        # Short: 4h bearish + ADX trending + KAMA bearish + (KAMA slope down OR RSI < 50)
+        if bear_trend_4h and trend_strength and kama_bearish:
+            if kama_slope_bearish or rsi_bearish:
                 new_signal = -SIZE_BASE
         
-        # === RANGING REGIME ENTRIES (ADX < 20) ===
-        if ranging_regime:
-            # Long: 4h bullish bias + BB lower + RSI oversold
-            if bull_trend_4h and bb_long_signal and rsi_oversold:
-                new_signal = SIZE_BASE
-            
-            # Short: 4h bearish bias + BB upper + RSI overbought
-            if bear_trend_4h and bb_short_signal and rsi_overbought:
-                new_signal = -SIZE_BASE
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Check stoploss on EXISTING position before considering new entry
         if in_position:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                # Trailing stop: 2.0 * ATR below highest close
-                stoploss_price = highest_close - 2.0 * atr[i]
+                # Trailing stop: 2.5 * ATR below highest close
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
             
@@ -318,8 +246,8 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                # Trailing stop: 2.0 * ATR above lowest close
-                stoploss_price = lowest_close + 2.0 * atr[i]
+                # Trailing stop: 2.5 * ATR above lowest close
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
         
@@ -338,6 +266,7 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
+            # else: maintaining same position direction
         else:
             # Exiting position (signal-based or stoploss)
             if in_position:
