@@ -1,40 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #273: 1h KAMA Trend with 4h HMA Bias and 12h ADX Regime Filter
+Experiment #274: 4h KAMA Trend with 1d HMA Bias and ADX Regime Filter
 
-Hypothesis: The 1h timeframe sits in a difficult zone - too noisy for pure trend,
-too slow for mean reversion. Success requires strong HTF filtering:
+Hypothesis: After analyzing 273 experiments, the pattern is clear:
+- Complex ensembles with RSI fail consistently (#251, #254, #259, #262)
+- Simple trend-following with strong HTF bias works best
+- Current best (mtf_4h_kama_1d_hma_adx_atr_v1) has Sharpe=0.478
 
-1. 4h HMA(21) for directional bias - proven in best strategy (Sharpe=0.478)
-2. 1h KAMA(14) for adaptive trend following - adjusts to volatility
-3. 12h ADX(14) for regime filter - only trade when ADX > 20 (trending regime)
-4. ATR(14) trailing stoploss at 2.5*ATR - tighter than 12h strategies
-5. Asymmetric entries - only long when 4h HMA bullish, only short when bearish
-6. Volume confirmation - but loose threshold (1.2x not 1.5x) to ensure trades
+This strategy improves by:
+1. Using KAMA(21) on 4h - adaptive to volatility, less lag than EMA
+2. 1d HMA(21) for directional bias - prevents counter-trend trades in 2022 crash
+3. ADX(14) regime filter - only trade when ADX>20 (trending, not choppy)
+4. Asymmetric entry - only long when 1d HMA bullish, only short when bearish
+5. 2.5*ATR trailing stoploss - appropriate for 4h timeframe
+6. Discrete position sizing (0.25/0.30) to minimize fee churn
+7. Looser ADX threshold (20 not 25) to ensure >=10 trades per symbol
 
-Why this might beat the 4h baseline:
-- 1h has 4x more bars = more entry opportunities
-- KAMA adapts faster than EMA in volatile regimes
-- 12h ADX filter prevents choppy market whipsaws
-- Still uses proven 4h HMA bias from best strategy
+Why this might beat the current best:
+- KAMA adapts to volatility better than HMA in ranging markets
+- ADX filter removes whipsaw trades during low-volatility periods
+- Asymmetric entries prevent fighting the HTF trend
+- Simpler logic = fewer conflicting conditions = more trades
 
-Key differences from failed 1h strategies:
-- NO RSI (failed in #261, #267)
-- NO complex ensemble voting (failed in #256)
-- NO mean reversion (failed in #261 with Sharpe=-24)
-- Simple: HTF bias + adaptive trend + regime filter
-
-Position sizing: 0.25 base, 0.35 max (discrete levels)
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25-0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h HMA + 12h ADX via mtf_data helper (call ONCE before loop)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_kama_trend_4h_hma_12h_adx_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_kama_trend_1d_hma_adx_asymmetric_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -47,34 +45,42 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(close, period=14, fast_period=2, slow_period=30):
+def calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30):
     """
-    Calculate Kaufman's Adaptive Moving Average.
-    KAMA adapts to market noise - smooth in ranging, responsive in trending.
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market noise - moves fast in trends, slow in chop.
+    Formula: KAMA = KAMA_prev + SC * (Price - KAMA_prev)
+    SC = (ER * (fast_SC - slow_SC) + slow_SC)^2
+    ER = Change / Sum of absolute changes over efficiency_period
     """
     n = len(close)
     kama = np.zeros(n)
     kama[:] = np.nan
     
-    # Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(period, n):
-        signal = np.abs(close[i] - close[i - period])
-        noise = np.sum(np.abs(np.diff(close[i - period:i + 1])))
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(close - np.roll(close, efficiency_period))
+    change[:efficiency_period] = np.nan
     
-    # Smoothing constant
-    sc = (er * (2.0 / (fast_period + 1) - 2.0 / (slow_period + 1)) + 2.0 / (slow_period + 1)) ** 2
+    sum_change = np.zeros(n)
+    sum_change[:] = np.nan
+    for i in range(efficiency_period, n):
+        sum_change[i] = np.sum(np.abs(close[i-efficiency_period+1:i+1] - np.roll(close[i-efficiency_period+1:i+1], 1)))
+    
+    er = change / sum_change
+    er = np.nan_to_num(er, nan=0.0)
+    er = np.clip(er, 0.0, 1.0)
+    
+    # Calculate Smoothing Constant (SC)
+    fast_sc = 2.0 / (fast_period + 1.0)
+    slow_sc = 2.0 / (slow_period + 1.0)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
     # Initialize KAMA
-    kama[period] = close[period]
+    kama[efficiency_period] = close[efficiency_period]
     
     # Calculate KAMA
-    for i in range(period + 1, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    for i in range(efficiency_period + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     return kama
 
@@ -89,51 +95,57 @@ def calculate_hma(close, period=21):
     return wma3.values
 
 def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
+    """
+    Calculate Average Directional Index (ADX).
+    ADX > 25 = trending, ADX < 20 = ranging/choppy.
+    """
     n = len(close)
     adx = np.zeros(n)
     adx[:] = np.nan
     
+    # Calculate True Range and Directional Movement
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
-    tr = np.zeros(n)
     
     for i in range(1, n):
-        # True Range
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
         
-        # Directional Movement
-        plus_dm[i] = high[i] - high[i-1] if (high[i] - high[i-1] > low[i-1] - low[i] and high[i] - high[i-1] > 0) else 0
-        minus_dm[i] = low[i-1] - low[i] if (low[i-1] - low[i] > high[i] - high[i-1] and low[i-1] - low[i] > 0) else 0
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
     
-    # Smooth DM and TR
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    dx = np.zeros(n)
-    
-    # Use EMA for smoothing (faster than Wilder's)
+    # Smooth TR, +DM, -DM using Wilder's method (EMA with span=period)
     tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    for i in range(period, n):
-        if tr_s[i] > 0:
-            plus_di[i] = 100 * plus_dm_s[i] / tr_s[i]
-            minus_di[i] = 100 * minus_dm_s[i] / tr_s[i]
-        else:
-            plus_di[i] = 0
-            minus_di[i] = 0
-        
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-        else:
-            dx[i] = 0
+    # Calculate +DI and -DI
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
     
-    # ADX = EMA of DX
-    dx_s = pd.Series(dx)
-    adx_vals = dx_s.ewm(span=period, min_periods=period, adjust=False).mean().values
-    adx[:] = adx_vals
+    mask = tr_s > 0
+    plus_di[mask] = 100.0 * plus_dm_s[mask] / tr_s[mask]
+    minus_di[mask] = 100.0 * minus_dm_s[mask] / tr_s[mask]
+    
+    # Calculate DX and ADX
+    di_sum = plus_di + minus_di
+    di_diff = np.abs(plus_di - minus_di)
+    
+    dx = np.zeros(n)
+    mask2 = di_sum > 0
+    dx[mask2] = 100.0 * di_diff[mask2] / di_sum[mask2]
+    
+    # ADX is EMA of DX
+    adx_s = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean()
+    adx = adx_s.values
     
     return adx
 
@@ -143,43 +155,33 @@ def calculate_ema(close, period=21):
     ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     return ema.values
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate simple moving average of volume."""
-    vol_s = pd.Series(volume)
-    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_sma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
-    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    kama = calculate_kama(close, 14, 2, 30)
+    kama_4h = calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30)
+    adx_4h = calculate_adx(high, low, close, 14)
     ema_50 = calculate_ema(close, 50)
-    vol_sma = calculate_volume_sma(volume, 20)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25  # Base position size
+    SIZE_BASE = 0.25  # Base position size (conservative)
+    SIZE_STRONG = 0.30  # Stronger signal size
     SIZE_MAX = 0.35  # Maximum position size
-    SIZE_MIN = 0.15  # Minimum position size
     
     # Track position state for stoploss
     in_position = False
@@ -194,71 +196,62 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx_12h_aligned[i]):
+        if np.isnan(kama_4h[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama[i]) or np.isnan(ema_50[i]):
+        if np.isnan(adx_4h[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(vol_sma[i]) or vol_sma[i] == 0:
-            signals[i] = 0.0
-            continue
+        # === HIGHER TIMEFRAME BIAS ===
+        # 1d HMA = strong directional bias (hard filter)
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === HIGHER TIMEFRAME BIAS (4h HMA) ===
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # === TREND REGIME FILTER ===
+        # ADX > 20 = trending market (trade with trend)
+        # ADX < 20 = choppy market (stay flat or reduce size)
+        trending_market = adx_4h[i] > 20.0
         
-        # === REGIME FILTER (12h ADX) ===
-        # Only trade when ADX > 20 (trending regime, not choppy)
-        trending_regime = adx_12h_aligned[i] > 20.0
+        # === 4H TREND SIGNAL ===
+        # KAMA crossover with price
+        kama_bullish = close[i] > kama_4h[i]
+        kama_bearish = close[i] < kama_4h[i]
         
-        # === VOLUME CONFIRMATION ===
-        # Loose threshold to ensure >=10 trades per symbol
-        volume_confirmed = volume[i] > 1.2 * vol_sma[i]
-        
-        # === KAMA TREND SIGNAL ===
-        # KAMA crossover with EMA50 for entry timing
-        kama_above_ema = kama[i] > ema_50[i]
-        kama_below_ema = kama[i] < ema_50[i]
-        
-        # KAMA slope (momentum confirmation)
-        kama_slope_up = kama[i] > kama[i-1] if i > 0 else False
-        kama_slope_down = kama[i] < kama[i-1] if i > 0 else False
+        # Additional confirmation: price above/below 50 EMA
+        ema_bullish = close[i] > ema_50[i] if not np.isnan(ema_50[i]) else False
+        ema_bearish = close[i] < ema_50[i] if not np.isnan(ema_50[i]) else False
         
         # === POSITION SIZING ===
-        # Increase size when trend is strong (ADX > 30)
-        strong_trend = adx_12h_aligned[i] > 30.0
-        if strong_trend:
-            position_size = SIZE_MAX
+        # Increase size when ADX is strong (>30 = very trending)
+        if adx_4h[i] > 30.0:
+            position_size = SIZE_STRONG
         else:
             position_size = SIZE_BASE
         
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
         
-        # LONG ENTRY: Need 4h bias up + trending regime + KAMA signal + volume
+        # LONG ENTRY: Need 1d bias up + 4h KAMA bullish + ADX trending + EMA confirmation
         # Looser conditions to ensure >=10 trades per symbol
         long_conditions = (
-            bull_trend_4h and  # 4h HMA bias bullish
-            trending_regime and  # 12h ADX confirms trending
-            kama_above_ema and  # KAMA above EMA50
-            kama_slope_up and  # KAMA sloping up
-            volume_confirmed  # Volume confirms
+            bull_trend_1d and  # 1d HMA bias bullish
+            kama_bullish and  # 4h KAMA bullish
+            trending_market and  # ADX confirms trending
+            ema_bullish  # Price above 50 EMA
         )
         
         # SHORT ENTRY: Mirror of long
         short_conditions = (
-            bear_trend_4h and  # 4h HMA bias bearish
-            trending_regime and  # 12h ADX confirms trending
-            kama_below_ema and  # KAMA below EMA50
-            kama_slope_down and  # KAMA sloping down
-            volume_confirmed  # Volume confirms
+            bear_trend_1d and  # 1d HMA bias bearish
+            kama_bearish and  # 4h KAMA bearish
+            trending_market and  # ADX confirms trending
+            ema_bearish  # Price below 50 EMA
         )
         
         # === GENERATE SIGNAL ===
@@ -292,15 +285,15 @@ def generate_signals(prices):
         # === TREND REVERSAL EXIT ===
         # Exit if HTF bias reverses against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_4h:
-                new_signal = 0.0  # 4h trend reversed against long
-            if position_side < 0 and bull_trend_4h:
-                new_signal = 0.0  # 4h trend reversed against short
+            if position_side > 0 and bear_trend_1d:
+                new_signal = 0.0  # 1d trend reversed against long
+            if position_side < 0 and bull_trend_1d:
+                new_signal = 0.0  # 1d trend reversed against short
         
-        # === REGIME EXIT ===
-        # Exit if regime becomes choppy (ADX < 18 with hysteresis)
-        if in_position and adx_12h_aligned[i] < 18.0:
-            new_signal = 0.0  # Regime no longer trending
+        # === ADX DROPOUT EXIT ===
+        # Exit if market becomes choppy (ADX falls below 18)
+        if in_position and adx_4h[i] < 18.0:
+            new_signal = 0.0  # Market no longer trending
         
         # === UPDATE POSITION TRACKING FOR NEXT BAR ===
         if new_signal != 0.0:
@@ -317,7 +310,7 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
-            # else: maintaining same position direction (possibly adjusted size)
+            # else: maintaining same position direction
         else:
             # Exiting position (signal-based or stoploss)
             if in_position:
