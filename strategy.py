@@ -1,37 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #049: 4h Primary + 1d HTF — Simplified Trend Pullback
+Experiment #050: 1h Primary + 4h/12h HTF — Simplified Trend Pullback
 
-Hypothesis: Previous 4h strategies failed due to TOO MANY filters causing 0 trades.
-This strategy SIMPLIFIES entry conditions while keeping HTF trend alignment:
+Hypothesis: Previous strategies failed due to OVERLY STRICT confluence (0 trades).
+This strategy uses SIMPLER but EFFECTIVE filters to ensure trade generation:
 
-1. 1d HMA(21) for MAJOR trend bias (only trade WITH 1d trend)
-2. 4h RSI(14) pullback entries (30/70 thresholds - NOT extreme 20/80)
-3. 4h Donchian(20) breakout confirmation (price vs 20-bar high/low)
-4. ATR(14) trailing stoploss at 2.5x
-5. NO session filter, NO volume filter (these killed trades in #048)
-6. Discrete sizing: 0.30 for full position, 0.15 for partial
+1. 12h HMA(21) for MAJOR trend bias (trade WITH trend only)
+2. 4h RSI(14) pullback to 35-65 zone (not extreme - ensures entries happen)
+3. 1h price momentum breakout (close > high[5] for long, < low[5] for short)
+4. Volume > 1.0x 20-bar avg (minimal filter - just confirm activity)
+5. ATR(14) trailing stoploss at 2.5x
+6. NO session filter (allows more trades across all hours)
 
 Why this should work:
-- 4h is proven timeframe (20-50 trades/year target)
-- 1d HMA provides strong trend filter without overfitting
-- RSI 30/70 is achievable (unlike 20/80 which rarely triggers)
-- Donchian confirms momentum without lagging
-- Fewer filters = more trades = better Sharpe calculation
-- Simpler logic = less chance of 0 trades
+- Simpler = more trades (target 40-80/year)
+- 12h trend filter prevents counter-trend disasters
+- RSI 35-65 is COMMON (not rare extremes like 15/85)
+- 1h breakout provides timing within HTF trend
+- Discrete sizing (0.25/0.30) minimizes fee churn
 
-Timeframe: 4h (REQUIRED for this experiment)
-HTF: 1d via mtf_data.get_htf_data() — called ONCE before loop
-Position sizing: 0.15-0.30 discrete
+Timeframe: 1h (REQUIRED for this experiment)
+HTF: 4h and 12h via mtf_data.get_htf_data() — called ONCE before loop
+Position sizing: 0.25-0.30 discrete
 Stoploss: 2.5 * ATR(14) trailing
-Target trades: 20-50/year per symbol
+Target trades: 40-80/year per symbol
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_rsi_donchian_1d_hma_simple_v1"
-timeframe = "4h"
+name = "mtf_1h_hma_rsi_pullback_4h12h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -69,44 +68,40 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel upper and lower bands."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    
-    upper = high_s.rolling(window=period, min_periods=period).max().values
-    lower = low_s.rolling(window=period, min_periods=period).min().values
-    
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d HMA for trend bias
-    hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
+    # Calculate HTF indicators
+    hma_12h_21 = calculate_hma(df_12h['close'].values, 21)
+    rsi_4h_14 = calculate_rsi(df_4h['close'].values, 14)
     
-    # Align 1d HMA to 4h (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
+    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
+    hma_12h_21_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_21)
+    rsi_4h_14_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h_14)
     
-    # Calculate 4h indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_14 = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    rsi_1h_14 = calculate_rsi(close, 14)
     
-    # 4h HMA for additional trend confirmation
-    hma_4h_21 = calculate_hma(close, 21)
+    # Volume SMA for filter
+    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Price momentum (5-bar breakout)
+    high_5 = pd.Series(high).rolling(window=5, min_periods=5).max().values
+    low_5 = pd.Series(low).rolling(window=5, min_periods=5).min().values
     
     signals = np.zeros(n)
     
     # Base position sizing (Rule 4 - discrete levels, max 0.40)
-    BASE_SIZE = 0.30
-    HALF_SIZE = 0.15
+    BASE_SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -121,71 +116,65 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_21_aligned[i]):
+        if np.isnan(hma_12h_21_aligned[i]) or np.isnan(rsi_4h_14_aligned[i]):
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(rsi_1h_14[i]) or np.isnan(volume_sma[i]) or volume_sma[i] == 0:
             continue
         
-        # === 1D TREND BIAS (MAJOR) ===
-        # Price above 1d HMA = bullish bias (prefer longs)
-        # Price below 1d HMA = bearish bias (prefer shorts)
-        trend_1d_bullish = close[i] > hma_1d_21_aligned[i]
-        trend_1d_bearish = close[i] < hma_1d_21_aligned[i]
+        # === 12H TREND BIAS (MAJOR) ===
+        # Price above 12h HMA = bullish bias (prefer longs)
+        # Price below 12h HMA = bearish bias (prefer shorts)
+        trend_12h_bullish = close[i] > hma_12h_21_aligned[i]
+        trend_12h_bearish = close[i] < hma_12h_21_aligned[i]
         
-        # === 4H TREND CONFIRMATION ===
-        trend_4h_bullish = close[i] > hma_4h_21[i]
-        trend_4h_bearish = close[i] < hma_4h_21[i]
+        # === 4H RSI PULLBACK (INTERMEDIATE) ===
+        # RSI 35-65 = pullback zone (common, ensures trades happen)
+        # RSI < 35 = oversold (good for long entry in uptrend)
+        # RSI > 65 = overbought (good for short entry in downtrend)
+        rsi_4h_neutral = 35 <= rsi_4h_14_aligned[i] <= 65
+        rsi_4h_oversold = rsi_4h_14_aligned[i] < 45
+        rsi_4h_overbought = rsi_4h_14_aligned[i] > 55
         
-        # === RSI PULLBACK CONDITIONS (looser thresholds) ===
-        # RSI < 40 = pullback in uptrend (long opportunity)
-        # RSI > 60 = pullback in downtrend (short opportunity)
-        rsi_pullback_long = rsi_14[i] < 40
-        rsi_pullback_short = rsi_14[i] > 60
+        # === VOLUME FILTER (minimal) ===
+        volume_ok = volume[i] > 0.9 * volume_sma[i]
         
-        # === DONCHIAN BREAKOUT CONFIRMATION ===
-        # Price near Donchian upper = bullish momentum
-        # Price near Donchian lower = bearish momentum
-        donchian_range = donchian_upper[i] - donchian_lower[i]
-        if donchian_range > 0:
-            price_position = (close[i] - donchian_lower[i]) / donchian_range
-        else:
-            price_position = 0.5
-        
-        donchian_bullish = price_position > 0.5
-        donchian_bearish = price_position < 0.5
+        # === 1H MOMENTUM BREAKOUT ===
+        momentum_long = close[i] > high_5[i-1] if i > 5 else False
+        momentum_short = close[i] < low_5[i-1] if i > 5 else False
         
         # === POSITION SIZING ===
         current_size = BASE_SIZE
         
-        # === ENTRY LOGIC (SIMPLIFIED - fewer filters) ===
+        # === ENTRY LOGIC (LOOSE enough to generate trades) ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRY: 1d bullish + 4h bullish + RSI pullback
-        if trend_1d_bullish and trend_4h_bullish and rsi_pullback_long:
-            new_signal = current_size
+        # LONG ENTRIES
+        # Require: 12h bullish + 4h RSI pullback/oversold + volume + momentum
+        if trend_12h_bullish:
+            if (rsi_4h_oversold or rsi_4h_neutral) and volume_ok and momentum_long:
+                new_signal = current_size
         
-        # SHORT ENTRY: 1d bearish + 4h bearish + RSI pullback
-        if trend_1d_bearish and trend_4h_bearish and rsi_pullback_short:
-            new_signal = -current_size
+        # SHORT ENTRIES
+        # Require: 12h bearish + 4h RSI pullback/overbought + volume + momentum
+        if trend_12h_bearish:
+            if (rsi_4h_overbought or rsi_4h_neutral) and volume_ok and momentum_short:
+                new_signal = -current_size
         
-        # === FREQUENCY SAFEGUARD (ensure minimum trades) ===
-        # If no trades for 300 bars (~50 days on 4h), allow weaker entry
+        # === FREQUENCY SAFEGUARD ===
+        # If no trades for 300 bars (~12 days on 1h), allow weaker entry
         if bars_since_last_trade > 300 and new_signal == 0.0 and not in_position:
-            # Weaker long: just 1d bullish + RSI < 45
-            if trend_1d_bullish and rsi_14[i] < 45:
-                new_signal = HALF_SIZE
-            # Weaker short: just 1d bearish + RSI > 55
-            elif trend_1d_bearish and rsi_14[i] > 55:
-                new_signal = -HALF_SIZE
+            if trend_12h_bullish and rsi_1h_14[i] < 40:
+                new_signal = current_size * 0.5
+            elif trend_12h_bearish and rsi_1h_14[i] > 60:
+                new_signal = -current_size * 0.5
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
         
         if in_position and position_side != 0:
             if position_side > 0:
-                # Update highest price for long position
                 if close[i] > highest_price:
                     highest_price = close[i]
                 stoploss_price = highest_price - 2.5 * atr_14[i]
@@ -193,7 +182,6 @@ def generate_signals(prices):
                     stoploss_triggered = True
             
             if position_side < 0:
-                # Update lowest price for short position
                 if lowest_price == 0.0 or close[i] < lowest_price:
                     lowest_price = close[i]
                 stoploss_price = lowest_price + 2.5 * atr_14[i]
@@ -203,25 +191,14 @@ def generate_signals(prices):
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and trend_1d_bearish and rsi_14[i] > 65:
+            if position_side > 0 and trend_12h_bearish and rsi_4h_14_aligned[i] > 65:
                 trend_reversal = True
-            if position_side < 0 and trend_1d_bullish and rsi_14[i] < 35:
+            if position_side < 0 and trend_12h_bullish and rsi_4h_14_aligned[i] < 35:
                 trend_reversal = True
         
         # Apply stoploss or trend reversal
         if stoploss_triggered or trend_reversal:
             new_signal = 0.0
-        
-        # === TAKE PROFIT (reduce position at 2R) ===
-        if in_position and position_side != 0 and new_signal != 0.0:
-            if position_side > 0:
-                profit = close[i] - entry_price
-                if profit >= 2.0 * atr_14[i] and current_size == BASE_SIZE:
-                    new_signal = HALF_SIZE  # Take partial profit
-            if position_side < 0:
-                profit = entry_price - close[i]
-                if profit >= 2.0 * atr_14[i] and current_size == BASE_SIZE:
-                    new_signal = -HALF_SIZE  # Take partial profit
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
@@ -233,15 +210,11 @@ def generate_signals(prices):
                 lowest_price = close[i] if position_side < 0 else 0.0
                 last_trade_bar = i
             elif np.sign(new_signal) != position_side:
-                # Flip position
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_price = close[i] if position_side > 0 else 0.0
                 lowest_price = close[i] if position_side < 0 else 0.0
                 last_trade_bar = i
-            elif abs(new_signal) < abs(signals[i-1]) if i > 0 else False:
-                # Partial exit (take profit) - keep tracking
-                pass
         else:
             if in_position:
                 in_position = False
