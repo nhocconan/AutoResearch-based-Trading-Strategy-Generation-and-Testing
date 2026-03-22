@@ -1,62 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #074: 30m KAMA Adaptive Trend with 4h HMA Filter + RSI Pullback
-Hypothesis: 30m timeframe captures intraday momentum while 4h HMA provides trend bias.
-KAMA (Kaufman Adaptive MA) adapts to volatility - faster in trends, slower in chop.
-This should outperform static EMA/HMA by reducing whipsaw in ranging markets.
-RSI pullback (40-60 range) entries avoid extreme overbought/oversold traps.
-Simple ATR stoploss (2.5x) protects capital during reversals.
-Why this might work: KAMA's adaptive nature + HTF trend filter + moderate RSI = more trades with better timing.
-Position sizing: 0.25 base, 0.35 strong trend confirmation, discrete levels.
-Timeframe: 30m (REQUIRED), HTF: 4h via mtf_data helper (call ONCE before loop).
+Experiment #075: 1h Z-Score Mean Reversion with 4h HMA Trend Filter + Volume Confirmation
+Hypothesis: 1h timeframe captures intraday mean reversion opportunities while 4h HMA provides
+trend bias to avoid counter-trend trades. Z-score(20) extremes (<-2 or >+2) signal overextended
+moves likely to revert. Volume confirmation (taker_buy_ratio > 0.55 for longs) ensures genuine
+interest. ATR filter avoids trading during extreme volatility spikes.
+
+Why this might work:
+1. Z-score mean reversion has proven edge in crypto (70%+ win rate at extremes)
+2. 4h HMA trend filter prevents dangerous counter-trend entries during strong trends
+3. Volume confirmation filters out fake breakouts/reversals
+4. ATR volatility filter avoids whipsaw during panic pumps/dumps
+5. Asymmetric sizing: smaller positions in bear regime (4h HMA sloping down)
+
+Key improvements vs failed strategies:
+- Simpler entry logic (Z-score + trend + volume) = more trades
+- No complex regime switching that causes 0 trades
+- Discrete position sizes (0.20, 0.30) to minimize fee churn
+- Stoploss at 2.5*ATR with trailing for winners
+
+Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.20 base, 0.30 strong signal, max 0.35
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_kama_4h_hma_rsi_pullback_v1"
-timeframe = "30m"
+name = "mtf_1h_zscore_4h_hma_vol_atr_v1"
+timeframe = "1h"
 leverage = 1.0
-
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA).
-    KAMA adapts to market noise - moves fast in trends, slow in chop.
-    Efficiency Ratio (ER) determines smoothing constant.
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    if n < period + slow_period:
-        return kama
-    
-    # Calculate Efficiency Ratio
-    change = np.abs(close - np.roll(close, period))
-    change[:period] = np.nan
-    
-    volatility = np.zeros(n)
-    for i in range(period, n):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-period:i+1])))
-    
-    er = change / (volatility + 1e-10)
-    er[:period] = np.nan
-    
-    # Smoothing constants
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    
-    # KAMA calculation
-    kama[period] = close[period]  # Initialize with price
-    
-    for i in range(period + 1, n):
-        if np.isnan(er[i]):
-            kama[i] = kama[i-1]
-        else:
-            sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-            kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
-    
-    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -77,6 +49,14 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_zscore(close, period=20):
+    """Calculate Z-score of price vs rolling mean."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    zscore = (close_s - sma) / (std + 1e-10)
+    return zscore.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI."""
@@ -105,47 +85,17 @@ def calculate_ema(close, period):
     """Calculate EMA."""
     return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
-def calculate_sma(close, period):
-    """Calculate SMA."""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX for trend strength."""
-    n = len(close)
-    
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    
-    plus_dm = high_s.diff()
-    minus_dm = -low_s.diff()
-    
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10)
-    
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx, plus_di, minus_di
-
-def calculate_momentum(close, period=10):
-    """Calculate simple momentum (ROC)."""
-    return (close - np.roll(close, period)) / (np.roll(close, period) + 1e-10) * 100
+def calculate_volume_ratio(taker_buy_volume, volume):
+    """Calculate taker buy volume ratio."""
+    ratio = taker_buy_volume / (volume + 1e-10)
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -157,30 +107,25 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
+    zscore = calculate_zscore(close, 20)
     rsi = calculate_rsi(close, 14)
-    rsi_7 = calculate_rsi(close, 7)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
-    
-    # KAMA - adaptive trend
-    kama = calculate_kama(close, 10, 2, 30)
-    kama_fast = calculate_kama(close, 5, 2, 20)
-    
-    # EMA for confirmation
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
-    sma_200 = calculate_sma(close, 200)
+    vol_ratio = calculate_volume_ratio(taker_buy_volume, volume)
     
-    # Momentum
-    mom_10 = calculate_momentum(close, 10)
+    # ATR ratio for volatility filter (ATR(7)/ATR(30))
+    atr_7 = calculate_atr(high, low, close, 7)
+    atr_30 = calculate_atr(high, low, close, 30)
+    atr_ratio = atr_7 / (atr_30 + 1e-10)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.35
-    SIZE_HALF = 0.15
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.30
+    SIZE_MAX = 0.35
     
     # Track positions for stoploss
     position_side = 0
@@ -189,7 +134,7 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
-    for i in range(300, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
@@ -199,7 +144,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(ema_21[i]) or np.isnan(kama[i]):
+        if np.isnan(zscore[i]) or np.isnan(rsi[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(ema_21[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
@@ -208,110 +157,96 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # 30m KAMA = short-term trend
-        kama_bullish = not np.isnan(kama_fast[i]) and kama_fast[i] > kama[i]
-        kama_bearish = not np.isnan(kama_fast[i]) and kama_fast[i] < kama[i]
+        # 4h HMA slope (compare to 3 bars ago)
+        hma_slope_bull = i >= 3 and not np.isnan(hma_4h_aligned[i-3]) and hma_4h_aligned[i] > hma_4h_aligned[i-3]
+        hma_slope_bear = i >= 3 and not np.isnan(hma_4h_aligned[i-3]) and hma_4h_aligned[i] < hma_4h_aligned[i-3]
         
-        # Price vs KAMA
-        above_kama = close[i] > kama[i]
-        below_kama = close[i] < kama[i]
-        
-        # EMA alignment
+        # EMA alignment on 1h
         ema_bullish = ema_21[i] > ema_50[i]
         ema_bearish = ema_21[i] < ema_50[i]
         
-        # Price vs SMA200
-        above_sma200 = not np.isnan(sma_200[i]) and close[i] > sma_200[i]
-        below_sma200 = not np.isnan(sma_200[i]) and close[i] < sma_200[i]
+        # === VOLATILITY FILTER ===
+        # Avoid trading during extreme vol spikes (ATR ratio > 2.5)
+        normal_vol = atr_ratio[i] < 2.5
+        low_vol = atr_ratio[i] < 1.5
         
-        # === TREND STRENGTH / REGIME ===
-        trending_regime = adx[i] > 20
-        strong_trend = adx[i] > 28
-        ranging_regime = adx[i] < 18
+        # === Z-SCORE MEAN REVERSION SIGNALS ===
+        # Z-score <-2 = oversold (potential long)
+        # Z-score >+2 = overbought (potential short)
+        zscore_oversold = zscore[i] < -2.0
+        zscore_overbought = zscore[i] > 2.0
+        zscore_extreme_oversold = zscore[i] < -2.5
+        zscore_extreme_overbought = zscore[i] > 2.5
         
-        # DI crossover
-        di_bullish = plus_di[i] > minus_di[i]
-        di_bearish = plus_di[i] < minus_di[i]
+        # === VOLUME CONFIRMATION ===
+        # For longs: want buying pressure (taker buy ratio > 0.55)
+        # For shorts: want selling pressure (taker buy ratio < 0.45)
+        vol_buying = vol_ratio[i] > 0.55
+        vol_selling = vol_ratio[i] < 0.45
+        vol_neutral = 0.45 <= vol_ratio[i] <= 0.55
         
-        # Momentum
-        mom_positive = mom_10[i] > 0
-        mom_negative = mom_10[i] < 0
-        mom_strong_pos = mom_10[i] > 2.0
-        mom_strong_neg = mom_10[i] < -2.0
+        # === RSI FILTER ===
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
+        rsi_neutral = 40 <= rsi[i] <= 60
         
-        # === RSI PULLBACK CONDITIONS (moderate, not extreme) ===
-        rsi_pullback_long = 40 <= rsi[i] <= 55
-        rsi_pullback_short = 45 <= rsi[i] <= 60
-        rsi_bullish = rsi[i] > 50
-        rsi_bearish = rsi[i] < 50
-        
-        # Fast RSI confirmation
-        rsi7_bullish = rsi_7[i] > 50
-        rsi7_bearish = rsi_7[i] < 50
+        # === PRICE VS EMA ===
+        price_above_ema21 = close[i] > ema_21[i]
+        price_below_ema21 = close[i] < ema_21[i]
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS (multiple paths for more trades) ===
         
-        # Path 1: KAMA crossover + 4h trend + RSI pullback
-        if bull_trend_4h and kama_bullish:
-            if rsi_pullback_long and di_bullish:
-                if mom_positive:
-                    new_signal = SIZE_BASE
-        
-        # Path 2: Strong trend continuation
-        if bull_trend_4h and strong_trend:
-            if above_kama and ema_bullish:
-                if rsi_bullish and mom_strong_pos:
+        # Path 1: Z-score oversold + bull trend + volume confirmation
+        if bull_trend_4h and zscore_oversold and normal_vol:
+            if vol_buying or rsi_oversold:
+                if hma_slope_bull:
                     new_signal = SIZE_STRONG
-        
-        # Path 3: KAMA fast crossover + trend alignment
-        if bull_trend_4h:
-            if kama_bullish and ema_bullish:
-                if rsi7_bullish and above_sma200:
+                else:
                     new_signal = SIZE_BASE
         
-        # Path 4: Trending regime breakout
-        if trending_regime and bull_trend_4h:
-            if close[i] > ema_21[i] and di_bullish:
-                if mom_10[i] > 1.0:
-                    new_signal = SIZE_BASE
+        # Path 2: Extreme Z-score oversold (stronger signal, less volume req)
+        if zscore_extreme_oversold and normal_vol:
+            if bull_trend_4h or ema_bullish:
+                new_signal = SIZE_BASE
         
-        # Path 5: Ranging regime mean reversion (with HTF bias)
-        if ranging_regime and bull_trend_4h:
-            if rsi[i] < 45 and close[i] > kama[i]:
-                new_signal = SIZE_HALF
+        # Path 3: RSI oversold + bull trend + price near EMA support
+        if bull_trend_4h and rsi_oversold and price_above_ema21:
+            if vol_buying:
+                new_signal = SIZE_BASE
+        
+        # Path 4: EMA bullish + pullback to EMA21 + neutral Z-score
+        if ema_bullish and bull_trend_4h:
+            if -1.0 < zscore[i] < 0.5 and price_above_ema21:
+                if vol_buying:
+                    new_signal = SIZE_BASE
         
         # === SHORT ENTRY CONDITIONS (multiple paths for more trades) ===
         
-        # Path 1: KAMA crossover + 4h trend + RSI pullback
-        if bear_trend_4h and kama_bearish:
-            if rsi_pullback_short and di_bearish:
-                if mom_negative:
-                    new_signal = -SIZE_BASE
-        
-        # Path 2: Strong trend continuation
-        if bear_trend_4h and strong_trend:
-            if below_kama and ema_bearish:
-                if rsi_bearish and mom_strong_neg:
+        # Path 1: Z-score overbought + bear trend + volume confirmation
+        if bear_trend_4h and zscore_overbought and normal_vol:
+            if vol_selling or rsi_overbought:
+                if hma_slope_bear:
                     new_signal = -SIZE_STRONG
-        
-        # Path 3: KAMA fast crossover + trend alignment
-        if bear_trend_4h:
-            if kama_bearish and ema_bearish:
-                if rsi7_bearish and below_sma200:
+                else:
                     new_signal = -SIZE_BASE
         
-        # Path 4: Trending regime breakout
-        if trending_regime and bear_trend_4h:
-            if close[i] < ema_21[i] and di_bearish:
-                if mom_10[i] < -1.0:
-                    new_signal = -SIZE_BASE
+        # Path 2: Extreme Z-score overbought (stronger signal, less volume req)
+        if zscore_extreme_overbought and normal_vol:
+            if bear_trend_4h or ema_bearish:
+                new_signal = -SIZE_BASE
         
-        # Path 5: Ranging regime mean reversion (with HTF bias)
-        if ranging_regime and bear_trend_4h:
-            if rsi[i] > 55 and close[i] < kama[i]:
-                new_signal = -SIZE_HALF
+        # Path 3: RSI overbought + bear trend + price below EMA resistance
+        if bear_trend_4h and rsi_overbought and price_below_ema21:
+            if vol_selling:
+                new_signal = -SIZE_BASE
+        
+        # Path 4: EMA bearish + rally to EMA21 + neutral Z-score
+        if ema_bearish and bear_trend_4h:
+            if -0.5 < zscore[i] < 1.0 and price_below_ema21:
+                if vol_selling:
+                    new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) ===
         # Long position stoploss
