@@ -1,51 +1,61 @@
 #!/usr/bin/env python3
 """
-Experiment #444: 1d Simplified Trend-RSI with 4h HMA Filter
+Experiment #445: 15m Multi-Confirmation Trend Pullback with 4h HMA Filter
 
-Hypothesis: After 431 failed experiments, the key insight is that complex ensembles
-on 1d create conflicting signals and negative Sharpe. This strategy SIMPLIFIES:
+Hypothesis: After 444 failed experiments, the pattern is clear - single-indicator
+strategies fail on 15m due to noise. This strategy uses MULTI-CONFIRMATION:
 
-1. SINGLE HTF FILTER: 4h HMA(21) trend bias (proven in best strategy #442)
-   - Long only when price > 4h HMA
-   - Short only when price < 4h HMA
-   - HMA smoother than EMA, reduces whipsaws
+1. 4H HMA(21) TREND BIAS (via mtf_data helper):
+   - Long bias when price > 4h HMA
+   - Short bias when price < 4h HMA
+   - HMA smoother than EMA, critical for trend detection
 
-2. PRIMARY SIGNAL: RSI(14) mean reversion WITH trend bias
-   - Long: RSI < 40 (looser than 30 to ensure trades) + price > 4h HMA
-   - Short: RSI > 60 (looser than 70) + price < 4h HMA
-   - Mean reversion works well in 2025 bear/range market
+2. 15M HMA(8/21) CROSSOVER for entry timing:
+   - Fast HMA(8) crosses above Slow HMA(21) = long trigger
+   - Fast HMA(8) crosses below Slow HMA(21) = short trigger
+   - HMA has less lag than EMA, better for 15m entries
 
-3. REGIME CONFIRMATION: Bollinger Band position
-   - Long: price < BB_lower + trend bull (oversold in uptrend)
-   - Short: price > BB_upper + trend bear (overbought in downtrend)
-   - Adds confluence without over-filtering
+3. RSI(14) PULLBACK FILTER:
+   - Long: RSI between 35-55 (pullback in uptrend, not oversold crash)
+   - Short: RSI between 45-65 (rally in downtrend, not overbought spike)
+   - Avoids catching falling knives or chasing tops
 
-4. ATR(14) TRAILING STOP at 2.5x
-   - Critical for 2022-style crash protection
-   - Signal → 0 when stop hit
+4. ADX(14) TREND STRENGTH:
+   - ADX > 18 = trend strong enough to trade
+   - ADX < 18 = skip (choppy market)
+   - Lower threshold than traditional 25 to ensure sufficient trades on 15m
 
-5. POSITION SIZING: 0.28 discrete
-   - Conservative for daily volatility
+5. VOLUME CONFIRMATION:
+   - Volume > 1.3 * SMA(volume, 20) = confirmed move
+   - Prevents fake breakouts on low volume
+
+6. ATR(14) TRAILING STOP at 2.5x:
+   - Signal → 0 when price moves 2.5*ATR against position
+   - Critical for 15m noise protection
+
+7. POSITION SIZING: 0.25 discrete (conservative for 15m volatility)
+   - Max 25% capital per position
    - Discrete levels minimize fee churn
 
-Why this should beat #432 (Sharpe=-0.181):
-- SIMPLER logic = fewer conflicting signals
-- 4h HMA proven in best strategy (Sharpe=0.676)
-- Looser RSI thresholds (40/60 vs 35/65) = more trades
-- BB position adds confluence without over-filtering
+Why this should work on 15m:
+- 4h HMA filter prevents counter-trend disasters (proven in baseline)
+- HMA crossover has less lag than EMA for 15m timing
+- RSI pullback filter avoids extreme entries
+- Volume confirmation reduces false signals
+- ADX > 18 (not 25) ensures sufficient trade frequency (>10/symbol)
 - Should work on BTC/ETH/SOL individually (not SOL-biased)
 
-Timeframe: 1d (REQUIRED for this experiment)
+Timeframe: 15m (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.28 discrete levels
+Position sizing: 0.25 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_simplified_rsi_4h_hma_bb_atr_v1"
-timeframe = "1d"
+name = "mtf_15m_hma_crossover_4h_hma_rsi_vol_adx_atr_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -68,6 +78,52 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index (ADX)."""
+    n = len(close)
+    adx = np.full(n, np.nan)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    for i in range(period, n):
+        if tr_s[i] > 1e-10:
+            plus_di = 100 * plus_dm_s[i] / tr_s[i]
+            minus_di = 100 * minus_dm_s[i] / tr_s[i]
+            di_sum = plus_di + minus_di
+            if di_sum > 1e-10:
+                dx = 100 * np.abs(plus_di - minus_di) / di_sum
+            else:
+                dx = 0
+        else:
+            dx = 0
+        
+        if i == period:
+            adx[i] = dx
+        else:
+            adx[i] = ((adx[i-1] * (period - 1)) + dx) / period
+    
+    return adx
+
 def calculate_rsi(close, period=14):
     """Calculate Relative Strength Index."""
     close_s = pd.Series(close)
@@ -82,19 +138,16 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper.values, lower.values, sma.values
+def calculate_sma(values, period=20):
+    """Calculate Simple Moving Average."""
+    values_s = pd.Series(values)
+    return values_s.rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -106,15 +159,18 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 1d indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
+    adx = calculate_adx(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, 20, 2.0)
+    hma_fast = calculate_hma(close, 8)
+    hma_slow = calculate_hma(close, 21)
+    vol_sma = calculate_sma(volume, 20)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.28
+    SIZE = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -133,7 +189,15 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(adx[i]) or np.isnan(rsi[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(vol_sma[i]) or vol_sma[i] == 0:
             signals[i] = 0.0
             continue
         
@@ -141,27 +205,35 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === RSI SIGNAL (looser thresholds for more trades) ===
-        rsi_long = rsi[i] < 40  # Oversold (looser than 30)
-        rsi_short = rsi[i] > 60  # Overbought (looser than 70)
+        # === 15M HMA CROSSOVER ===
+        hma_cross_long = hma_fast[i] > hma_slow[i] and hma_fast[i-1] <= hma_slow[i-1]
+        hma_cross_short = hma_fast[i] < hma_slow[i] and hma_fast[i-1] >= hma_slow[i-1]
         
-        # === BOLLINGER BAND POSITION ===
-        bb_oversold = close[i] < bb_lower[i]  # Price below lower band
-        bb_overbought = close[i] > bb_upper[i]  # Price above upper band
+        # Also allow continuation (already crossed and holding)
+        hma_bullish = hma_fast[i] > hma_slow[i]
+        hma_bearish = hma_fast[i] < hma_slow[i]
         
-        # === GENERATE SIGNAL (simplified logic) ===
+        # === RSI PULLBACK FILTER ===
+        rsi_pullback_long = 35 <= rsi[i] <= 55  # Pullback in uptrend
+        rsi_pullback_short = 45 <= rsi[i] <= 65  # Rally in downtrend
+        
+        # === ADX TREND STRENGTH ===
+        trend_strong = adx[i] > 18  # Lower threshold for 15m
+        
+        # === VOLUME CONFIRMATION ===
+        vol_confirmed = volume[i] > 1.3 * vol_sma[i]
+        
+        # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # LONG: RSI oversold + bull trend + BB oversold confirmation
-        if rsi_long and bull_trend_4h:
-            # BB oversold adds confluence but not required
-            if bb_oversold or rsi[i] < 35:  # Either BB confirmation or very oversold RSI
+        # LONG ENTRY: 4h bull + HMA bullish + RSI pullback + ADX strong + volume
+        if bull_trend_4h and hma_bullish and rsi_pullback_long and trend_strong:
+            if vol_confirmed or hma_cross_long:
                 new_signal = SIZE
         
-        # SHORT: RSI overbought + bear trend + BB overbought confirmation
-        if rsi_short and bear_trend_4h:
-            # BB overbought adds confluence but not required
-            if bb_overbought or rsi[i] > 65:  # Either BB confirmation or very overbought RSI
+        # SHORT ENTRY: 4h bear + HMA bearish + RSI pullback + ADX strong + volume
+        if bear_trend_4h and hma_bearish and rsi_pullback_short and trend_strong:
+            if vol_confirmed or hma_cross_short:
                 new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
@@ -188,6 +260,12 @@ def generate_signals(prices):
                 new_signal = 0.0
             if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0
+        
+        # === HMA CROSSOVER EXIT (opposite cross) ===
+        if in_position and position_side > 0 and hma_cross_short:
+            new_signal = 0.0
+        if in_position and position_side < 0 and hma_cross_long:
+            new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
