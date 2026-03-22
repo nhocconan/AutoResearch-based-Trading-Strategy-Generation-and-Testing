@@ -1,33 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #313: 15m HTF Trend + RSI Pullback with ADX Filter
+Experiment #314: 30m Donchian Breakout with 4h HMA Trend Filter and ATR Stoploss
 
-Hypothesis: 15m timeframe needs strong HTF bias to filter noise. Using 4h HMA for 
-primary trend direction (proven edge from #304, #311) combined with 1h RSI pullback
-entries should capture trend continuations while avoiding choppy whipsaws.
+Hypothesis: After #302 (30m Supertrend+RSI, Sharpe=-1.454) and #308 (30m Fisher+Chop, 0 trades) 
+failed due to over-filtering, this strategy SIMPLIFIES entry logic for 30m:
+1. 4h HMA(21) for primary directional bias (proven edge from #304, #311)
+2. Donchian(20) breakout for entry timing (catches momentum moves on 30m)
+3. Volume confirmation (taker_buy_volume > avg) to filter false breakouts
+4. ATR(14) trailing stoploss at 2.5x for risk management
+5. Minimal ADX filter (>15) to avoid ranging whipsaw
 
-Key design:
-1. 4h HMA(21) = primary trend bias (LONG when price > HMA, SHORT when <)
-2. 1h RSI(14) pullback = entry timing (RSI < 40 in uptrend, RSI > 60 in downtrend)
-3. ADX(14) > 15 = trend confirmation (avoid ranging markets)
-4. ATR(14) trailing stoploss at 2.5x (protects capital)
-5. Position sizing: 0.25 base, 0.30 strong trend
+Why this might work on 30m:
+- Donchian breakouts catch momentum moves better than EMA crossover on intraday
+- 4h HMA provides trend context without over-filtering
+- Volume confirmation reduces false breakouts (common on 30m)
+- Simple logic = more trades (avoiding #307/#308 zero-trade problem)
 
-Why this should work on 15m:
-- 4h trend filter removes 15m noise (proven from successful 4h strategies)
-- RSI pullback entries catch dips without waiting for full crossover
-- ADX filter avoids choppy periods that killed #301, #302
-- Loose enough conditions to generate >=10 trades (learned from #311)
-
-Timeframe: 15m (REQUIRED for this experiment)
-HTF: 4h and 1h via mtf_data helper (call ONCE before loop)
+Timeframe: 30m (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25-0.30 discrete levels
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_rsi_pullback_4h_hma_adx_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_donchian_breakout_4h_hma_volume_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -50,18 +49,15 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50.0)
-    return rsi.values
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high / lowest low over period)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    upper = high_s.rolling(window=period, min_periods=period).max().values
+    lower = low_s.rolling(window=period, min_periods=period).min().values
+    
+    return upper, lower
 
 def calculate_adx(high, low, close, period=14):
     """Calculate Average Directional Index (ADX)."""
@@ -88,9 +84,9 @@ def calculate_adx(high, low, close, period=14):
     plus_di = 100 * plus_dm_s / tr_s
     minus_di = 100 * minus_dm_s / tr_s
     
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = dx.replace([np.inf, -np.inf], np.nan)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    dx = np.clip(dx, 0, 100)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean()
     
     return adx.values
 
@@ -98,23 +94,28 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    df_1h = get_htf_data(prices, '1h')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
     adx = calculate_adx(high, low, close, 14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    
+    # Volume moving average for confirmation
+    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    taker_ratio = taker_buy_volume / (volume + 1e-10)
+    taker_ratio_avg = pd.Series(taker_ratio).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
@@ -135,11 +136,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_1h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]):
+        if np.isnan(adx[i]) or np.isnan(volume_sma[i]):
             signals[i] = 0.0
             continue
         
@@ -148,29 +149,27 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === RSI PULLBACK ENTRY ===
-        # In uptrend: wait for RSI pullback to < 45 (not oversold, just dip)
-        # In downtrend: wait for RSI rally to > 55 (not overbought, just bounce)
-        rsi_pullback_long = rsi_1h_aligned[i] < 45
-        rsi_pullback_short = rsi_1h_aligned[i] > 55
-        
-        # RSI extreme for stronger signal
-        rsi_extreme_long = rsi_1h_aligned[i] < 35
-        rsi_extreme_short = rsi_1h_aligned[i] > 65
-        
         # === TREND STRENGTH ===
-        # ADX > 15 = trending (avoid choppy)
+        # ADX > 15 = trending (avoid ranging whipsaw)
         trending = adx[i] > 15
         strong_trend = adx[i] > 25
         
-        # === VOLATILITY ADJUSTMENT ===
-        atr_recent_avg = np.nanmean(atr[max(0, i-20):i+1])
-        high_volatility = atr[i] > 1.5 * atr_recent_avg if not np.isnan(atr_recent_avg) else False
+        # === DONCHIAN BREAKOUT ===
+        # Price breaks above Donchian upper = bullish breakout
+        breakout_long = close[i] > donchian_upper[i-1]  # Use previous bar's upper
+        # Price breaks below Donchian lower = bearish breakout
+        breakout_short = close[i] < donchian_lower[i-1]  # Use previous bar's lower
+        
+        # === VOLUME CONFIRMATION ===
+        # Volume above average confirms breakout
+        volume_confirmed = volume[i] > volume_sma[i] * 1.2 if not np.isnan(volume_sma[i]) else False
+        
+        # Taker buy ratio confirms direction
+        taker_bullish = taker_ratio[i] > 0.55 if not np.isnan(taker_ratio[i]) else False
+        taker_bearish = taker_ratio[i] < 0.45 if not np.isnan(taker_ratio[i]) else False
         
         # Determine position size
-        if high_volatility:
-            position_size = SIZE_BASE
-        elif strong_trend and ((bull_trend_4h and rsi_extreme_long) or (bear_trend_4h and rsi_extreme_short)):
+        if strong_trend and volume_confirmed:
             position_size = SIZE_STRONG
         else:
             position_size = SIZE_BASE
@@ -178,18 +177,21 @@ def generate_signals(prices):
         # === ENTRY CONDITIONS (LOOSE for >=10 trades) ===
         new_signal = 0.0
         
-        # LONG: 4h bias up + RSI pullback + ADX trending
+        # LONG: 4h bias up + Donchian breakout + volume confirm + ADX trending
+        # Relaxed: volume OR taker confirmation (not both required)
         long_conditions = (
             bull_trend_4h and
-            rsi_pullback_long and
-            trending
+            breakout_long and
+            trending and
+            (volume_confirmed or taker_bullish)
         )
         
-        # SHORT: 4h bias down + RSI rally + ADX trending
+        # SHORT: 4h bias down + Donchian breakout + volume confirm + ADX trending
         short_conditions = (
             bear_trend_4h and
-            rsi_pullback_short and
-            trending
+            breakout_short and
+            trending and
+            (volume_confirmed or taker_bearish)
         )
         
         # === GENERATE SIGNAL ===
@@ -222,11 +224,11 @@ def generate_signals(prices):
             if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0
         
-        # === RSI REVERSAL EXIT ===
+        # === BREAKOUT REVERSAL EXIT ===
         if in_position and new_signal != 0.0:
-            if position_side > 0 and rsi_1h_aligned[i] > 70:
+            if position_side > 0 and breakout_short:
                 new_signal = 0.0
-            if position_side < 0 and rsi_1h_aligned[i] < 30:
+            if position_side < 0 and breakout_long:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
