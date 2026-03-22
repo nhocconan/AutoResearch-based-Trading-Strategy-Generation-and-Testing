@@ -1,1 +1,4 @@
 commit	strategy	symbol	sharpe	return_pct	cagr_pct	max_dd_pct	win_rate	profit_factor	trades	sortino	calmar	status	description	period
+eaf97b0	mtf_15m_crsi_chop_4h_hma_v1	BTCUSDT	-5.5837	-71.29	-26.82	-72.35	40.7	0.93	18833	-6.7016	-0.3707	discard	exp#001 mtf_15m_crsi_chop_4h_hma_v1	train
+eaf97b0	mtf_15m_crsi_chop_4h_hma_v1	ETHUSDT	-4.5546	-68.64	-25.18	-69.35	41.9	0.94	18994	-5.2476	-0.3631	discard	exp#001 mtf_15m_crsi_chop_4h_hma_v1	train
+eaf97b0	mtf_15m_crsi_chop_4h_hma_v1	SOLUSDT	-2.5380	-56.84	-19.02	-58.18	46.3	0.99	19490	-2.6576	-0.3268	discard	exp#001 mtf_15m_crsi_chop_4h_hma_v1	train
