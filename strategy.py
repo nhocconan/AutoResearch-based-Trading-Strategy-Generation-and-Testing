@@ -1,54 +1,57 @@
 #!/usr/bin/env python3
 """
-Experiment #412: 4h Simple Trend Pullback with Volume Confirmation
+Experiment #413: 12h ADX Regime + 1d HMA Trend + Donchian/RSI Adaptive Entry
 
-Hypothesis: After 411 failed experiments, the pattern is clear - OVER-ENGINEERING kills strategies.
-Complex regime detection (Choppiness, Fisher, multiple HTF) creates conflicting signals = 0 trades.
-The winning approach is SIMPLE: trend bias + pullback entry + volume confirmation + ATR stop.
+Hypothesis: After 412 failed experiments, the key insight is that 12h timeframe
+needs STRONGER regime filtering than 4h. 12h bars are less noisy but require
+clearer trend confirmation. This strategy uses:
 
-STRATEGY COMPONENTS:
-1. 1d HMA(21) TREND BIAS: Stable trend direction from daily closes
-   - Long bias when price > 1d HMA
-   - Short bias when price < 1d HMA
-   - HMA smoother than EMA, less whipsaw
+1. ADX(14) REGIME DETECTION on 12h:
+   - ADX > 25 = trending (use Donchian breakout)
+   - ADX < 20 = ranging (use RSI mean-reversion)
+   - 20-25 = neutral (stay flat, avoid whipsaw)
+   - This is MORE strict than 4h strategies to reduce false signals on 12h
 
-2. RSI(14) PULLBACK ENTRY: Enter on counter-trend pullbacks
-   - Long: RSI drops to 35-45 zone (oversold in uptrend)
-   - Short: RSI rises to 55-65 zone (overbought in downtrend)
-   - NOT extreme RSI (30/70) - those are too rare = 0 trades
-   - This is the KEY: moderate pullbacks happen frequently
+2. 1d HMA(21) TREND BIAS (via mtf_data helper):
+   - Long only when price > 1d HMA in trending regime
+   - Short only when price < 1d HMA in trending regime
+   - HMA smoother than EMA, critical for 12h/1d alignment
 
-3. VOLUME CONFIRMATION: Avoid false breakouts
-   - Volume > SMA(volume, 20) confirms genuine interest
-   - Filters out low-liquidity whipsaws
+3. DONCHIAN(20) BREAKOUT for trending regime:
+   - Long when price breaks 20-bar high + ADX > 25 + price > 1d HMA
+   - Short when price breaks 20-bar low + ADX > 25 + price < 1d HMA
+   - Captures sustained moves, not noise
 
-4. ATR(14) TRAILING STOP: Risk management at 2.5x ATR
+4. RSI(14) MEAN REVERSION for ranging regime:
+   - Long when RSI < 30 + price > 1d HMA (bullish dip)
+   - Short when RSI > 70 + price < 1d HMA (bearish rally)
+   - Only enter with 1d trend bias (avoid counter-trend)
+
+5. ATR(14) TRAILING STOP at 2.5x:
    - Signal → 0 when price moves 2.5*ATR against position
-   - Protects from crash scenarios like 2022
+   - Protects from 2022-style crashes
 
-5. POSITION SIZING: 0.25 discrete (conservative for 4h)
-   - Max 25% capital per position
-   - Discrete levels: 0.0, ±0.25 only (minimize fee churn)
+6. POSITION SIZING: 0.30 discrete (conservative for 12h volatility)
+   - Max 30% capital per position
+   - Discrete levels minimize fee churn on slower timeframe
 
-Why this should work:
-- SIMPLE = more trades (avoiding the #1 failure mode)
-- RSI 35-45/55-65 zones trigger 20-40 times/year (enough for stats)
-- 1d HMA provides stable bias without whipsaw
-- Volume filter removes low-quality signals
-- Works on BTC, ETH, SOL individually (tested mentally on all regimes)
+Why 12h should work better than 4h:
+- Fewer false breakouts (12h closes are more significant)
+- Less fee drag (fewer trades, ~20-40/year vs 100+ on 4h)
+- Better alignment with 1d HTF (12h = 2 bars per day)
+- Should work on BTC/ETH/SOL individually (not SOL-biased)
 
-Timeframe: 4h (REQUIRED for this experiment)
+Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels
+Position sizing: 0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
-Expected trades: 30-50 per year per symbol
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_simple_trend_pullback_vol_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_adx_regime_1d_hma_donchian_rsi_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -71,29 +74,90 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_adx(high, low, close, period=14):
+    """
+    Calculate Average Directional Index (ADX).
+    ADX > 25 = trending market
+    ADX < 20 = ranging market
+    """
+    n = len(close)
+    adx = np.full(n, np.nan)
+    
+    # Calculate True Range and Directional Movement
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    # Smooth using Wilder's method (EMA with span=period)
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate DI and DX
+    for i in range(period, n):
+        if tr_s[i] > 1e-10:
+            plus_di = 100 * plus_dm_s[i] / tr_s[i]
+            minus_di = 100 * minus_dm_s[i] / tr_s[i]
+            di_sum = plus_di + minus_di
+            if di_sum > 1e-10:
+                dx = 100 * np.abs(plus_di - minus_di) / di_sum
+            else:
+                dx = 0
+        else:
+            dx = 0
+        
+        # ADX is smoothed DX
+        if i == period:
+            adx[i] = dx
+        else:
+            adx[i] = ((adx[i-1] * (period - 1)) + dx) / period
+    
+    return adx
+
 def calculate_rsi(close, period=14):
-    """Calculate RSI using standard Wilder's method."""
+    """Calculate Relative Strength Index."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
+    
     avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
+    
+    rs = avg_gain / avg_loss.replace(0, np.inf)
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate simple moving average of volume."""
-    vol_s = pd.Series(volume)
-    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high, lowest low over period)."""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = high[i-period+1:i+1].max()
+        lower[i] = low[i-period+1:i+1].min()
+    
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -105,15 +169,16 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
+    adx = calculate_adx(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    vol_sma = calculate_volume_sma(volume, 20)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -132,37 +197,53 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        if np.isnan(adx[i]):
+            signals[i] = 0.0
+            continue
+        
         if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(vol_sma[i]) or vol_sma[i] == 0:
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
+        
+        # === REGIME DETECTION ===
+        trending_market = adx[i] > 25
+        ranging_market = adx[i] < 20
+        # neutral_market = 20 <= ADX <= 25 (stay flat)
         
         # === 1d HMA TREND BIAS ===
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > vol_sma[i]
+        # === DONCHIAN BREAKOUT SIGNALS (for trending regime) ===
+        donchian_long = close[i] > donchian_upper[i-1]  # Break above previous high
+        donchian_short = close[i] < donchian_lower[i-1]  # Break below previous low
         
-        # === RSI PULLBACK ZONES (moderate, not extreme) ===
-        # Long: RSI 35-45 in uptrend (pullback, not crash)
-        rsi_long_pullback = 35 <= rsi[i] <= 45
-        # Short: RSI 55-65 in downtrend (rally, not squeeze)
-        rsi_short_pullback = 55 <= rsi[i] <= 65
+        # === RSI MEAN REVERSION SIGNALS (for ranging regime) ===
+        rsi_long = rsi[i] < 30  # Oversold
+        rsi_short = rsi[i] > 70  # Overbought
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # LONG ENTRY: uptrend + RSI pullback + volume
-        if bull_trend_1d and rsi_long_pullback and volume_confirmed:
-            new_signal = SIZE
+        # TRENDING REGIME: Donchian breakout with 1d HMA filter
+        if trending_market:
+            if bull_trend_1d and donchian_long:
+                new_signal = SIZE
+            elif bear_trend_1d and donchian_short:
+                new_signal = -SIZE
         
-        # SHORT ENTRY: downtrend + RSI pullback + volume
-        elif bear_trend_1d and rsi_short_pullback and volume_confirmed:
-            new_signal = -SIZE
+        # RANGING REGIME: RSI mean-reversion with 1d HMA filter
+        elif ranging_market:
+            # Only enter with trend bias (avoid counter-trend mean reversion)
+            if bull_trend_1d and rsi_long:
+                new_signal = SIZE
+            elif bear_trend_1d and rsi_short:
+                new_signal = -SIZE
+        # NEUTRAL REGIME: Stay flat (20 <= ADX <= 25)
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -182,23 +263,22 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === TREND REVERSAL EXIT ===
-        # Exit long if trend flips bearish
-        if in_position and position_side > 0 and bear_trend_1d:
-            new_signal = 0.0
+        # === REGIME FLIP EXIT ===
+        # Exit if regime changes against position type
+        if in_position and new_signal != 0.0:
+            # Long position in trending regime should exit if market becomes ranging without RSI signal
+            if position_side > 0 and ranging_market and not rsi_long:
+                new_signal = 0.0
+            # Short position in trending regime should exit if market becomes ranging without RSI signal
+            if position_side < 0 and ranging_market and not rsi_short:
+                new_signal = 0.0
         
-        # Exit short if trend flips bullish
-        if in_position and position_side < 0 and bull_trend_1d:
-            new_signal = 0.0
-        
-        # === RSI OVEREXTENSION EXIT ===
-        # Exit long if RSI goes too high (overbought)
-        if in_position and position_side > 0 and rsi[i] > 70:
-            new_signal = 0.0
-        
-        # Exit short if RSI goes too low (oversold)
-        if in_position and position_side < 0 and rsi[i] < 30:
-            new_signal = 0.0
+        # === TREND REVERSAL EXIT (for trending regime positions) ===
+        if in_position and new_signal != 0.0 and trending_market:
+            if position_side > 0 and bear_trend_1d:
+                new_signal = 0.0
+            if position_side < 0 and bull_trend_1d:
+                new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
