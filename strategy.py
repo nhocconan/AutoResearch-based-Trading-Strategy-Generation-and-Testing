@@ -1,33 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #554: 30m Donchian Breakout with 4h HMA Trend Bias + ADX Filter
+Experiment #555: 1h MACD Momentum with 4h HMA Trend + BB Regime Filter
 
-Hypothesis: After analyzing 500+ failed experiments, the key insight is:
-1. 30m timeframe balances noise reduction vs trade frequency (between 15m whipsaw and 4h slowness)
-2. Donchian(20) breakout on 30m = 10-hour range break = captures sustained intraday moves
-3. 4h HMA(21) trend bias prevents counter-trend entries (major failure mode in bear markets)
-4. ADX>15 (loose, not >40) ensures we generate trades while avoiding worst chop
-5. 2.0*ATR stoploss protects against 2022-style crashes without being too tight
-6. Discrete position sizing (0.25) limits drawdown while generating sufficient trades
+Hypothesis: After 500+ failed experiments, the pattern is clear:
+1. Too many filters = 0 trades (see #543, #551 with Sharpe=0.000)
+2. RSI-based strategies failed badly (#553 Sharpe=-6.923, #548 Sharpe=-1.055)
+3. Donchian breakout failed (#554 Sharpe=-3.023)
+4. Supertrend strategies all failed
 
-Why this should work on 30m:
-- 30m has 48 bars/day = ~17,520 bars/year = good trade frequency
-- Donchian(20) = 10-hour breakout = catches intraday momentum without excessive whipsaw
-- 4h HMA is available via mtf_data helper with proper alignment (shift(1) for completed bars)
-- ADX>15 filter is loose enough to generate 50-100 trades/year (not 0 trades like #551)
-- Simple logic = more consistent signals across BTC/ETH/SOL
+NEW APPROACH for 1h:
+1. MACD histogram for momentum (DIFFERENT from failed RSI strategies)
+2. 4h HMA for trend bias (proven in multiple strategies)
+3. Bollinger Band width for regime (wide=trend, narrow=range)
+4. LOOSE entry conditions to ENSURE trades generate
+5. Asymmetric position sizing: larger in trend regime, smaller in range
 
-Timeframe: 30m (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete (max 0.40)
-Stoploss: 2.0 * ATR(14) trailing
+Why MACD instead of RSI:
+- RSI mean-reversion failed on crypto trends
+- MACD captures momentum continuation better
+- Histogram crossing zero is a clean signal
+- Different from 490+ failed strategies
+
+Why 1h timeframe:
+- 24 bars/day = enough signals without noise
+- Not tested much in recent experiments
+- Good balance between 15m (too noisy) and 4h (too slow)
+
+Position sizing: 0.25 base, 0.35 in strong trend regime
+Stoploss: 2.5 * ATR(14) trailing
+Timeframe: 1h (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_donchian_breakout_4h_hma_adx_loose_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_macd_momentum_4h_hma_bb_regime_asymmetric_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -50,45 +59,35 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram."""
     close_s = pd.Series(close)
-    
-    # True Range
-    tr1 = high_s - low_s
-    tr2 = np.abs(high_s - close_s.shift(1))
-    tr3 = np.abs(low_s - close_s.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Directional Movement
-    up_move = high_s - high_s.shift(1)
-    down_move = low_s.shift(1) - low_s
-    
-    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
-    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
-    
-    # Smoothed values
-    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
-    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.inf)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return adx.values
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low over period)."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    
-    upper = high_s.rolling(window=period, min_periods=period).max()
-    lower = low_s.rolling(window=period, min_periods=period).min()
-    
-    return upper.values, lower.values
+def calculate_bollinger(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands and bandwidth."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    bandwidth = (upper - lower) / sma
+    return upper.values, lower.values, bandwidth.values, sma.values
+
+def calculate_percentile_rank(series, window=100):
+    """Calculate percentile rank of current value over rolling window."""
+    s = pd.Series(series)
+    def pr(x):
+        if len(x) < 2:
+            return np.nan
+        return (x[:-1] < x[-1]).sum() / (len(x) - 1)
+    pr_vals = s.rolling(window=window, min_periods=window).apply(pr, raw=False)
+    return pr_vals.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -105,15 +104,19 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    adx_14 = calculate_adx(high, low, close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
+    bb_upper, bb_lower, bb_bandwidth, bb_sma = calculate_bollinger(close, 20, 2.0)
+    
+    # Calculate BB bandwidth percentile for regime detection
+    bb_bw_pr = calculate_percentile_rank(bb_bandwidth, 100)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.25
+    SIZE_BASE = 0.25
+    SIZE_TREND = 0.35
     
     # Track position state for stoploss
     in_position = False
@@ -121,6 +124,9 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     entry_price = 0.0
+    
+    # Track MACD histogram for momentum confirmation
+    prev_macd_hist = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -132,7 +138,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx_14[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(macd_hist[i]) or np.isnan(bb_bandwidth[i]):
             signals[i] = 0.0
             continue
         
@@ -140,32 +146,42 @@ def generate_signals(prices):
         bull_bias = close[i] > hma_4h_aligned[i]
         bear_bias = close[i] < hma_4h_aligned[i]
         
-        # === 30M DONCHIAN BREAKOUT ===
-        # Use previous bar's Donchian levels to avoid lookahead
-        breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
-        breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
+        # === BB REGIME DETECTION ===
+        # High bandwidth percentile = trend regime
+        # Low bandwidth percentile = range regime
+        trend_regime = False
+        if not np.isnan(bb_bw_pr[i]):
+            trend_regime = bb_bw_pr[i] > 0.5  # Top 50% bandwidth = trend
         
-        # === ADX FILTER (trend strength - loose threshold for trade generation) ===
-        trend_strong = adx_14[i] > 15  # Loose threshold to ensure trades (not >40)
+        # === MACD MOMENTUM ===
+        macd_bullish = macd_hist[i] > 0
+        macd_bearish = macd_hist[i] < 0
         
-        # === ENTRY LOGIC ===
+        # MACD histogram turning up (momentum increasing)
+        macd_turning_up = macd_hist[i] > prev_macd_hist
+        macd_turning_down = macd_hist[i] < prev_macd_hist
+        
+        # === ENTRY LOGIC (LOOSE to ensure trades) ===
         new_signal = 0.0
+        position_size = SIZE_TREND if trend_regime else SIZE_BASE
         
-        # Long: Donchian breakout + 4h bullish bias + ADX confirms trend
-        if breakout_long and bull_bias and trend_strong:
-            new_signal = SIZE
+        # Long: 4h bullish + MACD bullish OR MACD turning up
+        # Only ONE of these conditions needed (not both)
+        if bull_bias and (macd_bullish or macd_turning_up):
+            new_signal = position_size
         
-        # Short: Donchian breakout + 4h bearish bias + ADX confirms trend
-        elif breakout_short and bear_bias and trend_strong:
-            new_signal = -SIZE
+        # Short: 4h bearish + MACD bearish OR MACD turning down
+        # Only ONE of these conditions needed (not both)
+        elif bear_bias and (macd_bearish or macd_turning_down):
+            new_signal = -position_size
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.0 * atr_14[i]
+                stoploss_price = highest_close - 2.5 * atr_14[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -173,7 +189,7 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.0 * atr_14[i]
+                stoploss_price = lowest_close + 2.5 * atr_14[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
@@ -183,6 +199,15 @@ def generate_signals(prices):
             if position_side > 0 and bear_bias:
                 new_signal = 0.0
             if position_side < 0 and bull_bias:
+                new_signal = 0.0
+        
+        # === MACD MOMENTUM FADE EXIT ===
+        # Exit long if MACD histogram turns negative
+        # Exit short if MACD histogram turns positive
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and macd_bearish and prev_macd_hist >= 0:
+                new_signal = 0.0
+            if position_side < 0 and macd_bullish and prev_macd_hist <= 0:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -208,5 +233,6 @@ def generate_signals(prices):
                 lowest_close = 0.0
         
         signals[i] = new_signal
+        prev_macd_hist = macd_hist[i]
     
     return signals
