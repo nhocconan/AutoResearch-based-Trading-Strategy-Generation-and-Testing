@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #099: 1h Fisher Transform + 4h HMA Trend + Volatility Regime + RSI Confirmation
+Experiment #100: 4h KAMA Adaptive Trend + 1d HMA Bias + ATR Trailing Stop
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility -
+faster during trends, slower during chop. This should reduce whipsaws vs static EMA.
+Combined with 1d HMA for higher-timeframe trend bias, we capture major moves while
+avoiding counter-trend trades. ATR trailing stop protects capital during reversals.
 
-Hypothesis: 1h timeframe is ideal for mean-reversion-with-trend strategies.
-Fisher Transform (Ehlers) excels at catching reversals in bear/range markets.
-4h HMA provides stable trend bias without excessive lag.
-Volatility filter (ATR ratio) avoids entering during panic spikes.
-RSI confirmation ensures momentum alignment.
+Why this might work on 4h (learning from #088 Sharpe=0.223 and #094 Sharpe=0.000):
+- #088 used Supertrend+ADX (worked but can be slow to reverse)
+- #094 had too many filters = 0 trades (critical failure!)
+- KAMA adapts speed based on volatility ratio (ER = Efficiency Ratio)
+- Simpler entry: KAMA crossover + HTF bias only (no ADX/RSI clutter)
+- ATR trailing stop ensures we exit when trend breaks
+- Discrete position sizing minimizes fee churn
 
-Why this might work (learning from failures):
-- #087, #093 (1h strategies) failed with negative Sharpe - too much noise
-- #090, #096 (1d strategies) had positive Sharpe but low trade count
-- Key insight: 1h needs MEAN REVERSION entries with TREND filter (not pure trend)
-- Fisher Transform catches reversals better than RSI extremes
-- Asymmetric logic: more aggressive longs in bull, cautious shorts in bear
-- Looser entry conditions to ensure ≥10 trades per symbol
-
-Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper (call ONCE before loop).
-Position sizing: 0.20 base, 0.30 strong signals. Stoploss at 2.0*ATR.
+Timeframe: 4h (REQUIRED), HTF: 1d via mtf_data helper (call ONCE before loop).
+Position sizing: 0.25 base, 0.35 strong signals. Stoploss at 2.5*ATR trailing.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_fisher_4h_hma_vol_regime_rsi_v1"
-timeframe = "1h"
+name = "mtf_4h_kama_1d_hma_adaptive_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -37,28 +35,52 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI."""
+def calculate_kama(close, fast_period=2, slow_period=30, period=10):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market noise - faster in trends, slower in chop.
+    
+    Efficiency Ratio (ER) = |Close - Close[n]| / Sum(|Close[i] - Close[i-1]|)
+    SC = [ER * (fast_sc - slow_sc) + slow_sc]^2
+    KAMA = KAMA_prev + SC * (Close - KAMA_prev)
+    """
     n = len(close)
-    rsi = np.zeros(n)
-    rsi[:] = np.nan
+    kama = np.zeros(n)
+    kama[:] = np.nan
     
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)
+    # Calculate Efficiency Ratio
+    signal = np.abs(close - np.roll(close, period))
+    signal[:period] = np.nan
     
-    gains = np.where(delta > 0, delta, 0)
-    losses = np.where(delta < 0, -delta, 0)
+    noise = np.zeros(n)
+    for i in range(1, n):
+        noise[i] = noise[i-1] + np.abs(close[i] - close[i-1])
+        if i >= period:
+            noise[i] -= np.abs(close[i-period] - close[i-period-1])
+    noise[:period] = np.nan
     
-    avg_gain = pd.Series(gains).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(losses).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # Avoid division by zero
+    er = np.zeros(n)
+    mask = noise > 0
+    er[mask] = signal[mask] / noise[mask]
+    er[~mask] = 0.0
     
-    mask = avg_loss > 0
-    rs = np.zeros(n)
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rsi[mask] = 100 - (100 / (1 + rs[mask]))
-    rsi[~mask] = 100.0
+    # Smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    return rsi
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    # Calculate KAMA
+    for i in range(period + 1, n):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -70,59 +92,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_fisher_transform(high, low, close, period=9):
-    """
-    Calculate Ehlers Fisher Transform.
-    Transforms price into a Gaussian normal distribution for clearer reversal signals.
-    Long when Fisher crosses above -1.5 from below.
-    Short when Fisher crosses below +1.5 from above.
-    """
-    n = len(close)
-    fisher = np.zeros(n)
-    fisher[:] = np.nan
-    fisher_signal = np.zeros(n)
-    fisher_signal[:] = np.nan
-    
-    # Calculate typical price
-    hl2 = (high + low) / 2
-    typical = (2 * hl2 + close) / 3
-    
-    # Normalize price to -1 to +1 range
-    highest = pd.Series(typical).rolling(window=period, min_periods=period).max().values
-    lowest = pd.Series(typical).rolling(window=period, min_periods=period).min().values
-    
-    # Avoid division by zero
-    range_val = highest - lowest
-    range_val = np.where(range_val < 0.001, 0.001, range_val)
-    
-    normalized = 2 * (typical - lowest) / range_val - 1
-    normalized = np.clip(normalized, -0.999, 0.999)
-    
-    # Fisher transform
-    fisher_raw = 0.5 * np.log((1 + normalized) / (1 - normalized))
-    
-    # Smooth with EMA
-    fisher = pd.Series(fisher_raw).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Fisher signal line (1-period lag)
-    fisher_signal = np.roll(fisher, 1)
-    fisher_signal[0] = fisher[0]
-    
-    return fisher, fisher_signal
-
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    bandwidth = (upper - lower) / sma
-    return upper, lower, sma, bandwidth
-
-def calculate_ema(close, period):
-    """Calculate EMA."""
-    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -130,37 +99,30 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    rsi = calculate_rsi(close, 14)
-    ema_21 = calculate_ema(close, 21)
-    ema_50 = calculate_ema(close, 50)
     
-    # Fisher Transform for reversal signals
-    fisher, fisher_signal = calculate_fisher_transform(high, low, close, 9)
+    # KAMA fast and slow for crossover
+    kama_fast = calculate_kama(close, fast_period=2, slow_period=10, period=10)
+    kama_slow = calculate_kama(close, fast_period=2, slow_period=40, period=10)
     
-    # Bollinger Bands for mean reversion
-    bb_upper, bb_lower, bb_mid, bb_bw = calculate_bollinger_bands(close, 20, 2.0)
-    
-    # ATR ratio for volatility spike detection
-    atr_ratio = atr_7 / atr_30
-    atr_ratio = np.where(np.isnan(atr_ratio) | (atr_30 == 0), 1.0, atr_ratio)
+    # Additional trend confirmation
+    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.20
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.35
     
     # Track position state for stoploss
     in_position = False
@@ -169,138 +131,114 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     
+    # Track KAMA crossover state
+    prev_kama_diff = 0.0
+    
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(fisher_signal[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # 1d HMA = higher timeframe trend bias
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # EMA alignment on 1h
+        # === KAMA CROSSOVER SIGNAL ===
+        kama_diff = kama_fast[i] - kama_slow[i]
+        
+        # Detect crossover
+        kama_cross_bull = prev_kama_diff <= 0 and kama_diff > 0
+        kama_cross_bear = prev_kama_diff >= 0 and kama_diff < 0
+        
+        # Store for next iteration
+        prev_kama_diff = kama_diff
+        
+        # === EMA ALIGNMENT (additional confirmation) ===
         ema_bullish = ema_21[i] > ema_50[i]
         ema_bearish = ema_21[i] < ema_50[i]
         
-        # === VOLATILITY REGIME FILTER ===
-        # High vol (atr_ratio > 1.5) = panic, wait for reversion
-        # Normal vol (atr_ratio < 1.2) = good for entries
-        # Extreme vol (atr_ratio > 2.0) = avoid new entries
-        vol_normal = atr_ratio[i] < 1.5
-        vol_spike = atr_ratio[i] > 1.8
-        vol_extreme = atr_ratio[i] > 2.5
+        # === KAMA TREND DIRECTION ===
+        kama_bullish = kama_fast[i] > kama_slow[i]
+        kama_bearish = kama_fast[i] < kama_slow[i]
         
-        # === FISHER TRANSFORM REVERSAL SIGNALS ===
-        # Long: Fisher crosses above -1.5 from below (oversold reversal)
-        # Short: Fisher crosses below +1.5 from above (overbought reversal)
-        fisher_long_cross = (fisher_signal[i] < -1.5) and (fisher[i] >= -1.5)
-        fisher_short_cross = (fisher_signal[i] > 1.5) and (fisher[i] <= 1.5)
-        
-        # Fisher in extreme zones (mean reversion setup)
-        fisher_oversold = fisher[i] < -1.0
-        fisher_overbought = fisher[i] > 1.0
-        
-        # === RSI CONFIRMATION ===
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
-        rsi_neutral = 40 <= rsi[i] <= 60
-        
-        # === BOLLINGER BAND POSITION ===
-        price_near_lower = close[i] <= bb_lower[i] * 1.005  # within 0.5% of lower band
-        price_near_upper = close[i] >= bb_upper[i] * 0.995  # within 0.5% of upper band
-        price_below_mid = close[i] < bb_mid[i]
-        price_above_mid = close[i] > bb_mid[i]
+        # === PRICE VS KAMA ===
+        price_above_kama = close[i] > kama_slow[i]
+        price_below_kama = close[i] < kama_slow[i]
         
         new_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS (mean reversion with trend filter) ===
-        # Path 1: Fisher oversold cross + 4h bullish + normal vol (strong long)
-        if fisher_long_cross and bull_trend_4h and vol_normal:
+        # === LONG ENTRY CONDITIONS (simplified to ensure trades) ===
+        # Path 1: KAMA bull crossover + 1d bullish trend (strong signal)
+        if kama_cross_bull and bull_trend_1d:
             new_signal = SIZE_STRONG
         
-        # Path 2: Fisher oversold + price at BB lower + 4h bullish (strong long)
-        if new_signal == 0.0 and fisher_oversold and price_near_lower and bull_trend_4h:
-            if vol_normal or rsi_oversold:
-                new_signal = SIZE_STRONG
+        # Path 2: KAMA bullish + 1d bullish + EMA bullish (trend confirmation)
+        if new_signal == 0.0 and kama_bullish and bull_trend_1d and ema_bullish:
+            new_signal = SIZE_BASE
         
-        # Path 3: RSI oversold + price at BB lower + 4h bullish (mean reversion long)
-        if new_signal == 0.0 and rsi_oversold and price_near_lower and bull_trend_4h:
-            if vol_normal:
+        # Path 3: KAMA bullish + 1d bullish + price above KAMA (fallback)
+        if new_signal == 0.0 and kama_bullish and bull_trend_1d and price_above_kama:
+            new_signal = SIZE_BASE
+        
+        # Path 4: KAMA bull crossover alone (ensures we get trades)
+        if new_signal == 0.0 and kama_cross_bull:
+            if bull_trend_1d or ema_bullish:
                 new_signal = SIZE_BASE
         
-        # Path 4: Fisher oversold + 4h bullish (simpler, ensures trades)
-        if new_signal == 0.0 and fisher_oversold and bull_trend_4h:
-            if ema_bullish or rsi_neutral:
-                new_signal = SIZE_BASE
-        
-        # Path 5: Price at BB lower + 4h bullish + normal vol (fallback)
-        if new_signal == 0.0 and price_near_lower and bull_trend_4h and vol_normal:
-            if not vol_extreme:
-                new_signal = SIZE_BASE
-        
-        # === SHORT ENTRY CONDITIONS (mean reversion with trend filter) ===
-        # Path 1: Fisher overbought cross + 4h bearish + normal vol (strong short)
-        if fisher_short_cross and bear_trend_4h and vol_normal:
+        # === SHORT ENTRY CONDITIONS (simplified to ensure trades) ===
+        # Path 1: KAMA bear crossover + 1d bearish trend (strong signal)
+        if kama_cross_bear and bear_trend_1d:
             new_signal = -SIZE_STRONG
         
-        # Path 2: Fisher overbought + price at BB upper + 4h bearish (strong short)
-        if new_signal == 0.0 and fisher_overbought and price_near_upper and bear_trend_4h:
-            if vol_normal or rsi_overbought:
-                new_signal = -SIZE_STRONG
+        # Path 2: KAMA bearish + 1d bearish + EMA bearish (trend confirmation)
+        if new_signal == 0.0 and kama_bearish and bear_trend_1d and ema_bearish:
+            new_signal = -SIZE_BASE
         
-        # Path 3: RSI overbought + price at BB upper + 4h bearish (mean reversion short)
-        if new_signal == 0.0 and rsi_overbought and price_near_upper and bear_trend_4h:
-            if vol_normal:
+        # Path 3: KAMA bearish + 1d bearish + price below KAMA (fallback)
+        if new_signal == 0.0 and kama_bearish and bear_trend_1d and price_below_kama:
+            new_signal = -SIZE_BASE
+        
+        # Path 4: KAMA bear crossover alone (ensures we get trades)
+        if new_signal == 0.0 and kama_cross_bear:
+            if bear_trend_1d or ema_bearish:
                 new_signal = -SIZE_BASE
         
-        # Path 4: Fisher overbought + 4h bearish (simpler, ensures trades)
-        if new_signal == 0.0 and fisher_overbought and bear_trend_4h:
-            if ema_bearish or rsi_neutral:
-                new_signal = -SIZE_BASE
-        
-        # Path 5: Price at BB upper + 4h bearish + normal vol (fallback)
-        if new_signal == 0.0 and price_near_upper and bear_trend_4h and vol_normal:
-            if not vol_extreme:
-                new_signal = -SIZE_BASE
-        
-        # === VOLATILITY SPIKE EXIT ===
-        # If in position and vol spikes to extreme, reduce/exit
-        if in_position and vol_extreme:
-            # Don't add to position during panic, but don't exit immediately
-            if new_signal != 0.0:
-                new_signal = new_signal * 0.5  # Reduce size during panic
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR ===
+        # === ATR TRAILING STOPLOSS LOGIC (Rule 6) ===
         # Update trailing highs/lows for active positions
         if in_position and position_side > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
-            # Trailing stop: 2.0 * ATR below highest close
-            stoploss_price = highest_close - 2.0 * atr[i]
+            # Trailing stop: 2.5 * ATR below highest close
+            stoploss_price = highest_close - 2.5 * atr[i]
             if close[i] < stoploss_price:
                 new_signal = 0.0  # Stoploss hit
         
         if in_position and position_side < 0:
             if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
-            # Trailing stop: 2.0 * ATR above lowest close
-            stoploss_price = lowest_close + 2.0 * atr[i]
+            # Trailing stop: 2.5 * ATR above lowest close
+            stoploss_price = lowest_close + 2.5 * atr[i]
             if close[i] > stoploss_price:
                 new_signal = 0.0  # Stoploss hit
+        
+        # === KAMA CROSSBACK EXIT ===
+        # Exit long if KAMA crosses bearish
+        if in_position and position_side > 0 and kama_cross_bear:
+            new_signal = 0.0
+        
+        # Exit short if KAMA crosses bullish
+        if in_position and position_side < 0 and kama_cross_bull:
+            new_signal = 0.0
         
         # Update position tracking
         # Entering new position
