@@ -1,58 +1,48 @@
 #!/usr/bin/env python3
 """
-Experiment #429: 1h RSI Pullback + 4h HMA Trend + Volume Confirmation
+Experiment #430: 4h Fisher Transform + BB Width Regime + 1d/1w HMA Trend Filter
 
-Hypothesis: After 428 failed experiments, the pattern is clear - complex regime
-switching strategies (ADX+Chop+Bollinger) are overfitting and failing. The key
-insight is SIMPLICITY + STRONG HTF BIAS. This strategy uses:
+Hypothesis: After 429 failed experiments, the pattern is clear - complex multi-condition
+strategies with too many filters generate 0 trades or fail on BTC/ETH. The key insight:
 
-1. 4h HMA(21) TREND BIAS (via mtf_data helper):
-   - Long ONLY when price > 4h HMA (bullish bias)
-   - Short ONLY when price < 4h HMA (bearish bias)
-   - HMA is smoother than EMA, reduces whipsaw on 1h entries
-   - This is the SINGLE strongest filter - no counter-trend trades
+1. FISHER TRANSFORM (Ehlers): Superior to RSI for catching reversals in bear/range markets.
+   Fisher normalizes price to Gaussian distribution, making extremes (-2 to +2) meaningful.
+   Long when Fisher crosses above -1.5 from below (oversold reversal).
+   Short when Fisher crosses below +1.5 from above (overbought reversal).
 
-2. RSI(7) PULLBACK ENTRY (faster than RSI(14) for 1h):
-   - Long: RSI(7) < 35 (oversold pullback in uptrend)
-   - Short: RSI(7) > 65 (overbought pullback in downtrend)
-   - Tighter thresholds than standard 30/70 for more trades
+2. BB WIDTH PERCENTILE REGIME: Instead of absolute BB width, use percentile over 100 bars.
+   BB Width %ile < 40 = compression (expect breakout/reversal soon).
+   This adapts to changing volatility regimes automatically.
 
-3. VOLUME CONFIRMATION (critical filter):
-   - Entry volume > 1.5x 20-bar average volume
-   - Confirms institutional interest, reduces false signals
-   - This was underutilized in failed strategies
+3. MTF HMA TREND FILTER: 1d HMA for intermediate trend, 1w HMA for macro bias.
+   Long only when price > 1d HMA (bullish intermediate trend).
+   Short only when price < 1d HMA (bearish intermediate trend).
+   Extra confirmation: 1d HMA > 1w HMA for longs, 1d HMA < 1w HMA for shorts.
 
-4. EMA(21) PROXIMITY FILTER:
-   - Long: price within 2% of EMA(21) (pullback, not breakout)
-   - Short: price within 2% of EMA(21)
-   - Ensures we're buying dips, not chasing
+4. VOLATILITY CONFIRMATION: ATR(14) > ATR(14).shift(5) ensures expanding vol on entry.
+   Avoids entering during dead/low-vol periods where signals whipsaw.
 
-5. ATR(14) TRAILING STOP at 2.0x:
-   - Signal → 0 when price moves 2.0*ATR against position
-   - Tighter than 2.5x for 1h timeframe (faster exits)
+5. POSITION SIZING: 0.25 discrete (conservative for 4h volatility).
+   Stoploss: 2.5 * ATR(14) trailing stop.
 
-6. POSITION SIZING: 0.25 discrete (conservative for 1h volatility)
-   - Max 25% capital per position
-   - Discrete levels: 0.0, ±0.25 only (minimize fee churn)
+Why this should work:
+- Fisher Transform catches reversals better than RSI (proven in literature)
+- BB Width %ile adapts to vol regime without fixed thresholds
+- 1d/1w HMA alignment prevents counter-trend trades that failed in 2022
+- Should generate 30-60 trades/year on 4h (enough for statistical significance)
+- Works on BTC/ETH/SOL individually (not SOL-biased)
 
-Why 1h should work:
-- More trades than 4h/12h (~50-100/year vs 20-40)
-- Faster reaction to reversals than 4h strategies
-- 4h HMA provides stable trend bias without overfitting
-- Volume filter is unique - most failed strategies ignored volume
-- RSI(7) is fast enough for 1h but not noisy like RSI(3)
-
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25 discrete levels
-Stoploss: 2.0 * ATR(14) trailing
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_rsi7_pullback_4h_hma_vol_confirm_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_fisher_bbwidth_1d_1w_hma_regime_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -75,53 +65,98 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=7):
-    """Calculate Relative Strength Index with custom period."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+def calculate_fisher_transform(high, low, period=9):
+    """
+    Calculate Ehlers Fisher Transform.
+    Converts price to Gaussian-normalized values (-2 to +2 typical range).
+    Crossovers at extremes signal reversals.
+    """
+    n = len(high)
+    fisher = np.full(n, np.nan)
+    trigger = np.full(n, np.nan)
     
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    for i in range(period - 1, n):
+        # Calculate typical price
+        hl2 = (high[i-period+1:i+1].max() + low[i-period+1:i+1].min()) / 2.0
+        
+        # Normalize to 0-1 range
+        highest = high[i-period+1:i+1].max()
+        lowest = low[i-period+1:i+1].min()
+        
+        if highest > lowest:
+            price_ratio = (hl2 - lowest) / (highest - lowest)
+        else:
+            price_ratio = 0.5
+        
+        # Clamp to avoid division issues
+        price_ratio = np.clip(price_ratio, 0.001, 0.999)
+        
+        # Fisher transform
+        fisher_val = 0.5 * np.log((1 + price_ratio) / (1 - price_ratio))
+        
+        # Smooth fisher
+        if i == period - 1:
+            fisher[i] = fisher_val
+        else:
+            fisher[i] = 0.67 * fisher_val + 0.33 * fisher[i-1]
+        
+        # Trigger line (1-period lag)
+        if i > period - 1:
+            trigger[i] = fisher[i-1]
     
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+    return fisher, trigger
 
-def calculate_ema(close, period=21):
-    """Calculate Exponential Moving Average."""
+def calculate_bb_width(close, high, low, period=20, std_mult=2.0):
+    """Calculate Bollinger Band Width as (Upper - Lower) / Middle."""
     close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    return ema.values
+    middle = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    
+    upper = middle + std_mult * std
+    lower = middle - std_mult * std
+    
+    bb_width = (upper - lower) / middle
+    
+    return bb_width.values
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate simple moving average of volume."""
-    vol_s = pd.Series(volume)
-    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+def calculate_bb_width_percentile(bb_width, lookback=100):
+    """Calculate BB Width percentile rank over lookback period."""
+    n = len(bb_width)
+    percentile = np.full(n, np.nan)
+    
+    for i in range(lookback - 1, n):
+        window = bb_width[i-lookback+1:i+1]
+        valid = window[~np.isnan(window)]
+        if len(valid) > 0:
+            # Percentile rank: what % of values are below current
+            rank = np.sum(valid < bb_width[i]) / len(valid)
+            percentile[i] = rank * 100.0
+    
+    return percentile
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 7)
-    ema_21 = calculate_ema(close, 21)
-    vol_sma = calculate_volume_sma(volume, 20)
+    fisher, trigger = calculate_fisher_transform(high, low, 9)
+    bb_width = calculate_bb_width(close, high, low, 20, 2.0)
+    bb_width_pct = calculate_bb_width_percentile(bb_width, 100)
     
     signals = np.zeros(n)
     
@@ -141,55 +176,65 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]):
+        if np.isnan(fisher[i]) or np.isnan(trigger[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema_21[i]):
+        if np.isnan(bb_width_pct[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(vol_sma[i]) or vol_sma[i] == 0:
-            signals[i] = 0.0
-            continue
+        # === BB WIDTH REGIME (Volatility Compression) ===
+        # Low percentile = compression = expect move soon
+        vol_compression = bb_width_pct[i] < 40.0
         
-        # === 4h HMA TREND BIAS (SINGLE STRONGEST FILTER) ===
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # === 1d/1w HMA TREND FILTER ===
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        vol_spike = volume[i] > 1.5 * vol_sma[i]
+        bull_trend_1w = hma_1d_aligned[i] > hma_1w_aligned[i]
+        bear_trend_1w = hma_1d_aligned[i] < hma_1w_aligned[i]
         
-        # === EMA PROXIMITY FILTER (pullback, not breakout) ===
-        ema_pct_diff = abs(close[i] - ema_21[i]) / ema_21[i]
-        near_ema = ema_pct_diff < 0.02  # Within 2% of EMA
+        # === FISHER TRANSFORM SIGNALS ===
+        # Long: Fisher crosses above -1.5 from below (oversold reversal)
+        fisher_long = (fisher[i] > -1.5) and (trigger[i] <= -1.5)
         
-        # === RSI PULLBACK SIGNALS ===
-        rsi_oversold = rsi[i] < 35  # Long entry
-        rsi_overbought = rsi[i] > 65  # Short entry
+        # Short: Fisher crosses below +1.5 from above (overbought reversal)
+        fisher_short = (fisher[i] < 1.5) and (trigger[i] >= 1.5)
+        
+        # === VOLATILITY EXPANSION CONFIRMATION ===
+        # ATR should be expanding (not in dead market)
+        if i >= 5:
+            vol_expanding = atr[i] > atr[i-5]
+        else:
+            vol_expanding = True
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # LONG: 4h bullish + RSI oversold + volume spike + near EMA
-        if bull_trend_4h and rsi_oversold and vol_spike and near_ema:
-            new_signal = SIZE
+        # LONG ENTRY: Fisher long + bull trend + vol compression + vol expanding
+        if fisher_long and bull_trend_1d and vol_compression and vol_expanding:
+            # Extra confirmation: 1d HMA above 1w HMA (aligned bullish)
+            if bull_trend_1w:
+                new_signal = SIZE
         
-        # SHORT: 4h bearish + RSI overbought + volume spike + near EMA
-        elif bear_trend_4h and rsi_overbought and vol_spike and near_ema:
-            new_signal = -SIZE
+        # SHORT ENTRY: Fisher short + bear trend + vol compression + vol expanding
+        if fisher_short and bear_trend_1d and vol_compression and vol_expanding:
+            # Extra confirmation: 1d HMA below 1w HMA (aligned bearish)
+            if bear_trend_1w:
+                new_signal = -SIZE
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.0 * atr[i]
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -197,18 +242,20 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.0 * atr[i]
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit long if 4h trend turns bearish
-        if in_position and position_side > 0 and bear_trend_4h:
-            new_signal = 0.0
+        # Exit long if price falls below 1d HMA
+        if in_position and position_side > 0 and new_signal != 0.0:
+            if bear_trend_1d:
+                new_signal = 0.0
         
-        # Exit short if 4h trend turns bullish
-        if in_position and position_side < 0 and bull_trend_4h:
-            new_signal = 0.0
+        # Exit short if price rises above 1d HMA
+        if in_position and position_side < 0 and new_signal != 0.0:
+            if bull_trend_1d:
+                new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
