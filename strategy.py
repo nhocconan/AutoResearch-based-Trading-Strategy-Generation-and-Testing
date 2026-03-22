@@ -1,30 +1,76 @@
 #!/usr/bin/env python3
 """
-Experiment #167: 12h Supertrend + 1d HMA Trend Bias + Choppiness Filter
+Experiment #168: 1d KAMA Adaptive Trend + 1w HMA Bias + BB Squeeze + RSI Entry
 
-Hypothesis: 12h Supertrend provides clear trend-following signals with built-in
-volatility adjustment. 1d HMA gives higher timeframe trend bias to avoid
-counter-trend trades. Choppiness Index filters out ranging markets where
-Supertrend whipsaws. This combo should beat pure Donchian breakout (#161).
+Hypothesis: 1d timeframe needs adaptive trend following that works in both bull and bear
+markets. KAMA (Kaufman Adaptive Moving Average) adjusts sensitivity based on market
+efficiency - fast in trends, slow in chop. Combined with 1w HMA for major trend bias,
+BB squeeze for regime detection, and RSI for entry timing.
 
-Why this might work better than #161:
-- Supertrend adapts to volatility (ATR-based), Donchian is fixed period
-- Choppiness filter prevents trades in sideways markets (major Sharpe killer)
-- 12h is slow enough to capture sustained trends, fast enough for 10+ trades/year
-- Learning from #161: ADX>20 was too restrictive, CHOP<50 is more adaptive
+Why this might work on 1d:
+- KAMA adapts to market conditions (unlike fixed EMA that failed in #158, #159, #160)
+- 1w HTF provides stable major trend bias (avoid counter-trend trades)
+- BB squeeze identifies low-volatility periods before breakouts
+- RSI(7) extremes provide entry timing within the trend
+- Fewer but higher-quality trades suitable for 1d timeframe
 
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d via mtf_data helper (call ONCE before loop)
+Learning from failures:
+- #158, #159, #160: Simple EMA crossover failed on 30m, 1h, 4h
+- #161: Donchian breakout on 12h had negative Sharpe
+- #162: 1d HMA + 1w bias + MACD + BB had Sharpe=0.218 but discarded (likely <10 trades)
+- #166: CRSI mean reversion on 4h failed catastrophically (Sharpe=-48)
+- Need trend-following with adaptive parameters, not fixed EMA
+
+Key differences from #162:
+- KAMA instead of HMA for primary trend (more adaptive)
+- RSI(7) instead of MACD for entry timing (faster signals)
+- BB squeeze threshold tuned for 1d (lower threshold = more trades)
+- Ensure entry conditions trigger frequently enough for ≥10 trades
+
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25-0.35 discrete levels
-Stoploss: Built into Supertrend + 2.5*ATR emergency stop
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_supertrend_1d_hma_chop_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_1w_hma_bb_squeeze_rsi_atr_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts smoothing based on market efficiency ratio.
+    Fast in trends, slow in choppy markets.
+    """
+    n = len(close)
+    kama = np.zeros(n)
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(period, n):
+        signal = np.abs(close[i] - close[i - period])
+        noise = np.sum(np.abs(np.diff(close[i-period:i+1])))
+        if noise > 0:
+            er[i] = signal / noise
+        else:
+            er[i] = 0
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1.0)
+    slow_sc = 2.0 / (slow_period + 1.0)
+    
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    for i in range(period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+    
+    return kama
 
 def calculate_atr(high, low, close, period=14):
     """Calculate ATR using Wilder's smoothing."""
@@ -36,84 +82,25 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator for trend direction."""
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    # Calculate basic bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Initialize final bands
-    final_upper = np.zeros(n)
-    final_lower = np.zeros(n)
-    supertrend = np.zeros(n)
-    
-    # First bar
-    final_upper[0] = upper_band[0]
-    final_lower[0] = lower_band[0]
-    supertrend[0] = upper_band[0]  # Start in short mode
-    
-    # Iterate for subsequent bars
-    for i in range(1, n):
-        # Upper band logic
-        if upper_band[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]:
-            final_upper[i] = upper_band[i]
-        else:
-            final_upper[i] = final_upper[i-1]
-        
-        # Lower band logic
-        if lower_band[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]:
-            final_lower[i] = lower_band[i]
-        else:
-            final_lower[i] = final_lower[i-1]
-        
-        # Determine Supertrend value
-        if supertrend[i-1] == final_upper[i-1]:
-            if close[i] > final_upper[i]:
-                supertrend[i] = final_lower[i]
-            else:
-                supertrend[i] = final_upper[i]
-        else:
-            if close[i] < final_lower[i]:
-                supertrend[i] = final_upper[i]
-            else:
-                supertrend[i] = final_lower[i]
-    
-    # Determine trend direction: 1 = long (price > supertrend), -1 = short
-    trend = np.where(close > supertrend, 1, -1)
-    
-    return supertrend, trend, atr
+def calculate_rsi(close, period=7):
+    """Calculate RSI with configurable period."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = (delta.where(delta > 0, 0)).ewm(span=period, min_periods=period, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = gain / (loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
-def calculate_choppiness(high, low, close, period=14):
-    """Calculate Choppiness Index (CHOP) for regime detection.
-    
-    CHOP > 61.8 = ranging/choppy market
-    CHOP < 38.2 = trending market
-    """
-    n = len(close)
-    chop = np.zeros(n)
-    
-    for i in range(period, n):
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        if highest_high == lowest_low:
-            chop[i] = 100
-            continue
-        
-        atr_sum = 0
-        for j in range(i-period+1, i+1):
-            tr = max(high[j] - low[j], 
-                     abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j],
-                     abs(low[j] - close[j-1]) if j > 0 else high[j] - low[j])
-            atr_sum += tr
-        
-        chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
-    
-    return chop
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    bandwidth = (upper - lower) / (sma + 1e-10)
+    return upper, lower, sma, bandwidth
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -132,17 +119,19 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
-    supertrend, st_trend, atr = calculate_supertrend(high, low, close, 10, 3.0)
-    chop = calculate_choppiness(high, low, close, 14)
+    # Calculate 1d indicators
+    kama = calculate_kama(close, period=10, fast_period=2, slow_period=30)
+    atr = calculate_atr(high, low, close, 14)
+    rsi = calculate_rsi(close, period=7)
+    bb_upper, bb_lower, bb_mid, bb_bandwidth = calculate_bollinger_bands(close, period=20, std_dev=2.0)
     
     signals = np.zeros(n)
     
@@ -163,77 +152,84 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop[i]) or np.isnan(st_trend[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(bb_bandwidth[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 1d HMA = higher timeframe trend bias
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
+        # 1w HMA = higher timeframe trend bias (very stable)
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
         
-        # === CHOPPINESS FILTER ===
-        # CHOP < 50 = trending market (trade Supertrend signals)
-        # CHOP >= 50 = ranging market (reduce position or stay flat)
-        is_trending = chop[i] < 50
+        # === ADAPTIVE TREND (KAMA) ===
+        # Price above KAMA = bullish momentum
+        # Price below KAMA = bearish momentum
+        bull_kama = close[i] > kama[i]
+        bear_kama = close[i] < kama[i]
         
-        # === SUPERTREND SIGNAL ===
-        # st_trend = 1 means price above Supertrend (bullish)
-        # st_trend = -1 means price below Supertrend (bearish)
-        st_long = st_trend[i] == 1
-        st_short = st_trend[i] == -1
+        # === BOLLINGER BAND SQUEEZE REGIME ===
+        # Low bandwidth = squeeze (potential breakout coming)
+        # Calculate bandwidth percentile approximation
+        bb_squeeze = bb_bandwidth[i] < 0.10  # Low vol regime
         
-        # Check for Supertrend flip (entry signal)
-        st_flip_long = (i > 0 and st_trend[i] == 1 and st_trend[i-1] == -1)
-        st_flip_short = (i > 0 and st_trend[i] == -1 and st_trend[i-1] == 1)
+        # === RSI ENTRY TIMING ===
+        # In uptrend: enter on RSI pullback to 40-50
+        # In downtrend: enter on RSI rally to 50-60
+        rsi_long_entry = rsi[i] < 50 and rsi[i] > 35  # Pullback in uptrend
+        rsi_short_entry = rsi[i] > 50 and rsi[i] < 65  # Rally in downtrend
+        
+        # === BB BOUNCE ENTRY ===
+        # Long: price near lower band in uptrend
+        # Short: price near upper band in downtrend
+        price_near_lower = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i] + 1e-10) < 0.3
+        price_near_upper = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i] + 1e-10) > 0.7
         
         new_signal = 0.0
         
         # === LONG ENTRY CONDITIONS ===
-        # 1d bullish + trending market + Supertrend flip to long
-        if bull_trend_1d and is_trending and st_flip_long:
-            new_signal = SIZE_STRONG
-        elif bull_trend_1d and is_trending and st_long:
-            new_signal = SIZE_BASE
+        # 1w bullish + KAMA bullish + (RSI pullback OR BB bounce)
+        long_condition_1 = bull_trend_1w and bull_kama and rsi_long_entry
+        long_condition_2 = bull_trend_1w and bull_kama and price_near_lower
+        
+        if long_condition_1 or long_condition_2:
+            # Stronger signal if BB squeeze present
+            if bb_squeeze:
+                new_signal = SIZE_STRONG
+            else:
+                new_signal = SIZE_BASE
         
         # === SHORT ENTRY CONDITIONS ===
-        # 1d bearish + trending market + Supertrend flip to short
-        if bear_trend_1d and is_trending and st_flip_short:
-            new_signal = -SIZE_STRONG
-        elif bear_trend_1d and is_trending and st_short:
-            new_signal = -SIZE_BASE
+        # 1w bearish + KAMA bearish + (RSI rally OR BB bounce)
+        short_condition_1 = bear_trend_1w and bear_kama and rsi_short_entry
+        short_condition_2 = bear_trend_1w and bear_kama and price_near_upper
         
-        # === RANGING MARKET ADJUSTMENT ===
-        # In choppy markets, reduce position size by half
-        if not is_trending and new_signal != 0.0:
-            new_signal = new_signal * 0.5
+        if short_condition_1 or short_condition_2:
+            # Stronger signal if BB squeeze present
+            if bb_squeeze:
+                new_signal = -SIZE_STRONG
+            else:
+                new_signal = -SIZE_BASE
         
-        # === STOPLOSS LOGIC (Rule 6) - Supertrend + 2.5*ATR emergency ===
-        # Supertrend itself acts as trailing stop, but add emergency stop
-        
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Update trailing highs/lows for active positions
         if in_position and position_side > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
-            # Emergency stop: 2.5 * ATR below highest close
+            # Trailing stop: 2.5 * ATR below highest close
             stoploss_price = highest_close - 2.5 * atr[i]
-            # Also check Supertrend level
-            st_stop = supertrend[i]
-            if close[i] < stoploss_price or close[i] < st_stop:
+            if close[i] < stoploss_price:
                 new_signal = 0.0  # Stoploss hit
         
         if in_position and position_side < 0:
             if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
-            # Emergency stop: 2.5 * ATR above lowest close
+            # Trailing stop: 2.5 * ATR above lowest close
             stoploss_price = lowest_close + 2.5 * atr[i]
-            # Also check Supertrend level
-            st_stop = supertrend[i]
-            if close[i] > stoploss_price or close[i] > st_stop:
+            if close[i] > stoploss_price:
                 new_signal = 0.0  # Stoploss hit
         
         # Update position tracking
