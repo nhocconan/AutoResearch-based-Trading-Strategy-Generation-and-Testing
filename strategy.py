@@ -1,56 +1,130 @@
 #!/usr/bin/env python3
 """
-Experiment #370: 4h Regime-Adaptive with 1d/1w HMA Bias + Volatility Filter
+Experiment #371: 12h KAMA Adaptive Trend with 1d HMA Bias + RSI Timing
 
-Hypothesis: After 369 failed experiments, the clearest pattern is that static strategies
-fail because they don't adapt to market regime. For 4h timeframe specifically:
+Hypothesis: After 350+ failed experiments, the pattern is clear - over-filtered strategies
+generate 0 trades. For 12h timeframe, I need SIMPLER logic that actually trades:
 
-1. BOLLINGER BAND WIDTH REGIME: Detect trending vs ranging markets
-   - BB Width < 30th percentile = trending (use breakout logic)
-   - BB Width > 70th percentile = ranging (use mean reversion logic)
-   - This is the #1 meta-filter from quantitative literature
+1. KAMA (Kaufman Adaptive Moving Average): Adapts to market noise automatically
+   - Fast in trends, slow in ranges (no need for separate regime detection)
+   - Period=10, fast=2, slow=30 (standard Kaufman parameters)
+   - Crossover signals work better than static EMA on 12h
 
-2. 1d HMA TREND BIAS: Only take trades in direction of daily trend
-   - Long only if price > 1d HMA(21)
-   - Short only if price < 1d HMA(21)
-   - Filters 50%+ of losing trades
+2. RSI(14) TIMING FILTER: Enter on pullbacks, not extremes
+   - Long: KAMA bullish + RSI between 35-60 (pullback in uptrend)
+   - Short: KAMA bearish + RSI between 40-65 (rally in downtrend)
+   - NOT waiting for RSI<30 or >70 (too rare on 12h = 0 trades)
 
-3. 1w HMA MACRO BIAS: Additional filter for major trend direction
-   - Adds conviction when 1d and 1w agree
-   - Increases position size when aligned (0.30 vs 0.20)
+3. 1d HMA(21) SOFT BIAS: Weight entries, don't block
+   - Long entries preferred when price > 1d HMA (but not required)
+   - Short entries preferred when price < 1d HMA (but not required)
+   - This is a WEIGHT, not a hard filter (generates more trades)
 
-4. DUAL ENTRY LOGIC:
-   - Trending regime: Donchian(20) breakout in trend direction
-   - Ranging regime: RSI(14) mean reversion (RSI<35 long, RSI>65 short)
-   - Loosened thresholds to ensure sufficient trades
-
-5. ATR TRAILING STOP (2.5x): Protect capital on reversals
+4. ATR(14) 2.5x TRAILING STOP: Protect capital
    - Signal → 0 when price moves 2.5*ATR against position
-   - Critical for limiting drawdown
+   - Trailing stop locks profits in strong trends
 
-6. POSITION SIZING: 0.20-0.30 discrete (conservative for 4h volatility)
-   - 0.20 when 1d/1w disagree
-   - 0.30 when 1d/1w agree (higher conviction)
-   - Discrete levels minimize fee churn
+5. POSITION SIZING: 0.28 discrete (conservative for 12h)
+   - Max 28% capital per position
+   - Discrete levels: 0.0, ±0.28
 
-Why 4h should work:
-- Fast enough to capture swings, slow enough to filter noise
-- 4h candles are significant for crypto (6 per day)
-- Should generate 30-60 trades/year per symbol
-- Regime adaptation handles both 2022 crash and 2025 bear market
+Why this should work on 12h:
+- KAMA adapts to volatility (no ADX filter needed = more trades)
+- RSI range 35-65 is COMMON (generates 30-50 trades/year)
+- Soft 1d bias doesn't block valid signals
+- Simpler = more trades = better statistics
 
-Timeframe: 4h (REQUIRED for this experiment)
-HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20-0.30 discrete levels
+Timeframe: 12h (REQUIRED)
+HTF: 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.28 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_regime_adaptive_1d_1w_hma_bb_rsi_donchian_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_kama_1d_hma_rsi_timing_atr_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market noise - fast in trends, slow in ranges.
+    
+    Efficiency Ratio (ER) = |close - close[n]| / sum(|close[i] - close[i-1]|)
+    Smoothing Constant (SC) = [ER * (fast_sc - slow_sc) + slow_sc]^2
+    KAMA = KAMA_prev + SC * (close - KAMA_prev)
+    """
+    n = len(close)
+    kama = np.full(n, np.nan)
+    
+    if n < slow + period:
+        return kama
+    
+    # Calculate Efficiency Ratio
+    signal = np.abs(close - np.roll(close, period))
+    signal[:period] = np.nan
+    
+    noise = np.abs(close - np.roll(close, 1))
+    noise[0] = 0
+    
+    # Sum of noise over period
+    noise_sum = pd.Series(noise).rolling(window=period, min_periods=period).sum().values
+    
+    # Efficiency Ratio (0 to 1)
+    er = np.zeros(n)
+    mask = noise_sum > 1e-10
+    er[mask] = signal[mask] / noise_sum[mask]
+    er = np.clip(er, 0, 1)
+    
+    # Smoothing constants
+    fast_sc = 2 / (fast + 1)
+    slow_sc = 2 / (slow + 1)
+    
+    # Adaptive smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Initialize KAMA with SMA of first period
+    kama[period - 1] = np.nanmean(close[:period])
+    
+    # Calculate KAMA
+    for i in range(period, n):
+        if not np.isnan(kama[i - 1]):
+            kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+        else:
+            kama[i] = close[i]
+    
+    return kama
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI using standard Wilder's method."""
+    n = len(close)
+    rsi = np.full(n, np.nan)
+    
+    if n < period + 1:
+        return rsi
+    
+    # Calculate price changes
+    delta = np.diff(close)
+    delta = np.insert(delta, 0, 0)
+    
+    # Separate gains and losses
+    gains = np.where(delta > 0, delta, 0)
+    losses = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing (EMA with span=period)
+    avg_gains = pd.Series(gains).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_losses = pd.Series(losses).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate RSI
+    mask = avg_losses > 1e-10
+    rs = np.zeros(n)
+    rs[mask] = avg_gains[mask] / avg_losses[mask]
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    rsi[~mask] = 100  # No losses = RSI 100
+    
+    return rsi
 
 def calculate_atr(high, low, close, period=14):
     """Calculate ATR using Wilder's smoothing."""
@@ -72,46 +146,6 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    # Band width as percentage of price
-    bw = (upper - lower) / sma * 100
-    return upper, lower, bw
-
-def calculate_rsi(close, period=14):
-    """Calculate RSI using Wilder's smoothing."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-def calculate_donchian_channels(high, low, period=20):
-    """Calculate Donchian Channels using rolling max/min."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    upper = high_s.rolling(window=period, min_periods=period).max().values
-    lower = low_s.rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_bb_width_percentile(bb_width, lookback=100):
-    """Calculate rolling percentile of BB Width for regime detection."""
-    bb_s = pd.Series(bb_width)
-    # Calculate percentile rank over lookback period
-    percentile = bb_s.rolling(window=lookback, min_periods=lookback).apply(
-        lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min()) * 100 if x.max() > x.min() else 50
-    )
-    return percentile.values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -120,28 +154,22 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
     hma_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
-    atr = calculate_atr(high, low, close, 14)
+    # Calculate 12h indicators
+    kama = calculate_kama(close, period=10, fast=2, slow=30)
     rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2.0)
-    bb_percentile = calculate_bb_width_percentile(bb_width, 100)
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, 20)
+    atr = calculate_atr(high, low, close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_LOW = 0.20   # When 1d/1w disagree
-    SIZE_HIGH = 0.30  # When 1d/1w agree (higher conviction)
+    SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -150,78 +178,56 @@ def generate_signals(prices):
     lowest_close = 0.0
     entry_price = 0.0
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(bb_percentile[i]):
-            signals[i] = 0.0
-            continue
+        # === KAMA TREND DIRECTION ===
+        # KAMA slope: current vs 3 bars ago
+        kama_bullish = kama[i] > kama[i - 3] if i >= 3 else False
+        kama_bearish = kama[i] < kama[i - 3] if i >= 3 else False
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            signals[i] = 0.0
-            continue
+        # Price vs KAMA position
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
-        # === HTF TREND BIAS ===
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
-        bull_trend_1w = close[i] > hma_1w_aligned[i]
-        bear_trend_1w = close[i] < hma_1w_aligned[i]
+        # === 1d HMA SOFT BIAS (not a hard filter) ===
+        bull_bias_1d = close[i] > hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else True
+        bear_bias_1d = close[i] < hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else True
         
-        # === REGIME DETECTION ===
-        # BB Width percentile < 30 = trending regime (breakout logic)
-        # BB Width percentile > 70 = ranging regime (mean reversion logic)
-        trending_regime = bb_percentile[i] < 30
-        ranging_regime = bb_percentile[i] > 70
+        # === RSI TIMING FILTER (pullback entries, not extremes) ===
+        # Long: RSI between 35-60 (pullback in uptrend, not oversold)
+        rsi_long_ok = 35 <= rsi[i] <= 60
         
-        # === POSITION SIZING ===
-        # Higher size when 1d and 1w agree on trend direction
-        if bull_trend_1d and bull_trend_1w:
-            size_long = SIZE_HIGH
-        elif bear_trend_1d and bear_trend_1w:
-            size_short = SIZE_HIGH
-        else:
-            size_long = SIZE_LOW
-            size_short = SIZE_LOW
+        # Short: RSI between 40-65 (rally in downtrend, not overbought)
+        rsi_short_ok = 40 <= rsi[i] <= 65
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # TRENDING REGIME: Donchian breakout in trend direction
-        if trending_regime:
-            # Long breakout + 1d bullish bias
-            long_breakout = close[i] > donchian_upper[i-1] if i > 0 else False
-            if long_breakout and bull_trend_1d:
-                new_signal = size_long
-            
-            # Short breakout + 1d bearish bias
-            short_breakout = close[i] < donchian_lower[i-1] if i > 0 else False
-            if short_breakout and bear_trend_1d:
-                new_signal = -size_short
-        
-        # RANGING REGIME: RSI mean reversion
-        elif ranging_regime:
-            # RSI oversold + 1d bullish bias = long
-            if rsi[i] < 35 and bull_trend_1d:
-                new_signal = size_long
-            
-            # RSI overbought + 1d bearish bias = short
-            if rsi[i] > 65 and bear_trend_1d:
-                new_signal = -size_short
-        
-        # NEUTRAL REGIME: Stay flat or hold existing position
-        else:
-            # In neutral regime, only exit signals, no new entries
-            if in_position:
-                new_signal = signals[i-1] if i > 0 else 0.0
+        # LONG ENTRY: KAMA bullish + RSI pullback + 1d bias helps
+        if kama_bullish and price_above_kama and rsi_long_ok:
+            # Prefer entries with 1d bullish bias (but not required)
+            if bull_bias_1d:
+                new_signal = SIZE
             else:
-                new_signal = 0.0
+                # Weaker signal without 1d bias, but still enter
+                new_signal = SIZE * 0.8
+        
+        # SHORT ENTRY: KAMA bearish + RSI rally + 1d bias helps
+        elif kama_bearish and price_below_kama and rsi_short_ok:
+            # Prefer entries with 1d bearish bias (but not required)
+            if bear_bias_1d:
+                new_signal = -SIZE
+            else:
+                # Weaker signal without 1d bias, but still enter
+                new_signal = -SIZE * 0.8
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -241,12 +247,12 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === TREND REVERSAL EXIT ===
-        # Exit if 1d trend flips against position
+        # === KAMA REVERSAL EXIT ===
+        # Exit if KAMA trend flips against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_1d:
+            if position_side > 0 and kama_bearish and price_below_kama:
                 new_signal = 0.0
-            if position_side < 0 and bull_trend_1d:
+            if position_side < 0 and kama_bullish and price_above_kama:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
