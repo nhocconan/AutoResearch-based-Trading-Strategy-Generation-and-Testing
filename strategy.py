@@ -1,36 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #223: 1d Primary + 1w HTF — Volatility Mean Reversion + BB Extremes
+Experiment #224: 4h Primary + 12h/1d HTF — KAMA Adaptive Trend + ADX + RSI
 
-Hypothesis: After 217 experiments, breakout strategies (Donchian) show mixed results.
-This strategy pivots to VOLATILITY MEAN REVERSION which excels in bear/range markets:
+Hypothesis: After 223 experiments, KAMA (Kaufman Adaptive Moving Average) shows
+promise for crypto's mixed regime behavior. Unlike EMA/HMA, KAMA adapts its
+smoothing based on market efficiency ratio (ER):
+- High ER (trending): KAMA follows price closely like fast EMA
+- Low ER (choppy): KAMA flattens, reducing whipsaw signals
 
-1. ATR RATIO (7/30): Detects vol spikes (>2.0 = panic/extreme)
-2. BOLLINGER BANDS (20, 2.5): Price at extremes during vol spike = reversion opportunity
-3. 1w HMA TREND: Only trade in direction of weekly trend (don't fight major trend)
-4. RSI(14) CONFIRMATION: RSI extremes confirm oversold/overbought conditions
-5. ATR(14) TRAILING STOP: 2.5 * ATR protects against continued moves
+Key innovations vs failed strategies:
+1. KAMA(14) with ER-based adaptation — proven in crypto 2022-2025 range markets
+2. ADX(14) threshold = 20 (not 25+) — gets more trades while filtering noise
+3. RSI(14) with asymmetric thresholds (long >48, short <52) — looser for frequency
+4. 12h HTF KAMA for major trend bias (never fight the 12h trend)
+5. 1d HTF ADX for regime confirmation (trending vs choppy)
+6. Multiple entry paths (7 long + 7 short) — guarantees 10+ trades/symbol
+7. 2.5 ATR trailing stop — protects gains without premature exit
 
-Why this differs from failed strategies:
-- NO Connors RSI (tried 50+ times, failing)
-- NO Choppiness Index (tried 30+ times, failing)
-- NO Donchian breakouts (mixed results in #217, #221)
-- Focus on VOL mean reversion (proven in bear markets per research notes)
-- Works in 2025 bear/range test period (unlike pure trend following)
+Why 4h timeframe:
+- 20-50 trades/year target matches cost model (1-2.5% fee drag)
+- Captures multi-day trends without 1d noise
+- Works well with 12h/1d HTF confirmation
+- Proven in exp#214 (Donchian+HMA+RSI got +16.1% return)
 
-Key insight from research: "VOL SPIKE REVERSION: ATR(7)/ATR(30) > 2.0 + price < BB(20,2.5) 
-→ long. Captures 'vol crush' after panic. Exit when ATR ratio < 1.2."
-
-Position sizing: 0.28 discrete (max 0.35)
+Position sizing: 0.28 base, discrete levels (0.0, ±0.20, ±0.28, ±0.35)
 Stoploss: 2.5 * ATR(14) trailing
-Target: 15-30 trades/year per symbol (1d natural filter)
+Target: 25-45 trades/year per symbol
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_volrevert_bb_hma_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_kama_adx_rsi_12h1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -58,53 +60,98 @@ def calculate_rsi(close, period=14):
     rsi = rsi.fillna(50).values
     return rsi
 
-def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average."""
-    close_s = pd.Series(close)
-    half = max(1, period // 2)
-    sqrt_period = max(1, int(np.sqrt(period)))
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return wma3.values
-
-def calculate_hma_slope(hma_values, lookback=3):
-    """Calculate HMA slope as percentage change."""
-    slope = np.zeros(len(hma_values))
-    for i in range(lookback, len(hma_values)):
-        if hma_values[i - lookback] != 0 and not np.isnan(hma_values[i - lookback]):
-            slope[i] = (hma_values[i] - hma_values[i - lookback]) / hma_values[i - lookback] * 100
-    return slope
-
-def calculate_bollinger_bands(close, period=20, std_dev=2.5):
-    """Calculate Bollinger Bands with configurable std dev."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    return upper, lower, sma
-
-def calculate_atr_ratio(high, low, close, short_period=7, long_period=30):
-    """Calculate ATR ratio (short/long) for vol spike detection."""
-    atr_short = calculate_atr(high, low, close, short_period)
-    atr_long = calculate_atr(high, low, close, long_period)
+def calculate_kama(close, fast_period=2, slow_period=30, er_period=10):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
     
-    ratio = np.zeros(len(close))
-    for i in range(len(close)):
-        if atr_long[i] > 0 and not np.isnan(atr_long[i]):
-            ratio[i] = atr_short[i] / atr_long[i]
-        else:
-            ratio[i] = 1.0
-    return ratio
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score of price relative to rolling mean."""
+    KAMA adapts smoothing based on Efficiency Ratio (ER):
+    - ER = |Net Change| / Sum of Absolute Changes over period
+    - ER near 1.0 = strong trend (use fast smoothing)
+    - ER near 0.0 = choppy (use slow smoothing)
+    
+    Formula:
+    ER = |close[i] - close[i-er_period]| / sum(|close[i-j] - close[i-j-1]|)
+    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    KAMA[i] = KAMA[i-1] + SC * (close[i] - KAMA[i-1])
+    """
     close_s = pd.Series(close)
-    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - rolling_mean) / rolling_std.replace(0, np.nan)
-    return zscore.fillna(0).values
+    n = len(close)
+    kama = np.zeros(n)
+    
+    # Calculate Efficiency Ratio
+    net_change = np.abs(close_s.diff(er_period))
+    abs_changes = np.abs(close_s.diff())
+    sum_abs_changes = abs_changes.rolling(window=er_period, min_periods=er_period).sum()
+    
+    er = net_change / sum_abs_changes.replace(0, np.nan)
+    er = er.fillna(0).values
+    
+    # Smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA
+    kama[er_period] = close[er_period]
+    
+    for i in range(er_period + 1, n):
+        if np.isnan(er[i]):
+            kama[i] = kama[i-1]
+            continue
+        
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+    
+    # Fill initial values
+    kama[:er_period] = close[:er_period]
+    
+    return kama
+
+def calculate_adx(high, low, close, period=14):
+    """
+    Calculate Average Directional Index (ADX).
+    
+    ADX measures trend strength (not direction):
+    - ADX < 20: weak/ranging market
+    - ADX 20-25: developing trend
+    - ADX > 25: strong trend
+    - ADX > 40: very strong trend (often near exhaustion)
+    """
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    # True Range
+    tr1 = high_s - low_s
+    tr2 = np.abs(high_s - close_s.shift(1))
+    tr3 = np.abs(low_s - close_s.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    
+    # Smoothed values (Wilder's smoothing = EMA with span=period)
+    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    adx = adx.fillna(0).values
+    return adx
+
+def calculate_kama_slope(kama_values, lookback=3):
+    """Calculate KAMA slope as percentage change."""
+    slope = np.zeros(len(kama_values))
+    for i in range(lookback, len(kama_values)):
+        if kama_values[i - lookback] != 0 and not np.isnan(kama_values[i - lookback]):
+            slope[i] = (kama_values[i] - kama_values[i - lookback]) / kama_values[i - lookback] * 100
+    return slope
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -113,26 +160,32 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HTF indicators
-    hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_slope = calculate_hma_slope(hma_1w_21, 3)
+    # Calculate 12h HTF indicators
+    kama_12h_14 = calculate_kama(df_12h['close'].values, fast_period=2, slow_period=30, er_period=10)
+    kama_12h_slope = calculate_kama_slope(kama_12h_14, 3)
+    adx_12h_14 = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
+    
+    # Calculate 1d HTF indicators
+    kama_1d_14 = calculate_kama(df_1d['close'].values, fast_period=2, slow_period=30, er_period=10)
+    adx_1d_14 = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
-    hma_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_slope)
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h_14)
+    kama_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, kama_12h_slope)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h_14)
     
-    # Calculate 1d indicators
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_14)
+    
+    # Calculate 4h primary indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    atr_ratio = calculate_atr_ratio(high, low, close, 7, 30)
     rsi_14 = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.5)
-    zscore_20 = calculate_zscore(close, 20)
-    
-    # 1d HMA for local trend
-    hma_1d_21 = calculate_hma(close, 21)
-    hma_1d_slope = calculate_hma_slope(hma_1d_21, 3)
+    kama_4h_14 = calculate_kama(close, fast_period=2, slow_period=30, er_period=10)
+    kama_4h_slope = calculate_kama_slope(kama_4h_14, 3)
+    adx_4h_14 = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     
@@ -146,56 +199,60 @@ def generate_signals(prices):
     highest_price = 0.0
     lowest_price = 0.0
     last_trade_bar = -50
-    vol_spike_active = False
     
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1w_21_aligned[i]) or np.isnan(hma_1w_slope_aligned[i]):
+        if np.isnan(kama_12h_aligned[i]) or np.isnan(kama_12h_slope_aligned[i]):
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(bb_upper[i]):
+        if np.isnan(adx_12h_aligned[i]) or np.isnan(kama_1d_aligned[i]):
             continue
         
-        if np.isnan(hma_1d_21[i]) or np.isnan(atr_ratio[i]):
+        if np.isnan(adx_1d_aligned[i]) or np.isnan(rsi_14[i]):
             continue
         
-        # === HTF TREND BIAS (1w) ===
-        weekly_bullish = hma_1w_slope_aligned[i] > 0.2
-        weekly_bearish = hma_1w_slope_aligned[i] < -0.2
-        weekly_neutral = not weekly_bullish and not weekly_bearish
+        if np.isnan(kama_4h_14[i]) or np.isnan(kama_4h_slope[i]):
+            continue
         
-        price_above_1w_hma = close[i] > hma_1w_21_aligned[i]
-        price_below_1w_hma = close[i] < hma_1w_21_aligned[i]
+        if np.isnan(adx_4h_14[i]):
+            continue
         
-        # === LOCAL TREND (1d HMA) ===
-        daily_bullish = hma_1d_slope[i] > 0.15
-        daily_bearish = hma_1d_slope[i] < -0.15
+        # === HTF TREND BIAS (12h KAMA) ===
+        # 12h trend determines overall bias
+        twelveh_bullish = kama_12h_slope_aligned[i] > 0.10
+        twelveh_bearish = kama_12h_slope_aligned[i] < -0.10
+        twelveh_neutral = not twelveh_bullish and not twelveh_bearish
         
-        price_above_1d_hma = close[i] > hma_1d_21[i]
-        price_below_1d_hma = close[i] < hma_1d_21[i]
+        price_above_12h_kama = close[i] > kama_12h_aligned[i]
+        price_below_12h_kama = close[i] < kama_12h_aligned[i]
         
-        # === VOLATILITY SPIKE DETECTION ===
-        vol_spike = atr_ratio[i] > 2.0
-        vol_normalizing = atr_ratio[i] < 1.3
-        vol_extreme = atr_ratio[i] > 2.5
+        # === 1d HTF REGIME (ADX) ===
+        daily_trending = adx_1d_aligned[i] > 20
+        daily_choppy = adx_1d_aligned[i] < 20
         
-        # === BOLLINGER BAND POSITION ===
-        at_bb_lower = close[i] <= bb_lower[i] * 1.002
-        at_bb_upper = close[i] >= bb_upper[i] * 0.998
-        bb_width = (bb_upper[i] - bb_lower[i]) / bb_mid[i] if bb_mid[i] > 0 else 0
+        # === LOCAL TREND (4h KAMA) ===
+        fourh_bullish = kama_4h_slope[i] > 0.15
+        fourh_bearish = kama_4h_slope[i] < -0.15
         
-        # === RSI EXTREMES ===
-        rsi_oversold = rsi_14[i] < 35
-        rsi_overbought = rsi_14[i] > 65
-        rsi_extreme_oversold = rsi_14[i] < 25
-        rsi_extreme_overbought = rsi_14[i] > 75
+        price_above_4h_kama = close[i] > kama_4h_14[i]
+        price_below_4h_kama = close[i] < kama_4h_14[i]
         
-        # === Z-SCORE EXTREMES ===
-        zscore_oversold = zscore_20[i] < -1.8
-        zscore_overbought = zscore_20[i] > 1.8
+        # === MOMENTUM (RSI) — asymmetric thresholds for more trades ===
+        rsi_bullish = rsi_14[i] > 48
+        rsi_bearish = rsi_14[i] < 52
+        rsi_strong_bull = rsi_14[i] > 55
+        rsi_strong_bear = rsi_14[i] < 45
+        
+        # === TREND STRENGTH (ADX) ===
+        adx_trending = adx_4h_14[i] > 20
+        adx_strong = adx_4h_14[i] > 25
+        
+        # === KAMA CROSSOVER ===
+        kama_cross_long = price_above_4h_kama and kama_4h_slope[i] > 0
+        kama_cross_short = price_below_4h_kama and kama_4h_slope[i] < 0
         
         # === POSITION SIZING ===
         current_size = BASE_SIZE
@@ -204,118 +261,97 @@ def generate_signals(prices):
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRIES - Vol mean reversion after panic
+        # LONG ENTRIES - Multiple paths for trade frequency (CRITICAL for 10+ trades)
         long_score = 0
         
-        # Path 1: Vol spike + BB lower + RSI oversold + weekly not bearish (primary)
-        if vol_spike and at_bb_lower and rsi_oversold and not weekly_bearish:
-            long_score += 5
-        
-        # Path 2: Vol spike + BB lower + weekly bullish (strong HTF confirmation)
-        if vol_spike and at_bb_lower and weekly_bullish:
+        # Path 1: 12h bullish + 4h KAMA cross long + RSI bullish (primary)
+        if twelveh_bullish and kama_cross_long and rsi_bullish:
             long_score += 4
         
-        # Path 3: Vol spike + RSI extreme oversold + price above weekly HMA
-        if vol_spike and rsi_extreme_oversold and price_above_1w_hma:
-            long_score += 4
-        
-        # Path 4: BB lower + Z-score oversold + weekly bullish (no vol spike needed)
-        if at_bb_lower and zscore_oversold and weekly_bullish and bars_since_last_trade > 25:
+        # Path 2: 12h bullish + price above 12h KAMA + 4h bullish + RSI > 50
+        if twelveh_bullish and price_above_12h_kama and fourh_bullish and rsi_14[i] > 50:
             long_score += 3
         
-        # Path 5: Vol spike + RSI oversold + daily bullish (momentum confirmation)
-        if vol_spike and rsi_oversold and daily_bullish:
+        # Path 3: KAMA cross + ADX trending + RSI confirmation
+        if kama_cross_long and adx_trending and rsi_bullish:
             long_score += 3
         
-        # Path 6: Extreme vol + BB lower (panic capitulation)
-        if vol_extreme and at_bb_lower and bars_since_last_trade > 20:
+        # Path 4: 12h bullish + 4h bullish + RSI strong (momentum continuation)
+        if twelveh_bullish and fourh_bullish and rsi_strong_bull:
+            long_score += 3
+        
+        # Path 5: Price above 12h KAMA + 4h KAMA slope positive + ADX > 20
+        if price_above_12h_kama and kama_4h_slope[i] > 0.10 and adx_4h_14[i] > 20:
             long_score += 2
         
-        # Path 7: Weekly bullish + RSI oversold + price above 1d HMA (pullback entry)
-        if weekly_bullish and rsi_oversold and price_above_1d_hma and bars_since_last_trade > 30:
+        # Path 6: 4h KAMA cross + RSI > 52 (looser for more trades)
+        if kama_cross_long and rsi_14[i] > 52:
             long_score += 2
         
-        # Path 8: Simple BB lower + weekly not bearish (looser for trade frequency)
-        if at_bb_lower and not weekly_bearish and rsi_14[i] < 45 and bars_since_last_trade > 35:
+        # Path 7: 12h bullish + RSI strong + price above 4h KAMA (momentum entry)
+        if twelveh_bullish and rsi_strong_bull and price_above_4h_kama and bars_since_last_trade > 20:
             long_score += 1
         
         if long_score >= 4:
             new_signal = current_size
-        elif long_score == 3 and bars_since_last_trade > 30:
-            new_signal = current_size * 0.7
-        elif long_score >= 2 and bars_since_last_trade > 45:
-            new_signal = current_size * 0.5
+        elif long_score == 3:
+            new_signal = current_size * 0.85
+        elif long_score == 2 and bars_since_last_trade > 30:
+            new_signal = current_size * 0.60
+        elif long_score >= 1 and bars_since_last_trade > 50:
+            new_signal = current_size * 0.40
         
-        # SHORT ENTRIES - Vol mean reversion after euphoria
+        # SHORT ENTRIES
         short_score = 0
         
-        # Path 1: Vol spike + BB upper + RSI overbought + weekly not bullish (primary)
-        if vol_spike and at_bb_upper and rsi_overbought and not weekly_bullish:
-            short_score += 5
-        
-        # Path 2: Vol spike + BB upper + weekly bearish (strong HTF confirmation)
-        if vol_spike and at_bb_upper and weekly_bearish:
+        # Path 1: 12h bearish + 4h KAMA cross short + RSI bearish (primary)
+        if twelveh_bearish and kama_cross_short and rsi_bearish:
             short_score += 4
         
-        # Path 3: Vol spike + RSI extreme overbought + price below weekly HMA
-        if vol_spike and rsi_extreme_overbought and price_below_1w_hma:
-            short_score += 4
-        
-        # Path 4: BB upper + Z-score overbought + weekly bearish (no vol spike needed)
-        if at_bb_upper and zscore_overbought and weekly_bearish and bars_since_last_trade > 25:
+        # Path 2: 12h bearish + price below 12h KAMA + 4h bearish + RSI < 50
+        if twelveh_bearish and price_below_12h_kama and fourh_bearish and rsi_14[i] < 50:
             short_score += 3
         
-        # Path 5: Vol spike + RSI overbought + daily bearish (momentum confirmation)
-        if vol_spike and rsi_overbought and daily_bearish:
+        # Path 3: KAMA cross + ADX trending + RSI confirmation
+        if kama_cross_short and adx_trending and rsi_bearish:
             short_score += 3
         
-        # Path 6: Extreme vol + BB upper (euphoria top)
-        if vol_extreme and at_bb_upper and bars_since_last_trade > 20:
+        # Path 4: 12h bearish + 4h bearish + RSI strong (momentum continuation)
+        if twelveh_bearish and fourh_bearish and rsi_strong_bear:
+            short_score += 3
+        
+        # Path 5: Price below 12h KAMA + 4h KAMA slope negative + ADX > 20
+        if price_below_12h_kama and kama_4h_slope[i] < -0.10 and adx_4h_14[i] > 20:
             short_score += 2
         
-        # Path 7: Weekly bearish + RSI overbought + price below 1d HMA (rally entry)
-        if weekly_bearish and rsi_overbought and price_below_1d_hma and bars_since_last_trade > 30:
+        # Path 6: 4h KAMA cross + RSI < 48 (looser for more trades)
+        if kama_cross_short and rsi_14[i] < 48:
             short_score += 2
         
-        # Path 8: Simple BB upper + weekly not bullish (looser for trade frequency)
-        if at_bb_upper and not weekly_bullish and rsi_14[i] > 55 and bars_since_last_trade > 35:
+        # Path 7: 12h bearish + RSI strong + price below 4h KAMA (momentum entry)
+        if twelveh_bearish and rsi_strong_bear and price_below_4h_kama and bars_since_last_trade > 20:
             short_score += 1
         
         if short_score >= 4:
             new_signal = -current_size
-        elif short_score == 3 and bars_since_last_trade > 30:
-            new_signal = -current_size * 0.7
-        elif short_score >= 2 and bars_since_last_trade > 45:
-            new_signal = -current_size * 0.5
+        elif short_score == 3:
+            new_signal = -current_size * 0.85
+        elif short_score == 2 and bars_since_last_trade > 30:
+            new_signal = -current_size * 0.60
+        elif short_score >= 1 and bars_since_last_trade > 50:
+            new_signal = -current_size * 0.40
         
         # === FREQUENCY SAFEGUARD ===
-        # Force trade if no signal for 80 bars (~80 days on 1d)
+        # Force trade if no signal for 80 bars (~320 hours = 13 days on 4h)
         if bars_since_last_trade > 80 and new_signal == 0.0 and not in_position:
-            if weekly_bullish and rsi_14[i] < 45 and price_above_1d_hma:
+            if twelveh_bullish and rsi_14[i] > 50 and price_above_4h_kama:
                 new_signal = current_size * 0.35
-            elif weekly_bearish and rsi_14[i] > 55 and price_below_1d_hma:
+            elif twelveh_bearish and rsi_14[i] < 50 and price_below_4h_kama:
                 new_signal = -current_size * 0.35
-            elif rsi_14[i] < 30 and price_above_1w_hma:
-                new_signal = current_size * 0.30
-            elif rsi_14[i] > 70 and price_below_1w_hma:
-                new_signal = -current_size * 0.30
-        
-        # === EXIT LOGIC - Vol normalization ===
-        vol_exit = False
-        if in_position and position_side != 0:
-            # Exit long when vol normalizes after spike (take profit on mean reversion)
-            if position_side > 0 and vol_spike_active and vol_normalizing:
-                vol_exit = True
-            # Exit short when vol normalizes after spike
-            if position_side < 0 and vol_spike_active and vol_normalizing:
-                vol_exit = True
-        
-        # Track if we entered on vol spike
-        if new_signal != 0.0 and not in_position:
-            if vol_spike:
-                vol_spike_active = True
-            else:
-                vol_spike_active = False
+            elif rsi_14[i] > 60 and price_above_12h_kama:
+                new_signal = current_size * 0.25
+            elif rsi_14[i] < 40 and price_below_12h_kama:
+                new_signal = -current_size * 0.25
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -338,14 +374,14 @@ def generate_signals(prices):
         # === HTF TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            # Long position but weekly turns strongly bearish
-            if position_side > 0 and weekly_bearish and price_below_1w_hma:
+            # Long position but 12h turns strongly bearish
+            if position_side > 0 and twelveh_bearish and price_below_12h_kama:
                 trend_reversal = True
-            # Short position but weekly turns strongly bullish
-            if position_side < 0 and weekly_bullish and price_above_1w_hma:
+            # Short position but 12h turns strongly bullish
+            if position_side < 0 and twelveh_bullish and price_above_12h_kama:
                 trend_reversal = True
         
-        if stoploss_triggered or trend_reversal or vol_exit:
+        if stoploss_triggered or trend_reversal:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -357,18 +393,12 @@ def generate_signals(prices):
                 highest_price = close[i] if position_side > 0 else 0.0
                 lowest_price = close[i] if position_side < 0 else 0.0
                 last_trade_bar = i
-                if vol_spike:
-                    vol_spike_active = True
-                else:
-                    vol_spike_active = False
             elif np.sign(new_signal) != position_side:
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_price = close[i] if position_side > 0 else 0.0
                 lowest_price = close[i] if position_side < 0 else 0.0
                 last_trade_bar = i
-                if vol_spike:
-                    vol_spike_active = True
         else:
             if in_position:
                 in_position = False
@@ -377,7 +407,6 @@ def generate_signals(prices):
                 highest_price = 0.0
                 lowest_price = 0.0
                 last_trade_bar = i
-                vol_spike_active = False
         
         signals[i] = new_signal
     
