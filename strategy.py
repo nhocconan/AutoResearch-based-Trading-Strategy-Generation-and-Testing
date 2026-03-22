@@ -1,34 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #172: 12h Primary + 1d/1w HTF — Simplified Mean Reversion + Trend Filter
+Experiment #173: 1d Primary + 1w HTF — Simplified Regime Mean Reversion
 
-Hypothesis: Previous strategies failed due to OVER-FILTERING (too many confluence requirements = 0 trades).
-Research shows simpler signals with fewer filters generate more trades while maintaining edge.
-This strategy uses:
-
-1. 1w HMA(21) for MAJOR regime bias (bull/bear market detection)
-2. 1d HMA(16) for intermediate trend direction
-3. RSI(7) for entry timing (simpler than Connors, more responsive)
-4. Bollinger Band %B for mean reversion extremes
-5. ATR(14) for stoploss and vol adjustment
+Hypothesis: Previous strategies failed due to overly complex entry conditions
+resulting in 0 trades (Sharpe=0.000). Research shows simpler mean reversion
+with regime filtering works best for BTC/ETH in bear/range markets.
 
 Key changes from failed experiments:
-- REDUCED confluence requirements (score >= 1 instead of >= 2)
-- SIMPLER RSI(7) instead of complex Connors RSI
-- WEEKLY trend filter prevents fighting major moves
-- More aggressive trade frequency safeguards (every 80 bars)
-- Asymmetric sizing: 0.35 with trend, 0.20 against trend
+1. SIMPLER entries: RSI(14) extremes only (not Connors RSI which is too strict)
+2. WEEKLY trend filter: HMA(21) on 1w for major direction bias
+3. CHOPPINESS regime: CHOP>55 = range (fade extremes), CHOP<45 = trend (pullback entries)
+4. ASYMMETRIC sizing: 0.30 in favorable regime, 0.20 in counter-trend
+5. GENEROUS thresholds: RSI<35/>65 (not <20/>80) to ensure trade frequency
 
 Why this should work:
-- 12h timeframe = 20-50 trades/year target (low fee drag)
-- Weekly filter prevents catastrophic counter-trend trades
-- RSI(7) is more responsive than RSI(14) for crypto volatility
-- Fewer filters = more trades = better statistical significance
-- Asymmetric sizing reduces risk when fighting trend
+- 1d timeframe = 20-50 trades/year target (matches cost model)
+- Weekly HMA prevents fighting major trends (2022 crash protection)
+- Choppiness filter adapts to market regime (range vs trend)
+- Simple RSI extremes = more trades than Connors RSI
+- Asymmetric sizing reduces counter-trend risk
 
-Timeframe: 12h (REQUIRED)
-HTF: 1d and 1w via mtf_data.get_htf_data() — called ONCE before loop
-Position sizing: 0.20-0.35 discrete
+Timeframe: 1d (REQUIRED)
+HTF: 1w via mtf_data.get_htf_data() — called ONCE before loop
+Position sizing: 0.25-0.30 discrete
 Stoploss: 2.5 * ATR(14) trailing
 Target trades: 25-50/year per symbol
 """
@@ -36,8 +30,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_rsi_bb_hma_1d1w_simp_v1"
-timeframe = "12h"
+name = "mtf_1d_regime_rsi_hma_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -65,20 +59,25 @@ def calculate_rsi(close, period=14):
     rsi = rsi.fillna(50).values
     return rsi
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and %B."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = range market (mean revert)
+    CHOP < 38.2 = trend market (trend follow)
+    """
+    atr_values = calculate_atr(high, low, close, period)
     
-    # Calculate %B: where price is within bands (0=lower, 1=upper)
-    bb_range = upper - lower
-    bb_range = np.where(bb_range == 0, 1e-10, bb_range)
-    percent_b = (close - lower) / bb_range
+    atr_sum = pd.Series(atr_values).rolling(window=period, min_periods=period).sum().values
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
     
-    return upper, lower, sma, percent_b
+    price_range = highest_high - lowest_low
+    price_range = np.where(price_range == 0, 1e-10, price_range)
+    
+    chop = 100 * np.log10(atr_sum / price_range) / np.log10(period)
+    chop = np.clip(chop, 0, 100)
+    
+    return chop
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average."""
@@ -105,35 +104,30 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d_16 = calculate_hma(df_1d['close'].values, 16)
-    hma_1d_slope = calculate_hma_slope(hma_1d_16, 3)
-    
     hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_slope = calculate_hma_slope(hma_1w_21, 2)
+    hma_1w_slope = calculate_hma_slope(hma_1w_21, 3)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_1d_16_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_16)
-    hma_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_slope)
-    
     hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
     hma_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_slope)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_7 = calculate_rsi(close, 7)
     rsi_14 = calculate_rsi(close, 14)
+    chop_14 = calculate_choppiness(high, low, close, 14)
     
-    bb_upper, bb_lower, bb_mid, percent_b = calculate_bollinger_bands(close, 20, 2.2)
+    # 200-day SMA for major trend filter
+    close_s = pd.Series(close)
+    sma_200 = close_s.rolling(window=200, min_periods=200).mean().values
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    BASE_SIZE_WITH_TREND = 0.35
-    BASE_SIZE_COUNTER = 0.20
+    BASE_SIZE = 0.30
+    REDUCED_SIZE = 0.20
     
     # Track position state
     in_position = False
@@ -143,119 +137,106 @@ def generate_signals(prices):
     lowest_price = 0.0
     last_trade_bar = -50
     
-    for i in range(100, n):
+    for i in range(250, n):  # Start after 200 SMA is ready
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_16_aligned[i]) or np.isnan(hma_1w_21_aligned[i]):
+        if np.isnan(hma_1w_21_aligned[i]) or np.isnan(hma_1w_slope_aligned[i]):
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(percent_b[i]):
+        if np.isnan(chop_14[i]) or np.isnan(rsi_14[i]):
             continue
         
-        # === WEEKLY REGIME (Major trend - don't fight this) ===
+        if np.isnan(sma_200[i]):
+            continue
+        
+        # === 1W TREND BIAS ===
         weekly_bullish = hma_1w_slope_aligned[i] > 0.5
         weekly_bearish = hma_1w_slope_aligned[i] < -0.5
-        price_above_1w_hma = close[i] > hma_1w_21_aligned[i]
-        price_below_1w_hma = close[i] < hma_1w_21_aligned[i]
+        price_above_sma200 = close[i] > sma_200[i]
+        price_below_sma200 = close[i] < sma_200[i]
         
-        # === DAILY TREND (Intermediate direction) ===
-        daily_bullish = hma_1d_slope_aligned[i] > 0.3
-        daily_bearish = hma_1d_slope_aligned[i] < -0.3
-        price_above_1d_hma = close[i] > hma_1d_16_aligned[i]
-        price_below_1d_hma = close[i] < hma_1d_16_aligned[i]
+        # === CHOPPINESS REGIME ===
+        is_range_market = chop_14[i] > 55
+        is_trend_market = chop_14[i] < 45
         
-        # === RSI SIGNALS (Entry timing) ===
-        rsi_oversold = rsi_7[i] < 30
-        rsi_overbought = rsi_7[i] > 70
-        rsi_extreme_low = rsi_7[i] < 20
-        rsi_extreme_high = rsi_7[i] > 80
-        rsi_neutral = 35 <= rsi_7[i] <= 65
-        
-        # === BOLLINGER BAND SIGNALS ===
-        bb_extreme_low = percent_b[i] < 0.05  # Below lower band
-        bb_extreme_high = percent_b[i] > 0.95  # Above upper band
-        bb_lower_half = percent_b[i] < 0.4
-        bb_upper_half = percent_b[i] > 0.6
+        # === RSI EXTREMES (simpler than Connors) ===
+        rsi_oversold = rsi_14[i] < 35
+        rsi_overbought = rsi_14[i] > 65
+        rsi_extreme_low = rsi_14[i] < 25
+        rsi_extreme_high = rsi_14[i] > 75
         
         # === POSITION SIZING ===
-        # Larger size when trading WITH weekly trend
-        if weekly_bullish:
-            long_size = BASE_SIZE_WITH_TREND
-            short_size = BASE_SIZE_COUNTER
-        elif weekly_bearish:
-            long_size = BASE_SIZE_COUNTER
-            short_size = BASE_SIZE_WITH_TREND
-        else:
-            long_size = BASE_SIZE_COUNTER
-            short_size = BASE_SIZE_COUNTER
+        # Favorable regime = larger size, counter-trend = smaller size
+        long_favorable = weekly_bullish or price_above_sma200 or is_range_market
+        short_favorable = weekly_bearish or price_below_sma200 or is_range_market
         
-        # === ENTRY LOGIC (Simplified - fewer confluence requirements) ===
+        # === ENTRY LOGIC ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRIES - Simpler logic, more trades
-        long_score = 0
+        # LONG ENTRIES
+        long_entry = False
         
-        # Primary: RSI oversold + BB extreme (mean reversion)
-        if rsi_oversold and bb_extreme_low:
-            long_score += 3
+        # Path 1: Range market + RSI oversold (mean revert - highest priority)
+        if is_range_market and rsi_oversold:
+            long_entry = True
         
-        # Secondary: RSI very low alone (more trades)
-        if rsi_extreme_low:
-            long_score += 2
+        # Path 2: Weekly bullish + RSI pullback (trend follow pullback)
+        if weekly_bullish and rsi_14[i] < 45:
+            long_entry = True
         
-        # Tertiary: Pullback in uptrend
-        if (weekly_bullish or daily_bullish) and rsi_7[i] < 40 and bb_lower_half:
-            long_score += 2
+        # Path 3: Price above SMA200 + RSI extreme (bull market dip)
+        if price_above_sma200 and rsi_extreme_low:
+            long_entry = True
         
-        # Quaternary: Price below both HMA but RSI very low (deep pullback)
-        if price_below_1d_hma and price_below_1w_hma and rsi_7[i] < 35:
-            long_score += 1
+        # Path 4: Weekly bullish + price above SMA200 + any RSI<50
+        if weekly_bullish and price_above_sma200 and rsi_14[i] < 50:
+            long_entry = True
         
-        # Generate long signal with reduced threshold
-        if long_score >= 2:
-            new_signal = long_size
-        elif long_score == 1 and bars_since_last_trade > 60:
-            new_signal = long_size * 0.6
+        if long_entry:
+            size = BASE_SIZE if long_favorable else REDUCED_SIZE
+            new_signal = size
         
         # SHORT ENTRIES
-        short_score = 0
+        short_entry = False
         
-        # Primary: RSI overbought + BB extreme
-        if rsi_overbought and bb_extreme_high:
-            short_score += 3
+        # Path 1: Range market + RSI overbought (mean revert)
+        if is_range_market and rsi_overbought:
+            short_entry = True
         
-        # Secondary: RSI very high alone
-        if rsi_extreme_high:
-            short_score += 2
+        # Path 2: Weekly bearish + RSI rally (trend follow pullback)
+        if weekly_bearish and rsi_14[i] > 55:
+            short_entry = True
         
-        # Tertiary: Rally in downtrend
-        if (weekly_bearish or daily_bearish) and rsi_7[i] > 60 and bb_upper_half:
-            short_score += 2
+        # Path 3: Price below SMA200 + RSI extreme (bear market rally)
+        if price_below_sma200 and rsi_extreme_high:
+            short_entry = True
         
-        # Quaternary: Price above both HMA but RSI very high (rally in bear)
-        if price_above_1d_hma and price_above_1w_hma and rsi_7[i] > 65:
-            short_score += 1
+        # Path 4: Weekly bearish + price below SMA200 + any RSI>50
+        if weekly_bearish and price_below_sma200 and rsi_14[i] > 50:
+            short_entry = True
         
-        # Generate short signal with reduced threshold
-        if short_score >= 2:
-            new_signal = -short_size
-        elif short_score == 1 and bars_since_last_trade > 60:
-            new_signal = -short_size * 0.6
+        if short_entry:
+            size = BASE_SIZE if short_favorable else REDUCED_SIZE
+            # Don't enter short if long signal also triggered (conflict)
+            if new_signal > 0:
+                new_signal = 0.0  # flat on conflict
+            else:
+                new_signal = -size
         
-        # === TRADE FREQUENCY SAFEGUARD (Critical for generating trades) ===
-        # Force trade if no signal for 100 bars (~50 days on 12h)
-        if bars_since_last_trade > 100 and new_signal == 0.0 and not in_position:
-            if weekly_bullish and rsi_7[i] < 40:
-                new_signal = long_size * 0.5
-            elif weekly_bearish and rsi_7[i] > 60:
-                new_signal = -short_size * 0.5
-            elif rsi_7[i] < 25:
-                new_signal = long_size * 0.4
-            elif rsi_7[i] > 75:
-                new_signal = -short_size * 0.4
+        # === FREQUENCY SAFEGUARD ===
+        # Force trade if no signal for 60 bars (~60 days on 1d)
+        if bars_since_last_trade > 60 and new_signal == 0.0 and not in_position:
+            if weekly_bullish and rsi_14[i] < 45:
+                new_signal = REDUCED_SIZE * 0.8
+            elif weekly_bearish and rsi_14[i] > 55:
+                new_signal = -REDUCED_SIZE * 0.8
+            elif is_range_market and rsi_14[i] < 35:
+                new_signal = REDUCED_SIZE * 0.7
+            elif is_range_market and rsi_14[i] > 65:
+                new_signal = -REDUCED_SIZE * 0.7
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -276,12 +257,12 @@ def generate_signals(prices):
                     stoploss_triggered = True
         
         # === REGIME REVERSAL EXIT ===
-        # Exit if weekly regime flips against position
+        # Exit if major regime changes against position
         regime_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and weekly_bearish and price_below_1w_hma:
+            if position_side > 0 and weekly_bearish and chop_14[i] < 40:
                 regime_reversal = True
-            if position_side < 0 and weekly_bullish and price_above_1w_hma:
+            if position_side < 0 and weekly_bullish and chop_14[i] < 40:
                 regime_reversal = True
         
         if stoploss_triggered or regime_reversal:
