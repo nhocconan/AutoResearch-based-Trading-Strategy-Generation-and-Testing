@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #008: 30m Donchian Breakout + 4h HMA Trend + Volume + Z-Score Mean Reversion
-Hypothesis: 30m captures multi-day swings better than 15m (less noise) but trades more than 1h.
-Donchian(20) breakouts with 4h HMA trend filter capture sustained moves. Volume confirmation
-(taker_buy_ratio) filters false breakouts. Z-score(20) provides mean reversion entries when
-ADX<20 (ranging market). 2.5*ATR stoploss for 30m bars. Conservative sizing (0.25-0.30).
-CRITICAL: Multiple entry paths (4 long + 4 short) to ensure >=10 trades per symbol.
-Looser filters than #002 to avoid 0-trade failure. Timeframe: 30m (REQUIRED), HTF: 4h.
+Experiment #007: 15m Bollinger Mean Reversion + 4h HMA Trend Bias + Volume Confirmation + ATR Stop
+Hypothesis: 15m timeframe captures short-term mean reversion opportunities while 4h HMA provides
+trend bias to avoid counter-trend trades. Bollinger Band width detects regime (squeeze=range,
+expansion=trend). Volume confirmation filters false breakouts. Multiple entry paths ensure
+>=10 trades per symbol. Conservative sizing (0.25) with 2.0*ATR stoploss controls drawdown.
+Timeframe: 15m (REQUIRED), HTF: 4h via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_donchian_4h_hma_vol_zscore_atr_v1"
-timeframe = "30m"
+name = "mtf_15m_bb_meanrev_4h_hma_vol_atr_v2"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -26,6 +25,16 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / sma
+    return upper, lower, sma, bandwidth
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -36,20 +45,17 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high, lowest low over period)."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    mid = (upper + lower) / 2.0
-    return upper, lower, mid
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score of price relative to rolling mean."""
-    close_s = pd.Series(close)
-    mean = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    zscore = (close - mean) / (std + 1e-10)
-    return zscore
+def calculate_rsi(close, period=14):
+    """Calculate RSI indicator."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
+    rsi = 100 - 100 / (1 + rs)
+    rsi = np.clip(rsi, 0, 100)
+    return rsi
 
 def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index) for trend strength."""
@@ -89,31 +95,32 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
-def calculate_volume_ratio(taker_buy_volume, volume):
-    """Calculate taker buy volume ratio (0-1, >0.5 = bullish pressure)."""
-    ratio = np.zeros(len(volume))
-    mask = volume > 0
-    ratio[mask] = taker_buy_volume[mask] / volume[mask]
-    return ratio
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average for volume confirmation."""
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI indicator."""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_g = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_l = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    rs = np.where(avg_l > 0, avg_g / avg_l, 100.0)
-    rsi = 100 - 100 / (1 + rs)
-    rsi = np.clip(rsi, 0, 100)
-    return rsi
+def calculate_bandwidth_percentile(bandwidth, lookback=100):
+    """Calculate percentile rank of bandwidth over lookback period."""
+    n = len(bandwidth)
+    percentile = np.zeros(n)
+    percentile[:] = np.nan
+    
+    for i in range(lookback, n):
+        if not np.isnan(bandwidth[i]):
+            window = bandwidth[i-lookback+1:i+1]
+            valid = window[~np.isnan(window)]
+            if len(valid) > 0:
+                percentile[i] = np.sum(valid < bandwidth[i]) / len(valid) * 100
+    
+    return percentile
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
-    taker_buy_vol = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -125,21 +132,21 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 15m indicators
     atr = calculate_atr(high, low, close, 14)
-    donch_upper, donch_lower, donch_mid = calculate_donchian(high, low, 20)
-    zscore = calculate_zscore(close, 20)
-    adx = calculate_adx(high, low, close, 14)
-    vol_ratio = calculate_volume_ratio(taker_buy_vol, volume)
+    bb_upper, bb_lower, bb_sma, bb_bandwidth = calculate_bollinger_bands(close, 20, 2.0)
     rsi = calculate_rsi(close, 14)
+    adx = calculate_adx(high, low, close, 14)
+    vol_ma = calculate_volume_ma(volume, 20)
+    bw_percentile = calculate_bandwidth_percentile(bb_bandwidth, 100)
     
-    # 30m HMA for additional trend confirmation
-    hma_30m = calculate_hma(close, 21)
-    hma_30m_fast = calculate_hma(close, 10)
+    # 15m HMA for additional trend confirmation
+    hma_15m = calculate_hma(close, 21)
+    hma_15m_fast = calculate_hma(close, 10)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.28
-    SIZE_HALF = 0.14
+    SIZE_ENTRY = 0.25
+    SIZE_HALF = 0.12
     
     # Track positions for stoploss
     position_side = 0
@@ -155,86 +162,99 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(donch_upper[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(bb_upper[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(zscore[i]) or np.isnan(adx[i]):
+        if np.isnan(rsi[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
-        # 4h trend bias (HTF) - LOOSE filter to ensure trades
+        if np.isnan(bw_percentile[i]):
+            signals[i] = 0.0
+            continue
+        
+        # 4h trend bias (HTF)
         htf_bullish = close[i] > hma_4h_aligned[i]
         htf_bearish = close[i] < hma_4h_aligned[i]
         
-        # 30m trend
-        hma_30m_bullish = close[i] > hma_30m[i]
-        hma_30m_bearish = close[i] < hma_30m[i]
-        hma_rising = hma_30m[i] > hma_30m[i-1] if i > 0 else False
-        hma_falling = hma_30m[i] < hma_30m[i-1] if i > 0 else False
-        
-        # Donchian breakout signals (LOOSE - compare to 2 bars ago for confirmation)
-        breakout_long = close[i] > donch_upper[i-2] if i > 1 else False
-        breakout_short = close[i] < donch_lower[i-2] if i > 1 else False
-        
-        # Volume confirmation - LOOSE threshold
-        vol_bullish = vol_ratio[i] > 0.50
-        vol_bearish = vol_ratio[i] < 0.50
-        
-        # ADX regime - LOOSE threshold
-        trend_strong = adx[i] > 15
-        trend_weak = adx[i] < 25
-        
-        # Z-score extremes - LOOSE threshold
-        zscore_oversold = zscore[i] < -1.2
-        zscore_overbought = zscore[i] > 1.2
-        
-        # RSI extremes for additional entries
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
+        # 15m HMA trend
+    ltf_bullish = close[i] > hma_15m[i]
+        ltf_bearish = close[i] < hma_15m[i]
+        hma_rising = hma_15m[i] > hma_15m[i-1] if i > 0 else False
+        hma_falling = hma_15m[i] < hma_15m[i-1] if i > 0 else False
         
         # Fast HMA crossover
-        fast_above_slow = hma_30m_fast[i] > hma_30m[i]
-        fast_below_slow = hma_30m_fast[i] < hma_30m[i]
-        fast_rising = hma_30m_fast[i] > hma_30m_fast[i-1] if i > 0 else False
-        fast_falling = hma_30m_fast[i] < hma_30m_fast[i-1] if i > 0 else False
+        fast_above_slow = hma_15m_fast[i] > hma_15m[i]
+        fast_below_slow = hma_15m_fast[i] < hma_15m[i]
+        
+        # Bollinger Band position
+        price_vs_bb_upper = close[i] >= bb_upper[i]
+        price_vs_bb_lower = close[i] <= bb_lower[i]
+        price_vs_bb_mid = close[i] > bb_sma[i]
+        
+        # Bandwidth regime (squeeze vs expansion)
+        regime_range = bw_percentile[i] < 40  # Low bandwidth = ranging
+        regime_trend = bw_percentile[i] > 60  # High bandwidth = trending
+        
+        # ADX trend strength
+        trend_strong = adx[i] > 20
+        trend_weak = adx[i] < 20
+        
+        # RSI zones
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        rsi_pullback_long = rsi[i] > 40 and rsi[i] < 55
+        rsi_pullback_short = rsi[i] > 45 and rsi[i] < 60
+        
+        # Volume confirmation
+        vol_spike = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+        vol_normal = volume[i] <= 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else True
         
         new_signal = 0.0
         
-        # === LONG ENTRIES (4 paths for >=10 trades) ===
+        # === LONG ENTRIES (multiple paths for >=10 trades) ===
         
-        # Path 1: Donchian breakout + 4h bullish + volume ok (primary trend entry)
-        if breakout_long and htf_bullish and vol_bullish:
+        # Path 1: Mean reversion - price at BB lower + RSI oversold + HTF not bearish
+        if price_vs_bb_lower and rsi_oversold and not htf_bearish:
             new_signal = SIZE_ENTRY
         
-        # Path 2: 4h bullish + 30m HMA bullish + Fast HMA crossover up (trend continuation)
-        elif htf_bullish and hma_30m_bullish and fast_above_slow and fast_rising:
+        # Path 2: Trend pullback - HTF bullish + price near BB mid + RSI pullback + ADX strong
+        elif htf_bullish and not price_vs_bb_lower and rsi_pullback_long and trend_strong:
             new_signal = SIZE_ENTRY
         
-        # Path 3: Z-score oversold + 4h bullish (mean reversion in uptrend)
-        elif zscore_oversold and htf_bullish:
+        # Path 3: HMA crossover + HTF bullish + volume confirmation
+        elif htf_bullish and fast_above_slow and hma_rising and vol_spike:
             new_signal = SIZE_ENTRY
         
-        # Path 4: RSI oversold + 4h bullish + ADX weak (dip buy in ranging uptrend)
-        elif rsi_oversold and htf_bullish and trend_weak:
+        # Path 4: Range regime mean reversion - BB lower + RSI oversold + ADX weak
+        elif regime_range and price_vs_bb_lower and rsi_oversold and trend_weak:
             new_signal = SIZE_ENTRY
         
-        # === SHORT ENTRIES (4 paths for >=10 trades) ===
+        # Path 5: BB bounce - price crosses above BB lower from below + RSI rising
+        elif price_vs_bb_lower and i > 0 and close[i-1] < bb_lower[i-1] and rsi[i] > rsi[i-1]:
+            new_signal = SIZE_ENTRY
         
-        # Path 1: Donchian breakout + 4h bearish + volume ok (primary trend entry)
-        if breakout_short and htf_bearish and vol_bearish:
+        # === SHORT ENTRIES (multiple paths for >=10 trades) ===
+        
+        # Path 1: Mean reversion - price at BB upper + RSI overbought + HTF not bullish
+        if price_vs_bb_upper and rsi_overbought and not htf_bullish:
             new_signal = -SIZE_ENTRY
         
-        # Path 2: 4h bearish + 30m HMA bearish + Fast HMA crossover down (trend continuation)
-        elif htf_bearish and hma_30m_bearish and fast_below_slow and fast_falling:
+        # Path 2: Trend pullback - HTF bearish + price near BB mid + RSI pullback + ADX strong
+        elif htf_bearish and not price_vs_bb_upper and rsi_pullback_short and trend_strong:
             new_signal = -SIZE_ENTRY
         
-        # Path 3: Z-score overbought + 4h bearish (mean reversion in downtrend)
-        elif zscore_overbought and htf_bearish:
+        # Path 3: HMA crossover + HTF bearish + volume confirmation
+        elif htf_bearish and fast_below_slow and hma_falling and vol_spike:
             new_signal = -SIZE_ENTRY
         
-        # Path 4: RSI overbought + 4h bearish + ADX weak (rally sell in ranging downtrend)
-        elif rsi_overbought and htf_bearish and trend_weak:
+        # Path 4: Range regime mean reversion - BB upper + RSI overbought + ADX weak
+        elif regime_range and price_vs_bb_upper and rsi_overbought and trend_weak:
+            new_signal = -SIZE_ENTRY
+        
+        # Path 5: BB rejection - price crosses below BB upper from above + RSI falling
+        elif price_vs_bb_upper and i > 0 and close[i-1] > bb_upper[i-1] and rsi[i] < rsi[i-1]:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -243,8 +263,8 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for 30m timeframe)
-            current_stop = highest_close - 2.5 * atr[i]
+            # Calculate trailing stop (2.0*ATR for 15m timeframe)
+            current_stop = highest_close - 2.0 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -253,7 +273,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.5 * atr[i]
+                risk = 2.0 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
@@ -264,8 +284,8 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR for 30m timeframe)
-            current_stop = lowest_close + 2.5 * atr[i]
+            # Calculate trailing stop (2.0*ATR for 15m timeframe)
+            current_stop = lowest_close + 2.0 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -274,7 +294,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.5 * atr[i]
+                risk = 2.0 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
@@ -287,7 +307,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
@@ -296,7 +316,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
+            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
