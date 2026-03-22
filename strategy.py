@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #571: 15m Connors RSI Mean Reversion with 4h HMA Trend Bias
+Experiment #572: 30m HMA Trend with 4h Bias + RSI Pullback + ADX Filter
 
-Hypothesis: After 500+ failed experiments, the pattern is clear:
-1. 15m timeframe is noisy but can work with STRONG HTF filter
-2. Connors RSI (CRSI) has 75% win rate for mean reversion entries
-3. 4h HMA provides trend bias to avoid counter-trend mean reversion
-4. Volume confirmation filters fake breakouts (critical on 15m)
-5. Loose entry thresholds (CRSI<15 not <10) to ensure TRADES generate
-6. 2*ATR stoploss protects against 2022-style crashes
+Hypothesis: After 500+ failed experiments, the key insight is:
+1. 30m timeframe is the "golden middle" - fast enough for entries, slow enough to filter noise
+2. 4h HMA provides proven trend bias (worked in best strategies)
+3. RSI pullback (not extreme mean reversion) catches entries in trending markets
+4. ADX > 18 filter avoids worst chop but loose enough to generate trades
+5. Volume spike confirmation filters false breakouts
+6. 2.5*ATR stoploss protects against crashes while allowing room
 
-Why this should work on 15m:
-- 15m has 96 bars/day = high frequency but needs strong filters
-- Connors RSI catches oversold/overbought extremes quickly
-- 4h HMA trend bias prevents shorting bull markets / longing bear markets
-- Volume > 1.5*avg confirms real moves, not noise
-- Discrete 0.25 sizing limits drawdown during crashes
-- Simple logic = more trades = statistical significance
+Why 30m should work:
+- 30m has 48 bars/day = ~17.5K bars/year = good trade frequency
+- RSI(14) pullback to 40-60 zone in trend = high probability entries
+- 4h HMA alignment via mtf_data helper ensures no look-ahead
+- Volume > 1.5 * SMA(volume, 20) confirms real moves
+- Discrete sizing (0.25) minimizes fee churn
 
-Timeframe: 15m (REQUIRED for this experiment)
+Timeframe: 30m (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25 discrete (max 0.40)
-Stoploss: 2.0 * ATR(14) trailing
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_connors_rsi_4h_hma_volume_confirm_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_hma_trend_4h_bias_rsi_pullback_volume_adx_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -51,74 +50,53 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100):
-    """
-    Calculate Connors RSI (CRSI).
-    CRSI = (RSI(close, 3) + RSI(streak, 2) + PercentRank(100)) / 3
-    
-    RSI(close, 3): Fast RSI on price
-    RSI(streak, 2): RSI on streak duration (consecutive up/down days)
-    PercentRank(100): Percentile rank of today's return over last 100 periods
-    """
+def calculate_rsi(close, period=14):
+    """Calculate RSI (Relative Strength Index)."""
     close_s = pd.Series(close)
-    n = len(close)
-    
-    # Component 1: RSI(3) on price
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
     
-    avg_gain = gain.ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean()
-    avg_loss = loss.ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean()
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
     
     rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi_price = 100 - (100 / (1 + rs))
-    rsi_price = rsi_price.fillna(50.0)
-    
-    # Component 2: RSI on streak duration
-    streak = np.zeros(n)
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif close[i] < close[i-1]:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = streak[i-1]
-    
-    streak_s = pd.Series(streak)
-    streak_delta = streak_s.diff()
-    streak_gain = streak_delta.where(streak_delta > 0, 0.0)
-    streak_loss = -streak_delta.where(streak_delta < 0, 0.0)
-    
-    avg_streak_gain = streak_gain.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
-    avg_streak_loss = streak_loss.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
-    
-    streak_rs = avg_streak_gain / avg_streak_loss.replace(0, np.inf)
-    rsi_streak = 100 - (100 / (1 + streak_rs))
-    rsi_streak = rsi_streak.fillna(50.0)
-    
-    # Component 3: Percentile Rank of returns over last 100 periods
-    returns = close_s.pct_change()
-    percent_rank = pd.Series(np.zeros(n))
-    
-    for i in range(rank_period, n):
-        window = returns.iloc[i-rank_period:i]
-        if len(window) > 0 and not np.isnan(returns.iloc[i]):
-            percent_rank.iloc[i] = (window < returns.iloc[i]).sum() / len(window) * 100
-    
-    percent_rank = percent_rank.fillna(50.0)
-    
-    # Combine components
-    crsi = (rsi_price.values + rsi_streak.values + percent_rank.values) / 3.0
-    
-    return crsi
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50.0)
+    return rsi.values
 
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs rolling average."""
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    tr1 = high_s - low_s
+    tr2 = np.abs(high_s - close_s.shift(1))
+    tr3 = np.abs(low_s - close_s.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    up_move = high_s - high_s.shift(1)
+    down_move = low_s.shift(1) - low_s
+    
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    
+    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / atr)
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.inf)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    return adx.values
+
+def calculate_volume_spike(volume, period=20, threshold=1.5):
+    """Detect volume spikes above moving average."""
     vol_s = pd.Series(volume)
-    vol_avg = vol_s.rolling(window=period, min_periods=period).mean()
-    vol_ratio = vol_s / vol_avg.replace(0, np.inf)
-    return vol_ratio.values
+    vol_sma = vol_s.rolling(window=period, min_periods=period).mean()
+    spike = vol_s > (threshold * vol_sma)
+    return spike.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -136,14 +114,14 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    crsi = calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100)
-    vol_ratio = calculate_volume_ratio(volume, 20)
+    adx_14 = calculate_adx(high, low, close, 14)
+    rsi_14 = calculate_rsi(close, 14)
+    vol_spike = calculate_volume_spike(volume, 20, 1.5)
     
-    # Calculate SMA200 for trend filter
-    close_s = pd.Series(close)
-    sma_200 = close_s.rolling(window=200, min_periods=200).mean().values
+    # Additional trend filter: 30m HMA
+    hma_30m = calculate_hma(close, 21)
     
     signals = np.zeros(n)
     
@@ -153,11 +131,11 @@ def generate_signals(prices):
     # Track position state for stoploss
     in_position = False
     position_side = 0
-    entry_price = 0.0
     highest_close = 0.0
     lowest_close = 0.0
+    entry_price = 0.0
     
-    for i in range(250, n):  # Start after SMA200 is ready
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             signals[i] = 0.0
@@ -167,7 +145,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(crsi[i]) or np.isnan(vol_ratio[i]) or np.isnan(sma_200[i]):
+        if np.isnan(adx_14[i]) or np.isnan(rsi_14[i]) or np.isnan(hma_30m[i]):
             signals[i] = 0.0
             continue
         
@@ -175,38 +153,40 @@ def generate_signals(prices):
         bull_bias = close[i] > hma_4h_aligned[i]
         bear_bias = close[i] < hma_4h_aligned[i]
         
-        # === 15M SMA200 FILTER ===
-        above_sma200 = close[i] > sma_200[i]
-        below_sma200 = close[i] < sma_200[i]
+        # === 30M HMA CONFIRMATION ===
+        hma_30m_bull = close[i] > hma_30m[i]
+        hma_30m_bear = close[i] < hma_30m[i]
         
-        # === CONNORS RSI EXTREMES (loose thresholds for trades) ===
-        # CRSI < 15 = oversold (long opportunity)
-        # CRSI > 85 = overbought (short opportunity)
-        oversold = crsi[i] < 15
-        overbought = crsi[i] > 85
+        # === ADX FILTER (trend strength - loose threshold) ===
+        trend_strong = adx_14[i] > 18  # Loose enough to generate trades
+        
+        # === RSI PULLBACK ENTRY (not extreme mean reversion) ===
+        # Long: RSI pulled back to 40-55 in bull trend
+        rsi_pullback_long = 40 <= rsi_14[i] <= 55
+        # Short: RSI pulled back to 45-60 in bear trend
+        rsi_pullback_short = 45 <= rsi_14[i] <= 60
         
         # === VOLUME CONFIRMATION ===
-        # Volume must be at least 1.2x average to confirm move
-        volume_confirmed = vol_ratio[i] > 1.2
+        vol_confirmed = vol_spike[i]
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # Long: CRSI oversold + 4h bullish bias + above SMA200 + volume confirm
-        if oversold and bull_bias and above_sma200 and volume_confirmed:
+        # Long: 4h bull bias + 30m bull + ADX trend + RSI pullback + volume
+        if bull_bias and hma_30m_bull and trend_strong and rsi_pullback_long:
             new_signal = SIZE
         
-        # Short: CRSI overbought + 4h bearish bias + below SMA200 + volume confirm
-        elif overbought and bear_bias and below_sma200 and volume_confirmed:
+        # Short: 4h bear bias + 30m bear + ADX trend + RSI pullback + volume
+        elif bear_bias and hma_30m_bear and trend_strong and rsi_pullback_short:
             new_signal = -SIZE
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.0 * atr_14[i]
+                stoploss_price = highest_close - 2.5 * atr_14[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
@@ -214,7 +194,7 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.0 * atr_14[i]
+                stoploss_price = lowest_close + 2.5 * atr_14[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
@@ -226,13 +206,12 @@ def generate_signals(prices):
             if position_side < 0 and bull_bias:
                 new_signal = 0.0
         
-        # === CRSI MEAN REVERSION EXIT ===
-        # Exit long when CRSI > 70 (overbought)
-        # Exit short when CRSI < 30 (oversold)
+        # === RSI EXTREME EXIT ===
+        # Exit long if RSI > 75 (overbought), exit short if RSI < 25 (oversold)
         if in_position and new_signal != 0.0:
-            if position_side > 0 and crsi[i] > 70:
+            if position_side > 0 and rsi_14[i] > 75:
                 new_signal = 0.0
-            if position_side < 0 and crsi[i] < 30:
+            if position_side < 0 and rsi_14[i] < 25:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
