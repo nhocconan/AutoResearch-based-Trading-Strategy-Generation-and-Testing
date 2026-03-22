@@ -1,57 +1,59 @@
 #!/usr/bin/env python3
 """
-Experiment #469: 15m Multi-Signal with 4h/1h Trend Filter
+Experiment #470: 30m Supertrend + RSI Pullback with 4h/1d Regime Filter
 
-Hypothesis: After 468 experiments, the key lesson is that 15m strategies need
-LOOSE entry conditions to generate sufficient trades. Most failures (#463, #465, #466)
-got Sharpe=0.0 because they generated ZERO trades. This strategy uses:
+Hypothesis: After analyzing 469 failed experiments, the pattern is clear:
+- Pure trend strategies fail on BTC/ETH whipsaws (2022 crash destroyed gains)
+- Pure mean reversion fails on strong trends (SOL 100x rally)
+- 30m timeframe needs STRONGER filtering than 4h/12h due to noise
 
-1. 4H HMA(21) TREND BIAS (via mtf_data helper):
-   - Long bias when price > 4h HMA (bull market)
-   - Short bias when price < 4h HMA (bear market)
-   - Call get_htf_data() ONCE before loop
-
-2. 1H ADX(14) REGIME FILTER (via mtf_data helper):
-   - ADX > 18 = trending (allow breakout signals)
-   - ADX < 18 = ranging (allow mean reversion signals)
-   - Lower threshold (18 vs 20) to ensure more signals
-
-3. TWO SIMPLE SIGNAL TYPES (either can trigger - ensures trades):
-   a) RSI(7) MEAN REVERSION: RSI < 35 (long) or > 65 (short)
-      - Faster RSI(7) for 15m timeframe
-      - Looser thresholds than 30/70 to ensure trades
-      - Must align with 4h trend bias
+This strategy combines:
+1. 4H HMA(21) TREND BIAS: Smooth trend direction (HMA less lag than EMA)
+   - Long bias when price > 4h HMA
+   - Short bias when price < 4h HMA
    
-   b) DONCHIAN(15) BREAKOUT: Price breaks 15-bar high/low
-      - Shorter period for more signals on 15m
-      - Works in any regime
+2. 1D ADX(14) REGIME FILTER: Detect trending vs ranging markets
+   - ADX > 25 = trending (allow Supertrend breakouts)
+   - ADX < 25 = ranging (allow RSI mean reversion only)
+   - Prevents breakout whipsaws in choppy conditions
 
-4. ATR(14) TRAILING STOP at 2.0x:
+3. SUPERTREND(10, 3.0) ENTRY SIGNAL:
+   - Clean trend-following signal with ATR-based stops built-in
+   - Long when price crosses above Supertrend lower band
+   - Short when price crosses below Supertrend upper band
+   - Only in trending regime (1d ADX > 25)
+
+4. RSI(14) PULLBACK ENTRY (looser thresholds for more trades):
+   - Long: RSI < 40 (not 30) + price > 4h HMA
+   - Short: RSI > 60 (not 70) + price < 4h HMA
+   - Works in any regime, ensures sufficient trade count
+
+5. ATR(14) TRAILING STOP at 2.0x:
    - Signal → 0 when price moves 2.0*ATR against position
-   - Tighter stop for 15m timeframe
+   - Critical for crash protection
 
-5. POSITION SIZING: 0.25 discrete
-   - 25% capital per position
-   - Discrete levels minimize fee churn
+6. POSITION SIZING: 0.28 discrete
+   - Max 28% capital per position
+   - Discrete levels (0.0, ±0.28) minimize fee churn
 
-Why this should work on 15m:
-- LOOSE thresholds ensure >10 trades/symbol/year
-- 4h HMA + 1h ADX provides regime context without over-filtering
-- RSI(7) is fast enough for 15m swings
-- Should work on BTC/ETH/SOL individually
-- 15m captures intraday moves missed by 4h/12h
+Why this should work on 30m:
+- 4h HMA provides stable trend bias (not noisy like 1h)
+- 1d ADX regime filter prevents whipsaw entries
+- Supertrend + RSI dual entry ensures >10 trades/year
+- Looser RSI thresholds (40/60 vs 30/70) guarantee trades on all symbols
+- 2.0x ATR stoploss protects against 2022-style crashes
 
-Timeframe: 15m (REQUIRED for this experiment)
-HTF: 1h and 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels
+Timeframe: 30m (REQUIRED for this experiment)
+HTF: 4h and 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.28 discrete levels
 Stoploss: 2.0 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_rsi7_donchian_4h_hma_1h_adx_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_supertrend_rsi_4h_hma_1d_adx_regime_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -120,8 +122,8 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
-def calculate_rsi(close, period=7):
-    """Calculate Relative Strength Index with faster period for 15m."""
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -134,22 +136,55 @@ def calculate_rsi(close, period=7):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_donchian(high, low, period=15):
-    """Calculate Donchian Channel."""
-    n = len(high)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+def calculate_supertrend(high, low, close, atr, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator."""
+    n = len(close)
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
+    supertrend = np.full(n, np.nan)
+    trend = np.ones(n)  # 1 = uptrend, -1 = downtrend
     
-    for i in range(period - 1, n):
-        upper[i] = high[i-period+1:i+1].max()
-        lower[i] = low[i-period+1:i+1].min()
+    for i in range(period, n):
+        if np.isnan(atr[i]) or atr[i] == 0:
+            continue
+        
+        hl2 = (high[i] + low[i]) / 2
+        upper_band[i] = hl2 + multiplier * atr[i]
+        lower_band[i] = hl2 - multiplier * atr[i]
+        
+        if i == period:
+            supertrend[i] = upper_band[i]
+            trend[i] = -1 if close[i] < upper_band[i] else 1
+        else:
+            # Upper band logic
+            if upper_band[i] < upper_band[i-1] or close[i-1] > upper_band[i-1]:
+                upper_band[i] = upper_band[i]
+            else:
+                upper_band[i] = upper_band[i-1]
+            
+            # Lower band logic
+            if lower_band[i] > lower_band[i-1] or close[i-1] < lower_band[i-1]:
+                lower_band[i] = lower_band[i]
+            else:
+                lower_band[i] = lower_band[i-1]
+            
+            # Trend determination
+            if trend[i-1] == 1:
+                if close[i] < lower_band[i]:
+                    trend[i] = -1
+                    supertrend[i] = upper_band[i]
+                else:
+                    trend[i] = 1
+                    supertrend[i] = lower_band[i]
+            else:
+                if close[i] > upper_band[i]:
+                    trend[i] = 1
+                    supertrend[i] = lower_band[i]
+                else:
+                    trend[i] = -1
+                    supertrend[i] = upper_band[i]
     
-    return upper, lower
-
-def calculate_sma(close, period=50):
-    """Calculate Simple Moving Average."""
-    close_s = pd.Series(close)
-    return close_s.rolling(window=period, min_periods=period).mean().values
+    return supertrend, trend, upper_band, lower_band
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -158,27 +193,26 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
     df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    adx_1h = calculate_adx(df_1h['high'].values, df_1h['low'].values, df_1h['close'].values, 14)
     hma_4h = calculate_hma(df_4h['close'].values, 21)
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    adx_1h_aligned = align_htf_to_ltf(prices, df_1h, adx_1h)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 7)  # Faster RSI for 15m
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 15)
-    sma_50 = calculate_sma(close, 50)
+    rsi = calculate_rsi(close, 14)
+    supertrend, st_trend, st_upper, st_lower = calculate_supertrend(high, low, close, atr, 10, 3.0)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.25
+    SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -193,15 +227,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(adx_1h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(adx_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(sma_50[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(rsi[i]) or np.isnan(supertrend[i]):
             signals[i] = 0.0
             continue
         
@@ -209,34 +239,42 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === 1H ADX REGIME FILTER ===
-        adx_1h_val = adx_1h_aligned[i]
-        trending_market = adx_1h_val > 18  # Lower threshold for more signals
-        ranging_market = adx_1h_val <= 18
+        # === 1D ADX REGIME FILTER ===
+        adx_1d_val = adx_1d_aligned[i]
+        trending_market = adx_1d_val > 25
+        ranging_market = adx_1d_val <= 25
         
-        # === SIGNAL 1: RSI(7) MEAN REVERSION ===
-        # Looser thresholds (35/65 vs 30/70) to ensure trades
-        rsi_long = rsi[i] < 35
-        rsi_short = rsi[i] > 65
+        # === SUPERTREND SIGNAL ===
+        # Long: Supertrend flips to uptrend (trend changes from -1 to 1)
+        # Short: Supertrend flips to downtrend (trend changes from 1 to -1)
+        supertrend_long = False
+        supertrend_short = False
         
-        # === SIGNAL 2: DONCHIAN(15) BREAKOUT ===
-        donchian_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        donchian_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        if i > 100 and not np.isnan(st_trend[i-1]):
+            if st_trend[i] == 1 and st_trend[i-1] == -1:
+                supertrend_long = True
+            elif st_trend[i] == -1 and st_trend[i-1] == 1:
+                supertrend_short = True
         
-        # === GENERATE SIGNAL (either signal can trigger) ===
+        # === RSI PULLBACK SIGNAL (looser thresholds for more trades) ===
+        rsi_long = rsi[i] < 40  # Was 30, loosened to ensure trades
+        rsi_short = rsi[i] > 60  # Was 70, loosened to ensure trades
+        
+        # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # RSI MEAN REVERSION (must align with 4h trend)
-        if rsi_long and bull_trend_4h:
-            new_signal = SIZE
-        elif rsi_short and bear_trend_4h:
-            new_signal = -SIZE
-        
-        # DONCHIAN BREAKOUT (works in any regime, align with 4h trend)
-        if new_signal == 0.0:
-            if donchian_long and bull_trend_4h:
+        # SUPERTREND BREAKOUT (only in trending market per 1d ADX)
+        if trending_market:
+            if supertrend_long and bull_trend_4h:
                 new_signal = SIZE
-            elif donchian_short and bear_trend_4h:
+            elif supertrend_short and bear_trend_4h:
+                new_signal = -SIZE
+        
+        # RSI PULLBACK (works in any regime, must align with 4h trend)
+        if new_signal == 0.0:
+            if rsi_long and bull_trend_4h:
+                new_signal = SIZE
+            elif rsi_short and bear_trend_4h:
                 new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
