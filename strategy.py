@@ -1,48 +1,55 @@
 #!/usr/bin/env python3
 """
-Experiment #421: 15m Multi-Regime Strategy with 4h HMA Trend + 1h Choppiness Filter
+Experiment #422: 30m Volatility Squeeze + 4h HMA Trend + RSI Volume Confirmation
 
-Hypothesis: After analyzing 420+ failed experiments, the key insight is that 15m
-timeframe needs ADAPTIVE logic based on market regime. Simple trend-following
-fails in bear/range markets (2022 crash, 2025 bear). This strategy uses:
+Hypothesis: After 421 experiments, 30m timeframe needs a DIFFERENT approach than 4h/12h.
+30m has more noise but also more opportunities. Key insights:
 
-1. 4h HMA(21) TREND BIAS (via mtf_data helper):
-   - Long bias when price > 4h HMA
-   - Short bias when price < 4h HMA
-   - HMA smoother than EMA, critical for MTF alignment
+1. VOLATILITY SQUEEZE REGIME (not ADX):
+   - Bollinger Band Width at 20-bar low = compression = breakout imminent
+   - BB Width percentile < 20% = squeeze (prepare for breakout)
+   - BB Width percentile > 60% = expansion (trend following)
+   - This works better than ADX on 30m (ADX too laggy for intraday)
 
-2. 1h CHOPPINESS INDEX REGIME DETECTION (via mtf_data helper):
-   - CHOP > 61.8 = ranging market (use mean-reversion entries)
-   - CHOP < 38.2 = trending market (use breakout entries)
-   - 38.2-61.8 = neutral (reduce position size or stay flat)
-   - This is the KEY differentiator from failed strategies
+2. 4h HMA(21) TREND BIAS (via mtf_data helper):
+   - 4h is the RIGHT HTF for 30m (not 1d, which is too slow)
+   - 4h HMA smoother than EMA, critical for 30m/4h alignment
+   - Long only when price > 4h HMA in squeeze breakout
+   - Short only when price < 4h HMA in squeeze breakout
 
-3. 15m ENTRY LOGIC (adaptive per regime):
-   - TRENDING: Donchian(20) breakout in direction of 4h trend
-   - RANGING: RSI(7) extremes (30/70) with 4h trend bias
-   - This avoids counter-trend mean-reversion in strong trends
+3. RSI(7) FAST MOMENTUM for 30m:
+   - RSI(7) instead of RSI(14) for faster 30m signals
+   - Long: RSI crosses above 40 from below (momentum building)
+   - Short: RSI crosses below 60 from above (momentum fading)
+   - More responsive than RSI(14) on 30m timeframe
 
 4. VOLUME CONFIRMATION:
-   - Entry volume > 0.8 * 20-bar avg volume
-   - Filters false breakouts on low liquidity
+   - Volume > 1.5 * Volume_SMA(20) confirms breakout validity
+   - Reduces false breakouts on low-volume 30m bars
+   - Critical for 30m where noise is higher than 4h/12h
 
-5. ATR(14) TRAILING STOP at 2.5x:
+5. DONCHIAN(20) BREAKOUT TRIGGER:
+   - Long: price breaks 20-bar high + volume confirmation + 4h HMA bullish
+   - Short: price breaks 20-bar low + volume confirmation + 4h HMA bearish
+   - Only enter during BB squeeze (percentile < 20%)
+
+6. ATR(14) TRAILING STOP at 2.5x:
    - Signal → 0 when price moves 2.5*ATR against position
-   - Protects from 2022-style crashes
+   - Protects from 2022-style crashes on 30m timeframe
 
-6. POSITION SIZING: 0.25 discrete (conservative for 15m volatility)
-   - Max 25% capital per position
+7. POSITION SIZING: 0.25 discrete (conservative for 30m volatility)
+   - Max 25% capital per position (30m more volatile than 4h)
    - Discrete levels minimize fee churn
 
-Why 15m with this approach should work:
-- Adaptive regime detection avoids trend-following in chop
-- 4h HMA provides strong trend filter (not 1h which is too noisy)
-- 1h Choppiness gives cleaner regime signal than ADX on 15m
+Why 30m with this approach should work:
+- BB squeeze catches breakouts before they happen (leading indicator)
+- 4h HMA provides trend filter without being too slow (like 1d)
+- RSI(7) + Volume reduces false signals on noisy 30m bars
+- Should generate 30-60 trades/year (more than 12h, less than 15m)
 - Works on BTC/ETH/SOL individually (not SOL-biased)
-- Should generate 50-100 trades/year (enough for stats, not too many for fees)
 
-Timeframe: 15m (REQUIRED for this experiment)
-HTF: 4h HMA + 1h Choppiness via mtf_data helper (call ONCE before loop)
+Timeframe: 30m (REQUIRED for this experiment)
+HTF: 4h via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
@@ -50,8 +57,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_regime_chop_4h_hma_1h_donchian_rsi_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_bb_squeeze_4h_hma_rsi_vol_donchian_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -74,35 +81,8 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market
-    CHOP < 38.2 = trending market
-    
-    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    """
-    n = len(close)
-    chop = np.full(n, np.nan)
-    
-    # Calculate ATR for each bar (simplified: just high-low for this calculation)
-    tr = high - low
-    
-    for i in range(period, n):
-        atr_sum = tr[i-period+1:i+1].sum()
-        highest_high = high[i-period+1:i+1].max()
-        lowest_low = low[i-period+1:i+1].min()
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 1e-10:
-            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-        else:
-            chop[i] = 50.0  # neutral
-    
-    return chop
-
 def calculate_rsi(close, period=7):
-    """Calculate Relative Strength Index with shorter period for 15m."""
+    """Calculate Relative Strength Index with faster period for 30m."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
@@ -114,6 +94,30 @@ def calculate_rsi(close, period=7):
     rs = avg_gain / avg_loss.replace(0, np.inf)
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands and Band Width."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    bandwidth = (upper - lower) / sma
+    return upper, lower, bandwidth
+
+def calculate_bb_width_percentile(bandwidth, lookback=100):
+    """Calculate percentile rank of BB Width over lookback period."""
+    n = len(bandwidth)
+    percentile = np.full(n, np.nan)
+    
+    for i in range(lookback, n):
+        window = bandwidth[i-lookback:i+1]
+        valid = window[~np.isnan(window)]
+        if len(valid) > 0:
+            rank = np.sum(valid < bandwidth[i]) / len(valid)
+            percentile[i] = rank * 100
+    
+    return percentile
 
 def calculate_donchian(high, low, period=20):
     """Calculate Donchian Channel (highest high, lowest low over period)."""
@@ -127,10 +131,11 @@ def calculate_donchian(high, low, period=20):
     
     return upper, lower
 
-def calculate_volume_avg(volume, period=20):
-    """Calculate rolling average volume."""
+def calculate_volume_sma(volume, period=20):
+    """Calculate SMA of volume for volume confirmation."""
     vol_s = pd.Series(volume)
-    return vol_s.rolling(window=period, min_periods=period).mean().values
+    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -141,21 +146,20 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    df_1h = get_htf_data(prices, '1h')
     
     # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    chop_1h = calculate_choppiness(df_1h['high'].values, df_1h['low'].values, df_1h['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    chop_1h_aligned = align_htf_to_ltf(prices, df_1h, chop_1h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 7)
+    bb_upper, bb_lower, bb_bandwidth = calculate_bollinger_bands(close, 20, 2.0)
+    bb_percentile = calculate_bb_width_percentile(bb_bandwidth, 100)
     donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    vol_avg = calculate_volume_avg(volume, 20)
+    volume_sma = calculate_volume_sma(volume, 20)
     
     signals = np.zeros(n)
     
@@ -179,11 +183,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop_1h_aligned[i]):
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]):
+        if np.isnan(bb_percentile[i]):
             signals[i] = 0.0
             continue
         
@@ -191,55 +195,49 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(vol_avg[i]) or vol_avg[i] == 0:
+        if np.isnan(volume_sma[i]) or volume_sma[i] == 0:
             signals[i] = 0.0
             continue
         
-        # === REGIME DETECTION (1h Choppiness) ===
-        trending_market = chop_1h_aligned[i] < 38.2
-        ranging_market = chop_1h_aligned[i] > 61.8
-        neutral_market = not trending_market and not ranging_market
+        # === VOLATILITY REGIME DETECTION ===
+        bb_squeeze = bb_percentile[i] < 20  # Bandwidth at 20% low = squeeze
+        bb_expansion = bb_percentile[i] > 60  # Bandwidth expanding = trend
         
         # === 4h HMA TREND BIAS ===
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > 0.8 * vol_avg[i]
+        volume_spike = volume[i] > 1.5 * volume_sma[i]
         
-        # === DONCHIAN BREAKOUT SIGNALS (for trending regime) ===
+        # === DONCHIAN BREAKOUT SIGNALS ===
         donchian_long = close[i] > donchian_upper[i-1]  # Break above previous high
         donchian_short = close[i] < donchian_lower[i-1]  # Break below previous low
         
-        # === RSI MEAN REVERSION SIGNALS (for ranging regime) ===
-        rsi_long = rsi[i] < 30  # Oversold
-        rsi_short = rsi[i] > 70  # Overbought
+        # === RSI MOMENTUM CROSSOVER ===
+        rsi_momentum_long = rsi[i] > 40 and rsi[i-1] <= 40  # Cross above 40
+        rsi_momentum_short = rsi[i] < 60 and rsi[i-1] >= 60  # Cross below 60
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # TRENDING REGIME: Donchian breakout with 4h HMA filter + volume
-        if trending_market:
-            if bull_trend_4h and donchian_long and volume_confirmed:
+        # BB SQUEEZE BREAKOUT (primary entry signal)
+        if bb_squeeze:
+            # Long: squeeze + bullish 4h trend + Donchian breakout + volume
+            if bull_trend_4h and donchian_long and volume_spike:
                 new_signal = SIZE
-            elif bear_trend_4h and donchian_short and volume_confirmed:
+            # Short: squeeze + bearish 4h trend + Donchian breakout + volume
+            elif bear_trend_4h and donchian_short and volume_spike:
                 new_signal = -SIZE
         
-        # RANGING REGIME: RSI mean-reversion with 4h HMA filter
-        elif ranging_market:
-            # Only enter with trend bias (avoid counter-trend mean reversion)
-            if bull_trend_4h and rsi_long:
+        # BB EXPANSION TREND FOLLOWING (secondary entry)
+        elif bb_expansion:
+            # Long: expansion + bullish 4h + RSI momentum
+            if bull_trend_4h and rsi_momentum_long:
                 new_signal = SIZE
-            elif bear_trend_4h and rsi_short:
+            # Short: expansion + bearish 4h + RSI momentum
+            elif bear_trend_4h and rsi_momentum_short:
                 new_signal = -SIZE
-        
-        # NEUTRAL REGIME: Reduce position size or stay flat
-        elif neutral_market:
-            # Only take strongest signals in neutral regime
-            if bull_trend_4h and donchian_long and volume_confirmed and rsi[i] < 50:
-                new_signal = SIZE / 2  # Half position in neutral
-            elif bear_trend_4h and donchian_short and volume_confirmed and rsi[i] > 50:
-                new_signal = -SIZE / 2  # Half position in neutral
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -259,22 +257,19 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === REGIME FLIP EXIT ===
-        # Exit if regime changes against position type
-        if in_position and new_signal != 0.0:
-            # Long position in trending regime should exit if market becomes ranging without RSI signal
-            if position_side > 0 and ranging_market and not rsi_long:
-                new_signal = 0.0
-            # Short position in trending regime should exit if market becomes ranging without RSI signal
-            if position_side < 0 and ranging_market and not rsi_short:
-                new_signal = 0.0
-        
-        # === TREND REVERSAL EXIT (for trending regime positions) ===
+        # === TREND REVERSAL EXIT ===
         if in_position and new_signal != 0.0:
             if position_side > 0 and bear_trend_4h:
                 new_signal = 0.0
             if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0
+        
+        # === RSI EXTREME EXIT (overbought/oversold) ===
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and rsi[i] > 80:
+                new_signal = 0.0  # Take profit on overbought
+            if position_side < 0 and rsi[i] < 20:
+                new_signal = 0.0  # Take profit on oversold
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
