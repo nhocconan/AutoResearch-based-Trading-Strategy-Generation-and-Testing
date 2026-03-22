@@ -1,38 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #045: 1h Primary + 4h/1d HTF — Fisher Transform + HMA Trend + Z-Score
+Experiment #046: 12h Primary + 1d HTF — Dual Regime Adaptive Strategy
 
-Hypothesis: Lower timeframe strategies fail due to excessive trades and fee drag.
-This strategy uses HTF trend filter with 1h entry timing to achieve HTF trade
-frequency with 1h execution precision.
+Hypothesis: 12h timeframe balances trade frequency (20-50/year) with signal quality.
+Higher timeframes reduce fee drag while capturing major moves. This strategy uses:
 
-Key components:
-1. 1d HMA(21) for MAJOR trend bias (only trade WITH 1d trend direction)
-2. 4h HMA(21) for INTERMEDIATE trend confirmation
-3. Ehlers Fisher Transform(9) for reversal entries (proven in bear markets)
-4. Z-score(20) for mean reversion confirmation
-5. ATR(14) trailing stoploss at 2.5x
-6. Discrete position sizing (0.25, 0.30) to minimize fee churn
+1. 1d HMA(21) for MAJOR trend bias (only trade WITH daily trend)
+2. 12h Choppiness Index(14) for regime detection (>55=range, <45=trend)
+3. Connors RSI(3,2,100) for mean reversion entries in range regime
+4. HMA(16/48) crossover for trend entries in trend regime
+5. ATR(14) trailing stoploss at 2.5x for risk management
+6. Volume filter to confirm genuine moves
+7. Discrete position sizing (0.25/0.30) to minimize fee churn
 
 Why this should work:
-- Fisher Transform catches reversals in bear rallies (mentioned in research)
-- 1h entries within 4h/1d trend = fewer trades, better timing
-- Z-score filter prevents entering at extremes
-- Session filter (8-20 UTC) avoids low-liquidity whipsaws
-- Target: 30-60 trades/year on 1h timeframe
+- 12h captures multi-day swings without excessive trades
+- Dual regime adapts to market conditions (range vs trend)
+- 1d bias prevents counter-trend trades in strong trends
+- Connors RSI has proven 75% win rate for extremes
+- HMA crossover catches sustained trends with less lag than EMA
+- Stoploss protects from 2022-style crashes
 
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h and 1d via mtf_data.get_htf_data() — called ONCE before loop
+Timeframe: 12h (REQUIRED)
+HTF: 1d via mtf_data.get_htf_data() — called ONCE before loop
 Position sizing: 0.25-0.30 discrete
 Stoploss: 2.5 * ATR(14) trailing
-Target trades: 30-60/year per symbol
+Target trades: 20-50/year per symbol
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_fisher_zscore_hma_4h1d_v1"
-timeframe = "1h"
+name = "mtf_12h_dual_regime_connors_hma_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -60,53 +60,84 @@ def calculate_rsi(close, period=14):
     rsi = rsi.fillna(50).values
     return rsi
 
-def calculate_fisher_transform(high, low, close, period=9):
+def calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100):
     """
-    Ehlers Fisher Transform - catches reversals in bear/range markets.
+    Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
     
-    Formula:
-    1. Calculate typical price: (high + low) / 2
-    2. Normalize to -1 to +1 range
-    3. Apply Fisher transform: 0.5 * ln((1+x)/(1-x))
+    RSI_Streak: RSI of consecutive up/down bars
+    PercentRank: percentile rank of price change over lookback
+    """
+    close_s = pd.Series(close)
     
-    Long when Fisher crosses above -1.5
-    Short when Fisher crosses below +1.5
+    # Component 1: RSI(3)
+    rsi_3 = calculate_rsi(close, rsi_period)
+    
+    # Component 2: Streak RSI
+    delta = close_s.diff()
+    streak = np.zeros(len(close))
+    for i in range(1, len(close)):
+        if delta.iloc[i] > 0:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif delta.iloc[i] < 0:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = 0
+    
+    streak_s = pd.Series(streak)
+    streak_gain = streak_s.where(streak_s > 0, 0.0)
+    streak_loss = -streak_s.where(streak_s < 0, 0.0)
+    
+    avg_streak_gain = streak_gain.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
+    avg_streak_loss = streak_loss.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
+    
+    streak_rs = avg_streak_gain / avg_streak_loss.replace(0, np.nan)
+    streak_rsi = 100 - (100 / (1 + streak_rs))
+    streak_rsi = streak_rsi.fillna(50).values
+    
+    # Component 3: Percent Rank
+    returns = close_s.pct_change()
+    percent_rank = returns.rolling(window=rank_period, min_periods=rank_period).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) >= rank_period else 50
+    )
+    percent_rank = percent_rank.fillna(50).values
+    
+    # Connors RSI
+    connors_rsi = (rsi_3 + streak_rsi + percent_rank) / 3
+    return connors_rsi
+
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Choppiness Index = 100 * (ATR(1) sum / ATR(period)) / (Highest High - Lowest Low) * log10(period)
+    
+    CHOP > 61.8 = range/choppy
+    CHOP < 38.2 = trending
     """
     high_s = pd.Series(high)
     low_s = pd.Series(low)
-    close_s = pd.Series(close)
     
-    # Typical price
-    typical = (high + low) / 2
-    typical_s = pd.Series(typical)
+    # ATR(1) = True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Normalize to -1 to +1 using Donchian-style range
-    highest = typical_s.rolling(window=period, min_periods=period).max()
-    lowest = typical_s.rolling(window=period, min_periods=period).min()
+    # Sum of ATR(1) over period
+    atr1_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
     
-    # Normalize: (price - lowest) / (highest - lowest) * 2 - 1
-    range_val = highest - lowest
-    normalized = np.where(range_val > 0, (typical - lowest.values) / range_val.values * 2 - 1, 0)
-    normalized = np.clip(normalized, -0.99, 0.99)  # Prevent division by zero in log
+    # ATR(period)
+    atr_period = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    # Fisher transform
-    fisher = 0.5 * np.log((1 + normalized) / (1 - normalized))
-    fisher = np.nan_to_num(fisher, nan=0.0)
+    # Highest High - Lowest Low over period
+    hh_ll = high_s.rolling(window=period, min_periods=period).max().values - low_s.rolling(window=period, min_periods=period).min().values
+    hh_ll = np.where(hh_ll == 0, 1e-10, hh_ll)
     
-    # Signal line (1-bar lag of fisher)
-    fisher_signal = np.roll(fisher, 1)
-    fisher_signal[0] = fisher[0]
+    # Choppiness Index
+    chop = 100 * (atr1_sum / atr_period) / hh_ll * np.log10(period)
+    chop = np.nan_to_num(chop, nan=50.0)
+    chop = np.clip(chop, 0, 100)
     
-    return fisher, fisher_signal
-
-def calculate_zscore(close, period=20):
-    """Calculate Z-score for mean reversion detection."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - sma) / std.replace(0, np.nan)
-    zscore = zscore.fillna(0).values
-    return zscore
+    return chop
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -118,38 +149,44 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def get_utc_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)."""
-    return (open_time // (1000 * 3600)) % 24
+def calculate_zscore(series, period=20):
+    """Calculate Z-score of price relative to rolling mean."""
+    s = pd.Series(series)
+    mean = s.rolling(window=period, min_periods=period).mean()
+    std = s.rolling(window=period, min_periods=period).std()
+    zscore = (s - mean) / std.replace(0, np.nan)
+    return zscore.fillna(0).values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h_21 = calculate_hma(df_4h['close'].values, 21)
     hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
     hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
     
-    # Calculate 1h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_14 = calculate_rsi(close, 14)
-    fisher, fisher_signal = calculate_fisher_transform(high, low, close, 9)
-    zscore = calculate_zscore(close, 20)
+    connors_rsi = calculate_connors_rsi(close, 3, 2, 100)
+    chop = calculate_choppiness_index(high, low, close, 14)
+    
+    # HMA for trend following
+    hma_16 = calculate_hma(close, 16)
+    hma_48 = calculate_hma(close, 48)
     
     # Volume SMA for filter
     volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Z-score for extreme moves
+    zscore_20 = calculate_zscore(close, 20)
     
     signals = np.zeros(n)
     
@@ -162,25 +199,21 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_price = 0.0
     lowest_price = 0.0
-    last_trade_bar = -50
+    last_trade_bar = -100
     
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(hma_1d_21_aligned[i]):
+        if np.isnan(hma_1d_21_aligned[i]):
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(zscore[i]):
+        if np.isnan(connors_rsi[i]) or np.isnan(chop[i]):
             continue
         
         if np.isnan(volume_sma[i]) or volume_sma[i] == 0:
             continue
-        
-        # === SESSION FILTER (8-20 UTC only - high liquidity) ===
-        utc_hour = get_utc_hour(open_time[i])
-        in_session = 8 <= utc_hour <= 20
         
         # === 1D TREND BIAS (MAJOR) ===
         # Price above 1d HMA = bullish bias (prefer longs)
@@ -188,28 +221,28 @@ def generate_signals(prices):
         trend_1d_bullish = close[i] > hma_1d_21_aligned[i]
         trend_1d_bearish = close[i] < hma_1d_21_aligned[i]
         
-        # === 4H TREND CONFIRMATION (INTERMEDIATE) ===
-        trend_4h_bullish = close[i] > hma_4h_21_aligned[i]
-        trend_4h_bearish = close[i] < hma_4h_21_aligned[i]
+        # === CHOPPINESS REGIME ===
+        # CHOP > 55 = range (mean reversion preferred)
+        # CHOP < 45 = trend (trend following preferred)
+        is_range = chop[i] > 55
+        is_trend = chop[i] < 45
         
         # === VOLUME FILTER ===
         volume_ok = volume[i] > 0.7 * volume_sma[i]
         
-        # === FISHER TRANSFORM SIGNALS ===
-        # Long: Fisher crosses above -1.5 (oversold reversal)
-        # Short: Fisher crosses below +1.5 (overbought reversal)
-        fisher_long = fisher[i] > -1.5 and fisher_signal[i] <= -1.5
-        fisher_short = fisher[i] < 1.5 and fisher_signal[i] >= 1.5
+        # === CONNORS RSI EXTREMES (loosened for more trades) ===
+        # CRSI < 25 = oversold (long opportunity)
+        # CRSI > 75 = overbought (short opportunity)
+        crsi_oversold = connors_rsi[i] < 25
+        crsi_overbought = connors_rsi[i] > 75
         
-        # === Z-SCORE CONFIRMATION ===
-        # Long: zscore < -1.0 (price below mean)
-        # Short: zscore > 1.0 (price above mean)
-        zscore_long = zscore[i] < -0.8
-        zscore_short = zscore[i] > 0.8
+        # === HMA CROSSOVER ===
+        hma_bullish = hma_16[i] > hma_48[i]
+        hma_bearish = hma_16[i] < hma_48[i]
         
-        # === RSI FILTER (avoid extreme counter-trend) ===
-        rsi_ok_long = rsi_14[i] < 65  # Not overbought for longs
-        rsi_ok_short = rsi_14[i] > 35  # Not oversold for shorts
+        # === Z-SCORE EXTREMES ===
+        zscore_extreme_low = zscore_20[i] < -1.5
+        zscore_extreme_high = zscore_20[i] > 1.5
         
         # === POSITION SIZING ===
         current_size = BASE_SIZE
@@ -219,26 +252,44 @@ def generate_signals(prices):
         bars_since_last_trade = i - last_trade_bar
         
         # LONG ENTRIES
-        # Require: 1d bullish OR 4h bullish (trend alignment)
-        # Plus: Fisher reversal + Z-score confirmation + volume
-        if trend_1d_bullish or trend_4h_bullish:
-            if fisher_long and zscore_long and rsi_ok_long and volume_ok:
+        # Regime 1: Range + Mean Reversion (Connors RSI extreme + 1d bullish bias)
+        if is_range and crsi_oversold and trend_1d_bullish:
+            if volume_ok:
                 new_signal = current_size
         
+        # Regime 2: Trend + HMA crossover (1d bullish + 12h HMA cross up)
+        elif is_trend and hma_bullish and trend_1d_bullish:
+            if volume_ok:
+                new_signal = current_size
+        
+        # Regime 3: Z-score extreme reversal (deep oversold in any regime)
+        elif zscore_extreme_low and trend_1d_bullish:
+            if volume_ok:
+                new_signal = current_size * 0.8
+        
         # SHORT ENTRIES
-        # Require: 1d bearish OR 4h bearish (trend alignment)
-        # Plus: Fisher reversal + Z-score confirmation + volume
-        if trend_1d_bearish or trend_4h_bearish:
-            if fisher_short and zscore_short and rsi_ok_short and volume_ok:
+        # Regime 1: Range + Mean Reversion (Connors RSI extreme + 1d bearish bias)
+        if is_range and crsi_overbought and trend_1d_bearish:
+            if volume_ok:
                 new_signal = -current_size
         
+        # Regime 2: Trend + HMA crossover (1d bearish + 12h HMA cross down)
+        elif is_trend and hma_bearish and trend_1d_bearish:
+            if volume_ok:
+                new_signal = -current_size
+        
+        # Regime 3: Z-score extreme reversal (deep overbought in any regime)
+        elif zscore_extreme_high and trend_1d_bearish:
+            if volume_ok:
+                new_signal = -current_size * 0.8
+        
         # === FREQUENCY SAFEGUARD ===
-        # If no trades for 150 bars (~6 days on 1h), allow weaker entry
-        if bars_since_last_trade > 150 and new_signal == 0.0 and not in_position:
-            if trend_1d_bullish and trend_4h_bullish and zscore[i] < -1.5:
-                new_signal = current_size * 0.7
-            elif trend_1d_bearish and trend_4h_bearish and zscore[i] > 1.5:
-                new_signal = -current_size * 0.7
+        # If no trades for 300 bars (~15 days on 12h), allow weaker entry
+        if bars_since_last_trade > 300 and new_signal == 0.0 and not in_position:
+            if trend_1d_bullish and connors_rsi[i] < 35:
+                new_signal = current_size * 0.5
+            elif trend_1d_bearish and connors_rsi[i] > 65:
+                new_signal = -current_size * 0.5
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -261,19 +312,14 @@ def generate_signals(prices):
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            if position_side > 0 and trend_1d_bearish and rsi_14[i] > 70:
+            if position_side > 0 and trend_1d_bearish and connors_rsi[i] > 70:
                 trend_reversal = True
-            if position_side < 0 and trend_1d_bullish and rsi_14[i] < 30:
+            if position_side < 0 and trend_1d_bullish and connors_rsi[i] < 30:
                 trend_reversal = True
         
         # Apply stoploss or trend reversal
         if stoploss_triggered or trend_reversal:
             new_signal = 0.0
-        
-        # === SESSION EXIT (optional - close position if out of session) ===
-        # Commented out to allow holding through off-session
-        # if in_position and not in_session:
-        #     new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
