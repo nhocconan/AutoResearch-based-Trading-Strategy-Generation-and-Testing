@@ -1,38 +1,48 @@
 #!/usr/bin/env python3
 """
-Experiment #266: 30m Supertrend with 4h HMA Bias and ADX Momentum Filter
+Experiment #267: 1h Donchian Breakout with 4h HMA Bias, ADX Filter, and Volume Confirmation
 
-Hypothesis: After analyzing 265 experiments, the clearest pattern is:
-- RSI-based entries consistently FAIL (Sharpe -1.8 to -3.1 across 10+ strategies)
-- Simple trend following works BUT needs strong HTF bias to survive 2022 crash
-- ADX momentum filter prevents entries during choppy periods (major return destroyer)
-- 30m timeframe offers balance: frequent enough for trades, not too noisy
+Hypothesis: After analyzing 266 experiments, clear patterns emerge:
+1. RSI mean-reversion consistently FAILS on 1h/15m/30m (Sharpe -1.1 to -3.1)
+2. Complex ensembles FAIL (too many conflicting filters)
+3. 4h+ timeframes work better than sub-hourly (less noise, fewer false signals)
+4. HTF bias (4h/1d HMA) is CRITICAL for filtering counter-trend trades
+5. Volume confirmation reduces false breakouts significantly
+6. ADX filter ensures we only trade when trend strength is sufficient
 
 This strategy combines:
-1. 4h HMA(21) for directional bias - prevents counter-trend trades (proven in #263, #264)
-2. 30m Supertrend(10,3) for clean entry signals - less whipsaw than EMA crossover
-3. ADX(14) > 20 filter - only trade when there's actual momentum (critical for 2022)
-4. ATR-based position sizing - reduce size when volatility spikes
-5. 2.5*ATR trailing stoploss - tighter than 12h strategies, appropriate for 30m
-6. Asymmetric entries - only trade in direction of 4h HMA bias
+1. 4h HMA(21) for directional bias - prevents counter-trend trades (learned from #263)
+2. 1h Donchian(20) breakout - clean momentum entry signal
+3. ADX(14) > 25 filter - only trade when trend strength is adequate
+4. Volume > 1.3x SMA(20) - breakout must have participation
+5. 2.5*ATR trailing stoploss - appropriate for 1h timeframe
+6. Discrete position sizing (0.25/0.30) - minimize fee churn
 
-Why this might beat the baseline (Sharpe=0.478):
-- Supertrend is cleaner than KAMA for entry timing (less lag)
-- ADX filter prevents choppy market entries (major issue in 2022)
-- 30m generates more trades than 4h/12h while maintaining quality
-- Discrete signal levels minimize fee churn
+Why 1h with these filters might work:
+- 4h HMA bias filters out ~50% of false signals (counter-trend)
+- ADX filter removes low-momentum chop periods
+- Volume confirmation ensures breakouts have real participation
+- Fewer but higher-quality trades = better Sharpe
+- Still frequent enough to generate >=10 trades per symbol
 
-Timeframe: 30m (REQUIRED for this experiment)
+Key differences from failed strategies:
+- NO RSI (RSI strategies failed on 1h in #255, #259)
+- NO Choppiness Index (failed in #262)
+- NO Fisher Transform (failed in #257)
+- Simple breakout + HTF bias + ADX + volume = cleaner signals
+- Looser ADX threshold (25 vs 30-40) to ensure >=10 trades
+
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.35 discrete, scaled by ATR
+Position sizing: 0.25-0.30 discrete
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_supertrend_4h_hma_adx_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_donchian_breakout_4h_hma_adx_volume_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -55,105 +65,59 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_supertrend(high, low, close, atr, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-    Returns: supertrend_values, supertrend_direction (1=long, -1=short)
-    """
-    n = len(close)
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)  # 1 = bullish (price above ST), -1 = bearish
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (highest high, lowest low over period)."""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    for i in range(period, n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            supertrend[i] = np.nan
-            direction[i] = 0
-            continue
-        
-        # Calculate basic upper and lower bands
-        hl2 = (high[i] + low[i]) / 2
-        upper_band = hl2 + multiplier * atr[i]
-        lower_band = hl2 - multiplier * atr[i]
-        
-        # Initialize
-        if i == period:
-            supertrend[i] = upper_band
-            direction[i] = -1
-        else:
-            # Determine supertrend value based on previous direction
-            if direction[i-1] == 1:  # Previous was bullish
-                if lower_band > supertrend[i-1]:
-                    supertrend[i] = lower_band
-                else:
-                    supertrend[i] = supertrend[i-1]
-            else:  # Previous was bearish
-                if upper_band < supertrend[i-1]:
-                    supertrend[i] = upper_band
-                else:
-                    supertrend[i] = supertrend[i-1]
-            
-            # Update direction based on price vs supertrend
-            if close[i] > supertrend[i]:
-                direction[i] = 1
-            else:
-                direction[i] = -1
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    return supertrend, direction
+    return upper, lower
+
+def calculate_volume_sma(volume, period=20):
+    """Calculate simple moving average of volume."""
+    vol_s = pd.Series(volume)
+    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 def calculate_adx(high, low, close, period=14):
-    """
-    Calculate Average Directional Index (ADX).
-    ADX > 25 = trending, ADX < 20 = ranging
-    """
+    """Calculate ADX (Average Directional Index) for trend strength."""
     n = len(close)
-    adx = np.zeros(n)
-    adx[:] = np.nan
     
-    if n < period * 2:
-        return adx
-    
-    # Calculate True Range, +DM, -DM
-    tr = np.zeros(n)
+    # Calculate DM and TR
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
+    tr = np.zeros(n)
     
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        plus_dm[i] = max(0, high[i] - high[i-1]) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
+        minus_dm[i] = max(0, low[i-1] - low[i]) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
         
-        if high[i] - high[i-1] > low[i-1] - low[i]:
-            plus_dm[i] = max(0, high[i] - high[i-1])
-        else:
-            plus_dm[i] = 0
-            
-        if low[i-1] - low[i] > high[i] - high[i-1]:
-            minus_dm[i] = max(0, low[i-1] - low[i])
-        else:
-            minus_dm[i] = 0
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Smooth TR, +DM, -DM using Wilder's method (EMA with alpha=1/period)
-    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # Smooth DM and TR using Wilder's method (EMA with span=period)
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    # Calculate +DI, -DI
+    # Calculate DI
     plus_di = np.zeros(n)
     minus_di = np.zeros(n)
-    
-    for i in range(period, n):
-        if tr_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
+    mask = tr_s > 0
+    plus_di[mask] = 100 * plus_dm_s[mask] / tr_s[mask]
+    minus_di[mask] = 100 * minus_dm_s[mask] / tr_s[mask]
     
     # Calculate DX and ADX
     dx = np.zeros(n)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    di_sum = plus_di + minus_di
+    di_diff = np.abs(plus_di - minus_di)
+    mask2 = di_sum > 0
+    dx[mask2] = 100 * di_diff[mask2] / di_sum[mask2]
     
-    # ADX is smoothed DX
-    adx_series = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean()
-    adx[:] = adx_series.values
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
     
     return adx
 
@@ -161,6 +125,7 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -172,15 +137,16 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
-    supertrend, st_direction = calculate_supertrend(high, low, close, atr, 10, 3.0)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    vol_sma = calculate_volume_sma(volume, 20)
     adx = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.30  # Base position size
+    SIZE_BASE = 0.28  # Base position size (conservative)
     SIZE_REDUCED = 0.20  # Reduced size in high vol
     SIZE_MAX = 0.35  # Maximum position size
     
@@ -190,7 +156,6 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     entry_price = 0.0
-    entry_atr = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -202,11 +167,15 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(supertrend[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or adx[i] == 0:
+        if np.isnan(vol_sma[i]) or vol_sma[i] == 0:
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
@@ -215,10 +184,9 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === MOMENTUM FILTER ===
-        # ADX > 20 = there's actual momentum (not choppy)
-        # This is critical - prevents entries during range-bound periods
-        momentum_present = adx[i] > 20
+        # === VOLUME CONFIRMATION ===
+        # Breakout must have volume > 1.3x average to be valid
+        volume_confirmed = volume[i] > 1.3 * vol_sma[i]
         
         # === VOLATILITY ADJUSTMENT ===
         # Reduce position size when ATR is elevated (>1.5x recent average)
@@ -231,29 +199,40 @@ def generate_signals(prices):
         else:
             position_size = SIZE_BASE
         
-        # === SUPERTREND SIGNALS ===
-        # Long signal: Supertrend direction = 1 (price above ST)
-        supertrend_long = st_direction[i] == 1
+        # === ADX TREND STRENGTH FILTER ===
+        # Only trade when ADX > 25 (sufficient trend strength)
+        # Looser threshold (25 vs 30-40) to ensure >=10 trades per symbol
+        trend_strength_ok = adx[i] > 25
         
-        # Short signal: Supertrend direction = -1 (price below ST)
-        supertrend_short = st_direction[i] == -1
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        # Long breakout: price breaks above previous Donchian upper
+        breakout_long = False
+        if not np.isnan(donchian_upper[i-1]):
+            breakout_long = close[i] > donchian_upper[i-1]
+        
+        # Short breakout: price breaks below previous Donchian lower
+        breakout_short = False
+        if not np.isnan(donchian_lower[i-1]):
+            breakout_short = close[i] < donchian_lower[i-1]
         
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
         
-        # LONG ENTRY: Need 4h bias up + Supertrend long + ADX momentum
+        # LONG ENTRY: Need 4h bias up + Donchian breakout + volume + ADX
         # Looser conditions to ensure >=10 trades per symbol
         long_conditions = (
             bull_trend_4h and  # 4h HMA bias bullish
-            supertrend_long and  # Supertrend confirms long
-            momentum_present  # ADX confirms momentum
+            breakout_long and  # Donchian breakout
+            volume_confirmed and  # Volume confirms breakout
+            trend_strength_ok  # ADX confirms trend strength
         )
         
         # SHORT ENTRY: Mirror of long
         short_conditions = (
             bear_trend_4h and  # 4h HMA bias bearish
-            supertrend_short and  # Supertrend confirms short
-            momentum_present  # ADX confirms momentum
+            breakout_short and  # Donchian breakout
+            volume_confirmed and  # Volume confirms breakout
+            trend_strength_ok  # ADX confirms trend strength
         )
         
         # === GENERATE SIGNAL ===
@@ -292,14 +271,6 @@ def generate_signals(prices):
             if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0  # 4h trend reversed against short
         
-        # === SUPERTREND REVERSAL EXIT ===
-        # Exit if Supertrend flips against position
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and st_direction[i] == -1:
-                new_signal = 0.0  # Supertrend flipped bearish
-            if position_side < 0 and st_direction[i] == 1:
-                new_signal = 0.0  # Supertrend flipped bullish
-        
         # === UPDATE POSITION TRACKING FOR NEXT BAR ===
         if new_signal != 0.0:
             if not in_position:
@@ -307,14 +278,12 @@ def generate_signals(prices):
                 in_position = True
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
-                entry_atr = atr[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
                 # Reversing position
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
-                entry_atr = atr[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             # else: maintaining same position direction (possibly adjusted size)
@@ -324,7 +293,6 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
-                entry_atr = 0.0
                 highest_close = 0.0
                 lowest_close = 0.0
         
