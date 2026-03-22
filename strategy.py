@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #231: 1h Multi-Timeframe Trend Following with RSI Pullback
+Experiment #232: 4h KAMA Trend + 1d HMA Filter + RSI Pullback + ATR Stop
 
-Hypothesis: 1h timeframe captures intraday swings while 4h HMA provides stable trend bias.
-RSI pullback entries (RSI<45 in uptrend, RSI>55 in downtrend) catch dips in trends
-rather than chasing breakouts. ADX>20 filters choppy markets. ATR trailing stop
-protects against reversals. This combines proven elements from current best strategy
-(mt4h_kama_1d_hma_adx_atr_v1) but optimized for 1h timeframe.
+Hypothesis: KAMA adapts to volatility better than EMA/HMA, reducing whipsaws in chop.
+1d HMA provides stable higher-timeframe bias. RSI pullback (40-60) enters on dips in trend.
+ATR trailing stop (2.5x) protects capital. This combines adaptive trend + HTF filter + timing.
 
-Why 1h might work:
-- 1h bars = 24 per day, captures swing moves without 5m/15m noise
-- RSI pullback entries have better risk/reward than breakouts
-- 4h HMA filter prevents counter-trend trades
-- ADX>20 (not 25+) ensures sufficient trade count on 1h
-- Conservative sizing (0.30) controls drawdown in crashes
+Why this might work on 4h:
+- KAMA adapts to market regime (fast in trends, slow in chop)
+- 4h = 6 bars/day, enough trades without excessive noise
+- 1d HMA prevents counter-trend trades (critical for BTC/ETH)
+- RSI pullback avoids chasing breakouts (enters on retracements)
+- Conservative sizing (0.30) controls drawdown in 2022-style crashes
 
 Learning from failures:
+- #226 (4h KAMA): Sharpe=-0.440 - KAMA alone, no HTF filter
+- #231 (1h RSI pullback): Sharpe=-1.409 - 1h too noisy, no vol filter
 - #224 (30m Supertrend): Sharpe=0.000 - 0 trades, conditions too strict
-- #225 (1h KAMA): Sharpe=-1.055 - KAMA alone insufficient
-- #229 (15m Donchian): Sharpe=-3.173 - lower TF too noisy
-- Mean reversion fails on crypto (Sharpe=-2.849, -3.173)
-- Need HTF filter + flexible entries to ensure trades
+- Need: HTF filter + relaxed entry conditions + proper stoploss
 
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper (call ONCE before loop)
 Position sizing: 0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
@@ -31,8 +28,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_rsi_pullback_4h_hma_adx_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_kama_1d_hma_rsi_pullback_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -45,41 +42,36 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index) for trend strength."""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average (KAMA)."""
     n = len(close)
+    kama = np.zeros(n)
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Calculate Efficiency Ratio
+    change = np.abs(close - np.roll(close, er_period))
+    change[:er_period] = np.nan
     
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
+    volatility = np.zeros(n)
+    for i in range(er_period, n):
+        volatility[i] = np.sum(np.abs(close[i-er_period+1:i+1] - np.roll(close[i-er_period+1:i+1], 1)))
     
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
+    er = change / (volatility + 1e-10)
+    er[:er_period] = 0
     
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # Calculate smoothing constant
+    fast_sc = 2 / (fast_period + 1)
+    slow_sc = 2 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    tr_s = np.where(tr_s == 0, 1e-10, tr_s)
+    # Calculate KAMA
+    kama[er_period] = close[er_period]
+    for i in range(er_period + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    plus_di = 100 * plus_dm_s / tr_s
-    minus_di = 100 * minus_dm_s / tr_s
+    # Fill initial values
+    kama[:er_period] = kama[er_period]
     
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
+    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -112,12 +104,6 @@ def calculate_ema(close, period=21):
     ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     return ema.values
 
-def calculate_sma(close, period=200):
-    """Calculate Simple Moving Average."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    return sma.values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -125,21 +111,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    adx = calculate_adx(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
-    sma_200 = calculate_sma(close, 200)
+    rsi = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     
@@ -158,54 +143,66 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]) or np.isnan(rsi[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 4h HMA = higher timeframe trend bias
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # 1d HMA = higher timeframe trend bias (critical filter)
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === TREND STRENGTH FILTER ===
-        # ADX > 20 = trending market (lower threshold for 1h to ensure trades)
-        trend_strength = adx[i] > 20
+        # === 4h TREND STRUCTURE ===
+        # KAMA slope (adaptive trend)
+        kama_bullish = close[i] > kama[i]
+        kama_bearish = close[i] < kama[i]
         
-        # === RSI PULLBACK ENTRY ===
-        # Long: RSI < 45 (pullback in uptrend)
-        # Short: RSI > 55 (pullback in downtrend)
-        rsi_pullback_long = rsi[i] < 45
-        rsi_pullback_short = rsi[i] > 55
-        
-        # === EMA CONFIRMATION ===
-        # EMA21 > EMA50 = bullish trend structure
-        # EMA21 < EMA50 = bearish trend structure
+        # EMA structure confirmation
         ema_bullish = ema_21[i] > ema_50[i]
         ema_bearish = ema_21[i] < ema_50[i]
         
-        # === SMA200 FILTER ===
-        # Price above SMA200 = long-term bullish
-        # Price below SMA200 = long-term bearish
-        above_sma200 = close[i] > sma_200[i] if not np.isnan(sma_200[i]) else True
-        below_sma200 = close[i] < sma_200[i] if not np.isnan(sma_200[i]) else False
+        # === RSI PULLBACK ENTRY ===
+        # Long: RSI pulled back to 40-55 in uptrend (buy the dip)
+        # Short: RSI rallied to 45-60 in downtrend (sell the rip)
+        rsi_pullback_long = 35 < rsi[i] < 60
+        rsi_pullback_short = 40 < rsi[i] < 65
+        
+        # === MOMENTUM CONFIRMATION ===
+        # Price above/below 5-bar ago (simple momentum)
+        momentum_long = close[i] > close[i-3]
+        momentum_short = close[i] < close[i-3]
         
         new_signal = 0.0
         
-        # === ENTRY CONDITIONS ===
-        # Long: 4h bullish + (ADX trending OR EMA bullish) + RSI pullback
-        # Flexible conditions to ensure enough trades
-        if bull_trend_4h:
-            if rsi_pullback_long and (trend_strength or ema_bullish):
-                new_signal = SIZE_BASE
+        # === ENTRY CONDITIONS (relaxed for trade count) ===
+        # Long: 1d bullish + 4h KAMA bullish + RSI pullback + momentum
+        # Only need 2 of 3 momentum filters to trigger
+        long_score = 0
+        if kama_bullish:
+            long_score += 1
+        if ema_bullish:
+            long_score += 1
+        if momentum_long:
+            long_score += 1
         
-        # Short: 4h bearish + (ADX trending OR EMA bearish) + RSI pullback
-        if bear_trend_4h:
-            if rsi_pullback_short and (trend_strength or ema_bearish):
-                new_signal = -SIZE_BASE
+        if bull_trend_1d and rsi_pullback_long and long_score >= 2:
+            new_signal = SIZE_BASE
+        
+        # Short: 1d bearish + 4h KAMA bearish + RSI pullback + momentum
+        short_score = 0
+        if kama_bearish:
+            short_score += 1
+        if ema_bearish:
+            short_score += 1
+        if momentum_short:
+            short_score += 1
+        
+        if bear_trend_1d and rsi_pullback_short and short_score >= 2:
+            new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Check stoploss on EXISTING position before considering new entry
@@ -234,22 +231,23 @@ def generate_signals(prices):
                 # Entering new position
                 in_position = True
                 position_side = np.sign(new_signal)
-                entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
                 # Reversing position
                 position_side = np.sign(new_signal)
-                entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
-            # else: maintaining same position direction
+            # else: maintaining same position direction, update extremes
+            elif position_side > 0 and close[i] > highest_close:
+                highest_close = close[i]
+            elif position_side < 0 and (lowest_close == 0.0 or close[i] < lowest_close):
+                lowest_close = close[i]
         else:
             # Exiting position (signal-based or stoploss)
             if in_position:
                 in_position = False
                 position_side = 0
-                entry_price = 0.0
                 highest_close = 0.0
                 lowest_close = 0.0
         
