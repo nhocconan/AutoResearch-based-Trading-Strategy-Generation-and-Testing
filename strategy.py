@@ -1,32 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #088: 4h Supertrend with 1d HMA Trend Filter + ADX Regime
-Hypothesis: 4h is the sweet spot timeframe (proven in #076 with Sharpe=0.162).
-Using 1d HMA (slower than 4h HMA) provides more stable trend bias.
-ADX filter avoids choppy/ranging markets where Supertrend whipsaws.
-Simplified entry conditions ensure trades are generated on all symbols.
+Experiment #089: 12h Donchian Breakout with 1d HMA Trend Filter + ADX Regime
+Hypothesis: 12h timeframe captures major trend moves with less noise than lower TFs.
+Donchian(20) breakout is proven on longer timeframes (Turtle Trading legacy).
+1d HMA provides stable trend bias (slower than 12h, avoids whipsaws).
+ADX filter ensures we only trade in trending markets (ADX>25).
+12h has fewer bars = less fee drag, better risk/reward per trade.
 
-Why this might work on 4h (learning from failures):
-- #076 (4h Supertrend + 1d HMA): Sharpe=0.162 - PROVEN WINNER formula
-- #082 (4h KAMA + 1d HMA): Sharpe=-0.942 - KAMA too slow/adaptative
+Why this might work on 12h (learning from failures):
+- #077 (12h Donchian + 1d HMA + RSI): Sharpe=-0.393 - RSI filter too restrictive
+- #083 (12h Supertrend + 1d HMA + RSI): Sharpe=0.085 - Supertrend works on 12h!
 - #084 (1d Supertrend + 4h HMA): Sharpe=-0.110 - Wrong TF combo
-- #079 (15m + 4h + 1h): Sharpe=-7.623 - TOO MANY TIMEFRAMES
+- Key insight: 12h needs SIMPLER entry conditions to generate enough trades
+- Remove RSI filter, rely on Donchian + ADX + HTF trend only
 
-Key insight: Stick with winning formula from #076 but improve:
-1. Add ADX regime filter (ADX>20 = trending, avoid chop)
-2. Simpler RSI conditions (single threshold, not complex ranges)
-3. Ensure entry conditions aren't too strict (generate trades on all symbols)
-4. Conservative position sizing (0.25 base, 0.35 strong)
-
-Timeframe: 4h (REQUIRED), HTF: 1d via mtf_data helper (call ONCE before loop).
+Timeframe: 12h (REQUIRED), HTF: 1d via mtf_data helper (call ONCE before loop).
 Position sizing: 0.25 base, 0.35 strong signals. Stoploss at 2.5*ATR.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_supertrend_1d_hma_adx_regime_v2"
-timeframe = "4h"
+name = "mtf_12h_donchian_1d_hma_adx_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -112,48 +108,26 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+def calculate_donchian(high, low, period=20):
     """
-    Calculate Supertrend indicator.
-    Returns: supertrend_values, trend_direction (1=long, -1=short)
+    Calculate Donchian Channel.
+    Returns: upper_band, lower_band, middle_band
     """
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    hl2 = (high + low) / 2
-    
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
-    supertrend = np.zeros(n)
-    trend = np.ones(n)  # 1 = long, -1 = short
+    n = len(high)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    middle = np.zeros(n)
     
     for i in range(period, n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            continue
-        
-        upper_band[i] = hl2[i] + multiplier * atr[i]
-        lower_band[i] = hl2[i] - multiplier * atr[i]
-        
-        if i == period:
-            supertrend[i] = upper_band[i]
-            trend[i] = 1
-        else:
-            if trend[i-1] == 1:
-                if close[i] < lower_band[i-1]:
-                    trend[i] = -1
-                    supertrend[i] = upper_band[i]
-                else:
-                    trend[i] = 1
-                    supertrend[i] = max(upper_band[i], supertrend[i-1])
-            else:
-                if close[i] > upper_band[i-1]:
-                    trend[i] = 1
-                    supertrend[i] = lower_band[i]
-                else:
-                    trend[i] = -1
-                    supertrend[i] = min(lower_band[i], supertrend[i-1])
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+        middle[i] = (upper[i] + lower[i]) / 2
     
-    return supertrend, trend
+    upper[:period] = np.nan
+    lower[:period] = np.nan
+    middle[:period] = np.nan
+    
+    return upper, lower, middle
 
 def calculate_ema(close, period):
     """Calculate EMA."""
@@ -174,15 +148,14 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
     adx = calculate_adx(high, low, close, 14)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
     
-    # Supertrend
-    supertrend, supertrend_direction = calculate_supertrend(high, low, close, 10, 3.0)
+    # Donchian Channel (20-period breakout)
+    donchian_upper, donchian_lower, donchian_middle = calculate_donchian(high, low, 20)
     
     signals = np.zeros(n)
     
@@ -207,7 +180,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(adx[i]) or np.isnan(supertrend[i]):
+        if np.isnan(adx[i]) or np.isnan(donchian_upper[i]):
             signals[i] = 0.0
             continue
         
@@ -216,57 +189,66 @@ def generate_signals(prices):
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === SUPERTREND SIGNAL ===
-        supertrend_long = supertrend_direction[i] == 1
-        supertrend_short = supertrend_direction[i] == -1
+        # === DONCHIAN BREAKOUT SIGNAL ===
+        # Breakout above upper band = long signal
+        # Breakout below lower band = short signal
+        donchian_breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
+        donchian_breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
         
         # === EMA ALIGNMENT ===
         ema_bullish = ema_21[i] > ema_50[i]
         ema_bearish = ema_21[i] < ema_50[i]
         
         # === ADX REGIME FILTER (avoid choppy markets) ===
-        # ADX > 20 = trending market (good for Supertrend)
+        # ADX > 25 = strong trending market (good for breakouts)
         # ADX < 20 = ranging market (avoid entries)
+        strong_trend = adx[i] > 25
         trending_market = adx[i] > 20
         
-        # === RSI FILTER (simplified - single threshold) ===
-        # Avoid over-filtering that caused failures
-        rsi_bullish = rsi[i] > 40  # Not oversold
-        rsi_bearish = rsi[i] < 60  # Not overbought
-        
-        # === RSI MOMENTUM ===
-        rsi_momentum_long = rsi[i] > 50
-        rsi_momentum_short = rsi[i] < 50
+        # === RSI MOMENTUM (light filter - don't over-constrain) ===
+        rsi = calculate_rsi(close, 14)
+        rsi_momentum_long = rsi[i] > 45  # Not deeply oversold
+        rsi_momentum_short = rsi[i] < 55  # Not deeply overbought
         
         new_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS (simplified - ensure trades) ===
-        # Path 1: Supertrend long + 1d bullish + trending (primary - strong signal)
-        if supertrend_long and bull_trend_1d and trending_market:
-            if ema_bullish and rsi_bullish:
+        # === LONG ENTRY CONDITIONS (simplified for 12h - ensure trades) ===
+        # Path 1: Donchian breakout + 1d bullish + strong trend (primary - strong signal)
+        if donchian_breakout_long and bull_trend_1d and strong_trend:
+            if ema_bullish:
                 new_signal = SIZE_STRONG
-            elif rsi_momentum_long:
+            else:
                 new_signal = SIZE_BASE
         
-        # Path 2: Supertrend long + EMA bullish (simpler, ensures trades on all symbols)
-        if new_signal == 0.0 and supertrend_long and ema_bullish and trending_market:
+        # Path 2: Donchian breakout + EMA bullish + trending (simpler, ensures trades)
+        if new_signal == 0.0 and donchian_breakout_long and ema_bullish and trending_market:
             if bull_trend_1d or rsi_momentum_long:
                 new_signal = SIZE_BASE
         
-        # === SHORT ENTRY CONDITIONS (simplified - ensure trades) ===
-        # Path 1: Supertrend short + 1d bearish + trending (primary - strong signal)
-        if supertrend_short and bear_trend_1d and trending_market:
-            if ema_bearish and rsi_bearish:
+        # Path 3: Donchian breakout + 1d bullish only (fallback to ensure trades on all symbols)
+        if new_signal == 0.0 and donchian_breakout_long and bull_trend_1d:
+            if trending_market or ema_bullish:
+                new_signal = SIZE_BASE
+        
+        # === SHORT ENTRY CONDITIONS (simplified for 12h - ensure trades) ===
+        # Path 1: Donchian breakout + 1d bearish + strong trend (primary - strong signal)
+        if donchian_breakout_short and bear_trend_1d and strong_trend:
+            if ema_bearish:
                 new_signal = -SIZE_STRONG
-            elif rsi_momentum_short:
+            else:
                 new_signal = -SIZE_BASE
         
-        # Path 2: Supertrend short + EMA bearish (simpler, ensures trades on all symbols)
-        if new_signal == 0.0 and supertrend_short and ema_bearish and trending_market:
+        # Path 2: Donchian breakout + EMA bearish + trending (simpler, ensures trades)
+        if new_signal == 0.0 and donchian_breakout_short and ema_bearish and trending_market:
             if bear_trend_1d or rsi_momentum_short:
                 new_signal = -SIZE_BASE
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR for 4h ===
+        # Path 3: Donchian breakout + 1d bearish only (fallback to ensure trades on all symbols)
+        if new_signal == 0.0 and donchian_breakout_short and bear_trend_1d:
+            if trending_market or ema_bearish:
+                new_signal = -SIZE_BASE
+        
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR for 12h ===
         # Update trailing highs/lows for active positions
         if in_position and position_side > 0:
             if close[i] > highest_close:
