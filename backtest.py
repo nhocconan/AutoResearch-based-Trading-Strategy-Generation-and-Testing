@@ -366,9 +366,12 @@ def run_strategy_backtest(
     strategy_name = strategy.name
 
     # Load price data WITH WARMUP BUFFER for indicators
-    # Strategies need historical bars before the period for indicator warmup
-    # (EMA, HMA, ATR all need lookback). Load extra 500 bars before start.
-    warmup_start = "2020-01-01"  # Load from earliest available for full warmup
+    # Use 1 year before period start for warmup (enough for SMA-200 on 1d)
+    # Don't load all data from 2020 — 15m has 180K+ bars, too slow for for-loops
+    from datetime import datetime, timedelta
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    warmup_dt = start_dt - timedelta(days=365)
+    warmup_start = warmup_dt.strftime("%Y-%m-%d")
     prices_full = load_klines(symbol, timeframe, warmup_start, end_date, config)
     if len(prices_full) == 0:
         raise ValueError(f"No data for {symbol} {timeframe} in {period} period")
