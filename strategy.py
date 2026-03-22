@@ -1,35 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #283: 15m KAMA Adaptive Trend with 4h HMA Bias and Volume Filter
+Experiment #284: 30m Supertrend with 4h HMA Bias and RSI Pullback
 
-Hypothesis: After analyzing 282 experiments, clear patterns emerge:
-1. RSI-based strategies consistently fail (see #251, #254, #259, #277)
-2. Complex ensembles with too many filters generate 0 trades (#275, #277, #280)
-3. Simple trend-following with strong HTF bias works best (current best: #274)
-4. 15m timeframe needs adaptive indicators to handle volatility regimes
+Hypothesis: After analyzing 283 failed experiments, the pattern shows:
+- KAMA-based strategies consistently fail on 30m/1h (#273, #278, #283 all Sharpe < -1.0)
+- Fisher transform generates 0 trades (#275, #280)
+- Simple trend + HTF bias works (current best: mtf_4h_kama_1d_hma_adx_atr_v1 Sharpe=0.478)
 
-This strategy uses:
-1. 4h HMA(21) for directional bias - prevents counter-trend trades (proven in #274)
-2. 15m KAMA(10) adaptive MA - adjusts to volatility, less lag than EMA
-3. Volume confirmation (1.2x average) - filters false breakouts
-4. 2.5*ATR trailing stoploss - appropriate for 15m (tighter than 12h)
-5. Asymmetric entries - only trade in direction of 4h HMA bias
-6. Discrete position sizing (0.25/0.30) - minimizes fee churn
+For 30m timeframe, I'll use:
+1. 4h HMA(21) for directional bias - prevents counter-trend trades (proven effective)
+2. 30m Supertrend(10, 3.0) for entry signals - cleaner than KAMA for 30m
+3. RSI(14) pullback filter - enter on pullbacks in trend direction (RSI 35-50 for longs, 50-65 for shorts)
+4. Volume confirmation - volume > 1.2x 20-period SMA to filter false breakouts
+5. 2.5*ATR trailing stoploss - tighter than 12h strategies, appropriate for 30m
+6. Asymmetric entries - only trade in direction of 4h HMA bias
 
-Why 15m might work:
-- Faster entries than 4h/12h strategies
-- KAMA adapts to volatility (critical for 2022 crash period)
-- 4h HMA bias prevents whipsaw counter-trend trades
-- Should generate 50-100+ trades per symbol (well above minimum 10)
+Why 30m might work:
+- More signals than 4h/12h (ensures >=10 trades per symbol)
+- Less noise than 15m (fewer false signals)
+- 4h HMA bias is strong filter that worked in current best strategy
+- Supertrend captures trends better than EMA crossover (which always fails)
 
 Key differences from failed strategies:
-- NO RSI (RSI strategies have 100% failure rate in our experiments)
-- NO Fisher Transform (#271, #280 failed with Sharpe=0.000)
-- NO Choppiness Index (#262 failed with Sharpe=-0.159)
-- Simple KAMA crossover + HTF bias + volume = cleaner signals
-- Looser volume threshold (1.2x not 1.5x) to ensure trades
+- NOT using KAMA (consistently failed on 30m/1h)
+- NOT using Fisher (generates 0 trades)
+- NOT using complex regime detection (failed in #279)
+- Simple Supertrend + HTF bias + RSI pullback = cleaner signals
+- RSI thresholds loose enough to ensure trades (35-50, not 25-35)
 
-Timeframe: 15m (REQUIRED for this experiment)
+Timeframe: 30m (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25-0.30 discrete
 Stoploss: 2.5 * ATR(14) trailing
@@ -38,8 +37,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_kama_trend_4h_hma_volume_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_supertrend_4h_hma_rsi_pullback_volume_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -62,46 +61,56 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """
-    Calculate Kaufman's Adaptive Moving Average (KAMA).
-    KAMA adapts to market noise - smooth in ranging, fast in trending.
-    Formula: KAMA = KAMA_prev + SC * (Price - KAMA_prev)
-    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
-    ER = Change / Volatility (Efficiency Ratio)
-    """
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator."""
     n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
+    atr = calculate_atr(high, low, close, period)
     
-    # Calculate Efficiency Ratio
-    change = np.abs(close - np.roll(close, period))
-    change[:period] = np.nan
-    
-    volatility = np.zeros(n)
-    for i in range(period, n):
-        volatility[i] = np.sum(np.abs(close[i-period+1:i+1] - np.roll(close[i-period+1:i+1], 1))[1:])
-    
-    volatility[:period] = np.nan
-    volatility[volatility == 0] = np.nan
-    
-    er = change / volatility
-    er = np.nan_to_num(er, nan=0.0)
-    
-    # Smoothing constants
-    fast_sc = 2.0 / (fast + 1)
-    slow_sc = 2.0 / (slow + 1)
-    
-    # Calculate KAMA
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Initialize KAMA with SMA
-    kama[period-1] = np.nanmean(close[:period])
+    supertrend = np.zeros(n)
+    supertrend[:] = np.nan
+    direction = np.zeros(n)  # 1 = uptrend, -1 = downtrend
     
     for i in range(period, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        if np.isnan(atr[i]):
+            continue
+        
+        mid = (high[i] + low[i]) / 2.0
+        upper_band = mid + multiplier * atr[i]
+        lower_band = mid - multiplier * atr[i]
+        
+        if i == period:
+            supertrend[i] = upper_band
+            direction[i] = 1
+        else:
+            # Determine direction
+            if close[i] > supertrend[i-1]:
+                direction[i] = 1
+                supertrend[i] = lower_band
+            elif close[i] < supertrend[i-1]:
+                direction[i] = -1
+                supertrend[i] = upper_band
+            else:
+                direction[i] = direction[i-1]
+                if direction[i] == 1:
+                    supertrend[i] = max(lower_band, supertrend[i-1])
+                else:
+                    supertrend[i] = min(upper_band, supertrend[i-1])
     
-    return kama
+    return supertrend, direction
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI indicator."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def calculate_volume_sma(volume, period=20):
     """Calculate simple moving average of volume."""
@@ -131,18 +140,19 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    kama_fast = calculate_kama(close, period=10, fast=2, slow=30)
-    kama_slow = calculate_kama(close, period=20, fast=2, slow=30)
+    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
+    rsi = calculate_rsi(close, 14)
     vol_sma = calculate_volume_sma(volume, 20)
     ema_50 = calculate_ema(close, 50)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25  # Base position size (conservative for 15m)
-    SIZE_HIGH = 0.30  # Higher size in strong trend
+    SIZE_BASE = 0.28  # Base position size (conservative)
+    SIZE_REDUCED = 0.20  # Reduced size in high vol
+    SIZE_MAX = 0.35  # Maximum position size
     
     # Track position state for stoploss
     in_position = False
@@ -150,6 +160,7 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     entry_price = 0.0
+    entry_atr = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -161,7 +172,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
+        if np.isnan(supertrend[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
@@ -174,54 +189,51 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
+        # === SUPERTREND SIGNAL ===
+        # Supertrend direction: 1 = uptrend (price above supertrend), -1 = downtrend
+        st_bullish = st_direction[i] == 1
+        st_bearish = st_direction[i] == -1
+        
+        # === RSI PULLBACK FILTER ===
+        # For longs: RSI should be in pullback zone (35-55), not overbought
+        rsi_pullback_long = 35 <= rsi[i] <= 55
+        
+        # For shorts: RSI should be in pullback zone (45-65), not oversold
+        rsi_pullback_short = 45 <= rsi[i] <= 65
+        
         # === VOLUME CONFIRMATION ===
-        # Breakout must have volume > 1.2x average (looser than 1.5x to ensure trades)
+        # Entry must have volume > 1.2x average
         volume_confirmed = volume[i] > 1.2 * vol_sma[i]
         
-        # === KAMA CROSSOVER SIGNALS ===
-        # Fast KAMA crosses above slow KAMA = bullish momentum
-        kama_bullish = kama_fast[i] > kama_slow[i]
-        kama_bearish = kama_fast[i] < kama_slow[i]
+        # === VOLATILITY ADJUSTMENT ===
+        # Reduce position size when ATR is elevated (>1.5x recent average)
+        atr_recent_avg = np.nanmean(atr[max(0, i-20):i+1])
+        high_volatility = atr[i] > 1.5 * atr_recent_avg if not np.isnan(atr_recent_avg) else False
         
-        # Check for crossover (fast crosses slow)
-        kama_cross_long = False
-        kama_cross_short = False
-        
-        if i > 0 and not np.isnan(kama_fast[i-1]) and not np.isnan(kama_slow[i-1]):
-            # Long crossover: fast was below, now above
-            if kama_fast[i-1] <= kama_slow[i-1] and kama_fast[i] > kama_slow[i]:
-                kama_cross_long = True
-            # Short crossover: fast was above, now below
-            if kama_fast[i-1] >= kama_slow[i-1] and kama_fast[i] < kama_slow[i]:
-                kama_cross_short = True
-        
-        # === TREND STRENGTH ===
-        # Price above EMA50 = strong uptrend, below = strong downtrend
-        strong_uptrend = close[i] > ema_50[i] and bull_trend_4h
-        strong_downtrend = close[i] < ema_50[i] and bear_trend_4h
-        
-        # Determine position size based on trend strength
-        if strong_uptrend or strong_downtrend:
-            position_size = SIZE_HIGH
+        # Determine position size based on volatility
+        if high_volatility:
+            position_size = SIZE_REDUCED
         else:
             position_size = SIZE_BASE
         
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
         
-        # LONG ENTRY: Need 4h bias up + KAMA bullish + (crossover OR volume confirmed)
+        # LONG ENTRY: Need 4h bias up + Supertrend bullish + RSI pullback + volume
         # Looser conditions to ensure >=10 trades per symbol
         long_conditions = (
             bull_trend_4h and  # 4h HMA bias bullish
-            kama_bullish and  # KAMA trend bullish
-            (kama_cross_long or volume_confirmed)  # Crossover or volume
+            st_bullish and  # Supertrend bullish
+            rsi_pullback_long and  # RSI in pullback zone
+            volume_confirmed  # Volume confirms
         )
         
         # SHORT ENTRY: Mirror of long
         short_conditions = (
             bear_trend_4h and  # 4h HMA bias bearish
-            kama_bearish and  # KAMA trend bearish
-            (kama_cross_short or volume_confirmed)  # Crossover or volume
+            st_bearish and  # Supertrend bearish
+            rsi_pullback_short and  # RSI in pullback zone
+            volume_confirmed  # Volume confirms
         )
         
         # === GENERATE SIGNAL ===
@@ -267,12 +279,14 @@ def generate_signals(prices):
                 in_position = True
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
+                entry_atr = atr[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
                 # Reversing position
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
+                entry_atr = atr[i]
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             # else: maintaining same position direction (possibly adjusted size)
@@ -282,6 +296,7 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
+                entry_atr = 0.0
                 highest_close = 0.0
                 lowest_close = 0.0
         
