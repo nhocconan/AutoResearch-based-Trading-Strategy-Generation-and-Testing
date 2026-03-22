@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #322: 4h KAMA Trend + MACD Momentum + Dual HTF HMA Regime Filter
+Experiment #323: 12h KAMA Adaptive Trend with Dual HTF HMA Bias
 
-Hypothesis: #316 showed regime detection (CHOP) works on 4h with Sharpe=0.676.
-However, many strategies failed with Supertrend (#310, #319) and RSI (#312, #313).
+Hypothesis: After #311 (Sharpe=0.094) showed EMA crossover works but is too laggy,
+and #317 (Sharpe=-0.047) showed Choppiness Index doesn't help on 12h, I'll try:
 
-This strategy uses:
-1. KAMA (Kaufman Adaptive MA) - adapts to volatility, less whipsaw than EMA
-2. MACD histogram for momentum confirmation (proven edge in trend markets)
-3. 1d HMA(21) for primary directional bias
-4. 1w HMA(21) for meta-trend confirmation
-5. Choppiness Index for regime detection (range vs trend)
-6. ATR(14) trailing stoploss at 2.0x (tighter than #316's 2.5x)
+1. KAMA (Kaufman Adaptive Moving Average) instead of EMA - adapts to volatility,
+   reduces whipsaw in choppy markets while catching trends faster
+2. 1d HMA(21) for primary directional bias (proven edge from multiple strategies)
+3. 1w HMA(21) for meta-trend confirmation (soft filter - boosts size only)
+4. KAMA(10)/KAMA(30) crossover for entry timing (more adaptive than EMA)
+5. ADX(14) > 18 for trend confirmation (loose threshold for trade generation)
+6. ATR(14) 2.2x trailing stoploss (proven from successful strategies)
+7. Discrete position sizing: 0.25 base, 0.30 with 1w confirmation
 
-Key differences from #316:
-- KAMA instead of HMA for primary trend signal (more adaptive)
-- MACD histogram momentum filter (not just CHOP regime)
-- Dual HTF bias (both 1d AND 1w required for full position)
-- Tighter stoploss (2.0 ATR vs 2.5 ATR)
+Why KAMA over EMA:
+- KAMA adapts its smoothing constant based on market efficiency ratio
+- In trending markets: KAMA follows price closely (like fast EMA)
+- In choppy markets: KAMA flattens out (reduces false signals)
+- This should improve Sharpe vs #311's simple EMA crossover
 
-Timeframe: 4h (REQUIRED for this experiment)
+Timeframe: 12h (REQUIRED)
 HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.20-0.30 discrete levels
-Stoploss: 2.0 * ATR(14) trailing
+Position sizing: 0.25-0.30 discrete levels
+Stoploss: 2.2 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_macd_dual_htf_chop_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_kama_adaptive_dual_htf_hma_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -52,25 +53,28 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+def calculate_kama(close, fast_period=2, slow_period=30, er_period=10):
     """
-    Calculate Kaufman Adaptive Moving Average.
-    KAMA adapts to market noise - moves fast in trending markets, slow in ranging.
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    
+    KAMA adapts to market volatility using Efficiency Ratio (ER).
+    ER = |price change| / sum of absolute price changes over period
+    - High ER (trending): KAMA follows price closely
+    - Low ER (choppy): KAMA flattens, reduces whipsaw
+    
+    Parameters:
+    - fast_period: SC for trending market (default 2/16 = 0.125)
+    - slow_period: SC for choppy market (default 2/32 = 0.0625)
+    - er_period: Period for Efficiency Ratio calculation
     """
     close_s = pd.Series(close)
     n = len(close)
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(close - np.roll(close, er_period))
-    change[0:er_period] = np.nan
-    
-    volatility = np.zeros(n)
-    for i in range(er_period, n):
-        volatility[i] = np.sum(np.abs(close[i-er_period+1:i+1] - np.roll(close[i-er_period+1:i+1], 1)))
-    
-    er = change / (volatility + 1e-10)
-    er = np.nan_to_num(er, nan=0.0)
-    er = np.clip(er, 0.0, 1.0)
+    # Calculate Efficiency Ratio
+    price_change = np.abs(close_s.diff(er_period))
+    volatility = close_s.diff().abs().rolling(window=er_period, min_periods=er_period).sum()
+    er = price_change / volatility
+    er = er.fillna(0)
     
     # Calculate smoothing constant
     fast_sc = 2.0 / (fast_period + 1)
@@ -82,48 +86,43 @@ def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
     kama[0] = close[0]
     
     for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        if np.isnan(sc.iloc[i]) or i < er_period:
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
     
     return kama
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram."""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
-    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
-
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market (mean reversion)
-    CHOP < 38.2 = trending market (trend following)
-    """
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index (ADX)."""
     n = len(close)
-    chop = np.zeros(n)
     
-    for i in range(period, n):
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        if highest_high == lowest_low:
-            chop[i] = 100.0
-            continue
-        
-        atr_sum = 0.0
-        for j in range(i-period+1, i+1):
-            tr = max(high[j] - low[j], 
-                     abs(high[j] - close[j-1]), 
-                     abs(low[j] - close[j-1]))
-            atr_sum += tr
-        
-        chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    chop[0:period] = np.nan
-    return chop
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean()
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    plus_di = 100 * plus_dm_s / tr_s
+    minus_di = 100 * minus_dm_s / tr_s
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = dx.replace([np.inf, -np.inf], np.nan)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    return adx.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -143,16 +142,16 @@ def generate_signals(prices):
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
-    chop = calculate_choppiness(high, low, close, 14)
+    kama_fast = calculate_kama(close, fast_period=2, slow_period=30, er_period=10)
+    kama_slow = calculate_kama(close, fast_period=2, slow_period=60, er_period=20)
+    adx = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.20
+    SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
     
     # Track position state for stoploss
@@ -168,11 +167,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama[i]) or np.isnan(macd_hist[i]) or np.isnan(chop[i]):
+        if np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
@@ -181,63 +180,49 @@ def generate_signals(prices):
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # 1w HMA = meta-trend confirmation (REQUIRED for full size)
-        bull_trend_1w = close[i] > hma_1w_aligned[i]
-        bear_trend_1w = close[i] < hma_1w_aligned[i]
+        # 1w HMA = meta-trend confirmation (SOFT - boosts size but not required)
+        bull_trend_1w = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
+        bear_trend_1w = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
         
-        # === REGIME DETECTION ===
-        # CHOP < 38.2 = trending market (favor trend following)
-        # CHOP > 61.8 = ranging market (favor mean reversion)
-        trending_regime = chop[i] < 38.2
-        ranging_regime = chop[i] > 61.8
+        # === TREND STRENGTH ===
+        # ADX > 18 = minimal trending (loose for trade generation)
+        trending = adx[i] > 18
+        strong_trend = adx[i] > 25
         
-        # === KAMA TREND ===
-        # Price above KAMA = bullish trend
-        # Price below KAMA = bearish trend
-        kama_bullish = close[i] > kama[i]
-        kama_bearish = close[i] < kama[i]
+        # === KAMA CROSSOVER ===
+        # Fast KAMA crosses above slow KAMA = bullish
+        kama_bullish = kama_fast[i] > kama_slow[i]
+        # Fast KAMA crosses below slow KAMA = bearish
+        kama_bearish = kama_fast[i] < kama_slow[i]
         
-        # KAMA slope (momentum)
-        kama_slope_bull = kama[i] > kama[i-5] if i >= 5 else False
-        kama_slope_bear = kama[i] < kama[i-5] if i >= 5 else False
+        # === VOLATILITY ADJUSTMENT ===
+        atr_recent_avg = np.nanmean(atr[max(0, i-20):i+1])
+        high_volatility = atr[i] > 1.5 * atr_recent_avg if not np.isnan(atr_recent_avg) else False
         
-        # === MACD MOMENTUM ===
-        # MACD histogram above 0 = bullish momentum
-        # MACD histogram below 0 = bearish momentum
-        macd_bullish = macd_hist[i] > 0
-        macd_bearish = macd_hist[i] < 0
-        
-        # MACD histogram increasing = strengthening momentum
-        macd_hist_increasing = macd_hist[i] > macd_hist[i-1] if i >= 1 else False
-        macd_hist_decreasing = macd_hist[i] < macd_hist[i-1] if i >= 1 else False
-        
-        # === DETERMINE POSITION SIZE ===
-        # Full size when both HTF agree + trending regime
-        if bull_trend_1d and bull_trend_1w and trending_regime:
-            position_size = SIZE_STRONG
-        elif bear_trend_1d and bear_trend_1w and trending_regime:
+        # Determine position size
+        if high_volatility:
+            position_size = SIZE_BASE
+        elif strong_trend and bull_trend_1w:
             position_size = SIZE_STRONG
         else:
             position_size = SIZE_BASE
         
-        # === ENTRY CONDITIONS ===
+        # === ENTRY CONDITIONS (LOOSE for >=10 trades) ===
         new_signal = 0.0
         
-        # LONG: 1d bias up + 1w bias up + KAMA bullish + MACD bullish + trending regime
-        # Relaxed: only need 1d bias + KAMA + MACD (1w boosts size)
+        # LONG: 1d bias up + KAMA bullish + ADX trending
+        # 1w is soft confirm only (boosts size, not required for entry)
         long_conditions = (
             bull_trend_1d and
             kama_bullish and
-            macd_bullish and
-            (trending_regime or kama_slope_bull)
+            trending
         )
         
-        # SHORT: 1d bias down + 1w bias down + KAMA bearish + MACD bearish + trending regime
+        # SHORT: 1d bias down + KAMA bearish + ADX trending
         short_conditions = (
             bear_trend_1d and
             kama_bearish and
-            macd_bearish and
-            (trending_regime or kama_slope_bear)
+            trending
         )
         
         # === GENERATE SIGNAL ===
@@ -247,19 +232,19 @@ def generate_signals(prices):
         if short_conditions:
             new_signal = -position_size
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.2 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.0 * atr[i]
+                stoploss_price = highest_close - 2.2 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
             if position_side < 0:
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.0 * atr[i]
+                stoploss_price = lowest_close + 2.2 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
@@ -275,13 +260,6 @@ def generate_signals(prices):
             if position_side > 0 and kama_bearish:
                 new_signal = 0.0
             if position_side < 0 and kama_bullish:
-                new_signal = 0.0
-        
-        # === MACD REVERSAL EXIT ===
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and macd_bearish and macd_hist_decreasing:
-                new_signal = 0.0
-            if position_side < 0 and macd_bullish and macd_hist_increasing:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
