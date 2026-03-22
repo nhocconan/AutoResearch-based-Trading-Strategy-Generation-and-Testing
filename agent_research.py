@@ -157,17 +157,36 @@ def git_revert_strategy():
 
 
 def append_results(results: list[dict], status: str, description: str, period: str = "train"):
-    """Append experiment results to results.tsv."""
+    """Append experiment results to results.tsv, skipping duplicates."""
     if not RESULTS_FILE.exists():
         RESULTS_FILE.write_text(TSV_HEADER + "\n")
+
+    # Load existing to check for duplicates
+    existing = set()
+    try:
+        import csv
+        with open(RESULTS_FILE) as f:
+            reader = csv.reader(f, delimiter="\t")
+            next(reader, None)  # skip header
+            for row in reader:
+                if len(row) >= 4:
+                    existing.add((row[1], row[2], row[-1]))  # (strategy, symbol, period)
+    except Exception:
+        pass
 
     commit = get_git_commit()
     with open(RESULTS_FILE, "a") as f:
         for m in results:
+            strategy_name = m.get("strategy", "unknown")
+            symbol = m["symbol"]
+            key = (strategy_name, symbol, period)
+            if key in existing:
+                continue  # skip duplicate
+            existing.add(key)
             row = metrics_to_tsv_row(
                 metrics=m,
-                strategy_name=m.get("strategy", "unknown"),
-                symbol=m["symbol"],
+                strategy_name=strategy_name,
+                symbol=symbol,
                 commit=commit,
                 status=status,
                 description=description[:80],
