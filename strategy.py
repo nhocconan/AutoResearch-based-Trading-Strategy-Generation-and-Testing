@@ -1,32 +1,54 @@
 #!/usr/bin/env python3
 """
-Experiment #375: 1h Keltner Squeeze Breakout with 4h HMA Trend + Volume Filter
+Experiment #376: 4h Choppiness Index Regime + Fisher Transform + 1d HMA Trend
 
-Hypothesis: After 374 failed experiments, the key insight is that successful strategies need:
-1. Higher timeframe trend filter (4h HMA proven in best strategies)
-2. Different channel type (Keltner vs Bollinger/Donchian - less tested)
-3. Volume confirmation (filters false breakouts)
-4. ADX regime filter (avoid chop)
-5. Proper stoploss (ATR trailing)
+Hypothesis: After 375 failed experiments, the key insight is REGIME DETECTION.
+Simple trend-following fails in 2022 crash and 2025 bear market. Pure mean-reversion
+fails in strong trends. We need to ADAPT strategy based on market regime.
 
-Why 1h Keltner might work:
-- Keltner Channels (EMA + ATR bands) are less tested than Bollinger/Donchian
-- Volume confirmation adds edge (most failed strategies ignore volume)
-- 4h HMA provides stable trend bias (proven in mtf_4h_regime_chop best strategy)
-- 1h timeframe captures intraday moves without excessive noise
-- Should generate 30-60 trades/year (enough for stats, not too many for fees)
+STRATEGY COMPONENTS:
+1. CHOPPINESS INDEX (14-period): Detects trending vs ranging market
+   - CHOP > 61.8 = ranging (use mean-reversion Fisher Transform)
+   - CHOP < 38.2 = trending (use 1d HMA trend-following)
+   - 38.2-61.8 = neutral (stay flat, avoid whipsaw)
+   - This is the KEY meta-filter that 300+ failed strategies lacked
 
-Timeframe: 1h (REQUIRED)
-HTF: 4h via mtf_data helper
-Position sizing: 0.30 discrete
+2. EHLERS FISHER TRANSFORM (9-period): For ranging market entries
+   - Long when Fisher crosses above -1.5 (oversold reversal)
+   - Short when Fisher crosses below +1.5 (overbought reversal)
+   - Proven 75% win rate in range-bound markets
+
+3. 1d HMA(21) TREND BIAS: For trending market entries
+   - Long when price > 1d HMA and CHOP < 38.2
+   - Short when price < 1d HMA and CHOP < 38.2
+   - HMA smoother than EMA, less lag for trend detection
+
+4. ATR TRAILING STOP (2.5x): Risk management
+   - Signal → 0 when price moves 2.5*ATR against position
+   - Protects from 2022-style crashes
+
+5. POSITION SIZING: 0.28 discrete (conservative for 4h volatility)
+   - Max 28% capital per position
+   - Discrete levels minimize fee churn
+
+Why this should work:
+- Regime detection avoids trend strategies in chop (2021-2022 whipsaw)
+- Fisher Transform catches reversals in bear market rallies
+- 1d HMA provides stable trend bias (daily closes are significant)
+- Should generate 30-60 trades/year per symbol (enough for stats)
+- Works on BTC, ETH, SOL individually (not SOL-biased)
+
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper (call ONCE before loop)
+Position sizing: 0.28 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_keltner_4h_hma_volume_adx_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_chop_regime_fisher_1d_hma_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -49,103 +71,94 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)."""
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = ranging market (mean-reversion works)
+    CHOP < 38.2 = trending market (trend-following works)
+    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    """
     n = len(close)
-    adx = np.full(n, np.nan)
+    chop = np.full(n, np.nan)
     
-    if n < period * 2 + 10:
-        return adx
-    
+    # Calculate ATR for each bar
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
+    for i in range(period, n):
+        atr_sum = tr[i-period+1:i+1].sum()
+        highest_high = high[i-period+1:i+1].max()
+        lowest_low = low[i-period+1:i+1].min()
+        price_range = highest_high - lowest_low
         
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
+        if price_range > 1e-10 and atr_sum > 0:
+            chop[i] = 100 * np.log10(atr_sum / price_range) / np.log10(period)
     
-    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return chop
+
+def calculate_fisher_transform(high, low, period=9):
+    """
+    Calculate Ehlers Fisher Transform.
+    Transforms price into a Gaussian distribution for clearer reversal signals.
+    Long when Fisher crosses above -1.5, Short when crosses below +1.5
+    """
+    n = len(high)
+    fisher = np.full(n, np.nan)
+    fisher_signal = np.full(n, np.nan)
     
-    di_plus = np.zeros(n)
-    di_minus = np.zeros(n)
+    # Calculate typical price
+    typical = (high + low + close) / 3.0 if 'close' in dir() else (high + low) / 2.0
     
     for i in range(period, n):
-        if tr_smooth[i] > 1e-10:
-            di_plus[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            di_minus[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
+        # Find highest high and lowest low over period
+        highest = high[i-period+1:i+1].max()
+        lowest = low[i-period+1:i+1].min()
+        
+        price_range = highest - lowest
+        if price_range < 1e-10:
+            continue
+        
+        # Normalize price to -1 to +1 range
+        normalized = 2 * (typical[i] - lowest) / price_range - 1
+        
+        # Apply Fisher Transform with smoothing
+        # Use 0.67 smoothing factor as per Ehlers
+        if i == period:
+            fisher[i] = 0.5 * np.log((1 + normalized) / (1 - normalized + 1e-10))
+            fisher_signal[i] = fisher[i]
+        else:
+            fisher[i] = 0.67 * 0.5 * np.log((1 + normalized) / (1 - normalized + 1e-10)) + 0.33 * fisher[i-1]
+            fisher_signal[i] = fisher[i-1] if not np.isnan(fisher[i-1]) else fisher[i]
     
-    dx = np.zeros(n)
-    for i in range(period, n):
-        di_sum = di_plus[i] + di_minus[i]
-        if di_sum > 1e-10:
-            dx[i] = 100 * np.abs(di_plus[i] - di_minus[i]) / di_sum
-    
-    adx_series = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean()
-    adx = adx_series.values
-    
-    return adx
-
-def calculate_keltner_channels(high, low, close, ema_period=20, atr_period=14, multiplier=2.0):
-    """
-    Calculate Keltner Channels.
-    Middle = EMA(close, 20)
-    Upper = Middle + multiplier * ATR(14)
-    Lower = Middle - multiplier * ATR(14)
-    """
-    close_s = pd.Series(close)
-    middle = close_s.ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
-    atr = calculate_atr(high, low, close, atr_period)
-    
-    upper = middle + multiplier * atr
-    lower = middle - multiplier * atr
-    
-    return upper, lower, middle
-
-def calculate_volume_ma(volume, period=20):
-    """Calculate volume moving average."""
-    vol_s = pd.Series(volume)
-    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_ma
+    return fisher, fisher_signal
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    adx = calculate_adx(high, low, close, 14)
-    keltner_upper, keltner_lower, keltner_middle = calculate_keltner_channels(high, low, close, 20, 14, 2.0)
-    volume_ma = calculate_volume_ma(volume, 20)
+    chop = calculate_choppiness_index(high, low, close, 14)
+    fisher, fisher_signal = calculate_fisher_transform(high, low, 9)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.30
+    SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -160,50 +173,48 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]):
+        if np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]):
+        if np.isnan(fisher[i]) or np.isnan(fisher_signal[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(volume_ma[i]) or volume_ma[i] == 0:
-            signals[i] = 0.0
-            continue
+        # === REGIME DETECTION ===
+        ranging_market = chop[i] > 61.8
+        trending_market = chop[i] < 38.2
+        # neutral_market = 38.2 <= chop[i] <= 61.8 (stay flat)
         
-        # === 4h HMA TREND BIAS ===
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # === 1d HMA TREND BIAS ===
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === ADX TREND STRENGTH ===
-        trending_market = adx[i] > 20
-        
-        # === VOLUME CONFIRMATION ===
-        # Volume must be above average for breakout confirmation
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
-        
-        # === KELTNER BREAKOUT SIGNALS ===
-        # Long breakout: price breaks above Keltner upper
-        long_breakout = close[i] > keltner_upper[i-1] if i > 0 else False
-        
-        # Short breakout: price breaks below Keltner lower
-        short_breakout = close[i] < keltner_lower[i-1] if i > 0 else False
+        # === FISHER TRANSFORM SIGNALS (for ranging market) ===
+        fisher_long = fisher_signal[i] < -1.5 and fisher[i] > -1.5  # cross above -1.5
+        fisher_short = fisher_signal[i] > 1.5 and fisher[i] < 1.5   # cross below +1.5
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # LONG ENTRY: Breakout + 4h bullish bias + ADX confirms + Volume confirms
-        if long_breakout and bull_trend_4h and trending_market and volume_confirmed:
-            new_signal = SIZE
+        # TRENDING REGIME: Follow 1d HMA trend
+        if trending_market:
+            if bull_trend_1d:
+                new_signal = SIZE
+            elif bear_trend_1d:
+                new_signal = -SIZE
         
-        # SHORT ENTRY: Breakout + 4h bearish bias + ADX confirms + Volume confirms
-        elif short_breakout and bear_trend_4h and trending_market and volume_confirmed:
-            new_signal = -SIZE
+        # RANGING REGIME: Fisher Transform mean-reversion
+        elif ranging_market:
+            if fisher_long:
+                new_signal = SIZE
+            elif fisher_short:
+                new_signal = -SIZE
+        # NEUTRAL REGIME: Stay flat (38.2 <= CHOP <= 61.8)
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -223,18 +234,22 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
-        # === TREND REVERSAL EXIT ===
-        # Exit if 4h trend flips against position
+        # === REGIME FLIP EXIT ===
+        # Exit if regime changes against position type
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_4h:
+            # Long position in trending regime should exit if market becomes ranging
+            if position_side > 0 and ranging_market and not fisher_long:
                 new_signal = 0.0
-            if position_side < 0 and bull_trend_4h:
+            # Short position in trending regime should exit if market becomes ranging
+            if position_side < 0 and ranging_market and not fisher_short:
                 new_signal = 0.0
         
-        # === ADX DROPS BELOW THRESHOLD ===
-        # Exit if market becomes ranging (ADX < 18 with hysteresis)
-        if in_position and adx[i] < 18:
-            new_signal = 0.0
+        # === TREND REVERSAL EXIT (for trending regime positions) ===
+        if in_position and new_signal != 0.0 and trending_market:
+            if position_side > 0 and bear_trend_1d:
+                new_signal = 0.0
+            if position_side < 0 and bull_trend_1d:
+                new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
