@@ -1,40 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #297: 1h Supertrend + 4h HMA Bias + Choppiness Regime Filter
+Experiment #298: 4h MACD Momentum with 1d HMA Trend Bias and ADX Filter
 
-Hypothesis: After 296 experiments, clear patterns emerge for 1h timeframe:
-1. RSI pullbacks FAIL consistently (#285, #291 both negative Sharpe)
-2. Mean reversion on lower TFs is catastrophic (#290 Sharpe=-31)
-3. 4h Supertrend + 1d HMA works best (#292 Sharpe=0.485)
-4. Complex ensembles underperform simple trend following
-5. ADX helps but shouldn't be too restrictive
+Hypothesis: After analyzing 297 experiments, clear patterns emerge:
+1. 4h timeframe with 1d HTF bias is proven edge (#292 Sharpe=0.485)
+2. Simple trend following beats complex ensembles consistently
+3. MACD histogram captures momentum shifts before price reversals
+4. ADX filter reduces whipsaws in ranging markets
+5. Faster EMA periods (8/21 vs 13/50) generate more trades on 4h
 
-This strategy combines DIFFERENT elements than failed 1h attempts:
-1. 4h HMA(21) for directional bias (proven edge, stronger than 1d for 1h entries)
-2. 1h Supertrend(10, 3.0) for clean trend signals (better than EMA crossover)
-3. Choppiness Index(14) regime filter: CHOP>61.8=range(no trade), CHOP<38.2=trend(trade)
-4. Fisher Transform(9) for entry timing (worked in #293, better than RSI)
-5. ATR(14) trailing stoploss at 3.0*ATR (tighter than 12h strategies)
-6. Volume confirmation: taker_buy_volume ratio > 0.55 for longs
+This strategy combines:
+1. 1d HMA(21) slope for directional bias (proven from #292)
+2. 4h MACD(12,26,9) histogram for momentum entry timing
+3. ADX(14)>18 for trend strength confirmation
+4. ATR(14) 2.5x trailing stoploss for risk management
+5. Volume spike confirmation on breakouts (optional filter)
 
-Why this might beat #292 (4h Supertrend):
-- 1h captures more trend moves than 4h (earlier entries)
-- Choppiness filter avoids whipsaw in range markets (2022 bottom, 2025 bear)
-- 4h HMA bias is more responsive than 1d for 1h entries
-- Fisher Transform catches reversals earlier than EMA alone
-- Volume confirmation reduces false breakouts
+Why this might beat #292:
+- MACD histogram leads Supertrend in momentum detection
+- 4h generates more trades than 12h (#293 only Sharpe=0.111)
+- Simpler than Donchian (#286 failed) while maintaining trend bias
+- ADX filter prevents entries during choppy conditions
 
-Timeframe: 1h (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25-0.35 discrete levels
-Stoploss: 3.0 * ATR(14) trailing
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_supertrend_4h_hma_chop_fisher_volume_v1"
-timeframe = "1h"
+name = "mtf_4h_macd_1d_hma_adx_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -47,57 +45,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-    Returns: supertrend_line, supertrend_direction (1=bullish, -1=bearish)
-    
-    Formula:
-    1. ATR(period)
-    2. Upper Band = (high + low)/2 + multiplier * ATR
-    3. Lower Band = (high + low)/2 - multiplier * ATR
-    4. Supertrend = Lower Band if bullish, Upper Band if bearish
-    5. Direction flips when price crosses supertrend line
-    """
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2.0
-    
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)
-    direction[:] = np.nan
-    
-    # Initialize
-    supertrend[0] = lower_band[0]
-    direction[0] = 1
-    
-    for i in range(1, n):
-        if direction[i-1] == 1:
-            # Previously bullish
-            if close[i] < supertrend[i-1]:
-                # Flip to bearish
-                direction[i] = -1
-                supertrend[i] = upper_band[i]
-            else:
-                # Stay bullish, use max of lower bands
-                direction[i] = 1
-                supertrend[i] = max(lower_band[i], supertrend[i-1])
-        else:
-            # Previously bearish
-            if close[i] > supertrend[i-1]:
-                # Flip to bullish
-                direction[i] = 1
-                supertrend[i] = lower_band[i]
-            else:
-                # Stay bearish, use min of upper bands
-                direction[i] = -1
-                supertrend[i] = min(upper_band[i], supertrend[i-1])
-    
-    return supertrend, direction
-
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -108,101 +55,87 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_choppiness_index(high, low, close, period=14):
+def calculate_macd(close, fast=12, slow=26, signal=9):
     """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = range/choppy market (avoid trend trades)
-    CHOP < 38.2 = trending market (take trend trades)
-    
-    Formula:
-    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    Calculate MACD indicator.
+    Returns: macd_line, signal_line, histogram
+    """
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
+    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line.values, signal_line.values, histogram.values
+
+def calculate_adx(high, low, close, period=14):
+    """
+    Calculate Average Directional Index (ADX).
+    ADX > 25 = trending, ADX < 20 = ranging.
     """
     n = len(close)
-    choppiness = np.zeros(n)
-    choppiness[:] = np.nan
     
-    atr = calculate_atr(high, low, close, period)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    for i in range(period, n):
-        atr_sum = np.sum(atr[i - period + 1:i + 1])
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        
-        if highest_high > lowest_low and atr_sum > 0:
-            choppiness[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
     
-    return choppiness
-
-def calculate_fisher_transform(high, low, period=9):
-    """
-    Ehlers Fisher Transform - transforms price into Gaussian distribution
-    for clearer reversal signals. Period=9 is standard.
-    """
-    n = len(high)
-    typical = (high + low) / 2.0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    normalized = np.zeros(n)
-    normalized[:] = np.nan
+    # Smooth with Wilder's method (EMA with span=period)
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean()
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean()
     
-    for i in range(period - 1, n):
-        highest = np.max(high[i - period + 1:i + 1])
-        lowest = np.min(low[i - period + 1:i + 1])
-        if highest > lowest:
-            normalized[i] = 0.66 * ((typical[i] - lowest) / (highest - lowest) - 0.5)
-        else:
-            normalized[i] = 0.0
+    # Directional Indicators
+    plus_di = 100 * plus_dm_s / tr_s
+    minus_di = 100 * minus_dm_s / tr_s
     
-    normalized = np.clip(normalized, -0.99, 0.99)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = dx.replace([np.inf, -np.inf], np.nan)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    norm_s = pd.Series(normalized)
-    smoothed = norm_s.ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    fisher = np.zeros(n)
-    fisher[:] = np.nan
-    for i in range(period, n):
-        if np.abs(smoothed[i]) < 0.99:
-            fisher[i] = 0.5 * np.log((1 + smoothed[i]) / (1 - smoothed[i]))
-    
-    signal = np.roll(fisher, 1)
-    signal[0] = np.nan
-    
-    return fisher, signal
+    return adx.values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate HTF indicators
-    hma_4h = calculate_hma(df_4h['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
-    supertrend_line, supertrend_dir = calculate_supertrend(high, low, close, 10, 3.0)
-    choppiness = calculate_choppiness_index(high, low, close, 14)
-    fisher, fisher_signal = calculate_fisher_transform(high, low, 9)
+    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
+    adx = calculate_adx(high, low, close, 14)
     
-    # Volume ratio: taker buy / total volume
-    volume_ratio = np.zeros(n)
-    volume_ratio[:] = np.nan
-    for i in range(n):
-        if volume[i] > 0:
-            volume_ratio[i] = taker_buy_volume[i] / volume[i]
+    # Calculate volume moving average for spike detection
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.ewm(span=20, min_periods=20, adjust=False).mean().values
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.28  # Base position size (conservative)
-    SIZE_REDUCED = 0.18  # Reduced size in high vol/choppy
+    SIZE_BASE = 0.25  # Base position size
     SIZE_INCREASED = 0.35  # Increased size in strong trend
     
     # Track position state for stoploss
@@ -218,64 +151,52 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(supertrend_dir[i]):
+        if np.isnan(macd_hist[i]) or np.isnan(macd_signal[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(choppiness[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(fisher[i]) or np.isnan(fisher_signal[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(volume_ratio[i]):
+        if np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
         # === HIGHER TIMEFRAME BIAS ===
-        # 4h HMA = directional bias (proven edge from #292)
-        bull_trend_4h = close[i] > hma_4h_aligned[i]
-        bear_trend_4h = close[i] < hma_4h_aligned[i]
+        # 1d HMA slope = directional bias
+        # Calculate HMA slope over last 3 bars
+        if i >= 3:
+            hma_slope = hma_1d_aligned[i] - hma_1d_aligned[i-3]
+        else:
+            hma_slope = 0.0
         
-        # === REGIME FILTER (Choppiness Index) ===
-        # CHOP > 61.8 = range (avoid trend trades, reduce size)
-        # CHOP < 38.2 = trending (take trend trades, full size)
-        # 38.2 <= CHOP <= 61.8 = transition (reduced size)
-        choppy_market = choppiness[i] > 61.8
-        trending_market = choppiness[i] < 38.2
+        bull_trend_1d = hma_slope > 0
+        bear_trend_1d = hma_slope < 0
         
-        # === SUPERTREND SIGNAL ===
-        # Supertrend direction: 1 = bullish, -1 = bearish
-        supertrend_bullish = supertrend_dir[i] == 1
-        supertrend_bearish = supertrend_dir[i] == -1
+        # === TREND STRENGTH ===
+        # ADX > 18 = trending market
+        trending = adx[i] > 18
         
-        # === FISHER TRANSFORM CONFIRMATION ===
-        # Fisher crossing above signal line = bullish momentum
-        fisher_bullish = fisher[i] > fisher_signal[i] and fisher_signal[i] < 0.0
-        # Fisher crossing below signal line = bearish momentum
-        fisher_bearish = fisher[i] < fisher_signal[i] and fisher_signal[i] > 0.0
+        # === MACD MOMENTUM ===
+        # MACD histogram above signal = bullish momentum building
+        # MACD histogram below signal = bearish momentum building
+        macd_bullish = macd_hist[i] > 0 and macd_hist[i] > macd_hist[i-1] if i > 0 else False
+        macd_bearish = macd_hist[i] < 0 and macd_hist[i] < macd_hist[i-1] if i > 0 else False
+        
+        # MACD line crossover confirmation
+        macd_line_cross_up = macd_line[i] > macd_signal[i] and macd_line[i-1] <= macd_signal[i-1] if i > 0 else False
+        macd_line_cross_down = macd_line[i] < macd_signal[i] and macd_line[i-1] >= macd_signal[i-1] if i > 0 else False
         
         # === VOLUME CONFIRMATION ===
-        # Taker buy ratio > 0.55 = buying pressure (for longs)
-        # Taker buy ratio < 0.45 = selling pressure (for shorts)
-        volume_bullish = volume_ratio[i] > 0.55
-        volume_bearish = volume_ratio[i] < 0.45
+        # Volume spike = 1.5x recent average
+        vol_spike = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
-        # === VOLATILITY ADJUSTMENT ===
-        # Reduce position size when ATR is elevated (>1.5x recent average)
-        atr_recent_avg = np.nanmean(atr[max(0, i-20):i+1])
-        high_volatility = atr[i] > 1.5 * atr_recent_avg if not np.isnan(atr_recent_avg) else False
+        # === POSITION SIZING ===
+        # Strong trend = increase size
+        strong_trend = adx[i] > 30
         
-        # Determine position size based on regime and volatility
-        if choppy_market or high_volatility:
-            position_size = SIZE_REDUCED
-        elif trending_market and not high_volatility:
+        if strong_trend:
             position_size = SIZE_INCREASED
         else:
             position_size = SIZE_BASE
@@ -283,38 +204,37 @@ def generate_signals(prices):
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
         
-        # LONG ENTRY: Need 4h bias up + Supertrend bullish + Fisher/volume confirmation
-        # Looser in trending market, stricter in choppy
-        if bull_trend_4h and supertrend_bullish:
-            if trending_market:
-                # Trending market: need Fisher OR volume confirmation
-                if fisher_bullish or volume_bullish:
-                    new_signal = position_size
-            else:
-                # Choppy/transition: need BOTH Fisher AND volume
-                if fisher_bullish and volume_bullish:
-                    new_signal = position_size
+        # LONG ENTRY: Need 1d bias up + MACD momentum + ADX trend
+        # Looser conditions to ensure >=10 trades per symbol
+        long_conditions = (
+            bull_trend_1d and  # 1d HMA slope bullish
+            trending and  # ADX confirms trend
+            (macd_bullish or macd_line_cross_up)  # MACD momentum
+        )
         
         # SHORT ENTRY: Mirror of long
-        if bear_trend_4h and supertrend_bearish:
-            if trending_market:
-                # Trending market: need Fisher OR volume confirmation
-                if fisher_bearish or volume_bearish:
-                    new_signal = -position_size
-            else:
-                # Choppy/transition: need BOTH Fisher AND volume
-                if fisher_bearish and volume_bearish:
-                    new_signal = -position_size
+        short_conditions = (
+            bear_trend_1d and  # 1d HMA slope bearish
+            trending and  # ADX confirms trend
+            (macd_bearish or macd_line_cross_down)  # MACD momentum
+        )
         
-        # === STOPLOSS LOGIC (Rule 6) - 3.0 * ATR trailing ===
+        # === GENERATE SIGNAL ===
+        if long_conditions:
+            new_signal = position_size
+        
+        if short_conditions:
+            new_signal = -position_size
+        
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         # Check stoploss on EXISTING position before considering new entry
         if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
                     highest_close = close[i]
-                # Trailing stop: 3.0 * ATR below highest close
-                stoploss_price = highest_close - 3.0 * atr[i]
+                # Trailing stop: 2.5 * ATR below highest close
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
             
@@ -322,26 +242,26 @@ def generate_signals(prices):
                 # Update lowest close for short position
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                # Trailing stop: 3.0 * ATR above lowest close
-                stoploss_price = lowest_close + 3.0 * atr[i]
+                # Trailing stop: 2.5 * ATR above lowest close
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
         
         # === TREND REVERSAL EXIT ===
         # Exit if HTF bias reverses against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_4h:
-                new_signal = 0.0  # 4h trend reversed against long
-            if position_side < 0 and bull_trend_4h:
-                new_signal = 0.0  # 4h trend reversed against short
+            if position_side > 0 and bear_trend_1d:
+                new_signal = 0.0  # 1d trend reversed against long
+            if position_side < 0 and bull_trend_1d:
+                new_signal = 0.0  # 1d trend reversed against short
         
-        # === SUPERTREND REVERSAL EXIT ===
-        # Exit if Supertrend flips against position
+        # === MACD REVERSAL EXIT ===
+        # Exit if MACD momentum reverses against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and supertrend_bearish:
-                new_signal = 0.0  # Supertrend flipped against long
-            if position_side < 0 and supertrend_bullish:
-                new_signal = 0.0  # Supertrend flipped against short
+            if position_side > 0 and macd_bearish:
+                new_signal = 0.0  # MACD momentum reversed against long
+            if position_side < 0 and macd_bullish:
+                new_signal = 0.0  # MACD momentum reversed against short
         
         # === UPDATE POSITION TRACKING FOR NEXT BAR ===
         if new_signal != 0.0:
