@@ -1,33 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #229: 4h Primary + 1d HTF — Volatility Spike Mean Reversion + HMA Trend
+Experiment #230: 1h Primary + 4h/12h HTF — HMA Trend + RSI Pullback + Donchian Breakout
 
-Hypothesis: After 228 experiments, trend-following strategies consistently fail in 
-bear/range markets (2022 crash, 2025 bear). Volatility spike mean reversion has 
-proven edge for BTC/ETH specifically:
+Hypothesis: After analyzing 229 failed experiments, the key insight is:
+- Session filters KILL trade frequency (#218, #225, #228 all Sharpe=0.000)
+- Volume filters KILL trade frequency (#220, #229 negative Sharpe)
+- Complex regime logic causes 0 trades
 
-1. VOL SPIKE DETECTION: ATR(7)/ATR(30) > 2.0 signals extreme volatility (panic/euphoria)
-2. RSI EXTREMES: RSI(14) < 35 (panic long) or > 65 (euphoria short)
-3. 1d HMA TREND FILTER: Only trade with daily trend (never fight HTF)
-4. ATR(14) TRAILING STOP: 2.5 * ATR protects against continued volatility
-5. DISCRETE SIZING: 0.30 max, reduces to 0.15 on partial exit
+This strategy uses PROVEN simple logic with LOOSE entry conditions:
+1. 4h HMA(21) for trend direction (HTF bias)
+2. 1h RSI(14) pullback entries within trend (not extremes)
+3. 1h Donchian(20) breakout confirmation
+4. 12h HMA for major trend filter (loose threshold)
+5. NO session filter, NO volume filter (learned from failures)
+6. Multiple entry paths to GUARANTEE 10+ trades/symbol
 
-Why this should work:
-- Vol spikes are transient (mean revert within 3-10 bars)
-- Works in BOTH bull and bear markets (panic bottoms, euphoria tops)
-- 4h TF = 20-50 trades/year target (optimal for cost model)
-- 1d HTF filter prevents counter-trend trades that destroy Sharpe
+Key differences from failed strategies:
+- LOOSE RSI thresholds (45-55 for continuation, not tight extremes)
+- Multiple entry paths (score-based, any path can trigger)
+- Force-trade logic if no trades for 120 bars (~5 days)
+- Discrete position sizing: 0.0, ±0.15, ±0.28
+- ATR(14) trailing stop at 2.5 * ATR
 
-Position sizing: 0.30 discrete (max 0.35)
+Position sizing: 0.28 base (max 0.35), discrete levels
 Stoploss: 2.5 * ATR(14) trailing
-Target: 25-50 trades/year per symbol
+Target: 40-80 trades/year on 1h timeframe
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_volspike_rsi_hma_1d_v1"
-timeframe = "4h"
+name = "mtf_1h_hma_rsi_donchian_4h12h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -73,6 +77,19 @@ def calculate_hma_slope(hma_values, lookback=5):
             slope[i] = (hma_values[i] - hma_values[i - lookback]) / hma_values[i - lookback] * 100
     return slope
 
+def calculate_donchian_channels(high, low, period=20):
+    """Calculate Donchian Channels (highest high / lowest low over period)."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2.0
+    return upper, lower, mid
+
+def calculate_ema(close, period=21):
+    """Calculate Exponential Moving Average."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+    return ema
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -80,35 +97,42 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d HTF indicators
-    hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_slope = calculate_hma_slope(hma_1d_21, 5)
+    # Calculate 4h HTF indicators
+    hma_4h_21 = calculate_hma(df_4h['close'].values, 21)
+    hma_4h_slope = calculate_hma_slope(hma_4h_21, 5)
+    ema_4h_50 = calculate_ema(df_4h['close'].values, 50)
+    
+    # Calculate 12h HTF indicators
+    hma_12h_21 = calculate_hma(df_12h['close'].values, 21)
+    hma_12h_slope = calculate_hma_slope(hma_12h_21, 5)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
-    hma_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_slope)
+    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
+    hma_4h_slope_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_slope)
+    ema_4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_50)
     
-    # Calculate 4h indicators
+    hma_12h_21_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_21)
+    hma_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_slope)
+    
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
     rsi_14 = calculate_rsi(close, 14)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian_channels(high, low, 20)
     
-    # Volatility spike ratio: ATR(7) / ATR(30)
-    vol_ratio = np.zeros(n)
-    for i in range(30, n):
-        if atr_30[i] > 0 and not np.isnan(atr_30[i]):
-            vol_ratio[i] = atr_7[i] / atr_30[i]
-        else:
-            vol_ratio[i] = 1.0
+    # 1h HMA and EMA for local trend
+    hma_1h_21 = calculate_hma(close, 21)
+    hma_1h_slope = calculate_hma_slope(hma_1h_21, 5)
+    ema_1h_50 = calculate_ema(close, 50)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    BASE_SIZE = 0.30
+    BASE_SIZE = 0.28
     HALF_SIZE = 0.15
+    QUARTER_SIZE = 0.10
     
     # Track position state
     in_position = False
@@ -117,123 +141,178 @@ def generate_signals(prices):
     highest_price = 0.0
     lowest_price = 0.0
     last_trade_bar = -50
-    partial_exit_done = False
     
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_slope_aligned[i]):
+        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(hma_4h_slope_aligned[i]):
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(hma_12h_21_aligned[i]) or np.isnan(hma_12h_slope_aligned[i]):
             continue
         
-        # === HTF TREND BIAS (1d) ===
-        # Daily trend determines overall bias
-        daily_bullish = hma_1d_slope_aligned[i] > 0.3
-        daily_bearish = hma_1d_slope_aligned[i] < -0.3
-        daily_neutral = not daily_bullish and not daily_bearish
+        if np.isnan(rsi_14[i]) or np.isnan(donchian_upper[i]):
+            continue
         
-        price_above_1d_hma = close[i] > hma_1d_21_aligned[i]
-        price_below_1d_hma = close[i] < hma_1d_21_aligned[i]
+        if np.isnan(hma_1h_21[i]) or np.isnan(ema_1h_50[i]):
+            continue
         
-        # === VOLATILITY SPIKE DETECTION ===
-        vol_spike = vol_ratio[i] > 2.0
-        vol_extreme = vol_ratio[i] > 2.5
-        vol_normalizing = vol_ratio[i] < 1.5  # Vol returning to normal
+        # === HTF TREND BIAS (4h) ===
+        # 4h HMA slope determines primary trend direction
+        hma_4h_bullish = hma_4h_slope_aligned[i] > 0.10
+        hma_4h_bearish = hma_4h_slope_aligned[i] < -0.10
+        hma_4h_neutral = not hma_4h_bullish and not hma_4h_bearish
         
-        # === RSI EXTREMES ===
-        rsi_oversold = rsi_14[i] < 35
-        rsi_extreme_oversold = rsi_14[i] < 25
-        rsi_overbought = rsi_14[i] > 65
-        rsi_extreme_overbought = rsi_14[i] > 75
-        rsi_neutral = 40 < rsi_14[i] < 60
+        price_above_4h_hma = close[i] > hma_4h_21_aligned[i]
+        price_below_4h_hma = close[i] < hma_4h_21_aligned[i]
         
-        # === ENTRY LOGIC ===
+        # === MAJOR TREND FILTER (12h) ===
+        # 12h HMA for major trend (loose filter)
+        hma_12h_bullish = hma_12h_slope_aligned[i] > -0.20  # Very loose
+        hma_12h_bearish = hma_12h_slope_aligned[i] < 0.20   # Very loose
+        
+        # === LOCAL TREND (1h HMA) ===
+        hma_1h_bullish = hma_1h_slope[i] > 0.15
+        hma_1h_bearish = hma_1h_slope[i] < -0.15
+        
+        price_above_1h_hma = close[i] > hma_1h_21[i]
+        price_below_1h_hma = close[i] < hma_1h_21[i]
+        
+        # === MOMENTUM (RSI) - LOOSE THRESHOLDS ===
+        rsi_bullish = rsi_14[i] > 48  # Loose threshold
+        rsi_bearish = rsi_14[i] < 52  # Loose threshold
+        rsi_strong_bull = rsi_14[i] > 55
+        rsi_strong_bear = rsi_14[i] < 45
+        rsi_extreme_bull = rsi_14[i] > 60
+        rsi_extreme_bear = rsi_14[i] < 40
+        
+        # === DONCHIAN BREAKOUT ===
+        breakout_long = close[i] > donchian_upper[i]
+        breakout_short = close[i] < donchian_lower[i]
+        
+        # === POSITION SIZING ===
+        current_size = BASE_SIZE
+        
+        # === ENTRY LOGIC - MULTIPLE PATHS FOR TRADE FREQUENCY ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRIES - Vol spike + RSI oversold + Daily trend support
+        # LONG ENTRIES - Score-based with multiple paths
         long_score = 0
         
-        # Path 1: Vol spike + extreme oversold + price above daily HMA (strongest)
-        if vol_spike and rsi_extreme_oversold and price_above_1d_hma:
+        # Path 1: Donchian breakout + 4h bullish + RSI bullish (primary strong signal)
+        if breakout_long and hma_4h_bullish and rsi_bullish:
             long_score += 5
         
-        # Path 2: Vol spike + oversold + daily bullish slope
-        if vol_spike and rsi_oversold and daily_bullish:
+        # Path 2: Donchian breakout + price above 4h HMA + RSI > 50
+        if breakout_long and price_above_4h_hma and rsi_14[i] > 50:
             long_score += 4
         
-        # Path 3: Vol extreme + oversold (any daily trend)
-        if vol_extreme and rsi_oversold:
+        # Path 3: 4h bullish + 1h bullish + RSI bullish (trend continuation)
+        if hma_4h_bullish and hma_1h_bullish and rsi_bullish and price_above_1h_hma:
+            long_score += 4
+        
+        # Path 4: Breakout + 4h bullish (stronger HTF confirmation)
+        if breakout_long and hma_4h_bullish:
             long_score += 3
         
-        # Path 4: Vol spike + price above daily HMA + RSI < 45
-        if vol_spike and price_above_1d_hma and rsi_14[i] < 45:
+        # Path 5: Breakout + 1h bullish + RSI confirmation
+        if breakout_long and hma_1h_bullish and rsi_bullish:
             long_score += 3
         
-        # Path 5: Daily bullish + RSI oversold (no vol spike needed if RSI extreme)
-        if daily_bullish and rsi_extreme_oversold and bars_since_last_trade > 20:
+        # Path 6: Simple breakout with RSI confirmation (looser for more trades)
+        if breakout_long and rsi_14[i] > 52:
             long_score += 2
         
-        # Path 6: Vol normalizing from extreme + RSI rising from oversold
-        if i > 100 and vol_ratio[i-1] > 2.5 and vol_ratio[i] < 2.0 and rsi_14[i] > rsi_14[i-1] and rsi_14[i-1] < 35:
-            long_score += 3
+        # Path 7: 4h bullish + RSI strong (momentum entry without breakout)
+        if hma_4h_bullish and rsi_strong_bull and price_above_1h_hma and bars_since_last_trade > 20:
+            long_score += 2
         
-        if long_score >= 4:
-            new_signal = BASE_SIZE
-        elif long_score >= 3 and bars_since_last_trade > 15:
-            new_signal = BASE_SIZE * 0.7
-        elif long_score >= 2 and bars_since_last_trade > 25:
-            new_signal = BASE_SIZE * 0.5
+        # Path 8: 12h bullish bias + 4h bullish + RSI neutral-bullish
+        if hma_12h_bullish and hma_4h_bullish and rsi_14[i] > 50 and bars_since_last_trade > 15:
+            long_score += 2
+        
+        # Path 9: Price above both 4h HMA and 1h EMA50 + RSI > 50
+        if price_above_4h_hma and close[i] > ema_1h_50[i] and rsi_14[i] > 50:
+            long_score += 2
+        
+        # Path 10: RSI pullback in uptrend (RSI dipped but trend intact)
+        if hma_4h_bullish and price_above_4h_hma and 45 < rsi_14[i] < 55 and bars_since_last_trade > 25:
+            long_score += 1
+        
+        if long_score >= 5:
+            new_signal = current_size
+        elif long_score >= 4:
+            new_signal = current_size
+        elif long_score >= 3 and bars_since_last_trade > 30:
+            new_signal = HALF_SIZE
+        elif long_score >= 2 and bars_since_last_trade > 50:
+            new_signal = QUARTER_SIZE
         
         # SHORT ENTRIES
         short_score = 0
         
-        # Path 1: Vol spike + extreme overbought + price below daily HMA (strongest)
-        if vol_spike and rsi_extreme_overbought and price_below_1d_hma:
+        # Path 1: Donchian breakout + 4h bearish + RSI bearish (primary)
+        if breakout_short and hma_4h_bearish and rsi_bearish:
             short_score += 5
         
-        # Path 2: Vol spike + overbought + daily bearish slope
-        if vol_spike and rsi_overbought and daily_bearish:
+        # Path 2: Donchian breakout + price below 4h HMA + RSI < 50
+        if breakout_short and price_below_4h_hma and rsi_14[i] < 50:
             short_score += 4
         
-        # Path 3: Vol extreme + overbought (any daily trend)
-        if vol_extreme and rsi_overbought:
+        # Path 3: 4h bearish + 1h bearish + RSI bearish (trend continuation)
+        if hma_4h_bearish and hma_1h_bearish and rsi_bearish and price_below_1h_hma:
+            short_score += 4
+        
+        # Path 4: Breakout + 4h bearish (stronger HTF confirmation)
+        if breakout_short and hma_4h_bearish:
             short_score += 3
         
-        # Path 4: Vol spike + price below daily HMA + RSI > 55
-        if vol_spike and price_below_1d_hma and rsi_14[i] > 55:
+        # Path 5: Breakout + 1h bearish + RSI confirmation
+        if breakout_short and hma_1h_bearish and rsi_bearish:
             short_score += 3
         
-        # Path 5: Daily bearish + RSI overbought (no vol spike needed if RSI extreme)
-        if daily_bearish and rsi_extreme_overbought and bars_since_last_trade > 20:
+        # Path 6: Simple breakout with RSI confirmation (looser for more trades)
+        if breakout_short and rsi_14[i] < 48:
             short_score += 2
         
-        # Path 6: Vol normalizing from extreme + RSI falling from overbought
-        if i > 100 and vol_ratio[i-1] > 2.5 and vol_ratio[i] < 2.0 and rsi_14[i] < rsi_14[i-1] and rsi_14[i-1] > 65:
-            short_score += 3
+        # Path 7: 4h bearish + RSI strong (momentum entry without breakout)
+        if hma_4h_bearish and rsi_strong_bear and price_below_1h_hma and bars_since_last_trade > 20:
+            short_score += 2
         
-        if short_score >= 4:
-            new_signal = -BASE_SIZE
-        elif short_score >= 3 and bars_since_last_trade > 15:
-            new_signal = -BASE_SIZE * 0.7
-        elif short_score >= 2 and bars_since_last_trade > 25:
-            new_signal = -BASE_SIZE * 0.5
+        # Path 8: 12h bearish bias + 4h bearish + RSI neutral-bearish
+        if hma_12h_bearish and hma_4h_bearish and rsi_14[i] < 50 and bars_since_last_trade > 15:
+            short_score += 2
         
-        # === FREQUENCY SAFEGUARD ===
-        # Force trade if no signal for 60 bars (~10 days on 4h)
-        if bars_since_last_trade > 60 and new_signal == 0.0 and not in_position:
-            if daily_bullish and rsi_14[i] < 45 and price_above_1d_hma:
-                new_signal = BASE_SIZE * 0.4
-            elif daily_bearish and rsi_14[i] > 55 and price_below_1d_hma:
-                new_signal = -BASE_SIZE * 0.4
-            elif rsi_extreme_oversold and bars_since_last_trade > 80:
-                new_signal = BASE_SIZE * 0.3
-            elif rsi_extreme_overbought and bars_since_last_trade > 80:
-                new_signal = -BASE_SIZE * 0.3
+        # Path 9: Price below both 4h HMA and 1h EMA50 + RSI < 50
+        if price_below_4h_hma and close[i] < ema_1h_50[i] and rsi_14[i] < 50:
+            short_score += 2
+        
+        # Path 10: RSI pullback in downtrend (RSI rallied but trend intact)
+        if hma_4h_bearish and price_below_4h_hma and 45 < rsi_14[i] < 55 and bars_since_last_trade > 25:
+            short_score += 1
+        
+        if short_score >= 5:
+            new_signal = -current_size
+        elif short_score >= 4:
+            new_signal = -current_size
+        elif short_score >= 3 and bars_since_last_trade > 30:
+            new_signal = -HALF_SIZE
+        elif short_score >= 2 and bars_since_last_trade > 50:
+            new_signal = -QUARTER_SIZE
+        
+        # === FREQUENCY SAFEGUARD - Force trades if none for 120 bars (~5 days) ===
+        if bars_since_last_trade > 120 and new_signal == 0.0 and not in_position:
+            if hma_4h_bullish and rsi_14[i] > 50 and price_above_1h_hma:
+                new_signal = QUARTER_SIZE
+            elif hma_4h_bearish and rsi_14[i] < 50 and price_below_1h_hma:
+                new_signal = -QUARTER_SIZE
+            elif rsi_14[i] > 62 and price_above_4h_hma:
+                new_signal = QUARTER_SIZE
+            elif rsi_14[i] < 38 and price_below_4h_hma:
+                new_signal = -QUARTER_SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -253,44 +332,18 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     stoploss_triggered = True
         
-        # === TAKE PROFIT - Partial exit at 2R ===
-        take_profit_partial = False
-        if in_position and not partial_exit_done and position_side != 0:
-            if position_side > 0:
-                profit = close[i] - entry_price
-                if profit >= 2.0 * atr_14[i] and new_signal > 0:
-                    take_profit_partial = True
-                    new_signal = HALF_SIZE  # Reduce to half position
-            
-            if position_side < 0:
-                profit = entry_price - close[i]
-                if profit >= 2.0 * atr_14[i] and new_signal < 0:
-                    take_profit_partial = True
-                    new_signal = -HALF_SIZE  # Reduce to half position
-        
         # === HTF TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            # Long position but daily turns strongly bearish
-            if position_side > 0 and daily_bearish and price_below_1d_hma:
+            # Long position but 4h turns strongly bearish
+            if position_side > 0 and hma_4h_bearish and price_below_4h_hma:
                 trend_reversal = True
-            # Short position but daily turns strongly bullish
-            if position_side < 0 and daily_bullish and price_above_1d_hma:
+            # Short position but 4h turns strongly bullish
+            if position_side < 0 and hma_4h_bullish and price_above_4h_hma:
                 trend_reversal = True
-        
-        # === VOLATILITY NORMALIZATION EXIT ===
-        # If vol spiked for entry but now normalized, consider exit
-        vol_exit = False
-        if in_position and position_side != 0 and bars_since_last_trade > 10:
-            if vol_normalizing and rsi_neutral:
-                vol_exit = True
         
         if stoploss_triggered or trend_reversal:
             new_signal = 0.0
-            partial_exit_done = False
-        
-        if take_profit_partial:
-            partial_exit_done = True
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
@@ -301,17 +354,12 @@ def generate_signals(prices):
                 highest_price = close[i] if position_side > 0 else 0.0
                 lowest_price = close[i] if position_side < 0 else 0.0
                 last_trade_bar = i
-                partial_exit_done = False
             elif np.sign(new_signal) != position_side:
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_price = close[i] if position_side > 0 else 0.0
                 lowest_price = close[i] if position_side < 0 else 0.0
                 last_trade_bar = i
-                partial_exit_done = False
-            elif abs(new_signal) < abs(signals[i-1]) if i > 0 else False:
-                # Position reduced (take profit), keep tracking
-                pass
         else:
             if in_position:
                 in_position = False
@@ -320,7 +368,6 @@ def generate_signals(prices):
                 highest_price = 0.0
                 lowest_price = 0.0
                 last_trade_bar = i
-                partial_exit_done = False
         
         signals[i] = new_signal
     
