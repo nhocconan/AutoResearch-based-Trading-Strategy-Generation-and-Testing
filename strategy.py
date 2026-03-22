@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #332: 30m Supertrend Pullback with 4h HMA Bias and Volume Confirmation
+Experiment #333: 1h Supertrend with 4h HMA Bias and RSI Filter
 
-Hypothesis: After analyzing failures #320-331, complex regime filters and EMA crossovers
-are failing on 30m. The successful pattern from #329 (MACD momentum, Sharpe=0.311) suggests
-momentum-based entries work better than mean reversion on this timeframe.
+Hypothesis: After analyzing failures #321-#332, mean reversion and complex regime
+strategies fail badly on 1h timeframe. Fisher transform was catastrophic (#328).
+Simple EMA crossovers also fail (#331).
 
-This strategy combines:
-1. 4h HMA(21) for directional bias (proven edge from multiple experiments)
-2. 30m Supertrend(10,3) for trend direction and stoploss
-3. RSI(14) pullback filter - enter on pullback NOT breakout (RSI 40-60 zone)
-4. Volume confirmation - volume > 0.8 * 20-bar avg (avoid low liquidity entries)
-5. ATR(14) trailing stoploss at 2.5x for additional protection
+Key insight from successful strategies: HTF trend bias (4h HMA) + simple momentum
+entry (Supertrend) works best. The 1h timeframe needs:
+1. Strong HTF directional filter (4h HMA proven edge)
+2. Supertrend for momentum entry timing (less whipsaw than EMA crossover)
+3. RSI filter to avoid overextended entries (not mean reversion, just filter)
+4. ADX minimum for trend confirmation (loose threshold for trade generation)
+5. ATR trailing stoploss for risk management
 
-Key differences from failed strategies:
-- Supertrend instead of EMA crossover (better trend following)
-- RSI pullback (40-60) instead of extremes (avoid over-filtering)
-- Volume filter is soft confirmation, not hard requirement
-- Loose ADX > 15 (not > 25) to ensure trade generation
-- Position size 0.25 base, 0.30 strong trend
+Why this should work on 1h:
+- 4h HMA provides stable trend bias (not too fast like 1h, not too slow like 1d)
+- Supertrend catches momentum moves without EMA crossover whipsaw
+- RSI 40-60 filter avoids chasing extremes (different from mean reversion!)
+- ADX>15 is loose enough for >=10 trades but filters chop
+- Position size 0.25-0.30 controls drawdown during 2022 crash
 
-Timeframe: 30m (REQUIRED for this experiment)
+Timeframe: 1h (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25-0.30 discrete levels
-Stoploss: Supertrend flip + 2.5 * ATR(14) trailing
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_supertrend_4h_hma_rsi_pullback_volume_atr_v1"
-timeframe = "30m"
+name = "mtf_1h_supertrend_4h_hma_rsi_adx_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -54,48 +55,49 @@ def calculate_hma(close, period=21):
     return wma3.values
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-    Returns: supertrend_values, supertrend_direction (1=bullish, -1=bearish)
-    """
+    """Calculate Supertrend indicator for trend following."""
     n = len(close)
     atr = calculate_atr(high, low, close, period)
     
-    # Calculate basic upper and lower bands
     hl2 = (high + low) / 2.0
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
     
-    # Initialize arrays
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
     supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 = bullish (price above supertrend), -1 = bearish
+    trend = np.ones(n)  # 1 = bullish, -1 = bearish
     
-    # First valid bar
-    supertrend[period] = upper_band[period]
-    
-    for i in range(period + 1, n):
-        if direction[i-1] == 1:
-            # Previously bullish
-            if close[i] > lower_band[i]:
-                # Stay bullish
-                supertrend[i] = max(lower_band[i], supertrend[i-1])
-                direction[i] = 1
-            else:
-                # Flip to bearish
-                supertrend[i] = upper_band[i]
-                direction[i] = -1
+    for i in range(period, n):
+        if np.isnan(atr[i]):
+            continue
+            
+        # Calculate bands
+        upper_band[i] = hl2[i] + multiplier * atr[i]
+        lower_band[i] = hl2[i] - multiplier * atr[i]
+        
+        # Initialize
+        if i == period:
+            supertrend[i] = upper_band[i]
+            trend[i] = 1
         else:
-            # Previously bearish
-            if close[i] < upper_band[i]:
-                # Stay bearish
-                supertrend[i] = min(upper_band[i], supertrend[i-1])
-                direction[i] = -1
+            # Update bands based on previous trend
+            if trend[i-1] == 1:
+                upper_band[i] = min(upper_band[i], upper_band[i-1])
+                if close[i] < lower_band[i-1]:
+                    trend[i] = -1
+                    supertrend[i] = upper_band[i]
+                else:
+                    trend[i] = 1
+                    supertrend[i] = lower_band[i]
             else:
-                # Flip to bullish
-                supertrend[i] = lower_band[i]
-                direction[i] = 1
+                lower_band[i] = max(lower_band[i], lower_band[i-1])
+                if close[i] > upper_band[i-1]:
+                    trend[i] = 1
+                    supertrend[i] = lower_band[i]
+                else:
+                    trend[i] = -1
+                    supertrend[i] = upper_band[i]
     
-    return supertrend, direction
+    return supertrend, trend
 
 def calculate_rsi(close, period=14):
     """Calculate Relative Strength Index."""
@@ -108,9 +110,8 @@ def calculate_rsi(close, period=14):
     avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
     
     rs = avg_gain / avg_loss
-    rs = rs.replace([np.inf, -np.inf], np.nan)
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50.0)
+    rsi = rsi.replace([np.inf, -np.inf], np.nan).fillna(50.0)
     
     return rsi.values
 
@@ -149,7 +150,6 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -161,15 +161,11 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 30m indicators
+    # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
+    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
     rsi = calculate_rsi(close, 14)
     adx = calculate_adx(high, low, close, 14)
-    
-    # Volume moving average
-    volume_s = pd.Series(volume)
-    volume_avg = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
@@ -180,9 +176,9 @@ def generate_signals(prices):
     # Track position state for stoploss
     in_position = False
     position_side = 0
-    entry_price = 0.0
     highest_close = 0.0
     lowest_close = 0.0
+    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -203,55 +199,58 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === SUPERTREND DIRECTION ===
-        # st_direction = 1 means bullish (price above supertrend)
-        # st_direction = -1 means bearish (price below supertrend)
-        st_bullish = st_direction[i] == 1
-        st_bearish = st_direction[i] == -1
+        # === SUPERTREND MOMENTUM ===
+        # st_trend = 1 means bullish (price above supertrend)
+        # st_trend = -1 means bearish (price below supertrend)
+        supertrend_bullish = st_trend[i] == 1
+        supertrend_bearish = st_trend[i] == -1
         
-        # Check for supertrend flip (entry signal)
-        st_flip_bull = st_bullish and (i > 0 and st_direction[i-1] == -1)
-        st_flip_bear = st_bearish and (i > 0 and st_direction[i-1] == 1)
+        # Check for Supertrend flip (entry trigger)
+        st_flip_bull = supertrend_bullish and (i > 100 and st_trend[i-1] == -1)
+        st_flip_bear = supertrend_bearish and (i > 100 and st_trend[i-1] == 1)
         
-        # === RSI PULLBACK FILTER ===
-        # For longs: RSI between 40-60 (pullback, not overbought)
-        # For shorts: RSI between 40-60 (pullback, not oversold)
-        rsi_pullback_long = 40 <= rsi[i] <= 65
-        rsi_pullback_short = 35 <= rsi[i] <= 60
+        # Also allow entry if already in trend state (not just flip)
+        st_trend_bull = supertrend_bullish
+        st_trend_bear = supertrend_bearish
+        
+        # === RSI FILTER (avoid overextended, NOT mean reversion) ===
+        # RSI 40-65 = healthy trend zone (not oversold/overbought)
+        rsi_ok_long = 40 <= rsi[i] <= 65
+        rsi_ok_short = 35 <= rsi[i] <= 60
         
         # === ADX TREND STRENGTH ===
         # ADX > 15 = minimal trending (loose for trade generation)
         trending = adx[i] > 15
         strong_trend = adx[i] > 25
         
-        # === VOLUME CONFIRMATION ===
-        # Volume > 0.8 * 20-bar average (soft filter)
-        vol_confirmed = volume[i] > 0.8 * volume_avg[i] if not np.isnan(volume_avg[i]) else True
+        # === VOLATILITY ADJUSTMENT ===
+        atr_recent_avg = np.nanmean(atr[max(0, i-20):i+1])
+        high_volatility = atr[i] > 1.5 * atr_recent_avg if not np.isnan(atr_recent_avg) else False
+        
+        # Determine position size
+        if high_volatility:
+            position_size = SIZE_BASE
+        elif strong_trend and bull_trend_4h:
+            position_size = SIZE_STRONG
+        else:
+            position_size = SIZE_BASE
         
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
-        position_size = SIZE_BASE
         
-        # Boost size for strong trend + 4h alignment
-        if strong_trend and bull_trend_4h:
-            position_size = SIZE_STRONG
-        elif strong_trend and bear_trend_4h:
-            position_size = SIZE_STRONG
-        
-        # LONG: 4h bias up + Supertrend bullish + RSI pullback + trending
-        # Allow entry on supertrend flip OR if already in bullish state with pullback
+        # LONG: 4h bias up + Supertrend bullish + RSI ok + ADX trending
         long_conditions = (
             bull_trend_4h and
-            st_bullish and
-            rsi_pullback_long and
+            st_trend_bull and
+            rsi_ok_long and
             trending
         )
         
-        # SHORT: 4h bias down + Supertrend bearish + RSI pullback + trending
+        # SHORT: 4h bias down + Supertrend bearish + RSI ok + ADX trending
         short_conditions = (
             bear_trend_4h and
-            st_bearish and
-            rsi_pullback_short and
+            st_trend_bear and
+            rsi_ok_short and
             trending
         )
         
@@ -262,50 +261,36 @@ def generate_signals(prices):
         if short_conditions:
             new_signal = -position_size
         
-        # === STOPLOSS LOGIC (Rule 6) ===
-        # Primary: Supertrend flip against position
-        # Secondary: ATR trailing stop at 2.5x
-        
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
-            stoploss_triggered = False
-            
             if position_side > 0:
-                # Update highest close for trailing stop
                 if close[i] > highest_close:
                     highest_close = close[i]
-                
-                # Supertrend flip to bearish
-                if st_bearish:
-                    stoploss_triggered = True
-                
-                # ATR trailing stop
                 stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
-                    stoploss_triggered = True
-                
-                # 4h trend reversal
-                if bear_trend_4h:
-                    stoploss_triggered = True
+                    new_signal = 0.0
             
             if position_side < 0:
-                # Update lowest close for trailing stop
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                
-                # Supertrend flip to bullish
-                if st_bullish:
-                    stoploss_triggered = True
-                
-                # ATR trailing stop
                 stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
-                    stoploss_triggered = True
-                
-                # 4h trend reversal
-                if bull_trend_4h:
-                    stoploss_triggered = True
-            
-            if stoploss_triggered:
+                    new_signal = 0.0
+        
+        # === TREND REVERSAL EXIT ===
+        # Exit if 4h trend flips against position
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and bear_trend_4h:
+                new_signal = 0.0
+            if position_side < 0 and bull_trend_4h:
+                new_signal = 0.0
+        
+        # === SUPERTREND REVERSAL EXIT ===
+        # Exit if Supertrend flips against position
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and supertrend_bearish:
+                new_signal = 0.0
+            if position_side < 0 and supertrend_bullish:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -317,7 +302,6 @@ def generate_signals(prices):
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
-                # Position reversal
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_close = close[i] if position_side > 0 else 0.0
