@@ -1,40 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #337: 15m Supertrend + 4h HMA Bias + RSI Pullback + Choppiness Regime
+Experiment #338: 30m Donchian Breakout with 4h HMA Trend Bias and Volume Confirmation
 
-Hypothesis: 15m timeframe needs faster signals but still requires HTF filter.
-Key insights from 286+ failed strategies:
-1. Pure mean reversion fails (RSI/CRSI all negative Sharpe)
-2. Pure trend following fails in 2022 crash
-3. Regime filtering (Choppiness Index) is proven edge
-4. 4h HMA bias works across multiple successful strategies
-5. 15m needs looser conditions than 4h/1h for trade generation
+Hypothesis: After analyzing 286 failed strategies, key insights for 30m timeframe:
+1. 30m strategies #326 and #332 failed badly (Sharpe -2.6, -1.4) - too many filters
+2. 4h strategies work better (#334 Sharpe=0.098 kept) - slower signals reduce noise
+3. Donchian breakouts catch momentum moves without laggy crossovers
+4. Volume confirmation reduces false breakouts (proven in #334)
+5. 4h HMA provides stable trend bias (works across BTC/ETH/SOL)
 
-Strategy design:
-- 4h HMA(21) = primary trend bias (proven edge)
-- 15m Supertrend(10, 3) = entry trigger
-- 15m RSI(14) = pullback confirmation (not extreme mean reversion)
-- 15m Choppiness(14) = regime filter (avoid choppy markets)
-- 15m ADX(14) > 18 = trending confirmation (loose for trades)
-- ATR(14) stoploss at 2.5x
+Key improvements over failed 30m strategies:
+1. Simpler entry logic (Donchian breakout vs complex regime detection)
+2. 4h HMA bias only (not 1d - too slow for 30m entries)
+3. Volume ratio > 1.3 (not 2.0 - ensures trade generation)
+4. Position size 0.25 (conservative for 30m volatility)
+5. ATR stoploss at 2.5x for risk management
+6. Looser ADX threshold > 12 (ensure >=10 trades per symbol)
 
-Why 15m might work:
-- Faster than 4h, catches more moves
-- Still slow enough to avoid noise (vs 5m)
-- 4h HMA provides stable bias
-- Choppiness filter avoids whipsaws
-- Looser RSI thresholds (35/65 not 10/90) for more trades
+Why this should work on 30m:
+- 30m is fast enough for trade generation, slow enough to avoid noise
+- Donchian(20) breakout = 10-hour high/low on 30m chart
+- 4h HMA(21) = ~8.5 hour trend bias (stable but responsive)
+- Volume confirmation filters false breakouts
+- Works in both trending and ranging markets
 
-Position sizing: 0.25 discrete levels
-Timeframe: 15m (REQUIRED for this experiment)
+Timeframe: 30m (REQUIRED for this experiment)
 HTF: 4h via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25 discrete levels
+Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_supertrend_4h_hma_rsi_chop_adx_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_donchian_breakout_4h_hma_volume_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -57,54 +57,25 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI indicator."""
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.replace([np.inf, -np.inf], np.nan)
-    return rsi.values
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel upper and lower bands."""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator."""
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    hl2 = (high + low) / 2.0
-    
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.full(n, np.nan)
-    direction = np.full(n, 1.0)  # 1 = bullish, -1 = bearish
-    
-    supertrend[0] = lower_band[0]
-    
-    for i in range(1, n):
-        if np.isnan(atr[i]):
-            supertrend[i] = np.nan
-            continue
-            
-        # Check if we should flip direction
-        if close[i] > supertrend[i-1]:
-            direction[i] = 1.0
-            supertrend[i] = lower_band[i]
-        elif close[i] < supertrend[i-1]:
-            direction[i] = -1.0
-            supertrend[i] = upper_band[i]
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1.0:
-                supertrend[i] = max(lower_band[i], supertrend[i-1])
-            else:
-                supertrend[i] = min(upper_band[i], supertrend[i-1])
-    
-    return supertrend, direction
+def calculate_volume_ratio(volume, period=20):
+    """Calculate volume ratio vs rolling average."""
+    vol_s = pd.Series(volume)
+    vol_avg = vol_s.rolling(window=period, min_periods=period).mean()
+    vol_ratio = volume / vol_avg.values
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    return vol_ratio
 
 def calculate_adx(high, low, close, period=14):
     """Calculate Average Directional Index (ADX)."""
@@ -137,40 +108,11 @@ def calculate_adx(high, low, close, period=14):
     
     return adx.values
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market (mean revert)
-    CHOP < 38.2 = trending market (trend follow)
-    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    """
-    n = len(close)
-    chop = np.full(n, np.nan)
-    
-    atr = calculate_atr(high, low, close, 14)
-    
-    for i in range(period, n):
-        if np.isnan(atr[i]):
-            continue
-            
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        price_range = highest_high - lowest_low
-        
-        if price_range == 0:
-            chop[i] = 100.0
-            continue
-        
-        atr_sum = np.nansum(atr[i-period+1:i+1])
-        
-        chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    return chop
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -182,12 +124,11 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    rsi = calculate_rsi(close, 14)
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    vol_ratio = calculate_volume_ratio(volume, 20)
     adx = calculate_adx(high, low, close, 14)
-    chop = calculate_choppiness(high, low, close, 14)
     
     signals = np.zeros(n)
     
@@ -211,19 +152,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(supertrend[i]) or np.isnan(st_direction[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(rsi[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
         if np.isnan(adx[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
@@ -232,44 +165,35 @@ def generate_signals(prices):
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === SUPERTREND DIRECTION ===
-        # st_direction = 1 means bullish, -1 means bearish
-        st_bullish = st_direction[i] == 1.0
-        st_bearish = st_direction[i] == -1.0
+        # === DONCHIAN BREAKOUT ===
+        # Price breaks above upper band = bullish breakout
+        breakout_long = close[i] > donchian_upper[i - 1]  # break prev bar's upper
+        breakout_short = close[i] < donchian_lower[i - 1]  # break prev bar's lower
         
-        # === RSI PULLBACK ===
-        # Long: RSI 35-55 (pullback in uptrend)
-        # Short: RSI 45-65 (pullback in downtrend)
-        rsi_long_pullback = 35.0 <= rsi[i] <= 60.0
-        rsi_short_pullback = 40.0 <= rsi[i] <= 65.0
-        
-        # === CHOPPINESS REGIME FILTER ===
-        # CHOP < 50 = trending (good for trend strategies)
-        # CHOP > 61.8 = choppy (avoid or mean revert)
-        trending_regime = chop[i] < 50.0
+        # === VOLUME CONFIRMATION ===
+        # Volume ratio > 1.3 confirms breakout (loose for trade gen)
+        volume_confirmed = vol_ratio[i] > 1.3
         
         # === ADX TREND STRENGTH ===
-        # ADX > 18 = trending (loose for trade generation on 15m)
-        trending = adx[i] > 18.0
+        # ADX > 12 = trending (loose for trade generation)
+        trending = adx[i] > 12
         
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
         
-        # LONG: 4h trend up + Supertrend bullish + RSI pullback + trending regime + ADX
+        # LONG: 4h trend up + Donchian breakout + volume confirmed + trending
         long_conditions = (
             bull_trend_4h and
-            st_bullish and
-            rsi_long_pullback and
-            trending_regime and
+            breakout_long and
+            volume_confirmed and
             trending
         )
         
-        # SHORT: 4h trend down + Supertrend bearish + RSI pullback + trending regime + ADX
+        # SHORT: 4h trend down + Donchian breakout + volume confirmed + trending
         short_conditions = (
             bear_trend_4h and
-            st_bearish and
-            rsi_short_pullback and
-            trending_regime and
+            breakout_short and
+            volume_confirmed and
             trending
         )
         
@@ -304,12 +228,12 @@ def generate_signals(prices):
             if position_side < 0 and bull_trend_4h:
                 new_signal = 0.0
         
-        # === SUPERTREND REVERSAL EXIT ===
-        # Exit if Supertrend flips against position
+        # === DONCHIAN REVERSAL EXIT ===
+        # Exit if price breaks opposite Donchian band
         if in_position and new_signal != 0.0:
-            if position_side > 0 and st_bearish:
+            if position_side > 0 and close[i] < donchian_lower[i]:
                 new_signal = 0.0
-            if position_side < 0 and st_bullish:
+            if position_side < 0 and close[i] > donchian_upper[i]:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
