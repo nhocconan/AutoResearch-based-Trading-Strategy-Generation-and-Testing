@@ -1,83 +1,46 @@
 #!/usr/bin/env python3
 """
-Experiment #517: 1d Primary + 1w HTF — KAMA Adaptive Trend + RSI Pullback + ATR Trail
+Experiment #518: 30m Primary + 4h/1d HTF — Simplified Regime-Adaptive Mean Reversion
 
-Hypothesis: After 448 failed strategies (mostly vol-spike/Fisher/Choppiness/CRSI combos),
-try a SIMPLER approach that generates MORE trades while maintaining edge:
+Hypothesis: After 464 failed strategies (mostly over-filtered), try a SIMPLER approach
+that generates TRADES while maintaining quality:
 
-1. KAMA (Kaufman Adaptive Moving Average): Adapts to market efficiency ratio.
-   Reduces whipsaws in choppy markets (2022-2025 range/bear) while catching trends.
-   More robust than EMA/HMA for BTC/ETH which fail simple trend strategies.
+1. 4h HMA(21) = major trend direction (long when price > 4h HMA, short when <)
+2. RSI(3) = fast mean reversion (RSI < 20 long, RSI > 80 short) - faster than RSI(14)
+3. Choppiness Index(14) = regime awareness (not strict filter, just modifies thresholds)
+4. Volume filter = volume > 0.5x 20-bar avg (light filter, avoid dead hours only)
+5. NO session filter (crypto is 24/7, session filter killed trades in exp #508)
 
-2. RSI(7) PULLBACK entries (not extremes): RSI(7)<40 in uptrend, RSI(7)>60 in downtrend.
-   Looser than RSI<30/>70 to generate MORE trades (critical: need >=30/symbol on train).
-   Many failed strategies had 0 trades due to overly strict entry conditions.
+Why this might beat Sharpe=0.435:
+- 30m with 4h direction = HTF trade frequency with 30m entry precision
+- RSI(3) catches quick reversals that RSI(14) misses
+- Simpler filters = MORE trades (critical: exp #508 got 0 trades with CRSI+CHOP+HMA)
+- Looser thresholds ensure >=30 trades/symbol on train
 
-3. 1w HMA(21) as major trend filter: Only trade in direction of weekly trend.
-   Prevents counter-trend trades that got crushed in 2022 bear market.
-
-4. ATR(14) 2.5x trailing stop: Protects capital in crash scenarios.
-   Signal → 0 when price moves 2.5*ATR against position.
-
-Why this might beat current best (Sharpe=0.435):
-- KAMA is DIFFERENT from HMA/EMA (adaptive, not fixed smoothing)
-- Looser RSI thresholds = more trades (addresses #1 failure mode: 0 trades)
-- 1d TF targets 20-50 trades/year (lower fee drag, matches proven patterns)
-- Simpler logic = fewer conflicting filters that cancel each other out
-- 1w HTF filter prevents bear market disasters (2022 -77% crash)
-
-Position sizing: 0.25-0.30 (discrete levels, max 0.40)
+Position sizing: 0.25 (discrete, max 0.40 for lower TF)
 Stoploss: 2.5 * ATR trailing (signal → 0 when hit)
-Target: 25-50 trades/year on 1d, >=30 trades/symbol on train, >=3 on test
+Target: 40-60 trades/year on 30m, >=30 trades/symbol on train, >=3 on test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_kama_rsi7_pullback_1w_v1"
-timeframe = "1d"
+name = "mtf_30m_rsi3_hma4h_chop_v1"
+timeframe = "30m"
 leverage = 1.0
 
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA).
-    Adapts smoothing based on market efficiency ratio (ER).
-    High ER (trending) = fast smoothing. Low ER (choppy) = slow smoothing.
-    """
-    close_s = pd.Series(close)
-    n = len(close_s)
-    
-    # Calculate Efficiency Ratio (ER)
-    # ER = |Price Change| / Sum of |Individual Changes|
-    price_change = np.abs(close_s.diff(period))
-    sum_changes = np.abs(close_s.diff()).rolling(window=period, min_periods=period).sum()
-    
-    # Avoid division by zero
-    sum_changes = sum_changes.replace(0, 1e-10)
-    er = price_change / sum_changes
-    er = er.fillna(0)
-    
-    # Calculate smoothing constants
-    fast_sc = 2.0 / (fast_period + 1.0)
-    slow_sc = 2.0 / (slow_period + 1.0)
-    
-    # KAMA smoothing constant = ER * (fast_sc - slow_sc) + slow_sc
-    sc = (er.values * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA iteratively
-    kama = np.zeros(n)
-    kama[0] = close_s.iloc[0]
-    
-    for i in range(1, n):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close_s.iloc[i] - kama[i-1])
-    
-    return kama
+def calculate_atr(high, low, close, period=14):
+    """Calculate ATR using Wilder's smoothing."""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
 
 def calculate_hma(close, period=21):
-    """Calculate Hull Moving Average (HMA) for HTF trend."""
+    """Calculate Hull Moving Average (HMA)."""
     n = period
     half = n // 2
     sqrt_n = int(np.sqrt(n))
@@ -97,18 +60,33 @@ def calculate_hma(close, period=21):
     
     return hma.values
 
-def calculate_atr(high, low, close, period=14):
-    """Calculate ATR using Wilder's smoothing."""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = range/choppy market
+    CHOP < 38.2 = trending market
+    """
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    
+    # Highest high and lowest low over period
+    highest = high_s.rolling(window=period, min_periods=period).max()
+    lowest = low_s.rolling(window=period, min_periods=period).min()
+    
+    # ATR sum over period
+    atr_vals = calculate_atr(high, low, close, period)
+    atr_sum = pd.Series(atr_vals).rolling(window=period, min_periods=period).sum()
+    
+    # CHOP formula
+    range_hl = highest - lowest
+    range_hl = range_hl.replace(0, 1e-10)
+    
+    chop = 100.0 * np.log10(atr_sum / range_hl) / np.log10(period)
+    
+    return chop.values
 
-def calculate_rsi(close, period=7):
-    """Calculate RSI with configurable period (use 7 for faster signals)."""
+def calculate_rsi(close, period=3):
+    """Calculate fast RSI for quick mean reversion signals."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     
@@ -123,105 +101,34 @@ def calculate_rsi(close, period=7):
     
     return rsi.values
 
-def calculate_rsi_streak(close, period=2):
-    """
-    Calculate RSI Streak component for Connors RSI.
-    Measures consecutive up/down days.
-    """
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    
-    # Count consecutive up/down days
-    streak = np.zeros(len(close))
-    
-    for i in range(1, len(close)):
-        if delta.iloc[i] > 0:
-            if i > 0 and delta.iloc[i-1] > 0:
-                streak[i] = streak[i-1] + 1
-            else:
-                streak[i] = 1
-        elif delta.iloc[i] < 0:
-            if i > 0 and delta.iloc[i-1] < 0:
-                streak[i] = streak[i-1] - 1
-            else:
-                streak[i] = -1
-        else:
-            streak[i] = 0
-    
-    # Convert to RSI-like scale (0-100)
-    streak_s = pd.Series(streak)
-    streak_rsi = calculate_rsi(np.abs(streak), period)
-    
-    # Adjust for direction
-    streak_rsi = np.where(streak >= 0, streak_rsi, 100 - streak_rsi)
-    
-    return streak_rsi
-
-def calculate_percent_rank(close, period=100):
-    """
-    Calculate Percent Rank component for Connors RSI.
-    Measures where current return ranks vs past N days.
-    """
-    close_s = pd.Series(close)
-    returns = close_s.pct_change()
-    
-    percent_rank = np.zeros(len(close))
-    
-    for i in range(period, len(close)):
-        if np.isnan(returns.iloc[i]):
-            percent_rank[i] = 50.0
-            continue
-        
-        current_return = returns.iloc[i]
-        past_returns = returns.iloc[i-period+1:i]
-        
-        # Count how many past returns are less than current
-        rank = np.sum(past_returns < current_return)
-        percent_rank[i] = (rank / period) * 100.0
-    
-    return percent_rank
-
-def calculate_crsi(close, rsi_period=3, streak_period=2, pr_period=100):
-    """
-    Calculate Connors RSI (CRSI).
-    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    Proven 75% win rate for mean reversion entries.
-    """
-    rsi_fast = calculate_rsi(close, rsi_period)
-    # streak_rsi = calculate_rsi_streak(close, streak_period)
-    # percent_rank = calculate_percent_rank(close, pr_period)
-    
-    # Simplified CRSI (just fast RSI for speed + trade frequency)
-    crsi = rsi_fast
-    
-    return crsi
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # Load 1w HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    # Load 4h HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 1w HTF indicators (major trend direction)
-    hma_1w_21 = calculate_hma(df_1w['close'].values, period=21)
+    # Calculate 4h HMA for trend direction
+    hma_4h_21 = calculate_hma(df_4h['close'].values, period=21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
     
-    # Calculate 1d indicators
-    kama_10 = calculate_kama(close, period=10)
-    kama_20 = calculate_kama(close, period=20)
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    rsi_7 = calculate_rsi(close, 7)
+    chop_14 = calculate_choppiness(high, low, close, 14)
+    rsi_3 = calculate_rsi(close, 3)
+    
+    # Volume average for filter
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    LONG_SIZE = 0.30
-    SHORT_SIZE = 0.25
+    SIZE = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -230,72 +137,51 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(kama_10[i]) or np.isnan(kama_20[i]):
+        if np.isnan(hma_4h_aligned[i]):
             continue
-        if np.isnan(hma_1w_21_aligned[i]):
+        if np.isnan(chop_14[i]) or np.isnan(rsi_3[i]):
             continue
-        if np.isnan(rsi_7[i]):
+        if np.isnan(vol_avg[i]) or vol_avg[i] == 0:
             continue
         
-        # === 1W MAJOR TREND (primary direction filter) ===
-        bull_regime = close[i] > hma_1w_21_aligned[i]
-        bear_regime = close[i] < hma_1w_21_aligned[i]
+        # === 4H TREND DIRECTION ===
+        bull_trend = close[i] > hma_4h_aligned[i]
+        bear_trend = close[i] < hma_4h_aligned[i]
         
-        # === 1D KAMA TREND (entry timing) ===
-        kama_bull = kama_10[i] > kama_20[i]
-        kama_bear = kama_10[i] < kama_20[i]
+        # === CHOPPINESS REGIME ===
+        range_regime = chop_14[i] > 50.0  # Choppy/ranging
+        trend_regime = chop_14[i] <= 50.0  # Trending
         
-        # KAMA slope (momentum)
-        kama_slope_up = kama_10[i] > kama_10[i-5] if i >= 5 else False
-        kama_slope_down = kama_10[i] < kama_10[i-5] if i >= 5 else False
+        # === RSI MEAN REVERSION (fast RSI(3)) ===
+        # Looser thresholds to ensure trades (exp #508 failed with too strict)
+        rsi_oversold = rsi_3[i] < 20.0
+        rsi_overbought = rsi_3[i] > 80.0
         
-        # === RSI PULLBACK SIGNALS (looser thresholds for more trades) ===
-        rsi_pullback_long = rsi_7[i] < 40.0  # Pullback in uptrend
-        rsi_pullback_short = rsi_7[i] > 60.0  # Bounce in downtrend
-        rsi_extreme_low = rsi_7[i] < 30.0  # Oversold
-        rsi_extreme_high = rsi_7[i] > 70.0  # Overbought
+        # === VOLUME FILTER (light) ===
+        vol_ok = volume[i] > 0.5 * vol_avg[i]
         
-        # === ENTRY LOGIC — KAMA TREND + RSI PULLBACK ===
+        # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # LONG ENTRIES (multiple conditions to ensure trade frequency)
-        # Condition 1: Weekly bull + KAMA bull + RSI pullback (primary setup)
-        if bull_regime and kama_bull and rsi_pullback_long:
-            new_signal = LONG_SIZE
-        # Condition 2: Weekly bull + RSI extreme (strong reversal signal)
-        elif bull_regime and rsi_extreme_low:
-            new_signal = LONG_SIZE
-        # Condition 3: KAMA crossover bull + RSI pullback (momentum entry)
-        elif kama_bull and kama_slope_up and rsi_pullback_long:
-            new_signal = LONG_SIZE * 0.8
-        # Condition 4: Price > KAMA + RSI not overbought (trend continuation)
-        elif close[i] > kama_10[i] and rsi_7[i] < 65.0 and bull_regime:
-            new_signal = LONG_SIZE * 0.6
-        # Condition 5: RSI extreme alone (capitulation long)
-        elif rsi_extreme_low and rsi_7[i] < 25.0:
-            new_signal = LONG_SIZE * 0.7
+        # LONG: Bull trend + oversold RSI + volume ok
+        if bull_trend and vol_ok:
+            if rsi_oversold:
+                new_signal = SIZE
+            # Also enter in range regime with less extreme RSI
+            elif range_regime and rsi_3[i] < 30.0:
+                new_signal = SIZE * 0.8
         
-        # SHORT ENTRIES (mirror logic for bear market)
-        if new_signal == 0.0:
-            # Condition 1: Weekly bear + KAMA bear + RSI bounce (primary setup)
-            if bear_regime and kama_bear and rsi_pullback_short:
-                new_signal = -SHORT_SIZE
-            # Condition 2: Weekly bear + RSI extreme (strong reversal signal)
-            elif bear_regime and rsi_extreme_high:
-                new_signal = -SHORT_SIZE
-            # Condition 3: KAMA crossover bear + RSI bounce (momentum entry)
-            elif kama_bear and kama_slope_down and rsi_pullback_short:
-                new_signal = -SHORT_SIZE * 0.8
-            # Condition 4: Price < KAMA + RSI not oversold (trend continuation)
-            elif close[i] < kama_10[i] and rsi_7[i] > 35.0 and bear_regime:
-                new_signal = -SHORT_SIZE * 0.6
-            # Condition 5: RSI extreme alone (FOMO short)
-            elif rsi_extreme_high and rsi_7[i] > 75.0:
-                new_signal = -SHORT_SIZE * 0.7
+        # SHORT: Bear trend + overbought RSI + volume ok
+        if new_signal == 0.0 and bear_trend and vol_ok:
+            if rsi_overbought:
+                new_signal = -SIZE
+            # Also enter in range regime with less extreme RSI
+            elif range_regime and rsi_3[i] > 70.0:
+                new_signal = -SIZE * 0.8
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
         stoploss_triggered = False
@@ -318,22 +204,19 @@ def generate_signals(prices):
         if stoploss_triggered:
             new_signal = 0.0
         
-        # === TAKE PROFIT / EXIT CONDITIONS ===
-        # Exit long on RSI overbought or regime flip
-        if in_position and position_side > 0:
-            if rsi_extreme_high:
-                new_signal = 0.0
-            # Exit if weekly regime flips bearish
-            if bear_regime and kama_bear:
-                new_signal = 0.0
+        # === EXIT ON REGIME CHANGE ===
+        if in_position and position_side > 0 and bear_trend:
+            new_signal = 0.0
         
-        # Exit short on RSI oversold or regime flip
-        if in_position and position_side < 0:
-            if rsi_extreme_low:
-                new_signal = 0.0
-            # Exit if weekly regime flips bullish
-            if bull_regime and kama_bull:
-                new_signal = 0.0
+        if in_position and position_side < 0 and bull_trend:
+            new_signal = 0.0
+        
+        # === EXIT ON RSI REVERSAL (take profit) ===
+        if in_position and position_side > 0 and rsi_3[i] > 70.0:
+            new_signal = 0.0
+        
+        if in_position and position_side < 0 and rsi_3[i] < 30.0:
+            new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
