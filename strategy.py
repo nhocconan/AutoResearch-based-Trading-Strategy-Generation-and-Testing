@@ -1,90 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #012: 12h HMA-RSI Pullback with 1d/1w Trend Alignment
+Experiment #011: 4h HMA Trend + RSI Pullback with 1d/1w Bias
 
-Hypothesis: Previous strategies failed due to:
-- Choppiness Index regime switching (failed #001, #002, #003, #011)
-- Over-complicated multi-regime logic (failed #007, #011)
-- Too many conflicting filters causing 0 trades (failed #008, #010)
+Hypothesis: Previous regime-switching strategies failed due to over-complexity.
+This strategy uses a simpler, proven approach:
+1. 4h HMA crossover for primary trend signal
+2. 1d HMA for major trend bias (only trade with daily trend)
+3. 1w HMA for secular trend filter (avoid counter-trend trades)
+4. RSI(14) pullback entry (40-60 range, not extremes)
+5. ATR-based stoploss (2.5 ATR)
 
-This strategy uses a PROVEN pattern from research notes:
-"HMA crossover + RSI filter + ATR trail (SOL +0.879)"
+Why this should work:
+- 4h timeframe proven to work (current best is 4h-based)
+- Triple HMA alignment reduces whipsaw in bear markets
+- RSI pullback (not extreme) generates more trades than Connors extremes
+- Simpler logic = fewer conflicting filters = more trade frequency
+- Discrete position sizing (0.25-0.30) minimizes fee churn
 
-Key innovations for 12h timeframe:
-1. HMA(16/48) crossover - smoother than EMA, less lag than SMA
-2. RSI(7) pullback entries - enter on dips in uptrend, rallies in downtrend
-3. 1d HMA for intermediate trend bias - align with daily direction
-4. 1w HMA for major trend filter - only trade with weekly trend
-5. ATR(14) trailing stoploss - 2.5x ATR to protect capital
-6. Volume confirmation - require 1.2x average volume on entry
-
-Why 12h works:
-- 20-50 trades/year target (manageable fee drag ~1-2.5%)
-- Less noise than 4h, more signals than 1d
-- Captures multi-day swings without whipsaw
-
-Position sizing: 0.25-0.30 discrete levels (CRITICAL for drawdown control)
-Stoploss: 2.5 * ATR(14) trailing
-Timeframe: 12h (REQUIRED for this experiment)
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
+Position sizing: 0.25-0.30 discrete
+Stoploss: 2.5 * ATR(14)
+Target: 20-50 trades/year, Sharpe > 0.028 (beat current best)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_hma_rsi_pullback_1d_1w_trend_v1"
-timeframe = "12h"
+name = "mtf_4h_hma_rsi_pullback_1d1w_bias_v2"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_hma(close, period):
-    """
-    Hull Moving Average - reduces lag while maintaining smoothness.
-    Formula: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    Reference: Alan Hull, 2005
-    """
-    close_s = pd.Series(close)
-    n = len(close)
-    
-    if period < 2:
-        return np.full(n, np.nan)
-    
-    # WMA helper
-    def wma(series, window):
-        weights = np.arange(1, window + 1)
-        return series.rolling(window=window, min_periods=window).apply(
-            lambda x: np.dot(x, weights) / weights.sum(), raw=True
-        )
-    
-    half = period // 2
-    sqrt_n = int(np.sqrt(period))
-    
-    wma_half = wma(close_s, half)
-    wma_full = wma(close_s, period)
-    
-    # HMA calculation
-    raw_hma = 2 * wma_half - wma_full
-    hma = wma(raw_hma, sqrt_n)
-    
-    return hma.values
-
-def calculate_rsi(close, period=14):
-    """
-    Relative Strength Index - momentum oscillator.
-    Reference: J. Welles Wilder, 1978
-    """
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss
-    rs = rs.replace([np.inf, -np.inf], np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi.values
 
 def calculate_atr(high, low, close, period=14):
     """Calculate ATR using Wilder's smoothing."""
@@ -96,35 +41,64 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average for smoother trend with less lag."""
+    close_s = pd.Series(close)
+    half = max(1, period // 2)
+    sqrt_period = max(1, int(np.sqrt(period)))
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return wma3.values
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI using standard Wilder's method."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    return rsi
+
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average."""
+    close_s = pd.Series(close)
+    return close_s.rolling(window=period, min_periods=period).mean().values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1D HMA for intermediate trend
+    # Calculate 1D indicators
     hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
+    hma_1d_50 = calculate_hma(df_1d['close'].values, 50)
     
-    # Calculate 1W HMA for major trend bias
-    hma_1w_12 = calculate_hma(df_1w['close'].values, 12)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_12)
+    # Calculate 1W indicators
+    hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
     
-    # Calculate 12h indicators
-    hma_12h_fast = calculate_hma(close, 16)
-    hma_12h_slow = calculate_hma(close, 48)
-    rsi_7 = calculate_rsi(close, 7)
-    rsi_14 = calculate_rsi(close, 14)
+    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
+    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
+    hma_1d_50_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_50)
+    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
+    
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    
-    # Volume moving average for confirmation
-    volume_s = pd.Series(volume)
-    volume_ma20 = volume_s.rolling(window=20, min_periods=20).mean().values
+    hma_4h_16 = calculate_hma(close, 16)
+    hma_4h_48 = calculate_hma(close, 48)
+    rsi_14 = calculate_rsi(close, 14)
+    sma_50 = calculate_sma(close, 50)
     
     signals = np.zeros(n)
     
@@ -144,103 +118,87 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_50_aligned[i]):
             continue
         
-        if np.isnan(hma_12h_fast[i]) or np.isnan(hma_12h_slow[i]):
+        if np.isnan(hma_1w_21_aligned[i]):
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(hma_4h_16[i]) or np.isnan(hma_4h_48[i]):
             continue
         
-        if np.isnan(volume_ma20[i]) or volume_ma20[i] == 0:
+        if np.isnan(rsi_14[i]) or np.isnan(sma_50[i]):
             continue
         
-        # === 1W MAJOR TREND BIAS ===
-        weekly_bullish = close[i] > hma_1w_aligned[i]
-        weekly_bearish = close[i] < hma_1w_aligned[i]
+        # === 1W SECULAR TREND BIAS ===
+        weekly_bullish = close[i] > hma_1w_21_aligned[i]
+        weekly_bearish = close[i] < hma_1w_21_aligned[i]
         
-        # === 1D INTERMEDIATE TREND ===
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
+        # === 1D MAJOR TREND BIAS ===
+        daily_bullish = close[i] > hma_1d_21_aligned[i] and hma_1d_21_aligned[i] > hma_1d_50_aligned[i]
+        daily_bearish = close[i] < hma_1d_21_aligned[i] and hma_1d_21_aligned[i] < hma_1d_50_aligned[i]
+        daily_neutral = not daily_bullish and not daily_bearish
         
-        # === 12H HMA TREND ===
-        hma_bullish = hma_12h_fast[i] > hma_12h_slow[i]
-        hma_bearish = hma_12h_fast[i] < hma_12h_slow[i]
+        # === 4H HMA TREND ===
+        hma_4h_bullish = hma_4h_16[i] > hma_4h_48[i]
+        hma_4h_bearish = hma_4h_16[i] < hma_4h_48[i]
         
-        # === HMA SLOPE CONFIRMATION ===
-        hma_slope_long = hma_12h_fast[i] > hma_12h_fast[i-3] if i > 3 else False
-        hma_slope_short = hma_12h_fast[i] < hma_12h_fast[i-3] if i > 3 else False
+        # === RSI PULLBACK ENTRY ===
+        # Long: RSI pulled back to 40-50 in uptrend
+        rsi_long_pullback = 38 < rsi_14[i] < 52
+        # Short: RSI pulled back to 50-62 in downtrend
+        rsi_short_pullback = 48 < rsi_14[i] < 62
         
-        # === RSI PULLBACK CONDITIONS ===
-        # Long: RSI dipped but still bullish zone (40-55)
-        rsi_pullback_long = (rsi_7[i] > 35) & (rsi_7[i] < 55)
-        # Short: RSI rallied but still bearish zone (45-60)
-        rsi_pullback_short = (rsi_7[i] > 45) & (rsi_7[i] < 65)
+        # === VOLATILITY FILTER ===
+        # Only trade when ATR is not at extreme (avoid panic entries)
+        atr_median = np.nanmedian(atr_14[max(0, i-100):i]) if i > 100 else atr_14[i]
+        atr_ratio = atr_14[i] / atr_median if atr_median > 0 else 1.0
+        vol_normal = 0.5 < atr_ratio < 2.5
         
-        # RSI extremes for strong momentum
-        rsi_strong_long = rsi_7[i] > 55
-        rsi_strong_short = rsi_7[i] < 45
-        
-        # === VOLUME CONFIRMATION ===
-        volume_ok = volume[i] > 1.15 * volume_ma20[i]  # 15% above average
+        # === POSITION SIZING ===
+        # Reduce size in high volatility
+        vol_adjustment = np.clip(1.0 / atr_ratio, 0.7, 1.2)
+        current_size = BASE_SIZE * vol_adjustment
+        current_size = np.round(current_size, 2)
+        current_size = np.clip(current_size, 0.20, 0.32)
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRY: Need 12h HMA bullish + RSI pullback + (1d/1w alignment OR volume)
-        long_score = 0
-        if hma_bullish:
-            long_score += 2  # Primary requirement
-        if hma_slope_long:
-            long_score += 1
-        if rsi_pullback_long or rsi_strong_long:
-            long_score += 1
-        if weekly_bullish:
-            long_score += 1  # Major trend alignment
-        if daily_bullish:
-            long_score += 0.5  # Intermediate trend
-        if volume_ok:
-            long_score += 0.5
+        # LONG ENTRY: All trend aligned + RSI pullback
+        if weekly_bullish and daily_bullish and hma_4h_bullish:
+            if rsi_long_pullback and vol_normal:
+                if close[i] > sma_50[i]:  # Above 50 SMA confirmation
+                    new_signal = current_size
         
-        # Enter long if score >= 4 (need trend + confirmation)
-        if long_score >= 4 and hma_bullish:
-            new_signal = BASE_SIZE
+        # SHORT ENTRY: All trend aligned + RSI pullback
+        elif weekly_bearish and daily_bearish and hma_4h_bearish:
+            if rsi_short_pullback and vol_normal:
+                if close[i] < sma_50[i]:  # Below 50 SMA confirmation
+                    new_signal = -current_size
         
-        # SHORT ENTRY: Need 12h HMA bearish + RSI pullback + (1d/1w alignment OR volume)
-        short_score = 0
-        if hma_bearish:
-            short_score += 2  # Primary requirement
-        if hma_slope_short:
-            short_score += 1
-        if rsi_pullback_short or rsi_strong_short:
-            short_score += 1
-        if weekly_bearish:
-            short_score += 1  # Major trend alignment
-        if daily_bearish:
-            short_score += 0.5  # Intermediate trend
-        if volume_ok:
-            short_score += 0.5
-        
-        # Enter short if score >= 4 (need trend + confirmation)
-        if short_score >= 4 and hma_bearish:
-            new_signal = -BASE_SIZE
+        # === NEUTRAL MARKET: Reduced position, simpler logic ===
+        if daily_neutral and not in_position:
+            # Only 4h trend + RSI, skip daily/weekly filters
+            if hma_4h_bullish and rsi_long_pullback and vol_normal:
+                new_signal = current_size * 0.6
+            elif hma_4h_bearish and rsi_short_pullback and vol_normal:
+                new_signal = -current_size * 0.6
         
         # === FREQUENCY SAFEGUARD ===
-        # If no trades for 60 bars (~30 days on 12h), allow weaker entry
-        if bars_since_last_trade > 60 and new_signal == 0.0 and not in_position:
-            if hma_bullish and (daily_bullish or weekly_bullish):
-                new_signal = BASE_SIZE * 0.6  # Smaller size
-            elif hma_bearish and (daily_bearish or weekly_bearish):
-                new_signal = -BASE_SIZE * 0.6
+        # If no trades for 40 bars (~7 days on 4h), force entry with weaker signal
+        if bars_since_last_trade > 40 and new_signal == 0.0 and not in_position:
+            if hma_4h_bullish and rsi_14[i] < 55:
+                new_signal = current_size * 0.5
+            elif hma_4h_bearish and rsi_14[i] > 45:
+                new_signal = -current_size * 0.5
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR ===
         stoploss_triggered = False
         
         if in_position and position_side != 0:
             if position_side > 0:
-                # Update highest price for long position
                 if close[i] > highest_price:
                     highest_price = close[i]
                 stoploss_price = highest_price - 2.5 * atr_14[i]
@@ -248,7 +206,6 @@ def generate_signals(prices):
                     stoploss_triggered = True
             
             if position_side < 0:
-                # Update lowest price for short position
                 if lowest_price == 0.0 or close[i] < lowest_price:
                     lowest_price = close[i]
                 stoploss_price = lowest_price + 2.5 * atr_14[i]
@@ -258,31 +215,18 @@ def generate_signals(prices):
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            # Exit long if 12h HMA turns bearish
-            if position_side > 0 and hma_bearish:
+            if position_side > 0 and hma_4h_bearish:
                 trend_reversal = True
-            # Exit short if 12h HMA turns bullish
-            if position_side < 0 and hma_bullish:
+            if position_side < 0 and hma_4h_bullish:
                 trend_reversal = True
         
-        # === RSI EXTREME EXIT ===
-        rsi_exit = False
-        if in_position and position_side != 0:
-            # Exit long if RSI extremely overbought (>80)
-            if position_side > 0 and rsi_7[i] > 80:
-                rsi_exit = True
-            # Exit short if RSI extremely oversold (<20)
-            if position_side < 0 and rsi_7[i] < 20:
-                rsi_exit = True
-        
-        # Apply stoploss or exits
-        if stoploss_triggered or trend_reversal or rsi_exit:
+        # Apply stoploss or trend reversal
+        if stoploss_triggered or trend_reversal:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
             if not in_position:
-                # New entry
                 in_position = True
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
@@ -290,7 +234,6 @@ def generate_signals(prices):
                 lowest_price = close[i] if position_side < 0 else 0.0
                 last_trade_bar = i
             elif np.sign(new_signal) != position_side:
-                # Position flip
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_price = close[i] if position_side > 0 else 0.0
@@ -298,7 +241,6 @@ def generate_signals(prices):
                 last_trade_bar = i
         else:
             if in_position:
-                # Exit position
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
