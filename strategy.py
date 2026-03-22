@@ -1,40 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #347: 12h Volatility-Adaptive Strategy with 1d HMA Bias + RSI Mean Reversion
+Experiment #348: 1d Daily Strategy with 1w HMA Bias + RSI + ADX Filter
 
-Hypothesis: After analyzing 295 failed strategies, the key insight for 12h timeframe is:
-1. 12h is slow enough to avoid noise but fast enough to catch intermediate swings
-2. Pure trend following fails on BTC/ETH (2022 crash whipsawed all trend strategies)
-3. Mean reversion works better in bear/range markets (2025 test period)
-4. Volatility regime detection helps avoid entries during extreme moves
-5. LOOSE entry conditions are CRITICAL - many strategies failed with 0 trades
+Hypothesis: Daily timeframe with weekly trend bias provides stable directional
+filter while RSI entries on daily generate sufficient trade frequency. ADX
+filter avoids choppy periods where both trend and mean-reversion fail.
 
-Strategy components:
-1. 1d HMA(21) for long-term trend bias (via mtf_data helper - call ONCE)
-2. ATR(7)/ATR(30) ratio for volatility regime (>2.0 = vol spike, <1.0 = calm)
-3. RSI(14) with LOOSE thresholds (25/75) to ensure >=10 trades per symbol
-4. Volume confirmation (volume > 0.8 * SMA20 volume)
-5. Stoploss at 2.5 * ATR(14) trailing
-6. Position sizing: 0.25 discrete levels
+Key design choices:
+1. 1w HMA(21) for ultra-stable trend bias (only flips in major regime changes)
+2. RSI(14) with loose thresholds (<40 long, >60 short) for enough trades
+3. ADX(14) > 18 filter to avoid dead choppy markets
+4. Position size 0.25 discrete, ATR(14) stoploss at 2.5x
+5. Asymmetric: prefer longs when 1w HMA bullish, shorts when bearish
 
-Why this should work on 12h:
-- 12h bars capture multi-day swings without intraday noise
-- Volatility regime filter avoids entering during panic/extreme moves
-- Loose RSI thresholds ensure trades even in quiet markets
-- 1d HMA provides stable directional bias without whipsaw
-- Designed specifically to generate trades in both bull and bear regimes
-
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels
-Stoploss: 2.5 * ATR(14) trailing
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_vol_adaptive_1d_hma_rsi_loose_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_rsi_adx_1w_hma_bias_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -69,38 +56,72 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_sma(values, period):
-    """Calculate Simple Moving Average."""
-    return pd.Series(values).rolling(window=period, min_periods=period).mean().values
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    n = len(close)
+    adx = np.full(n, np.nan)
+    
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high_s - close_s.shift(1)).values
+    tr3 = np.abs(low_s - close_s.shift(1)).values
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    # Smooth with Wilder's method (EMA with span=period)
+    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * plus_dm_smooth / np.maximum(tr_smooth, 1e-10)
+    di_minus = 100 * minus_dm_smooth / np.maximum(tr_smooth, 1e-10)
+    
+    # DX
+    di_sum = di_plus + di_minus
+    dx = 100 * np.abs(di_plus - di_minus) / np.maximum(di_sum, 1e-10)
+    
+    # ADX = smoothed DX
+    adx_series = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean()
+    adx[:] = adx_series.values
+    
+    return adx
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
-    atr_14 = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
-    rsi_14 = calculate_rsi(close, 14)
-    vol_sma20 = calculate_sma(volume, 20)
-    
-    # Volatility ratio: ATR(7) / ATR(30)
-    vol_ratio = np.full(n, np.nan)
-    for i in range(30, n):
-        if atr_30[i] > 1e-10:
-            vol_ratio[i] = atr_7[i] / atr_30[i]
+    # Calculate 1d indicators
+    atr = calculate_atr(high, low, close, 14)
+    rsi = calculate_rsi(close, 14)
+    adx = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     
@@ -116,82 +137,91 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] == 0:
+        if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(vol_ratio[i]):
+        if np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
-        # === VOLATILITY REGIME ===
-        vol_spike = vol_ratio[i] > 2.0  # High volatility - avoid new entries
-        vol_calm = vol_ratio[i] < 1.2   # Low volatility - good for entries
+        # === 1w HMA TREND BIAS ===
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
         
-        # === 1d HMA TREND BIAS ===
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
+        # === ADX TREND STRENGTH FILTER ===
+        trending_market = adx[i] > 18  # Loose threshold for more trades
         
-        # === RSI EXTREMES (LOOSE thresholds for more trades) ===
-        rsi_oversold = rsi_14[i] < 35   # Loosened from 30 for more trades
-        rsi_overbought = rsi_14[i] > 65  # Loosened from 70 for more trades
-        rsi_neutral = 35 <= rsi_14[i] <= 65
-        
-        # === VOLUME CONFIRMATION ===
-        vol_confirm = vol_sma20[i] > 0 and volume[i] > 0.8 * vol_sma20[i]
+        # === RSI ENTRY SIGNALS (loose thresholds for trade frequency) ===
+        rsi_oversold = rsi[i] < 40  # Long entry
+        rsi_overbought = rsi[i] > 60  # Short entry
+        rsi_extreme_long = rsi[i] < 30  # Strong long
+        rsi_extreme_short = rsi[i] > 70  # Strong short
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # LONG ENTRY: RSI oversold + 1d HMA bullish + vol calm/normal + volume confirm
-        if rsi_oversold and bull_trend_1d and not vol_spike:
+        # LONG entries: RSI oversold + 1w HMA bullish bias OR extreme oversold
+        if rsi_extreme_long:
+            # Very oversold - enter regardless of trend (mean reversion)
             new_signal = SIZE
+        elif rsi_oversold and bull_trend_1w and trending_market:
+            # Oversold + bullish trend + trending market
+            new_signal = SIZE
+        elif rsi_oversold and bull_trend_1w:
+            # Oversold + bullish trend (ADX filter relaxed)
+            new_signal = SIZE * 0.6  # Smaller position
         
-        # SHORT ENTRY: RSI overbought + 1d HMA bearish + vol calm/normal + volume confirm
-        elif rsi_overbought and bear_trend_1d and not vol_spike:
+        # SHORT entries: RSI overbought + 1w HMA bearish bias OR extreme overbought
+        if rsi_extreme_short:
+            # Very overbought - enter regardless of trend (mean reversion)
             new_signal = -SIZE
-        
-        # NEUTRAL RSI + TREND CONTINUATION: Stay in position if already positioned
-        elif in_position and rsi_neutral:
-            # Keep existing position during neutral RSI
-            new_signal = signals[i-1] if i > 0 else 0.0
+        elif rsi_overbought and bear_trend_1w and trending_market:
+            # Overbought + bearish trend + trending market
+            new_signal = -SIZE
+        elif rsi_overbought and bear_trend_1w:
+            # Overbought + bearish trend (ADX filter relaxed)
+            new_signal = -SIZE * 0.6
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
             if position_side > 0:
                 if close[i] > highest_close:
                     highest_close = close[i]
-                stoploss_price = highest_close - 2.5 * atr_14[i]
+                stoploss_price = highest_close - 2.5 * atr[i]
                 if close[i] < stoploss_price:
                     new_signal = 0.0
             
             if position_side < 0:
                 if lowest_close == 0.0 or close[i] < lowest_close:
                     lowest_close = close[i]
-                stoploss_price = lowest_close + 2.5 * atr_14[i]
+                stoploss_price = lowest_close + 2.5 * atr[i]
                 if close[i] > stoploss_price:
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if 1d trend flips against position
+        # Exit if 1w trend flips strongly against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and bear_trend_1d:
+            if position_side > 0 and bear_trend_1w and adx[i] > 25:
                 new_signal = 0.0
-            if position_side < 0 and bull_trend_1d:
+            if position_side < 0 and bull_trend_1w and adx[i] > 25:
                 new_signal = 0.0
         
-        # === VOLATILITY SPIKE EXIT ===
-        # Exit position if volatility spikes extremely (panic)
-        if in_position and vol_ratio[i] > 3.0:
-            new_signal = 0.0
+        # === RSI REVERSAL EXIT ===
+        # Exit long when RSI becomes overbought, exit short when oversold
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and rsi[i] > 70:
+                new_signal = 0.0
+            if position_side < 0 and rsi[i] < 30:
+                new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
