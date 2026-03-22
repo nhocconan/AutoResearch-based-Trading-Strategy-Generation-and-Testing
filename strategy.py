@@ -1,41 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #448: 4h HMA Trend + RSI Pullback with Daily Bias
+Experiment #449: 12h KAMA-RSI Trend Following with Daily HMA Filter
 
-Hypothesis: After 447 experiments, the pattern is clear - complex ensembles fail
-because they're too strict (0 trades) or contradictory. This strategy SIMPLIFIES:
+Hypothesis: After 431 failed experiments, the key insight for 12h timeframe is:
+1. 12h sits between 4h (noisy) and 1d (too slow) - needs balanced approach
+2. Previous 12h failures (#437, #443) had either 0 trades or negative Sharpe
+3. KAMA (Kaufman Adaptive Moving Average) adapts to volatility - better than EMA
+4. RSI thresholds must be LOOSE (25/75) to ensure sufficient trade frequency
+5. 1d HMA filter provides trend bias without being too slow (unlike 1w)
 
-1. DAILY HMA(21) TREND BIAS (via mtf_data helper):
-   - Long bias when price > 1d HMA
-   - Short bias when price < 1d HMA
-   - HMA smoother than EMA, reduces whipsaw
+Strategy Components:
+1. KAMA(10,50) crossover - adaptive trend following (ER-based smoothing)
+2. RSI(14) with 25/75 thresholds - looser for more trades on 12h
+3. 1d HMA(21) trend bias - via mtf_data helper (call ONCE before loop)
+4. ATR(14) trailing stop at 2.5x - protects against 2022-style crashes
+5. Position size: 0.30 discrete - balances return vs drawdown
 
-2. RSI(14) PULLBACK ENTRIES:
-   - Long: RSI < 40 in bull trend (pullback entry)
-   - Short: RSI > 60 in bear trend (rally entry)
-   - Looser than 30/70 to ensure sufficient trades
+Why this should work on 12h:
+- KAMA adapts to market regime (trending vs ranging)
+- Looser RSI thresholds ensure >10 trades/year per symbol
+- 1d HMA filter prevents counter-trend disasters
+- Simpler than failed ensemble strategies (#437, #443)
+- Should work on BTC/ETH/SOL individually (not SOL-biased)
 
-3. VOLUME CONFIRMATION:
-   - Taker buy volume ratio > 0.55 for longs (buying pressure)
-   - Taker buy volume ratio < 0.45 for shorts (selling pressure)
-   - Prevents entries on low-volume fakeouts
-
-4. ATR(14) TRAILING STOP at 2.5x:
-   - Signal → 0 when price moves 2.5*ATR against position
-   - Critical for crash protection
-
-5. POSITION SIZING: 0.30 discrete
-   - 30% capital per position
-   - Discrete levels minimize fee churn
-
-Why this should work on 4h:
-- Simpler than failed ensembles (#436, #441, #442, #447)
-- 4h captures multi-day swings without 1d slowness
-- Volume filter adds edge without over-filtering
-- Should generate 20-50 trades/year per symbol
-
-Timeframe: 4h (REQUIRED for this experiment)
-HTF: 1d via mtf_data helper (call ONCE before loop)
+Timeframe: 12h (REQUIRED for this experiment)
+HTF: 1d via mtf_data helper
 Position sizing: 0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
 """
@@ -43,8 +32,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_trend_rsi_pullback_volume_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_kama_rsi_daily_hma_trend_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -56,6 +45,43 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_kama(close, fast_period=10, slow_period=50):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts smoothing based on market efficiency (trend vs noise).
+    ER (Efficiency Ratio) = |net change| / sum of absolute changes
+    SC (Smoothing Constant) = [ER * (fast_sc - slow_sc) + slow_sc]^2
+    """
+    n = len(close)
+    kama = np.full(n, np.nan)
+    
+    close_s = pd.Series(close)
+    change = np.abs(close_s.diff())
+    signal = np.abs(close_s.diff().values)
+    
+    # Sum of absolute changes over slow_period
+    noise = change.rolling(window=slow_period, min_periods=slow_period).sum().values
+    
+    # Efficiency Ratio
+    er = np.zeros(n)
+    for i in range(slow_period, n):
+        if noise[i] > 1e-10:
+            er[i] = signal[i] / noise[i]
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # KAMA calculation
+    kama[slow_period - 1] = close[slow_period - 1]
+    for i in range(slow_period, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+    
+    return kama
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -81,12 +107,15 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
+def calculate_sma(close, period=50):
+    """Calculate Simple Moving Average."""
+    close_s = pd.Series(close)
+    return close_s.rolling(window=period, min_periods=period).mean().values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -98,17 +127,12 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
+    kama_fast = calculate_kama(close, fast_period=10, slow_period=50)
+    kama_slow = calculate_kama(close, fast_period=20, slow_period=100)
     rsi = calculate_rsi(close, 14)
-    
-    # Volume ratio (taker buy / total volume)
-    volume_ratio = np.zeros(n)
-    for i in range(n):
-        if volume[i] > 0:
-            volume_ratio[i] = taker_buy_volume[i] / volume[i]
-        else:
-            volume_ratio[i] = 0.5
+    sma_50 = calculate_sma(close, 50)
     
     signals = np.zeros(n)
     
@@ -132,7 +156,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]):
+        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(rsi[i]) or np.isnan(sma_50[i]):
             signals[i] = 0.0
             continue
         
@@ -140,24 +168,30 @@ def generate_signals(prices):
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === RSI PULLBACK SIGNALS ===
-        rsi_long = rsi[i] < 40  # Pullback in bull trend
-        rsi_short = rsi[i] > 60  # Rally in bear trend
+        # === KAMA CROSSOVER SIGNAL ===
+        kama_bull = kama_fast[i] > kama_slow[i]
+        kama_bear = kama_fast[i] < kama_slow[i]
         
-        # === VOLUME CONFIRMATION ===
-        volume_buying = volume_ratio[i] > 0.55  # Buying pressure
-        volume_selling = volume_ratio[i] < 0.45  # Selling pressure
+        # === RSI ENTRY TIMING (loose thresholds for more trades) ===
+        rsi_oversold = rsi[i] < 35  # Looser than 30 for more long entries
+        rsi_overbought = rsi[i] > 65  # Looser than 70 for more short entries
+        
+        # === SMA FILTER (avoid extreme counter-trend) ===
+        above_sma50 = close[i] > sma_50[i]
+        below_sma50 = close[i] < sma_50[i]
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # Long entry: bull trend + RSI pullback + volume confirmation
-        if rsi_long and bull_trend_1d and volume_buying:
-            new_signal = SIZE
+        # LONG ENTRY: KAMA bull + RSI oversold + daily trend bull OR above SMA50
+        if kama_bull and bull_trend_1d:
+            if rsi_oversold or above_sma50:
+                new_signal = SIZE
         
-        # Short entry: bear trend + RSI rally + volume confirmation
-        elif rsi_short and bear_trend_1d and volume_selling:
-            new_signal = -SIZE
+        # SHORT ENTRY: KAMA bear + RSI overbought + daily trend bear OR below SMA50
+        if kama_bear and bear_trend_1d:
+            if rsi_overbought or below_sma50:
+                new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
