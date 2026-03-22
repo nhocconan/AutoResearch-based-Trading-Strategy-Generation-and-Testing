@@ -1,35 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #232: 4h KAMA Trend + 1d HMA Filter + RSI Pullback + ATR Stop
+Experiment #233: 12h KAMA Adaptive Trend + 1d HMA Bias + Flexible ADX/RSI
 
-Hypothesis: KAMA adapts to volatility better than EMA/HMA, reducing whipsaws in chop.
-1d HMA provides stable higher-timeframe bias. RSI pullback (40-60) enters on dips in trend.
-ATR trailing stop (2.5x) protects capital. This combines adaptive trend + HTF filter + timing.
+Hypothesis: 12h timeframe with KAMA (Kaufman Adaptive Moving Average) captures 
+trends while adapting to volatility regimes. KAMA flattens in choppy markets 
+(reducing whipsaws) and accelerates in trends. Combined with 1d HMA for higher
+timeframe bias, flexible ADX>15 filter (lower than typical 25 to ensure trades
+on 12h), and RSI momentum confirmation. ATR trailing stop at 2.5x protects capital.
 
-Why this might work on 4h:
-- KAMA adapts to market regime (fast in trends, slow in chop)
-- 4h = 6 bars/day, enough trades without excessive noise
-- 1d HMA prevents counter-trend trades (critical for BTC/ETH)
-- RSI pullback avoids chasing breakouts (enters on retracements)
+Why this should work better than previous 12h attempts:
+- KAMA adapts to volatility (unlike fixed EMA/Donchian) - crucial for crypto
+- 1d HMA provides stable trend bias without lag
+- ADX>15 (not 25) ensures sufficient trade count on 12h timeframe
+- RSI threshold flexible (45/55 not 50) to catch more momentum moves
 - Conservative sizing (0.30) controls drawdown in 2022-style crashes
+- Proper position tracking for stoploss (doesn't reset on every bar)
 
 Learning from failures:
-- #226 (4h KAMA): Sharpe=-0.440 - KAMA alone, no HTF filter
-- #231 (1h RSI pullback): Sharpe=-1.409 - 1h too noisy, no vol filter
-- #224 (30m Supertrend): Sharpe=0.000 - 0 trades, conditions too strict
-- Need: HTF filter + relaxed entry conditions + proper stoploss
+- #227 (12h KAMA): Sharpe=0.040 - worked but can improve with better HTF filter
+- #228 (1d Donchian): Sharpe=-0.235 - pure breakout fails without momentum filter
+- #221 (12h Fisher): Sharpe=-5.755 - mean reversion fails in crypto trends
+- Key insight: trend-following works, but need adaptive entry + proper stoploss
 
-Timeframe: 4h (REQUIRED for this experiment)
+Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d via mtf_data helper (call ONCE before loop)
-Position sizing: 0.30 discrete levels
+Position sizing: 0.30 discrete levels (max 0.40)
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_1d_hma_rsi_pullback_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_kama_1d_hma_adx_rsi_atr_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -42,36 +45,45 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average (KAMA)."""
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
     n = len(close)
-    kama = np.zeros(n)
     
-    # Calculate Efficiency Ratio
-    change = np.abs(close - np.roll(close, er_period))
-    change[:er_period] = np.nan
+    # Calculate True Range and Directional Movement
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    volatility = np.zeros(n)
-    for i in range(er_period, n):
-        volatility[i] = np.sum(np.abs(close[i-er_period+1:i+1] - np.roll(close[i-er_period+1:i+1], 1)))
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
     
-    er = change / (volatility + 1e-10)
-    er[:er_period] = 0
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
     
-    # Calculate smoothing constant
-    fast_sc = 2 / (fast_period + 1)
-    slow_sc = 2 / (slow_period + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Smooth with Wilder's method (EMA with span=period)
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    # Calculate KAMA
-    kama[er_period] = close[er_period]
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Avoid division by zero
+    tr_s = np.where(tr_s == 0, 1e-10, tr_s)
     
-    # Fill initial values
-    kama[:er_period] = kama[er_period]
+    plus_di = 100 * plus_dm_s / tr_s
+    minus_di = 100 * minus_dm_s / tr_s
     
-    return kama
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx, plus_di, minus_di
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -82,6 +94,39 @@ def calculate_hma(close, period=21):
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market noise - flattens in chop, accelerates in trends.
+    """
+    n = len(close)
+    kama = np.zeros(n)
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        signal = np.abs(close[i] - close[i - er_period])
+        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        if noise > 0:
+            er[i] = signal / noise
+        else:
+            er[i] = 0
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # KAMA calculation
+    kama[er_period] = close[er_period]
+    for i in range(er_period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    # Fill initial values
+    kama[:er_period] = close[:er_period]
+    
+    return kama
 
 def calculate_rsi(close, period=14):
     """Calculate RSI (Relative Strength Index)."""
@@ -119,23 +164,26 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
     kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    rsi = calculate_rsi(close, 14)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
-    rsi = calculate_rsi(close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.30
     
-    # Track position state for stoploss
+    # Track position state for stoploss (persists across bars)
     in_position = False
     position_side = 0
+    entry_price = 0.0
     highest_close = 0.0
     lowest_close = 0.0
+    entry_bar = 0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -147,66 +195,61 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(kama[i]) or np.isnan(rsi[i]):
+        if np.isnan(adx[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
         # === MULTI-TIMEFRAME TREND BIAS ===
-        # 1d HMA = higher timeframe trend bias (critical filter)
+        # 1d HMA = higher timeframe trend bias
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === 4h TREND STRUCTURE ===
-        # KAMA slope (adaptive trend)
-        kama_bullish = close[i] > kama[i]
-        kama_bearish = close[i] < kama[i]
+        # === KAMA TREND DIRECTION ===
+        # Price above KAMA = bullish, below = bearish
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
-        # EMA structure confirmation
+        # KAMA slope (simple: compare to 3 bars ago)
+        kama_rising = kama[i] > kama[i-3] if i >= 3 else False
+        kama_falling = kama[i] < kama[i-3] if i >= 3 else False
+        
+        # === TREND STRENGTH FILTER ===
+        # ADX > 15 = trending market (lower threshold for 12h to ensure trades)
+        trend_strength = adx[i] > 15
+        
+        # === RSI MOMENTUM ===
+        # RSI > 45 = bullish momentum (flexible, not strict 50)
+        # RSI < 55 = bearish momentum
+        rsi_bullish = rsi[i] > 45
+        rsi_bearish = rsi[i] < 55
+        
+        # === EMA CONFIRMATION (optional boost) ===
         ema_bullish = ema_21[i] > ema_50[i]
         ema_bearish = ema_21[i] < ema_50[i]
         
-        # === RSI PULLBACK ENTRY ===
-        # Long: RSI pulled back to 40-55 in uptrend (buy the dip)
-        # Short: RSI rallied to 45-60 in downtrend (sell the rip)
-        rsi_pullback_long = 35 < rsi[i] < 60
-        rsi_pullback_short = 40 < rsi[i] < 65
-        
-        # === MOMENTUM CONFIRMATION ===
-        # Price above/below 5-bar ago (simple momentum)
-        momentum_long = close[i] > close[i-3]
-        momentum_short = close[i] < close[i-3]
+        # === DI CONFIRMATION ===
+        di_bullish = plus_di[i] > minus_di[i]
+        di_bearish = plus_di[i] < minus_di[i]
         
         new_signal = 0.0
         
-        # === ENTRY CONDITIONS (relaxed for trade count) ===
-        # Long: 1d bullish + 4h KAMA bullish + RSI pullback + momentum
-        # Only need 2 of 3 momentum filters to trigger
-        long_score = 0
-        if kama_bullish:
-            long_score += 1
-        if ema_bullish:
-            long_score += 1
-        if momentum_long:
-            long_score += 1
+        # === ENTRY CONDITIONS ===
+        # Long: 1d bullish + price>KAMA + KAMA rising + ADX trending + RSI>45
+        # Flexible: need 1d bias + KAMA signal + at least one momentum confirm
+        if bull_trend_1d and price_above_kama and kama_rising:
+            # Need trend strength OR momentum confirmation
+            if trend_strength or (rsi_bullish and di_bullish):
+                new_signal = SIZE_BASE
         
-        if bull_trend_1d and rsi_pullback_long and long_score >= 2:
-            new_signal = SIZE_BASE
-        
-        # Short: 1d bearish + 4h KAMA bearish + RSI pullback + momentum
-        short_score = 0
-        if kama_bearish:
-            short_score += 1
-        if ema_bearish:
-            short_score += 1
-        if momentum_short:
-            short_score += 1
-        
-        if bear_trend_1d and rsi_pullback_short and short_score >= 2:
-            new_signal = -SIZE_BASE
+        # Short: 1d bearish + price<KAMA + KAMA falling + ADX trending + RSI<55
+        if bear_trend_1d and price_below_kama and kama_falling:
+            # Need trend strength OR momentum confirmation
+            if trend_strength or (rsi_bearish and di_bearish):
+                new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
-        # Check stoploss on EXISTING position before considering new entry
-        if in_position:
+        # Check stoploss on EXISTING position
+        if in_position and position_side != 0:
             if position_side > 0:
                 # Update highest close for long position
                 if close[i] > highest_close:
@@ -225,17 +268,23 @@ def generate_signals(prices):
                 if close[i] > stoploss_price:
                     new_signal = 0.0  # Stoploss overrides entry signal
         
-        # === UPDATE POSITION TRACKING FOR NEXT BAR ===
-        if new_signal != 0.0:
+        # === UPDATE POSITION TRACKING ===
+        current_signal_sign = np.sign(new_signal) if new_signal != 0 else 0
+        
+        if current_signal_sign != 0:
             if not in_position:
                 # Entering new position
                 in_position = True
-                position_side = np.sign(new_signal)
+                position_side = current_signal_sign
+                entry_price = close[i]
+                entry_bar = i
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
-            elif np.sign(new_signal) != position_side:
+            elif current_signal_sign != position_side:
                 # Reversing position
-                position_side = np.sign(new_signal)
+                position_side = current_signal_sign
+                entry_price = close[i]
+                entry_bar = i
                 highest_close = close[i] if position_side > 0 else 0.0
                 lowest_close = close[i] if position_side < 0 else 0.0
             # else: maintaining same position direction, update extremes
@@ -248,6 +297,8 @@ def generate_signals(prices):
             if in_position:
                 in_position = False
                 position_side = 0
+                entry_price = 0.0
+                entry_bar = 0
                 highest_close = 0.0
                 lowest_close = 0.0
         
