@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #005: 12h Regime-Adaptive Donchian + 1d HMA Trend Filter
-Hypothesis: 12h timeframe captures multi-day swings without excessive noise.
-Donchian breakouts work well in trending regimes (ADX>25), Bollinger mean-reversion in ranging (ADX<20).
-1d HMA provides HTF trend bias to avoid counter-trend breakouts that fail in strong trends.
-Key innovation: Regime-switching logic adapts to market conditions (trend vs range).
+Experiment #010: 4h Donchian Breakout + 1d HMA Trend + Volume Confirmation
+Hypothesis: 4h timeframe captures multi-day swings with less noise than 15m/30m/1h.
+Donchian breakouts work in trending regimes (ADX>25), Bollinger mean-reversion in ranging (ADX<20).
+1d HMA provides strong HTF trend bias - only take breakouts in direction of 1d trend.
+Volume confirmation filters false breakouts (volume > 1.5*MA20).
+Key innovation: Combines breakout momentum with HTF trend + volume filter to reduce whipsaws.
 Position sizing: 0.25 base, 0.35 max for strong signals, discrete levels to minimize fee churn.
 Stoploss: 2.5*ATR trailing stop to limit drawdown during 2022-style crashes.
-Timeframe: 12h (REQUIRED), HTF: 1d via mtf_data helper.
+Timeframe: 4h (REQUIRED), HTF: 1d via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1d_hma_regime_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_1d_hma_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -33,14 +34,12 @@ def calculate_adx(high, low, close, period=14):
     adx = np.zeros(n)
     adx[:] = np.nan
     
-    # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    # Directional Movement
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
     
@@ -53,12 +52,10 @@ def calculate_adx(high, low, close, period=14):
         if low_diff > high_diff and low_diff > 0:
             minus_dm[i] = low_diff
     
-    # Smooth with Wilder's method (EMA with span=period)
     tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    # DI+ and DI-
     di_plus = np.zeros(n)
     di_minus = np.zeros(n)
     
@@ -66,7 +63,6 @@ def calculate_adx(high, low, close, period=14):
     di_plus[mask] = 100 * plus_dm_smooth[mask] / tr_smooth[mask]
     di_minus[mask] = 100 * minus_dm_smooth[mask] / tr_smooth[mask]
     
-    # DX and ADX
     dx = np.zeros(n)
     mask2 = (di_plus + di_minus) > 0
     dx[mask2] = 100 * np.abs(di_plus[mask2] - di_minus[mask2]) / (di_plus[mask2] + di_minus[mask2])
@@ -134,10 +130,17 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average."""
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_ma
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -149,12 +152,13 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     atr = calculate_atr(high, low, close, 14)
     adx = calculate_adx(high, low, close, 14)
     donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     bb_upper, bb_lower, bb_bandwidth, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
     rsi = calculate_rsi(close, 14)
+    vol_ma = calculate_volume_ma(volume, 20)
     
     # Additional trend filters
     ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
@@ -189,18 +193,21 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # 1d trend bias (HTF)
+        # 1d trend bias (HTF) - STRONG FILTER
         bull_trend = close[i] > hma_1d_aligned[i]
         bear_trend = close[i] < hma_1d_aligned[i]
         
         # Regime detection via ADX
-        trending_regime = adx[i] > 25  # Strong trend
-        ranging_regime = adx[i] < 20   # Range-bound
-        transition_regime = 20 <= adx[i] <= 25  # Between states
+        trending_regime = adx[i] > 25
+        ranging_regime = adx[i] < 20
+        transition_regime = 20 <= adx[i] <= 25
         
         # Donchian breakout signals
         breakout_long = close[i] > donchian_upper[i - 1] if not np.isnan(donchian_upper[i - 1]) else False
         breakout_short = close[i] < donchian_lower[i - 1] if not np.isnan(donchian_lower[i - 1]) else False
+        
+        # Volume confirmation (volume > 1.5 * 20-period MA)
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
         # Bollinger mean reversion signals
         price_below_lower = close[i] < bb_lower[i] * 1.005
@@ -218,29 +225,34 @@ def generate_signals(prices):
         
         new_signal = 0.0
         
-        # === TRENDING REGIME (ADX > 25): Donchian Breakouts ===
+        # === TRENDING REGIME (ADX > 25): Donchian Breakouts with Volume ===
         if trending_regime:
-            # Long breakout with 1d bull trend confirmation
-            if breakout_long and bull_trend and ema_bullish:
+            # Long breakout with 1d bull trend + volume confirmation
+            if breakout_long and bull_trend and volume_confirmed:
                 new_signal = SIZE_MAX
-            # Short breakout with 1d bear trend confirmation
-            elif breakout_short and bear_trend and ema_bearish:
+            # Short breakout with 1d bear trend + volume confirmation
+            elif breakout_short and bear_trend and volume_confirmed:
                 new_signal = -SIZE_MAX
-            # Weaker breakout with just HTF trend
+            # Breakout with just HTF trend (weaker)
             elif breakout_long and bull_trend:
                 new_signal = SIZE_BASE
             elif breakout_short and bear_trend:
                 new_signal = -SIZE_BASE
+            # Breakout with EMA confirmation only
+            elif breakout_long and ema_bullish:
+                new_signal = SIZE_BASE
+            elif breakout_short and ema_bearish:
+                new_signal = -SIZE_BASE
         
         # === RANGING REGIME (ADX < 20): Bollinger Mean Reversion ===
         elif ranging_regime:
-            # Long at lower BB with RSI oversold
+            # Long at lower BB with RSI oversold + 1d bull trend
             if price_below_lower and rsi_oversold and bull_trend:
                 new_signal = SIZE_BASE
-            # Short at upper BB with RSI overbought
+            # Short at upper BB with RSI overbought + 1d bear trend
             elif price_above_upper and rsi_overbought and bear_trend:
                 new_signal = -SIZE_BASE
-            # Extreme mean reversion (stronger signal)
+            # Extreme mean reversion (stronger signal, ignore trend)
             elif price_below_lower and rsi_extreme_oversold:
                 new_signal = SIZE_BASE
             elif price_above_upper and rsi_extreme_overbought:
@@ -248,47 +260,40 @@ def generate_signals(prices):
         
         # === TRANSITION REGIME (20 <= ADX <= 25): Conservative ===
         elif transition_regime:
-            # Only take strongest signals
-            if breakout_long and bull_trend and rsi_oversold:
+            # Only take strongest signals with multiple confirmations
+            if breakout_long and bull_trend and rsi_oversold and volume_confirmed:
                 new_signal = SIZE_BASE
-            elif breakout_short and bear_trend and rsi_overbought:
+            elif breakout_short and bear_trend and rsi_overbought and volume_confirmed:
                 new_signal = -SIZE_BASE
         
         # === STOPLOSS LOGIC (Rule 6) ===
         # Long position stoploss
         if position_side > 0 and entry_price > 0:
-            # Update highest close for trailing
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR)
             current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
-            # Check stoploss hit
             if close[i] < trailing_stop:
                 new_signal = 0.0
         
         # Short position stoploss
         if position_side < 0 and entry_price > 0:
-            # Update lowest close for trailing
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.5*ATR)
             current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
-            # Check stoploss hit
             if close[i] > trailing_stop:
                 new_signal = 0.0
         
         # Update position tracking AFTER signal calculation
         prev_signal = signals[i - 1] if i > 0 else 0.0
         
-        # New position opened
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
@@ -296,7 +301,6 @@ def generate_signals(prices):
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
-        # Position reversed
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
@@ -304,7 +308,6 @@ def generate_signals(prices):
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
-        # Position closed
         elif new_signal == 0.0 and prev_signal != 0.0:
             position_side = 0
             entry_price = 0.0
