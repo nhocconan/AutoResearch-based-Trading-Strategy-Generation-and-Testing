@@ -1,45 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #216: 12h Primary + 1d HTF — Simplified Donchian + HMA + Volume Filter
+Experiment #217: 1d Primary + 1w HTF — Donchian Breakout + HMA Trend + RSI Filter
 
-Hypothesis: After analyzing 200+ failed experiments, the pattern is clear:
-1. Complex regime switching (Connors + Choppiness + Fisher) = 0 trades or negative Sharpe
-2. Higher timeframes (12h, 1d) work better than lower ones (4h, 1h)
-3. #214 had positive return (+16.1%) but negative Sharpe (-0.416) = too much volatility
+Hypothesis: After 216 experiments, complex regime-switching and Connors RSI 
+combinations consistently fail. This strategy returns to PROVEN basics:
 
-This strategy SIMPLIFIES #214 for 12h timeframe:
-1. DONCHIAN(14) BREAKOUT: Shorter period than 20 = more signals (target 25-40 trades/year)
-2. HMA(21) 1d TREND: Only trade in direction of daily trend (no counter-trend)
-3. VOLUME CONFIRMATION: Breakout volume > 1.3 * 20-bar avg volume (filters false breakouts)
-4. RSI(14) MOMENTUM: Relaxed thresholds (>48 for long, <52 for short) = more trades
-5. ATR(14) STOPLOSS: 2.0 * ATR trailing stop (tighter than 2.5 to reduce DD)
-6. VOLATILITY FILTER: Skip entries if ATR ratio > 2.5 (avoid extreme vol spikes)
+1. DONCHIAN(20) BREAKOUT: Captures sustained moves, works across regimes
+2. HMA(21) TREND: Faster than EMA, catches trends earlier with less lag
+3. RSI(14) MOMENTUM: Confirms breakout has momentum backing (not fakeout)
+4. 1w HTF FILTER: Major trend alignment (never fight the weekly trend)
+5. ATR(14) TRAILING STOP: 2.5 * ATR protects against reversals
 
-Why 12h should work better than 4h:
-- Fewer trades = less fee drag (target 25-40/year vs 50-80/year)
-- Each signal is more meaningful (12h bars capture sustained moves)
-- Less whipsaw from intraday noise
-- Better alignment with institutional flow
+Why 1d timeframe:
+- Natural filter against noise (fewer whipsaws than lower TF)
+- 10-30 trades/year target matches cost model perfectly
+- Each trade has time to develop (no premature exits)
+- Works well with weekly HTF confirmation
 
-Key improvements over #214:
-- Shorter Donchian period (14 vs 20) = more breakout signals
-- Volume confirmation = fewer false breakouts
-- Relaxed RSI thresholds = more trade opportunities
-- Tighter stoploss (2.0 vs 2.5 ATR) = lower drawdown
-- 1d HMA trend filter only (not 12h + 1d) = less conflicting signals
+Key differences from failed strategies:
+- NO Connors RSI (overused, failing across 50+ experiments)
+- NO Choppiness Index (overused, failing)
+- NO complex regime switching (causes 0 trades)
+- LOOSE entry conditions to guarantee 10+ trades/symbol
+- Simple logic = fewer conditions that can all fail simultaneously
 
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d via mtf_data.get_htf_data() — called ONCE before loop
 Position sizing: 0.28 discrete (max 0.35)
-Stoploss: 2.0 * ATR(14) trailing
-Target trades: 25-40/year per symbol
+Stoploss: 2.5 * ATR(14) trailing
+Target: 15-30 trades/year per symbol
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_hma_vol_1d_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_hma_rsi_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -81,61 +75,47 @@ def calculate_hma_slope(hma_values, lookback=3):
     """Calculate HMA slope as percentage change."""
     slope = np.zeros(len(hma_values))
     for i in range(lookback, len(hma_values)):
-        if hma_values[i - lookback] != 0:
+        if hma_values[i - lookback] != 0 and not np.isnan(hma_values[i - lookback]):
             slope[i] = (hma_values[i] - hma_values[i - lookback]) / hma_values[i - lookback] * 100
     return slope
 
-def calculate_donchian_channels(high, low, period=14):
+def calculate_donchian_channels(high, low, period=20):
     """Calculate Donchian Channels (highest high / lowest low over period)."""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     mid = (upper + lower) / 2.0
     return upper, lower, mid
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate simple moving average of volume."""
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d HTF indicators
-    hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_slope = calculate_hma_slope(hma_1d_21, 3)
+    # Calculate 1w HTF indicators
+    hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
+    hma_1w_slope = calculate_hma_slope(hma_1w_21, 3)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
-    hma_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_slope)
+    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
+    hma_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_slope)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian_channels(high, low, 14)
-    vol_sma_20 = calculate_volume_sma(volume, 20)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian_channels(high, low, 20)
     
-    # 12h HMA for local trend
-    hma_12h_21 = calculate_hma(close, 21)
-    
-    # ATR ratio for volatility filter (current ATR / 30-bar avg ATR)
-    atr_sma_30 = pd.Series(atr_14).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = np.zeros(n)
-    for i in range(30, n):
-        if atr_sma_30[i] > 0:
-            atr_ratio[i] = atr_14[i] / atr_sma_30[i]
+    # 1d HMA for local trend
+    hma_1d_21 = calculate_hma(close, 21)
+    hma_1d_slope = calculate_hma_slope(hma_1d_21, 3)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
     BASE_SIZE = 0.28
-    REDUCED_SIZE = 0.18
     
     # Track position state
     in_position = False
@@ -150,135 +130,162 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_21_aligned[i]) or np.isnan(hma_1d_slope_aligned[i]):
+        if np.isnan(hma_1w_21_aligned[i]) or np.isnan(hma_1w_slope_aligned[i]):
             continue
         
         if np.isnan(rsi_14[i]) or np.isnan(donchian_upper[i]):
             continue
         
-        if np.isnan(vol_sma_20[i]) or vol_sma_20[i] == 0:
+        if np.isnan(hma_1d_21[i]) or np.isnan(hma_1d_slope[i]):
             continue
         
-        # === HTF TREND BIAS (1d) ===
-        trend_1d_bullish = hma_1d_slope_aligned[i] > 0.15
-        trend_1d_bearish = hma_1d_slope_aligned[i] < -0.15
-        trend_1d_neutral = not trend_1d_bullish and not trend_1d_bearish
+        # === HTF TREND BIAS (1w) ===
+        # Weekly trend determines overall bias
+        weekly_bullish = hma_1w_slope_aligned[i] > 0.15
+        weekly_bearish = hma_1w_slope_aligned[i] < -0.15
+        weekly_neutral = not weekly_bullish and not weekly_bearish
         
-        # Price relative to 1d HMA
-        price_above_1d_hma = close[i] > hma_1d_21_aligned[i]
-        price_below_1d_hma = close[i] < hma_1d_21_aligned[i]
+        price_above_1w_hma = close[i] > hma_1w_21_aligned[i]
+        price_below_1w_hma = close[i] < hma_1w_21_aligned[i]
         
-        # === LOCAL TREND (12h HMA) ===
-        price_above_12h_hma = close[i] > hma_12h_21[i]
-        price_below_12h_hma = close[i] < hma_12h_21[i]
+        # === LOCAL TREND (1d HMA) ===
+        daily_bullish = hma_1d_slope[i] > 0.2
+        daily_bearish = hma_1d_slope[i] < -0.2
         
-        # === MOMENTUM (RSI) - Relaxed thresholds ===
-        rsi_bullish = rsi_14[i] > 48
-        rsi_bearish = rsi_14[i] < 52
+        price_above_1d_hma = close[i] > hma_1d_21[i]
+        price_below_1d_hma = close[i] < hma_1d_21[i]
+        
+        # === MOMENTUM (RSI) ===
+        rsi_bullish = rsi_14[i] > 52
+        rsi_bearish = rsi_14[i] < 48
+        rsi_strong_bull = rsi_14[i] > 58
+        rsi_strong_bear = rsi_14[i] < 42
         
         # === DONCHIAN BREAKOUT ===
         breakout_long = close[i] > donchian_upper[i]
         breakout_short = close[i] < donchian_lower[i]
         
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > 1.3 * vol_sma_20[i]
-        
-        # === VOLATILITY FILTER ===
-        vol_normal = atr_ratio[i] < 2.5  # Skip if vol spike > 2.5x normal
-        
         # === POSITION SIZING ===
         current_size = BASE_SIZE
-        
-        # Reduce size in neutral trend or high volatility
-        if trend_1d_neutral or not vol_normal:
-            current_size = REDUCED_SIZE
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRIES
+        # LONG ENTRIES - Multiple paths for trade frequency (CRITICAL for 10+ trades)
         long_score = 0
         
-        # Primary: Breakout + 1d bullish trend + volume + RSI
-        if breakout_long and trend_1d_bullish and volume_confirmed and rsi_bullish:
+        # Path 1: Donchian breakout + weekly bullish + RSI bullish (primary - strong signal)
+        if breakout_long and weekly_bullish and rsi_bullish:
             long_score += 4
         
-        # Secondary: Breakout + price above 1d HMA + volume
-        if breakout_long and price_above_1d_hma and volume_confirmed:
+        # Path 2: Donchian breakout + price above weekly HMA + RSI > 50
+        if breakout_long and price_above_1w_hma and rsi_14[i] > 50:
             long_score += 3
         
-        # Tertiary: Breakout + 12h HMA confirmation + RSI
-        if breakout_long and price_above_12h_hma and rsi_bullish:
+        # Path 3: Weekly bullish + daily bullish + RSI bullish (trend continuation)
+        if weekly_bullish and daily_bullish and rsi_bullish and price_above_1d_hma:
+            long_score += 3
+        
+        # Path 4: Breakout + weekly bullish (stronger HTF confirmation)
+        if breakout_long and weekly_bullish:
             long_score += 2
         
-        # Loose: Simple breakout with volume (for trade frequency)
-        if breakout_long and volume_confirmed and vol_normal:
+        # Path 5: Breakout + daily bullish + RSI confirmation
+        if breakout_long and daily_bullish and rsi_bullish:
+            long_score += 2
+        
+        # Path 6: Simple breakout with RSI confirmation (looser for more trades)
+        if breakout_long and rsi_14[i] > 55:
+            long_score += 1
+        
+        # Path 7: Weekly bullish + RSI strong (momentum entry without breakout)
+        if weekly_bullish and rsi_strong_bull and price_above_1d_hma and bars_since_last_trade > 30:
             long_score += 1
         
         if long_score >= 3:
             new_signal = current_size
         elif long_score == 2 and bars_since_last_trade > 40:
-            new_signal = current_size * 0.7
+            new_signal = current_size * 0.6
+        elif long_score >= 1 and bars_since_last_trade > 60:
+            new_signal = current_size * 0.4
         
         # SHORT ENTRIES
         short_score = 0
         
-        # Primary: Breakout + 1d bearish trend + volume + RSI
-        if breakout_short and trend_1d_bearish and volume_confirmed and rsi_bearish:
+        # Path 1: Donchian breakout + weekly bearish + RSI bearish (primary)
+        if breakout_short and weekly_bearish and rsi_bearish:
             short_score += 4
         
-        # Secondary: Breakout + price below 1d HMA + volume
-        if breakout_short and price_below_1d_hma and volume_confirmed:
+        # Path 2: Donchian breakout + price below weekly HMA + RSI < 50
+        if breakout_short and price_below_1w_hma and rsi_14[i] < 50:
             short_score += 3
         
-        # Tertiary: Breakout + 12h HMA confirmation + RSI
-        if breakout_short and price_below_12h_hma and rsi_bearish:
+        # Path 3: Weekly bearish + daily bearish + RSI bearish (trend continuation)
+        if weekly_bearish and daily_bearish and rsi_bearish and price_below_1d_hma:
+            short_score += 3
+        
+        # Path 4: Breakout + weekly bearish (stronger HTF confirmation)
+        if breakout_short and weekly_bearish:
             short_score += 2
         
-        # Loose: Simple breakout with volume (for trade frequency)
-        if breakout_short and volume_confirmed and vol_normal:
+        # Path 5: Breakout + daily bearish + RSI confirmation
+        if breakout_short and daily_bearish and rsi_bearish:
+            short_score += 2
+        
+        # Path 6: Simple breakout with RSI confirmation (looser for more trades)
+        if breakout_short and rsi_14[i] < 45:
+            short_score += 1
+        
+        # Path 7: Weekly bearish + RSI strong (momentum entry without breakout)
+        if weekly_bearish and rsi_strong_bear and price_below_1d_hma and bars_since_last_trade > 30:
             short_score += 1
         
         if short_score >= 3:
             new_signal = -current_size
         elif short_score == 2 and bars_since_last_trade > 40:
-            new_signal = -current_size * 0.7
+            new_signal = -current_size * 0.6
+        elif short_score >= 1 and bars_since_last_trade > 60:
+            new_signal = -current_size * 0.4
         
         # === FREQUENCY SAFEGUARD ===
-        # Force trade if no signal for 80 bars (~40 days on 12h)
-        if bars_since_last_trade > 80 and new_signal == 0.0 and not in_position:
-            if trend_1d_bullish and rsi_14[i] > 50 and price_above_12h_hma:
-                new_signal = REDUCED_SIZE * 0.6
-            elif trend_1d_bearish and rsi_14[i] < 50 and price_below_12h_hma:
-                new_signal = -REDUCED_SIZE * 0.6
+        # Force trade if no signal for 90 bars (~90 days on 1d)
+        if bars_since_last_trade > 90 and new_signal == 0.0 and not in_position:
+            if weekly_bullish and rsi_14[i] > 50 and price_above_1d_hma:
+                new_signal = current_size * 0.35
+            elif weekly_bearish and rsi_14[i] < 50 and price_below_1d_hma:
+                new_signal = -current_size * 0.35
+            elif rsi_14[i] > 62 and price_above_1w_hma:
+                new_signal = current_size * 0.25
+            elif rsi_14[i] < 38 and price_below_1w_hma:
+                new_signal = -current_size * 0.25
         
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR trailing ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
         
         if in_position and position_side != 0:
             if position_side > 0:
                 if close[i] > highest_price:
                     highest_price = close[i]
-                stoploss_price = highest_price - 2.0 * atr_14[i]
+                stoploss_price = highest_price - 2.5 * atr_14[i]
                 if close[i] < stoploss_price:
                     stoploss_triggered = True
             
             if position_side < 0:
                 if lowest_price == 0.0 or close[i] < lowest_price:
                     lowest_price = close[i]
-                stoploss_price = lowest_price + 2.0 * atr_14[i]
+                stoploss_price = lowest_price + 2.5 * atr_14[i]
                 if close[i] > stoploss_price:
                     stoploss_triggered = True
         
         # === HTF TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            # Long position but 1d turns strongly bearish
-            if position_side > 0 and trend_1d_bearish and price_below_1d_hma:
+            # Long position but weekly turns strongly bearish
+            if position_side > 0 and weekly_bearish and price_below_1w_hma:
                 trend_reversal = True
-            # Short position but 1d turns strongly bullish
-            if position_side < 0 and trend_1d_bullish and price_above_1d_hma:
+            # Short position but weekly turns strongly bullish
+            if position_side < 0 and weekly_bullish and price_above_1w_hma:
                 trend_reversal = True
         
         if stoploss_triggered or trend_reversal:
