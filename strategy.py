@@ -1,38 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #430: 4h Fisher Transform + BB Width Regime + 1d/1w HMA Trend Filter
+Experiment #431: 12h Dual HMA Trend + Donchian Breakout + Volume Confirmation
 
-Hypothesis: After 429 failed experiments, the pattern is clear - complex multi-condition
-strategies with too many filters generate 0 trades or fail on BTC/ETH. The key insight:
+Hypothesis: After analyzing 430+ failed experiments, the pattern is clear:
+- Complex regime filters (Choppiness, Fisher, BB Squeeze) FAIL on 12h
+- Mean reversion strategies FAIL in 2025 bear market
+- 12h needs SIMPLE trend-following with STRONG HTF confirmation
 
-1. FISHER TRANSFORM (Ehlers): Superior to RSI for catching reversals in bear/range markets.
-   Fisher normalizes price to Gaussian distribution, making extremes (-2 to +2) meaningful.
-   Long when Fisher crosses above -1.5 from below (oversold reversal).
-   Short when Fisher crosses below +1.5 from above (overbought reversal).
+This strategy uses:
+1. 1d HMA(21) for primary trend bias (long only above, short only below)
+2. 1w HMA(21) for major trend confirmation (avoids counter-trend in major bear)
+3. 12h Donchian(15) breakout for entry (faster than Donchian(20) for more trades)
+4. Volume confirmation (1.3x 20-bar average) to filter false breakouts
+5. ATR(14) 2.5x trailing stop for risk management
+6. Position sizing: 0.25 discrete (conservative for 12h volatility)
 
-2. BB WIDTH PERCENTILE REGIME: Instead of absolute BB width, use percentile over 100 bars.
-   BB Width %ile < 40 = compression (expect breakout/reversal soon).
-   This adapts to changing volatility regimes automatically.
+Why this should work on 12h:
+- Fewer whipsaws than 4h (12h closes are more significant)
+- Donchian breakout captures sustained trends, not noise
+- Dual HMA (1d + 1w) provides strong trend filter
+- Volume confirmation reduces false breakouts
+- Should generate 20-40 trades/year (meets min 10 trades requirement)
 
-3. MTF HMA TREND FILTER: 1d HMA for intermediate trend, 1w HMA for macro bias.
-   Long only when price > 1d HMA (bullish intermediate trend).
-   Short only when price < 1d HMA (bearish intermediate trend).
-   Extra confirmation: 1d HMA > 1w HMA for longs, 1d HMA < 1w HMA for shorts.
-
-4. VOLATILITY CONFIRMATION: ATR(14) > ATR(14).shift(5) ensures expanding vol on entry.
-   Avoids entering during dead/low-vol periods where signals whipsaw.
-
-5. POSITION SIZING: 0.25 discrete (conservative for 4h volatility).
-   Stoploss: 2.5 * ATR(14) trailing stop.
-
-Why this should work:
-- Fisher Transform catches reversals better than RSI (proven in literature)
-- BB Width %ile adapts to vol regime without fixed thresholds
-- 1d/1w HMA alignment prevents counter-trend trades that failed in 2022
-- Should generate 30-60 trades/year on 4h (enough for statistical significance)
-- Works on BTC/ETH/SOL individually (not SOL-biased)
-
-Timeframe: 4h (REQUIRED for this experiment)
+Timeframe: 12h (REQUIRED)
 HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
 Position sizing: 0.25 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
@@ -41,8 +31,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_fisher_bbwidth_1d_1w_hma_regime_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_dual_hma_donchian_vol_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -65,79 +55,29 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_fisher_transform(high, low, period=9):
-    """
-    Calculate Ehlers Fisher Transform.
-    Converts price to Gaussian-normalized values (-2 to +2 typical range).
-    Crossovers at extremes signal reversals.
-    """
+def calculate_donchian(high, low, period=15):
+    """Calculate Donchian Channel (highest high, lowest low over period)."""
     n = len(high)
-    fisher = np.full(n, np.nan)
-    trigger = np.full(n, np.nan)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
     for i in range(period - 1, n):
-        # Calculate typical price
-        hl2 = (high[i-period+1:i+1].max() + low[i-period+1:i+1].min()) / 2.0
-        
-        # Normalize to 0-1 range
-        highest = high[i-period+1:i+1].max()
-        lowest = low[i-period+1:i+1].min()
-        
-        if highest > lowest:
-            price_ratio = (hl2 - lowest) / (highest - lowest)
-        else:
-            price_ratio = 0.5
-        
-        # Clamp to avoid division issues
-        price_ratio = np.clip(price_ratio, 0.001, 0.999)
-        
-        # Fisher transform
-        fisher_val = 0.5 * np.log((1 + price_ratio) / (1 - price_ratio))
-        
-        # Smooth fisher
-        if i == period - 1:
-            fisher[i] = fisher_val
-        else:
-            fisher[i] = 0.67 * fisher_val + 0.33 * fisher[i-1]
-        
-        # Trigger line (1-period lag)
-        if i > period - 1:
-            trigger[i] = fisher[i-1]
+        upper[i] = high[i-period+1:i+1].max()
+        lower[i] = low[i-period+1:i+1].min()
     
-    return fisher, trigger
+    return upper, lower
 
-def calculate_bb_width(close, high, low, period=20, std_mult=2.0):
-    """Calculate Bollinger Band Width as (Upper - Lower) / Middle."""
-    close_s = pd.Series(close)
-    middle = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
-    
-    bb_width = (upper - lower) / middle
-    
-    return bb_width.values
-
-def calculate_bb_width_percentile(bb_width, lookback=100):
-    """Calculate BB Width percentile rank over lookback period."""
-    n = len(bb_width)
-    percentile = np.full(n, np.nan)
-    
-    for i in range(lookback - 1, n):
-        window = bb_width[i-lookback+1:i+1]
-        valid = window[~np.isnan(window)]
-        if len(valid) > 0:
-            # Percentile rank: what % of values are below current
-            rank = np.sum(valid < bb_width[i]) / len(valid)
-            percentile[i] = rank * 100.0
-    
-    return percentile
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average."""
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -152,11 +92,10 @@ def generate_signals(prices):
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
-    fisher, trigger = calculate_fisher_transform(high, low, 9)
-    bb_width = calculate_bb_width(close, high, low, 20, 2.0)
-    bb_width_pct = calculate_bb_width_percentile(bb_width, 100)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 15)
+    vol_ma = calculate_volume_ma(volume, 20)
     
     signals = np.zeros(n)
     
@@ -180,52 +119,44 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(trigger[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_width_pct[i]):
+        if np.isnan(vol_ma[i]) or vol_ma[i] == 0:
             signals[i] = 0.0
             continue
         
-        # === BB WIDTH REGIME (Volatility Compression) ===
-        # Low percentile = compression = expect move soon
-        vol_compression = bb_width_pct[i] < 40.0
-        
-        # === 1d/1w HMA TREND FILTER ===
+        # === 1d HMA TREND BIAS ===
         bull_trend_1d = close[i] > hma_1d_aligned[i]
         bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        bull_trend_1w = hma_1d_aligned[i] > hma_1w_aligned[i]
-        bear_trend_1w = hma_1d_aligned[i] < hma_1w_aligned[i]
+        # === 1w HMA MAJOR TREND CONFIRMATION ===
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
         
-        # === FISHER TRANSFORM SIGNALS ===
-        # Long: Fisher crosses above -1.5 from below (oversold reversal)
-        fisher_long = (fisher[i] > -1.5) and (trigger[i] <= -1.5)
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        # Break above previous bar's Donchian upper
+        donchian_long = close[i] > donchian_upper[i-1]
+        # Break below previous bar's Donchian lower
+        donchian_short = close[i] < donchian_lower[i-1]
         
-        # Short: Fisher crosses below +1.5 from above (overbought reversal)
-        fisher_short = (fisher[i] < 1.5) and (trigger[i] >= 1.5)
-        
-        # === VOLATILITY EXPANSION CONFIRMATION ===
-        # ATR should be expanding (not in dead market)
-        if i >= 5:
-            vol_expanding = atr[i] > atr[i-5]
-        else:
-            vol_expanding = True
+        # === VOLUME CONFIRMATION ===
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # LONG ENTRY: Fisher long + bull trend + vol compression + vol expanding
-        if fisher_long and bull_trend_1d and vol_compression and vol_expanding:
-            # Extra confirmation: 1d HMA above 1w HMA (aligned bullish)
-            if bull_trend_1w:
+        # LONG: 1d bullish + (1w bullish OR neutral) + Donchian breakout + Volume
+        if bull_trend_1d and donchian_long and vol_confirm:
+            # Extra confirmation: 1w should not be strongly bearish
+            if bull_trend_1w or (hma_1w_aligned[i] > 0):
                 new_signal = SIZE
         
-        # SHORT ENTRY: Fisher short + bear trend + vol compression + vol expanding
-        if fisher_short and bear_trend_1d and vol_compression and vol_expanding:
-            # Extra confirmation: 1d HMA below 1w HMA (aligned bearish)
-            if bear_trend_1w:
+        # SHORT: 1d bearish + (1w bearish OR neutral) + Donchian breakout + Volume
+        elif bear_trend_1d and donchian_short and vol_confirm:
+            # Extra confirmation: 1w should not be strongly bullish
+            if bear_trend_1w or (hma_1w_aligned[i] < 0):
                 new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
@@ -247,15 +178,13 @@ def generate_signals(prices):
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit long if price falls below 1d HMA
-        if in_position and position_side > 0 and new_signal != 0.0:
-            if bear_trend_1d:
-                new_signal = 0.0
+        # Exit long if 1d trend turns bearish
+        if in_position and position_side > 0 and bear_trend_1d:
+            new_signal = 0.0
         
-        # Exit short if price rises above 1d HMA
-        if in_position and position_side < 0 and new_signal != 0.0:
-            if bull_trend_1d:
-                new_signal = 0.0
+        # Exit short if 1d trend turns bullish
+        if in_position and position_side < 0 and bull_trend_1d:
+            new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
