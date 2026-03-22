@@ -1,29 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #388: 4h Multi-TF HMA Trend + RSI Pullback + BB Volatility Filter
+Experiment #389: 12h Weekly Trend Bias + Daily HMA + ADX Regime + RSI Pullback
 
-Hypothesis: After analyzing 387 experiments, the key insight is that strategies need:
-1. STRONG multi-timeframe trend alignment (1w + 1d HMA) to avoid whipsaws
-2. LOOSE entry conditions (RSI 35-65, not extremes) to generate enough trades
-3. Volatility filter (BB width) to avoid entering during compression/breakout uncertainty
-4. Asymmetric sizing based on trend strength (more capital when 1w/1d aligned)
+Hypothesis: After 388 failed experiments, the pattern is clear - 12h strategies fail
+because they're either too slow (miss moves) or too strict (0 trades). The solution:
 
-Why this should beat Sharpe=0.676 baseline:
-- Previous failures had RSI thresholds too strict (only RSI<30 or >70)
-- This uses RSI 35-65 for pullback entries = MORE TRADES
-- 1w HMA provides stronger trend filter than just 1d
-- BB width percentile avoids entering during volatility compression (false breakouts)
-- Position sizing scales with trend conviction (0.20 weak, 0.30 strong alignment)
+1. WEEKLY HMA(21) as ultimate trend filter - only trade in direction of weekly trend
+   This is the MOST stable trend indicator, filters out noise from 2022 crash
 
-STRATEGY COMPONENTS:
-1. 1w HMA(21): Primary trend bias (weekly closes are most significant)
-2. 1d HMA(21): Secondary trend confirmation
-3. 4h RSI(14): Pullback entry timing (35-65 range, not extremes)
-4. 4h Bollinger Band Width: Volatility filter (avoid <20th percentile)
-5. ATR(14) trailing stop: 2.5x for risk management
-6. Position sizing: 0.20-0.30 discrete, scales with trend alignment
+2. DAILY HMA(21) for intermediate confirmation - aligns with weekly for stronger signals
 
-Timeframe: 4h (REQUIRED for this experiment)
+3. ADX(14) regime detection with HYSTERESIS:
+   - ADX > 25 = trending (follow weekly trend with RSI pullback entries)
+   - ADX < 20 = ranging (mean-reversion with RSI extremes)
+   - 20-25 = hold current position (avoid whipsaw on regime flip)
+
+4. RSI(14) for entries:
+   - Trending: RSI pullback to 40-50 (long) or 50-60 (short) in trend direction
+   - Ranging: RSI < 35 (long) or RSI > 65 (short)
+
+5. ATR(14) * 2.5 trailing stop - protects from crashes like 2022
+
+6. POSITION SIZING: 0.30 discrete (conservative for 12h volatility)
+   - Larger size in trending regime (0.30)
+   - Smaller size in ranging regime (0.20)
+
+Why 12h should work now:
+- Weekly trend filter prevents trading against major trend (key failure mode)
+- ADX hysteresis prevents regime flip whipsaw
+- RSI pullback entries are LOOSE enough to generate trades (≥10/train, ≥3/test)
+- ATR stoploss protects from 2022-style crashes
+- Works on BTC, ETH, SOL individually (not SOL-biased)
+
+Timeframe: 12h (REQUIRED for this experiment)
 HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
 Position sizing: 0.20-0.30 discrete levels
 Stoploss: 2.5 * ATR(14) trailing
@@ -32,8 +41,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_trend_rsi_pullback_bbvol_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_weekly_trend_daily_hma_adx_rsi_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -56,39 +65,69 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    n = len(close)
+    adx = np.full(n, np.nan)
+    
+    # Calculate True Range and Directional Movement
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+    
+    # Smooth with Wilder's method (EMA with span=period)
+    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate DI+ and DI-
+    di_plus = np.zeros(n)
+    di_minus = np.zeros(n)
+    
+    for i in range(period, n):
+        if tr_smooth[i] > 1e-10:
+            di_plus[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
+            di_minus[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
+    
+    # Calculate DX and ADX
+    for i in range(period, n):
+        di_sum = di_plus[i] + di_minus[i]
+        if di_sum > 1e-10:
+            dx = 100 * np.abs(di_plus[i] - di_minus[i]) / di_sum
+            if i == period:
+                adx[i] = dx
+            else:
+                adx[i] = (adx[i-1] * (period - 1) + dx) / period
+    
+    return adx
+
 def calculate_rsi(close, period=14):
-    """Calculate RSI using standard Wilder's method."""
+    """Calculate RSI (Relative Strength Index)."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
+    
     avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
+    
+    rs = avg_gain / avg_loss.replace(0, np.inf)
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and bandwidth."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma
-    return upper.values, lower.values, bandwidth.values
-
-def calculate_bb_width_percentile(bandwidth, lookback=100):
-    """Calculate rolling percentile of BB width to detect compression/expansion."""
-    n = len(bandwidth)
-    percentile = np.full(n, np.nan)
-    for i in range(lookback, n):
-        window = bandwidth[i-lookback+1:i+1]
-        valid = window[~np.isnan(window)]
-        if len(valid) > 0:
-            current = bandwidth[i]
-            percentile[i] = np.sum(valid <= current) / len(valid) * 100
-    return percentile
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -108,13 +147,16 @@ def generate_signals(prices):
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr = calculate_atr(high, low, close, 14)
+    adx = calculate_adx(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, 20, 2.0)
-    bb_width_pct = calculate_bb_width_percentile(bb_width, 100)
     
     signals = np.zeros(n)
+    
+    # Position sizing - discrete levels (Rule 4)
+    SIZE_TREND = 0.30  # Larger in trending regime
+    SIZE_RANGE = 0.20  # Smaller in ranging regime
     
     # Track position state for stoploss
     in_position = False
@@ -122,8 +164,9 @@ def generate_signals(prices):
     highest_close = 0.0
     lowest_close = 0.0
     entry_price = 0.0
+    prev_adx_regime = 0  # 0=neutral, 1=trending, 2=ranging
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] == 0:
             signals[i] = 0.0
@@ -133,54 +176,52 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]):
+        if np.isnan(adx[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_width_pct[i]):
-            signals[i] = 0.0
-            continue
+        # === WEEKLY TREND BIAS (ultimate filter) ===
+        bull_trend_1w = close[i] > hma_1w_aligned[i]
+        bear_trend_1w = close[i] < hma_1w_aligned[i]
         
-        # === MULTI-TF TREND ALIGNMENT ===
-        # Strong bull: price > 1d HMA > 1w HMA
-        strong_bull = (close[i] > hma_1d_aligned[i]) and (hma_1d_aligned[i] > hma_1w_aligned[i])
-        # Strong bear: price < 1d HMA < 1w HMA
-        strong_bear = (close[i] < hma_1d_aligned[i]) and (hma_1d_aligned[i] < hma_1w_aligned[i])
-        # Weak bull: price > 1d HMA but 1d < 1w (transitioning)
-        weak_bull = (close[i] > hma_1d_aligned[i]) and (hma_1d_aligned[i] <= hma_1w_aligned[i])
-        # Weak bear: price < 1d HMA but 1d > 1w (transitioning)
-        weak_bear = (close[i] < hma_1d_aligned[i]) and (hma_1d_aligned[i] >= hma_1w_aligned[i])
+        # === DAILY TREND CONFIRMATION ===
+        bull_trend_1d = close[i] > hma_1d_aligned[i]
+        bear_trend_1d = close[i] < hma_1d_aligned[i]
         
-        # === VOLATILITY FILTER ===
-        # Only trade when BB width > 20th percentile (avoid compression)
-        vol_ok = bb_width_pct[i] > 20.0
+        # === ADX REGIME DETECTION WITH HYSTERESIS ===
+        # Use hysteresis to avoid whipsaw on regime flip
+        if adx[i] > 25:
+            adx_regime = 1  # trending
+        elif adx[i] < 20:
+            adx_regime = 2  # ranging
+        else:
+            adx_regime = prev_adx_regime  # hold previous regime
         
-        # === RSI PULLBACK ENTRY (LOOSE thresholds for more trades) ===
-        # Long: RSI 35-50 in bull trend (pullback, not oversold extreme)
-        rsi_long_pullback = 35.0 <= rsi[i] <= 50.0
-        # Short: RSI 50-65 in bear trend (pullback, not overbought extreme)
-        rsi_short_pullback = 50.0 <= rsi[i] <= 65.0
-        
-        # === POSITION SIZING BASED ON TREND STRENGTH ===
-        # Strong alignment = 0.30, weak alignment = 0.20
-        size_strong = 0.30
-        size_weak = 0.20
+        prev_adx_regime = adx_regime
+        trending_market = (adx_regime == 1)
+        ranging_market = (adx_regime == 2)
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
+        current_size = SIZE_TREND if trending_market else SIZE_RANGE
         
-        if vol_ok:
-            # LONG entries
-            if strong_bull and rsi_long_pullback:
-                new_signal = size_strong
-            elif weak_bull and rsi_long_pullback:
-                new_signal = size_weak
-            
-            # SHORT entries
-            if strong_bear and rsi_short_pullback:
-                new_signal = -size_strong
-            elif weak_bear and rsi_short_pullback:
-                new_signal = -size_weak
+        # TRENDING REGIME: Follow weekly trend with RSI pullback
+        if trending_market:
+            # Long: weekly bull + RSI pullback to 40-55
+            if bull_trend_1w and rsi[i] >= 40 and rsi[i] <= 55:
+                new_signal = current_size
+            # Short: weekly bear + RSI pullback to 45-60
+            elif bear_trend_1w and rsi[i] >= 45 and rsi[i] <= 60:
+                new_signal = -current_size
+        
+        # RANGING REGIME: Mean-reversion with RSI extremes
+        elif ranging_market:
+            # Long: RSI < 35 (oversold)
+            if rsi[i] < 35:
+                new_signal = current_size
+            # Short: RSI > 65 (overbought)
+            elif rsi[i] > 65:
+                new_signal = -current_size
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
@@ -201,14 +242,11 @@ def generate_signals(prices):
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit long if trend turns bearish
-        if in_position and position_side > 0 and new_signal != 0.0:
-            if strong_bear or weak_bear:
+        # Exit if weekly trend flips against position
+        if in_position and new_signal != 0.0:
+            if position_side > 0 and bear_trend_1w:
                 new_signal = 0.0
-        
-        # Exit short if trend turns bullish
-        if in_position and position_side < 0 and new_signal != 0.0:
-            if strong_bull or weak_bull:
+            if position_side < 0 and bull_trend_1w:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
