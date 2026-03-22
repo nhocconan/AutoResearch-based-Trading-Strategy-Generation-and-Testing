@@ -1,60 +1,62 @@
 #!/usr/bin/env python3
 """
-Experiment #461: 12h Multi-Signal Ensemble with Daily/Weekly Trend Filter
+Experiment #462: 1d Adaptive Trend Following with Weekly Bias
 
-Hypothesis: After 460 failed experiments, the key insight is that 12h strategies
-need to balance trend following with mean reversion. Pure trend strategies fail
-on BTC/ETH whipsaws, pure mean reversion fails on strong trends. This strategy uses:
+Hypothesis: After analyzing 461 experiments, the key insight is that 1d strategies
+need to be SIMPLE with looser entry conditions to ensure sufficient trades, while
+maintaining robust regime detection. Complex ensembles fail due to over-filtering.
+
+This strategy uses:
 
 1. WEEKLY HMA(21) TREND BIAS (via mtf_data helper):
    - Long bias when price > 1w HMA (bull market)
    - Short bias when price < 1w HMA (bear market)
-   - HMA is smoother than EMA, critical for weekly trend
+   - HMA smoother than EMA, critical for weekly trend detection
 
-2. DAILY ADX REGIME FILTER (via mtf_data helper):
-   - ADX > 20 = trending (allow breakout signals)
-   - ADX < 20 = ranging (allow mean reversion signals)
-   - Prevents breakout whipsaws in choppy markets
+2. DAILY KAMA(21) ADAPTIVE TREND:
+   - Kaufman Adaptive Moving Average adjusts to volatility
+   - Fast in trends, slow in chop
+   - Entry: KAMA crosses above price (long) or below price (short)
+   - Must align with weekly HMA bias
 
-3. THREE SIGNAL TYPES (any can trigger - ensures sufficient trades):
-   a) RSI(14) MEAN REVERSION: RSI < 32 (long) or > 68 (short)
-      - Looser than 30/70 to ensure trades on all symbols
-      - Must align with weekly trend bias
-   
-   b) DONCHIAN(10) BREAKOUT: Price breaks 10-bar high/low
-      - Shorter period than 20 to catch more moves on 12h
-      - Only in trending regime (daily ADX > 20)
-   
-   c) Z-SCORE EXTREMES: Z-score(20) < -1.8 (long) or > +1.8 (short)
-      - Captures statistical extremes
-      - Works in any regime
+3. RSI(14) CONFIRMATION (LOOSE THRESHOLDS):
+   - Long: RSI > 40 (not 30, ensures more trades)
+   - Short: RSI < 60 (not 70, ensures more trades)
+   - Prevents entering at extreme overbought/oversold
 
-4. ATR(14) TRAILING STOP at 2.5x:
+4. ADX(14) REGIME FILTER:
+   - ADX > 20 = trending (allow KAMA signals)
+   - ADX < 20 = ranging (reduce position size by half)
+   - Prevents whipsaw losses in choppy markets
+
+5. ATR(14) TRAILING STOP at 2.5x:
    - Signal → 0 when price moves 2.5*ATR against position
-   - Critical for crash protection (2022-style)
+   - Critical for crash protection (2022-style -77% BTC drop)
 
-5. POSITION SIZING: 0.28 discrete
-   - Max 28% capital per position
+6. POSITION SIZING: 0.30 discrete (0.15 in range)
+   - Max 30% capital per position
+   - 15% in ranging markets (ADX < 20)
    - Discrete levels minimize fee churn
 
-Why this should work on 12h:
-- Multiple signal types ensure >10 trades/year per symbol
-- Weekly HMA + Daily ADX provides robust regime detection
-- Looser thresholds than failed experiments (#449, #455)
+Why this should work on 1d:
+- Simpler logic = fewer conditions that can all fail
+- Looser RSI thresholds ensure >10 trades/year per symbol
+- Weekly HMA provides robust trend bias (proven in #461)
+- KAMA adapts to volatility better than EMA/SMA
 - Should work on BTC/ETH/SOL individually (not SOL-biased)
-- 12h timeframe captures swings missed by 4h and 1d
+- 1d timeframe captures major swings, fewer false signals
 
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.28 discrete levels
+Timeframe: 1d (REQUIRED for this experiment)
+HTF: 1w via mtf_data helper (call ONCE before loop)
+Position sizing: 0.30 trending, 0.15 ranging
 Stoploss: 2.5 * ATR(14) trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_ensemble_daily_adx_weekly_hma_rsi_donchian_zscore_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_weekly_hma_rsi_adx_adaptive_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -76,6 +78,37 @@ def calculate_hma(close, period=21):
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts to market volatility - fast in trends, slow in chop.
+    """
+    n = len(close)
+    kama = np.full(n, np.nan)
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        price_change = np.abs(close[i] - close[i - er_period])
+        volatility = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        if volatility > 1e-10:
+            er[i] = price_change / volatility
+        else:
+            er[i] = 0
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    for i in range(er_period, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        if i == er_period:
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 def calculate_adx(high, low, close, period=14):
     """Calculate Average Directional Index (ADX)."""
@@ -104,22 +137,18 @@ def calculate_adx(high, low, close, period=14):
     minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     
+    dx = np.zeros(n)
     for i in range(period, n):
         if tr_s[i] > 1e-10:
             plus_di = 100 * plus_dm_s[i] / tr_s[i]
             minus_di = 100 * minus_dm_s[i] / tr_s[i]
             di_sum = plus_di + minus_di
             if di_sum > 1e-10:
-                dx = 100 * np.abs(plus_di - minus_di) / di_sum
-            else:
-                dx = 0
-        else:
-            dx = 0
-        
-        if i == period:
-            adx[i] = dx
-        else:
-            adx[i] = ((adx[i-1] * (period - 1)) + dx) / period
+                dx[i] = 100 * np.abs(plus_di - minus_di) / di_sum
+    
+    # Smooth DX to get ADX
+    adx_s = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean()
+    adx[:] = adx_s.values
     
     return adx
 
@@ -137,31 +166,6 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.values
 
-def calculate_zscore(close, period=20):
-    """Calculate Z-score of price relative to rolling mean."""
-    close_s = pd.Series(close)
-    rolling_mean = close_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = close_s.rolling(window=period, min_periods=period).std()
-    zscore = (close_s - rolling_mean) / rolling_std.replace(0, np.inf)
-    return zscore.values
-
-def calculate_donchian(high, low, period=10):
-    """Calculate Donchian Channel."""
-    n = len(high)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        upper[i] = high[i-period+1:i+1].max()
-        lower[i] = low[i-period+1:i+1].min()
-    
-    return upper, lower
-
-def calculate_sma(close, period=50):
-    """Calculate Simple Moving Average."""
-    close_s = pd.Series(close)
-    return close_s.rolling(window=period, min_periods=period).mean().values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -169,28 +173,25 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
     hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    adx = calculate_adx(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    zscore = calculate_zscore(close, 20)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 10)
-    sma_50 = calculate_sma(close, 50)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE = 0.28
+    SIZE_TREND = 0.30  # 30% in trending markets
+    SIZE_RANGE = 0.15  # 15% in ranging markets
     
     # Track position state for stoploss
     in_position = False
@@ -205,15 +206,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(adx_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(zscore[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(sma_50[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(kama[i]) or np.isnan(adx[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
@@ -222,46 +219,39 @@ def generate_signals(prices):
         bear_trend_1w = close[i] < hma_1w_aligned[i]
         
         # === DAILY ADX REGIME FILTER ===
-        adx_1d_val = adx_1d_aligned[i]
-        trending_market = adx_1d_val > 20
-        ranging_market = adx_1d_val <= 20
+        adx_val = adx[i]
+        trending_market = adx_val > 20
+        ranging_market = adx_val <= 20
         
-        # === SIGNAL 1: RSI MEAN REVERSION ===
-        # Looser thresholds to ensure trades on all symbols
-        rsi_long = rsi[i] < 32
-        rsi_short = rsi[i] > 68
+        # Select position size based on regime
+        current_size = SIZE_TREND if trending_market else SIZE_RANGE
         
-        # === SIGNAL 2: DONCHIAN BREAKOUT ===
-        # Shorter period (10) for more signals on 12h
-        donchian_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        donchian_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        # === KAMA CROSSOVER SIGNAL ===
+        # Long: KAMA crosses above price (bullish momentum)
+        # Short: KAMA crosses below price (bearish momentum)
+        kama_long = kama[i] > close[i]
+        kama_short = kama[i] < close[i]
         
-        # === SIGNAL 3: Z-SCORE EXTREMES ===
-        zscore_long = zscore[i] < -1.8
-        zscore_short = zscore[i] > 1.8
+        # Check previous bar for crossover confirmation
+        kama_long_prev = kama[i-1] > close[i-1] if i > 0 else False
+        kama_short_prev = kama[i-1] < close[i-1] if i > 0 else False
         
-        # === GENERATE SIGNAL (Ensemble - any signal can trigger) ===
+        # === RSI CONFIRMATION (LOOSE THRESHOLDS) ===
+        # Long: RSI > 40 (not oversold, room to run)
+        # Short: RSI < 60 (not overbought, room to fall)
+        rsi_long_ok = rsi[i] > 40
+        rsi_short_ok = rsi[i] < 60
+        
+        # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # RSI MEAN REVERSION (works in any regime, must align with weekly trend)
-        if rsi_long and bull_trend_1w:
-            new_signal = SIZE
-        elif rsi_short and bear_trend_1w:
-            new_signal = -SIZE
+        # LONG ENTRY: Weekly bull + KAMA long + RSI confirmation
+        if bull_trend_1w and kama_long and rsi_long_ok:
+            new_signal = current_size
         
-        # DONCHIAN BREAKOUT (only in trending market per daily ADX)
-        if trending_market and new_signal == 0.0:
-            if donchian_long and bull_trend_1w:
-                new_signal = SIZE
-            elif donchian_short and bear_trend_1w:
-                new_signal = -SIZE
-        
-        # Z-SCORE EXTREMES (works in any regime)
-        if new_signal == 0.0:
-            if zscore_long and bull_trend_1w:
-                new_signal = SIZE
-            elif zscore_short and bear_trend_1w:
-                new_signal = -SIZE
+        # SHORT ENTRY: Weekly bear + KAMA short + RSI confirmation
+        elif bear_trend_1w and kama_short and rsi_short_ok:
+            new_signal = -current_size
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         if in_position and position_side != 0:
