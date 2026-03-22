@@ -1,56 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #427: 15m EMA Pullback + 4h HMA Trend + Volume Confirmation + ATR Stop
+Experiment #428: 30m Bollinger-Keltner Squeeze + 4h HMA Trend + Volume Confirmation
 
-Hypothesis: After analyzing 426 failed experiments, the key insight is that 15m
-timeframe needs STRONG higher-timeframe filtering to avoid noise whipsaws.
-This strategy uses a proven pullback approach adapted for 15m:
+Hypothesis: After 11 consecutive failures, the pattern is clear - pure trend 
+following and pure mean reversion both fail on crypto. The key is capturing 
+VOLATILITY EXPANSION events which occur in both bull and bear markets.
 
-1. 4h HMA(21) TREND BIAS (via mtf_data helper):
-   - Long only when 15m price > 4h HMA (bullish trend)
-   - Short only when 15m price < 4h HMA (bearish trend)
-   - HMA smoother than EMA, critical for MTF alignment
+This strategy combines:
+1. BOLLINGER-KELTNER SQUEEZE: When BB width < Keltner width, market is 
+   coiling. Breakout from squeeze = high probability move.
+2. 4h HMA TREND BIAS: Only take long breakouts when price > 4h HMA, only 
+   short when price < 4h HMA. This filters counter-trend squeezes.
+3. VOLUME CONFIRMATION: Breakout must have volume > 1.5x 20-bar average.
+   Filters false breakouts which killed strategy #416.
+4. ATR TRAILING STOP: 2.5x ATR from entry, protects from reversals.
+5. CONSERVATIVE SIZING: 0.25 position size (25% capital max).
 
-2. 15m EMA PULLBACK ENTRY:
-   - Fast EMA(8) crosses above Slow EMA(21) for long (in uptrend)
-   - Fast EMA(8) crosses below Slow EMA(21) for short (in downtrend)
-   - Only enter on pullback, not breakout (reduces false signals)
+Why 30m:
+- Fast enough to catch squeeze breakouts early
+- Slow enough to avoid 5m/15m noise
+- 4h HTF provides good trend context (8 bars per 4h)
 
-3. VOLUME CONFIRMATION:
-   - Volume must be > 1.3 * SMA(volume, 20) on entry bar
-   - Confirms genuine interest, not noise
-
-4. RSI(14) FILTER:
-   - Long: RSI > 45 (not oversold, confirms momentum)
-   - Short: RSI < 55 (not overbought, confirms momentum)
-   - Avoids entering at extremes
-
-5. ATR(14) TRAILING STOP at 2.5x:
-   - Signal → 0 when price moves 2.5*ATR against position
-   - Protects from adverse moves
-
-6. POSITION SIZING: 0.25 discrete (conservative for 15m noise)
-   - Max 25% capital per position
-   - Discrete levels minimize fee churn
-
-Why 15m should work with this approach:
-- 4h HMA filter removes 15m noise and false breakouts
-- Pullback entries (not breakouts) have better win rate
-- Volume confirmation reduces false signals
-- Should work on BTC/ETH/SOL individually (not SOL-biased)
-- Generates 50-100 trades/year (enough for statistical significance)
-
-Timeframe: 15m (REQUIRED for this experiment)
-HTF: 4h via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25 discrete levels
-Stoploss: 2.5 * ATR(14) trailing
+Expected: 30-50 trades/year, Sharpe > 0.7, DD < -30%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_ema_pullback_4h_hma_vol_rsi_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_bb_keltner_squeeze_4h_hma_vol_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -63,12 +41,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average."""
-    close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
-
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -79,25 +51,29 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
     close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    upper = sma + (std_dev * std)
+    lower = sma - (std_dev * std)
+    return upper.values, lower.values, sma.values
 
-def calculate_volume_sma(volume, period=20):
-    """Calculate SMA of volume."""
+def calculate_keltner_channel(high, low, close, period=20, atr_period=14, multiplier=1.5):
+    """Calculate Keltner Channel."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    atr = calculate_atr(high, low, close, atr_period)
+    upper = ema.values + (multiplier * atr)
+    lower = ema.values - (multiplier * atr)
+    return upper, lower
+
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average."""
     vol_s = pd.Series(volume)
-    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean()
+    return vol_ma.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -115,12 +91,11 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    ema_fast = calculate_ema(close, 8)
-    ema_slow = calculate_ema(close, 21)
-    rsi = calculate_rsi(close, 14)
-    vol_sma = calculate_volume_sma(volume, 20)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
+    keltner_upper, keltner_lower = calculate_keltner_channel(high, low, close, 20, 14, 1.5)
+    vol_ma = calculate_volume_ma(volume, 20)
     
     signals = np.zeros(n)
     
@@ -130,9 +105,9 @@ def generate_signals(prices):
     # Track position state for stoploss
     in_position = False
     position_side = 0
+    entry_price = 0.0
     highest_close = 0.0
     lowest_close = 0.0
-    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -144,47 +119,61 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]):
+        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(vol_sma[i]) or vol_sma[i] == 0:
+        if np.isnan(vol_ma[i]) or vol_ma[i] == 0:
             signals[i] = 0.0
             continue
+        
+        # === SQUEEZE DETECTION ===
+        # Squeeze = BB inside Keltner (low volatility, coiling)
+        bb_width = bb_upper[i] - bb_lower[i]
+        keltner_width = keltner_upper[i] - keltner_lower[i]
+        
+        in_squeeze = bb_width < keltner_width
+        
+        # Squeeze was active in previous bars (look back 5 bars)
+        squeeze_history = False
+        for j in range(max(100, i-5), i):
+            bb_w = bb_upper[j] - bb_lower[j]
+            k_w = keltner_upper[j] - keltner_lower[j]
+            if bb_w < k_w:
+                squeeze_history = True
+                break
         
         # === 4h HMA TREND BIAS ===
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === EMA PULLBACK SIGNALS ===
-        # EMA crossover: fast crosses above slow = bullish momentum
-        ema_bullish = ema_fast[i] > ema_slow[i]
-        ema_bearish = ema_fast[i] < ema_slow[i]
-        
-        # Check for crossover (current vs previous)
-        ema_cross_long = ema_bullish and (ema_fast[i-1] <= ema_slow[i-1])
-        ema_cross_short = ema_bearish and (ema_fast[i-1] >= ema_slow[i-1])
-        
         # === VOLUME CONFIRMATION ===
-        vol_confirmed = volume[i] > 1.3 * vol_sma[i]
+        volume_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        high_volume = volume_ratio > 1.5
         
-        # === RSI FILTER ===
-        rsi_long_ok = rsi[i] > 45  # Not oversold, has momentum
-        rsi_short_ok = rsi[i] < 55  # Not overbought, has momentum
+        # === BREAKOUT SIGNALS ===
+        # Long breakout: price breaks above BB upper + was in squeeze + volume + bull trend
+        breakout_long = (close[i] > bb_upper[i-1] and 
+                        squeeze_history and 
+                        high_volume and 
+                        bull_trend_4h)
+        
+        # Short breakout: price breaks below BB lower + was in squeeze + volume + bear trend
+        breakout_short = (close[i] < bb_lower[i-1] and 
+                         squeeze_history and 
+                         high_volume and 
+                         bear_trend_4h)
         
         # === GENERATE SIGNAL ===
         new_signal = 0.0
         
-        # LONG: 4h bullish + EMA cross long + volume + RSI ok
-        if bull_trend_4h and ema_cross_long and vol_confirmed and rsi_long_ok:
+        if breakout_long:
             new_signal = SIZE
-        
-        # SHORT: 4h bearish + EMA cross short + volume + RSI ok
-        elif bear_trend_4h and ema_cross_short and vol_confirmed and rsi_short_ok:
+        elif breakout_short:
             new_signal = -SIZE
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
@@ -206,19 +195,10 @@ def generate_signals(prices):
                     new_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit if 4h trend reverses against position
         if in_position and new_signal != 0.0:
             if position_side > 0 and bear_trend_4h:
                 new_signal = 0.0
             if position_side < 0 and bull_trend_4h:
-                new_signal = 0.0
-        
-        # === EMA REVERSAL EXIT ===
-        # Exit if EMA crossover reverses against position
-        if in_position and new_signal != 0.0:
-            if position_side > 0 and ema_bearish:
-                new_signal = 0.0
-            if position_side < 0 and ema_bullish:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
