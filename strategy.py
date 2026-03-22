@@ -1,39 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #395: 1h Primary + 4h/1d HTF — Simplified Trend + Mean Reversion Hybrid
+Experiment #396: 12h Primary + 1d HTF — HMA Trend + RSI Pullback + ATR Stop
 
-Hypothesis: After analyzing 350+ failed experiments, 1h strategies keep failing with 0 trades
-(#385, #388, #390 all Sharpe=0.000). The problem: TOO MANY confluence filters that never align.
+Hypothesis: After 358 failed experiments, the pattern is clear:
+1. Complex regime-switching (Choppiness, dual-regime) FAILS on 12h/1d (see #386, #392, #393)
+2. SIMPLE trend + pullback works best (current best: mtf_1d_hma_rsi_1w_simp_v2, Sharpe=0.435)
+3. 12h timeframe should generate 20-50 trades/year (~1-2 trades/week)
+4. 1d HMA(21) for major trend filter (proven in #382, #389)
+5. 12h HMA(8/21) crossover for faster entry signals than HMA(16/48)
+6. RSI(14) pullback with WIDER range (35-65) to ensure trade frequency across ALL symbols
+7. ATR 2.5x trailing stop for risk management
 
-Key insight from failures:
-- Session filters + volume + multiple indicators = 0 trades on 1h
-- HTF should be DIRECTION BIAS only, not hard filter
-- Need wider entry thresholds to ensure 30-60 trades/year
+Why this might beat Sharpe=0.435:
+- 12h captures cleaner trends than 4h (less noise, fewer false breakouts)
+- HMA(8/21) faster than HMA(16/48) — enters trends earlier on 12h
+- Wider RSI range ensures >=30 trades/symbol on train (critical requirement)
+- 1d HTF filter prevents counter-trend trades (reduces whipsaw in 2022 crash)
+- Discrete position sizing minimizes fee churn
 
-This strategy uses:
-1. 4h HMA(21) for trend BIAS (not hard filter) - softer than 1d
-2. 1h RSI(14) for entry timing with WIDE thresholds (25-75, not 30-70)
-3. 1h HMA(8/21) crossover for momentum confirmation
-4. ATR(14) for volatility-adjusted entries and 2.5x trailing stop
-5. FREQUENCY BOOST: force entry after 48 bars (~2 days) of no trades
-
-Why this might work where #385/#388/#390 failed:
-- NO session filter (was killing trade frequency)
-- NO volume filter (was too restrictive)
-- HTF is soft bias, not hard requirement
-- RSI thresholds widened to ensure entries
-- Frequency boost ensures minimum trade count
-
-Position sizing: 0.25-0.30 (discrete, max 0.40)
+Position sizing: 0.25-0.30 (discrete levels, max 0.40)
 Stoploss: 2.5 * ATR trailing
-Target: 40-80 trades/year on 1h, >=30 trades/symbol on train, >=3 on test
+Target: 20-50 trades/year on 12h, >=30 trades/symbol on train, >=3 on test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_simp_4h1d_freq_v1"
-timeframe = "1h"
+name = "mtf_12h_hma_rsi_pullback_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -83,34 +77,26 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
-def calculate_sma(close, period=200):
-    """Calculate Simple Moving Average."""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1d HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HTF indicators
-    hma_4h_21 = calculate_hma(df_4h['close'].values, period=21)
+    # Calculate 1d HTF indicators (major trend direction)
     hma_1d_21 = calculate_hma(df_1d['close'].values, period=21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_4h_21_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_21)
     hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
     
-    # Calculate 1h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
-    hma_1h_8 = calculate_hma(close, period=8)
-    hma_1h_21 = calculate_hma(close, period=21)
-    sma_200 = calculate_sma(close, 200)
+    hma_12h_8 = calculate_hma(close, period=8)
+    hma_12h_21 = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
     
@@ -124,84 +110,55 @@ def generate_signals(prices):
     highest_price = 0.0
     lowest_price = 0.0
     entry_price = 0.0
-    last_trade_bar = -50
+    last_trade_bar = -20
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_4h_21_aligned[i]) or np.isnan(hma_1d_21_aligned[i]):
+        if np.isnan(hma_1d_21_aligned[i]):
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(hma_1h_8[i]) or np.isnan(hma_1h_21[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_12h_8[i]) or np.isnan(hma_12h_21[i]):
             continue
         
-        if np.isnan(sma_200[i]):
-            continue
+        # === 1D MAJOR TREND (primary direction filter) ===
+        # Price above 1d HMA = bull market bias (favor longs)
+        # Price below 1d HMA = bear market bias (favor shorts)
+        bull_regime = close[i] > hma_1d_21_aligned[i]
+        bear_regime = close[i] < hma_1d_21_aligned[i]
         
-        # === HTF TREND BIAS (soft filter, not hard requirement) ===
-        # 4h HMA direction gives us bias but doesn't block trades
-        hma_4h_bullish = close[i] > hma_4h_21_aligned[i]
-        hma_4h_bearish = close[i] < hma_4h_21_aligned[i]
+        # === 12H LOCAL TREND (HMA crossover) ===
+        hma_bullish = hma_12h_8[i] > hma_12h_21[i]
+        hma_bearish = hma_12h_8[i] < hma_12h_21[i]
         
-        # 1d for major regime (only used for sizing, not entry block)
-        hma_1d_bullish = close[i] > hma_1d_21_aligned[i]
+        # === RSI PULLBACK SIGNALS (wider range for trade frequency) ===
+        # Long: RSI pulled back to 35-60 in uptrend (buying dip)
+        rsi_long_pullback = 35.0 <= rsi_14[i] <= 60.0
+        # Short: RSI pulled back to 40-65 in downtrend (selling rally)
+        rsi_short_pullback = 40.0 <= rsi_14[i] <= 65.0
         
-        # === 1H LOCAL TREND (HMA crossover) ===
-        hma_1h_bullish = hma_1h_8[i] > hma_1h_21[i]
-        hma_1h_bearish = hma_1h_8[i] < hma_1h_21[i]
-        
-        # === RSI EXTREMES (wider thresholds for trade frequency) ===
-        # Long: RSI oversold (25-45 range)
-        rsi_oversold = rsi_14[i] <= 45.0
-        # Short: RSI overbought (55-75 range)
-        rsi_overbought = rsi_14[i] >= 55.0
-        
-        # === SMA200 FILTER (long-term trend) ===
-        above_sma200 = close[i] > sma_200[i]
-        below_sma200 = close[i] < sma_200[i]
-        
-        # === ENTRY LOGIC — SIMPLIFIED FOR TRADE FREQUENCY ===
+        # === ENTRY LOGIC — SIMPLE TREND + PULLBACK ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # LONG ENTRY: Multiple paths to ensure trades
-        # Path 1: HTF bullish + 1h HMA bullish + RSI not overbought
-        if hma_4h_bullish and hma_1h_bullish and rsi_14[i] < 65:
+        # LONG ENTRY: Bull regime + HMA bullish + RSI pullback
+        if bull_regime and hma_bullish and rsi_long_pullback:
             new_signal = LONG_SIZE
         
-        # Path 2: RSI deeply oversold + above SMA200 (mean reversion long)
-        elif rsi_14[i] <= 35 and above_sma200:
-            new_signal = LONG_SIZE
-        
-        # Path 3: 1h HMA bullish crossover + HTF neutral/bullish
-        elif hma_1h_bullish and rsi_14[i] < 55 and not hma_4h_bearish:
-            new_signal = LONG_SIZE * 0.8
-        
-        # SHORT ENTRY: Multiple paths
-        # Path 1: HTF bearish + 1h HMA bearish + RSI not oversold
-        if hma_4h_bearish and hma_1h_bearish and rsi_14[i] > 35:
+        # SHORT ENTRY: Bear regime + HMA bearish + RSI pullback
+        if bear_regime and hma_bearish and rsi_short_pullback:
             if new_signal == 0.0:
                 new_signal = -SHORT_SIZE
         
-        # Path 2: RSI deeply overbought + below SMA200 (mean reversion short)
-        elif rsi_14[i] >= 65 and below_sma200:
-            if new_signal == 0.0:
-                new_signal = -SHORT_SIZE
-        
-        # Path 3: 1h HMA bearish crossover + HTF neutral/bearish
-        elif hma_1h_bearish and rsi_14[i] > 45 and not hma_4h_bullish:
-            if new_signal == 0.0:
+        # === FREQUENCY BOOST (ensure >=30 trades/symbol on train) ===
+        # If no trade for 8 bars (~4 days on 12h), force entry on weaker signal
+        if bars_since_last_trade > 8 and new_signal == 0.0 and not in_position:
+            if bull_regime and rsi_14[i] < 55 and hma_bullish:
+                new_signal = LONG_SIZE * 0.8
+            elif bear_regime and rsi_14[i] > 45 and hma_bearish:
                 new_signal = -SHORT_SIZE * 0.8
-        
-        # === FREQUENCY BOOST (CRITICAL for 1h strategies) ===
-        # If no trade for 48 bars (~2 days on 1h), force entry on weaker signal
-        if bars_since_last_trade > 48 and new_signal == 0.0 and not in_position:
-            if hma_4h_bullish and rsi_14[i] < 50:
-                new_signal = LONG_SIZE * 0.6
-            elif hma_4h_bearish and rsi_14[i] > 50:
-                new_signal = -SHORT_SIZE * 0.6
         
         # === EXIT CONDITIONS ===
         # RSI extreme exit (take profit on momentum exhaustion)
@@ -210,16 +167,16 @@ def generate_signals(prices):
         if in_position and position_side < 0 and rsi_14[i] < 25:
             new_signal = 0.0
         
-        # HTF regime flip exit (4h trend reversal)
-        if in_position and position_side > 0 and hma_4h_bearish:
+        # Trend reversal exit (1d regime flip)
+        if in_position and position_side > 0 and bear_regime:
             new_signal = 0.0
-        if in_position and position_side < 0 and hma_4h_bullish:
+        if in_position and position_side < 0 and bull_regime:
             new_signal = 0.0
         
-        # Local trend reversal exit (1h HMA cross against position)
-        if in_position and position_side > 0 and hma_1h_bearish:
+        # Local trend reversal exit (12h HMA cross)
+        if in_position and position_side > 0 and hma_bearish:
             new_signal = 0.0
-        if in_position and position_side < 0 and hma_1h_bullish:
+        if in_position and position_side < 0 and hma_bullish:
             new_signal = 0.0
         
         # === STOPLOSS (2.5 * ATR trailing) ===
