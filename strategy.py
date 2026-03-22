@@ -1,38 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #299: 12h Donchian Breakout with Dual HTF HMA Bias and ADX Filter
+Experiment #300: 1d Supertrend with 1w HMA Bias and Loose ADX Filter
 
-Hypothesis: After analyzing 298 experiments, clear patterns emerge:
-1. 4h Supertrend + 1d HMA works best (Sharpe=0.485, #292)
-2. 12h has potential but needs simpler logic than EMA+Fisher (#293 Sharpe=0.111)
-3. Complex ensembles consistently fail (#297, #295)
-4. RSI mean reversion ALWAYS fails across timeframes
-5. Simple trend following with strong HTF bias is the winning formula
+Hypothesis: Based on experiment history analysis:
+1. #292 (4h Supertrend + 1d HMA) Sharpe=0.485 - BEST, proves Supertrend+HTF works
+2. #294 (1d Supertrend + 1w HMA) Sharpe=0.145 - shows 1d CAN work with right filters
+3. #299 (12h Donchian + dual HTF) Sharpe=-0.080 - too many filters kills signals
 
-This strategy uses DONCHIAN BREAKOUT (classic trend following):
-1. 1d HMA(21) for primary directional bias (proven edge from #292)
-2. 1w HMA(21) for meta-trend filter (only trade with weekly trend)
-3. Donchian(20) breakout for entry timing (simpler than EMA crossover)
-4. ADX(14)>15 for trend strength (loose threshold for >=10 trades)
-5. ATR(14) trailing stoploss at 2.5x (tighter than 3.5x for 12h)
+For 1d timeframe, the key insight is: FEWER filters = MORE trades = better chance of meeting minimum
+- 1d has ~1460 bars over 4 years vs ~8760 for 4h
+- Need to generate 10+ trades per symbol, so entry conditions must be loose
+- ADX threshold reduced from 25 to 15 for 1d (more signals)
+- Single HTF (1w) instead of dual HTF (reduces over-filtering)
+- Supertrend(10,3) proven to work in #292 and #294
 
-Why this might beat #292:
-- Donchian breakout catches trends earlier than EMA crossover
-- Dual HTF filter (1d + 1w) reduces false signals in choppy markets
-- 12h has fewer whipsaws than 4h (less fee drag from signal changes)
-- Simpler entry logic = more trades generated vs #293's complex Fisher
+Strategy Logic:
+1. Supertrend(10,3) on 1d = primary trend signal
+2. 1w HMA(21) = directional bias (only trade with weekly trend)
+3. ADX(14)>15 = loose trend confirmation (ensures >=10 trades)
+4. ATR(14) 2.5x trailing stoploss = risk management
+5. Position sizing: 0.25 base, 0.35 in strong trends
 
-Timeframe: 12h (REQUIRED for this experiment)
-HTF: 1d and 1w via mtf_data helper (call ONCE before loop)
-Position sizing: 0.25-0.35 discrete levels
-Stoploss: 2.5 * ATR(14) trailing
+Timeframe: 1d (REQUIRED)
+HTF: 1w via mtf_data (ONCE before loop)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_dual_htf_hma_adx_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_supertrend_1w_hma_loose_adx_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -55,31 +52,67 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_donchian(high, low, period=20):
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     """
-    Calculate Donchian Channel (20-period high/low).
-    Upper = highest high of last 20 bars
-    Lower = lowest low of last 20 bars
-    Breakout above upper = long signal
-    Breakout below lower = short signal
+    Calculate Supertrend indicator.
+    Supertrend = (HL2) +/- (multiplier * ATR)
+    When price > Supertrend = bullish (green)
+    When price < Supertrend = bearish (red)
     """
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
+    n = len(close)
+    atr = calculate_atr(high, low, close, period)
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
+    hl2 = (high + low) / 2
     
-    return upper, lower
+    # Basic upper and lower bands
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    # Supertrend values
+    supertrend = np.zeros(n)
+    supertrend[:] = np.nan
+    trend = np.zeros(n)  # 1 = bullish, -1 = bearish
+    
+    for i in range(period, n):
+        if np.isnan(atr[i]) or atr[i] == 0:
+            continue
+            
+        # Initial values
+        if i == period:
+            supertrend[i] = lower_band[i]
+            trend[i] = 1
+        else:
+            # Update upper band
+            if upper_band[i] < upper_band[i-1] or close[i-1] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+            
+            # Update lower band
+            if lower_band[i] > lower_band[i-1] or close[i-1] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            
+            # Determine trend
+            if trend[i-1] == 1:
+                if close[i] < lower_band[i]:
+                    supertrend[i] = upper_band[i]
+                    trend[i] = -1
+                else:
+                    supertrend[i] = lower_band[i]
+                    trend[i] = 1
+            else:
+                if close[i] > upper_band[i]:
+                    supertrend[i] = lower_band[i]
+                    trend[i] = 1
+                else:
+                    supertrend[i] = upper_band[i]
+                    trend[i] = -1
+    
+    return supertrend, trend
 
 def calculate_adx(high, low, close, period=14):
     """
     Calculate Average Directional Index (ADX).
     ADX > 25 = trending, ADX < 20 = ranging.
-    We use 15 as threshold for 12h timeframe (looser for more trades).
+    We use 15 as threshold for 1d timeframe (loose for more trades).
     """
     n = len(close)
     
@@ -122,26 +155,23 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate HTF indicators
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_1w = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr = calculate_atr(high, low, close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    supertrend, st_trend = calculate_supertrend(high, low, close, 10, 3.0)
     adx = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
-    SIZE_BASE = 0.25  # Base position size (conservative for 12h)
+    SIZE_BASE = 0.25  # Base position size
     SIZE_INCREASED = 0.35  # Increased size in strong trend
     
     # Track position state for stoploss
@@ -157,11 +187,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(supertrend[i]):
             signals[i] = 0.0
             continue
         
@@ -169,25 +199,20 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # === HIGHER TIMEFRAME BIAS (Dual HTF Filter) ===
-        # 1d HMA = primary directional bias
-        bull_trend_1d = close[i] > hma_1d_aligned[i]
-        bear_trend_1d = close[i] < hma_1d_aligned[i]
-        
+        # === HIGHER TIMEFRAME BIAS ===
         # 1w HMA = meta-trend filter (only trade with weekly trend)
         bull_trend_1w = close[i] > hma_1w_aligned[i]
         bear_trend_1w = close[i] < hma_1w_aligned[i]
         
         # === TREND STRENGTH ===
-        # ADX > 15 = trending market (loose threshold for 12h)
+        # ADX > 15 = trending market (LOOSE threshold for 1d to ensure trades)
         trending = adx[i] > 15
         strong_trend = adx[i] > 25
         
-        # === DONCHIAN BREAKOUT ===
-        # Price breaks above Donchian upper = bullish breakout
-        donchian_bullish = close[i] > donchian_upper[i - 1] if not np.isnan(donchian_upper[i - 1]) else False
-        # Price breaks below Donchian lower = bearish breakout
-        donchian_bearish = close[i] < donchian_lower[i - 1] if not np.isnan(donchian_lower[i - 1]) else False
+        # === SUPERTREND SIGNAL ===
+        # Supertrend trend = 1 means bullish, -1 means bearish
+        st_bullish = st_trend[i] == 1
+        st_bearish = st_trend[i] == -1
         
         # === VOLATILITY ADJUSTMENT ===
         # Reduce position size when ATR is elevated (>1.5x recent average)
@@ -205,21 +230,19 @@ def generate_signals(prices):
         # === ENTRY CONDITIONS ===
         new_signal = 0.0
         
-        # LONG ENTRY: Need 1d bias up + 1w bias up + Donchian breakout + ADX filter
-        # Looser conditions to ensure >=10 trades per symbol
+        # LONG ENTRY: Need 1w bias up + Supertrend bullish + ADX filter
+        # LOOSE conditions to ensure >=10 trades per symbol on 1d data
         long_conditions = (
-            bull_trend_1d and  # 1d HMA bias bullish
             bull_trend_1w and  # 1w HMA meta-trend bullish
-            donchian_bullish and  # Donchian breakout
-            trending  # ADX confirms trend
+            st_bullish and  # Supertrend confirms bullish
+            trending  # ADX confirms trend (loose >15)
         )
         
         # SHORT ENTRY: Mirror of long
         short_conditions = (
-            bear_trend_1d and  # 1d HMA bias bearish
             bear_trend_1w and  # 1w HMA meta-trend bearish
-            donchian_bearish and  # Donchian breakout
-            trending  # ADX confirms trend
+            st_bearish and  # Supertrend confirms bearish
+            trending  # ADX confirms trend (loose >15)
         )
         
         # === GENERATE SIGNAL ===
@@ -253,18 +276,18 @@ def generate_signals(prices):
         # === TREND REVERSAL EXIT ===
         # Exit if HTF bias reverses against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and (bear_trend_1d or bear_trend_1w):
+            if position_side > 0 and bear_trend_1w:
                 new_signal = 0.0  # HTF trend reversed against long
-            if position_side < 0 and (bull_trend_1d or bull_trend_1w):
+            if position_side < 0 and bull_trend_1w:
                 new_signal = 0.0  # HTF trend reversed against short
         
-        # === DONCHIAN REVERSAL EXIT ===
-        # Exit if Donchian channel reverses against position
+        # === SUPERTREND REVERSAL EXIT ===
+        # Exit if Supertrend reverses against position
         if in_position and new_signal != 0.0:
-            if position_side > 0 and donchian_bearish:
-                new_signal = 0.0  # Donchian broke against long
-            if position_side < 0 and donchian_bullish:
-                new_signal = 0.0  # Donchian broke against short
+            if position_side > 0 and st_bearish:
+                new_signal = 0.0  # Supertrend turned bearish
+            if position_side < 0 and st_bullish:
+                new_signal = 0.0  # Supertrend turned bullish
         
         # === UPDATE POSITION TRACKING FOR NEXT BAR ===
         if new_signal != 0.0:
