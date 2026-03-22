@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #097: 15m Supertrend + 4h HMA Trend + 1h RSI Momentum + BB Squeeze Regime
-Hypothesis: 15m timeframe needs strong HTF filters to avoid noise whipsaws.
+Experiment #098: 30m EMA Crossover + 4h HMA Trend + Volume Confirmation + ATR Stop
+Hypothesis: 30m timeframe captures medium-term swings with less noise than 15m.
 4h HMA provides stable trend bias (proven in #088 with Sharpe=0.223).
-1h RSI adds momentum confirmation between 4h trend and 15m entries.
-Bollinger Band squeeze detection identifies low-volatility breakout setups.
-Volume confirmation filters false breakouts (critical on 15m).
+EMA(8/21) crossover on 30m catches trend changes faster than Supertrend.
+Volume confirmation filters false breakouts (common on 30m).
+RSI momentum (not extremes) ensures we enter with momentum, not against it.
+ATR trailing stop protects from reversals.
 
-Why this might work on 15m (learning from #085 Sharpe=-4.051 failure):
-- #085 failed because pure RSI mean-reversion on 15m gets killed by trends
-- This strategy is TREND-FOLLOWING with HTF confirmation (not mean-reversion)
-- 4h HMA filter ensures we only trade in direction of higher timeframe trend
-- 1h RSI momentum (not extremes) confirms entry timing
-- BB squeeze + volume spike = genuine breakout, not noise
-- ATR stoploss at 2.0x protects against 15m whipsaws
-- Discrete position sizing (0.25/0.35) minimizes fee churn
+Why this might work on 30m (learning from #086 Sharpe=-0.616):
+- #086 used Supertrend which whipsawed too much on 30m
+- EMA crossover is smoother and generates more consistent signals
+- Volume filter reduces false entries (critical on 30m)
+- Looser entry conditions ensure trades on ALL symbols (BTC, ETH, SOL)
+- Conservative position sizing (0.25 base) controls drawdown
 
-Timeframe: 15m (REQUIRED), HTF: 4h and 1h via mtf_data helper (call ONCE before loop).
-Position sizing: 0.25 base, 0.35 strong signals. Stoploss at 2.0*ATR.
+Timeframe: 30m (REQUIRED), HTF: 4h via mtf_data helper (call ONCE before loop).
+Position sizing: 0.25 base, 0.30 strong signals. Stoploss at 2.0*ATR.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_supertrend_4h_hma_1h_rsi_bb_squeeze_vol_v1"
-timeframe = "15m"
+name = "mtf_30m_ema_crossover_4h_hma_volume_rsi_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -70,66 +69,12 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands and bandwidth."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    # Bandwidth = (upper - lower) / sma
-    bandwidth = np.zeros(len(close))
-    mask = sma > 0
-    bandwidth[mask] = (upper[mask] - lower[mask]) / sma[mask]
-    return upper, lower, bandwidth, sma
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Calculate Supertrend indicator.
-    Returns: supertrend_values, supertrend_direction (1=long, -1=short)
-    """
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)
-    
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, n):
-        if np.isnan(atr[i]) or atr[i] == 0:
-            supertrend[i] = supertrend[i-1]
-            direction[i] = direction[i-1]
-            continue
-            
-        if direction[i-1] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-            if close[i] < supertrend[i]:
-                direction[i] = -1
-                supertrend[i] = upper_band[i]
-            else:
-                direction[i] = 1
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-            if close[i] > supertrend[i]:
-                direction[i] = 1
-                supertrend[i] = lower_band[i]
-            else:
-                direction[i] = -1
-    
-    return supertrend, direction
-
 def calculate_ema(close, period):
     """Calculate EMA."""
     return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
-def calculate_volume_ma(volume, period=20):
-    """Calculate volume moving average."""
+def calculate_volume_sma(volume, period=20):
+    """Calculate volume SMA for volume confirmation."""
     return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
@@ -141,45 +86,26 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    df_1h = get_htf_data(prices, '1h')
     
-    # Calculate 4h HTF indicators
+    # Calculate HTF indicators
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    
-    # Calculate 1h HTF indicators
-    rsi_1h = calculate_rsi(df_1h['close'].values, 14)
     
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
-    bb_upper, bb_lower, bb_bandwidth, bb_sma = calculate_bollinger_bands(close, 20, 2.0)
-    volume_ma = calculate_volume_ma(volume, 20)
-    
-    # Supertrend (10, 3) - proven parameters
-    supertrend, st_direction = calculate_supertrend(high, low, close, 10, 3.0)
-    
-    # EMA for trend confirmation
+    rsi = calculate_rsi(close, 14)
+    ema_8 = calculate_ema(close, 8)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
-    
-    # Calculate BB bandwidth percentile for squeeze detection
-    # Squeeze = bandwidth in bottom 20% of last 100 bars
-    bb_percentile = np.zeros(n)
-    for i in range(100, n):
-        if not np.isnan(bb_bandwidth[i]):
-            recent_bw = bb_bandwidth[i-100:i+1]
-            recent_bw = recent_bw[~np.isnan(recent_bw)]
-            if len(recent_bw) > 0:
-                bb_percentile[i] = np.sum(recent_bw <= bb_bandwidth[i]) / len(recent_bw)
+    vol_sma = calculate_volume_sma(volume, 20)
     
     signals = np.zeros(n)
     
     # Position sizing - discrete levels (Rule 4)
     SIZE_BASE = 0.25
-    SIZE_STRONG = 0.35
+    SIZE_STRONG = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -194,96 +120,114 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_1h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_bandwidth[i]) or np.isnan(supertrend[i]):
+        if np.isnan(ema_8[i]) or np.isnan(ema_21[i]) or np.isnan(ema_50[i]):
             signals[i] = 0.0
             continue
         
-        # === 4H HTF TREND BIAS (most important filter) ===
+        if np.isnan(vol_sma[i]) or vol_sma[i] == 0:
+            signals[i] = 0.0
+            continue
+        
+        # === MULTI-TIMEFRAME TREND BIAS ===
+        # 4h HMA = higher timeframe trend bias (proven in #088)
         bull_trend_4h = close[i] > hma_4h_aligned[i]
         bear_trend_4h = close[i] < hma_4h_aligned[i]
         
-        # === 1H RSI MOMENTUM (entry timing) ===
-        # RSI > 50 = bullish momentum, RSI < 50 = bearish momentum
-        rsi_momentum_long = rsi_1h_aligned[i] > 50
-        rsi_momentum_short = rsi_1h_aligned[i] < 50
+        # === EMA CROSSOVER SIGNAL ===
+        # Fast EMA (8) crossing above/below slow EMA (21)
+        ema_crossover_long = ema_8[i] > ema_21[i]
+        ema_crossover_short = ema_8[i] < ema_21[i]
         
-        # RSI not at extremes (avoid reversal zones)
-        rsi_not_overbought = rsi_1h_aligned[i] < 75
-        rsi_not_oversold = rsi_1h_aligned[i] > 25
+        # EMA alignment confirmation (8 > 21 > 50 for strong long)
+        ema_aligned_long = ema_8[i] > ema_21[i] and ema_21[i] > ema_50[i]
+        ema_aligned_short = ema_8[i] < ema_21[i] and ema_21[i] < ema_50[i]
         
-        # === SUPERTREND SIGNAL (15m entry trigger) ===
-        st_bullish = st_direction[i] == 1
-        st_bearish = st_direction[i] == -1
+        # === VOLUME CONFIRMATION ===
+        # Volume must be above average to confirm breakout
+        volume_confirmed = volume[i] > 1.0 * vol_sma[i]
+        volume_strong = volume[i] > 1.5 * vol_sma[i]
         
-        # === EMA ALIGNMENT (trend confirmation) ===
-        ema_bullish = ema_21[i] > ema_50[i]
-        ema_bearish = ema_21[i] < ema_50[i]
+        # === RSI MOMENTUM FILTER ===
+        # RSI > 50 for longs (momentum), RSI < 50 for shorts
+        rsi_momentum_long = rsi[i] > 45
+        rsi_momentum_short = rsi[i] < 55
         
-        # === BB SQUEEZE REGIME (breakout setup) ===
-        # bb_percentile < 0.25 = bandwidth in bottom 25% = squeeze
-        bb_squeeze = bb_percentile[i] < 0.25
-        
-        # === VOLUME CONFIRMATION (filter false breakouts) ===
-        volume_spike = volume[i] > 1.5 * volume_ma[i] if not np.isnan(volume_ma[i]) else False
+        # RSI not at extremes (avoid mean reversion traps)
+        rsi_not_overbought = rsi[i] < 75
+        rsi_not_oversold = rsi[i] > 25
         
         new_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS ===
-        # Path 1: Strong signal - all filters align (4h trend + 1h RSI + Supertrend + EMA + volume)
-        if bull_trend_4h and rsi_momentum_long and rsi_not_overbought and st_bullish and ema_bullish:
-            if volume_spike or bb_squeeze:
-                new_signal = SIZE_STRONG
-            else:
+        # === LONG ENTRY CONDITIONS (loose to ensure trades) ===
+        # Path 1: EMA aligned + 4h bullish + volume confirmed (strong signal)
+        if ema_aligned_long and bull_trend_4h and volume_confirmed:
+            if rsi_momentum_long and rsi_not_overbought:
+                if volume_strong:
+                    new_signal = SIZE_STRONG
+                else:
+                    new_signal = SIZE_BASE
+        
+        # Path 2: EMA crossover + 4h bullish (simpler, ensures trades)
+        if new_signal == 0.0 and ema_crossover_long and bull_trend_4h:
+            if rsi_momentum_long or volume_confirmed:
                 new_signal = SIZE_BASE
         
-        # Path 2: Simpler entry - 4h trend + Supertrend + RSI momentum (ensures trades)
-        if new_signal == 0.0 and bull_trend_4h and st_bullish and rsi_momentum_long:
-            if ema_bullish or bb_squeeze:
+        # Path 3: EMA aligned + 4h bullish only (fallback for all symbols)
+        if new_signal == 0.0 and ema_aligned_long and bull_trend_4h:
+            new_signal = SIZE_BASE
+        
+        # Path 4: EMA crossover + volume strong (momentum entry)
+        if new_signal == 0.0 and ema_crossover_long and volume_strong:
+            if rsi_momentum_long:
                 new_signal = SIZE_BASE
         
-        # Path 3: Fallback - 4h trend + Supertrend only (ensures minimum trades)
-        if new_signal == 0.0 and bull_trend_4h and st_bullish:
-            if rsi_momentum_long or ema_bullish:
-                new_signal = SIZE_BASE
+        # === SHORT ENTRY CONDITIONS (loose to ensure trades) ===
+        # Path 1: EMA aligned + 4h bearish + volume confirmed (strong signal)
+        if ema_aligned_short and bear_trend_4h and volume_confirmed:
+            if rsi_momentum_short and rsi_not_oversold:
+                if volume_strong:
+                    new_signal = -SIZE_STRONG
+                else:
+                    new_signal = -SIZE_BASE
         
-        # === SHORT ENTRY CONDITIONS ===
-        # Path 1: Strong signal - all filters align
-        if bear_trend_4h and rsi_momentum_short and rsi_not_oversold and st_bearish and ema_bearish:
-            if volume_spike or bb_squeeze:
-                new_signal = -SIZE_STRONG
-            else:
+        # Path 2: EMA crossover + 4h bearish (simpler, ensures trades)
+        if new_signal == 0.0 and ema_crossover_short and bear_trend_4h:
+            if rsi_momentum_short or volume_confirmed:
                 new_signal = -SIZE_BASE
         
-        # Path 2: Simpler entry - 4h trend + Supertrend + RSI momentum
-        if new_signal == 0.0 and bear_trend_4h and st_bearish and rsi_momentum_short:
-            if ema_bearish or bb_squeeze:
+        # Path 3: EMA aligned + 4h bearish only (fallback for all symbols)
+        if new_signal == 0.0 and ema_aligned_short and bear_trend_4h:
+            new_signal = -SIZE_BASE
+        
+        # Path 4: EMA crossover + volume strong (momentum entry)
+        if new_signal == 0.0 and ema_crossover_short and volume_strong:
+            if rsi_momentum_short:
                 new_signal = -SIZE_BASE
         
-        # Path 3: Fallback - 4h trend + Supertrend only
-        if new_signal == 0.0 and bear_trend_4h and st_bearish:
-            if rsi_momentum_short or ema_bearish:
-                new_signal = -SIZE_BASE
-        
-        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR for 15m ===
+        # === STOPLOSS LOGIC (Rule 6) - 2.0 * ATR ===
+        # Update trailing highs/lows for active positions
         if in_position and position_side > 0:
             if close[i] > highest_close:
                 highest_close = close[i]
+            # Trailing stop: 2.0 * ATR below highest close
             stoploss_price = highest_close - 2.0 * atr[i]
             if close[i] < stoploss_price:
-                new_signal = 0.0
+                new_signal = 0.0  # Stoploss hit
         
         if in_position and position_side < 0:
             if lowest_close == 0.0 or close[i] < lowest_close:
                 lowest_close = close[i]
+            # Trailing stop: 2.0 * ATR above lowest close
             stoploss_price = lowest_close + 2.0 * atr[i]
             if close[i] > stoploss_price:
-                new_signal = 0.0
+                new_signal = 0.0  # Stoploss hit
         
         # Update position tracking
+        # Entering new position
         if new_signal != 0.0 and not in_position:
             in_position = True
             position_side = np.sign(new_signal)
@@ -291,12 +235,14 @@ def generate_signals(prices):
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
+        # Reversing position
         elif new_signal != 0.0 and in_position and np.sign(new_signal) != position_side:
             position_side = np.sign(new_signal)
             entry_price = close[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
+        # Exiting position
         elif new_signal == 0.0 and in_position:
             in_position = False
             position_side = 0
