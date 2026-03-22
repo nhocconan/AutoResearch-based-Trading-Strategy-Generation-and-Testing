@@ -1,37 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #563: 1d Primary + 1w HTF — Simplified Trend-Pullback with HMA Crossover
+Experiment #564: 4h Primary + 12h/1d HTF — Simplified HMA Trend with RSI Pullback
 
-Hypothesis: After analyzing 500+ failed strategies, the pattern is clear:
-- Complex regime switching (Choppiness + Connors) often overfits and fails
-- Simple trend-following with HTF filter works best on 1d timeframe
-- #557 (1d dual regime) had Sharpe=0.152 — proves 1d+1w can work
-- Current best (mtf_1d_hma_rsi_1w_simp_asym_v2) has Sharpe=0.435 — must beat this
+Hypothesis: After 500+ failed experiments, the pattern is clear:
+- Complex regime filters (Choppiness, dual-regime) consistently fail on 4h
+- Too many confluence conditions = 0 trades (see #552, #558, #560, #561, #562)
+- 4h timeframe needs SIMPLER logic: HMA trend + RSI pullback + HTF confirmation
+- 12h HTF for major trend direction, 4h for entry timing
+- Remove Choppiness Index (failed in #559, #561, #562)
+- Remove session/volume filters (kills trades per #555 analysis)
+- Use asymmetric position sizing: stronger trend = larger size
 
-This strategy uses PROVEN patterns from research:
-1. 1w HMA(21) for MAJOR trend direction (HTF bias — slow, reliable)
-2. 1d HMA(16/48) crossover for ENTRY timing (faster signal within trend)
-3. RSI(14) 35-65 filter for pullback confirmation (not extremes)
-4. ATR(14) 2.5x trailing stop for risk management
-5. Position size: 0.28 discrete (balanced for 1d trade frequency)
+Key differences from failed attempts:
+1. NO Choppiness Index regime filter (consistently negative Sharpe on 4h)
+2. NO Connors RSI complexity (simple RSI(14) works better)
+3. Simpler entry: RSI 30-55 long, 45-70 short (wider than failed attempts)
+4. 12h HMA for major trend, 4h HMA for entry timing
+5. ADX > 18 (not >25 which was too strict in #555)
+6. ATR 2.5x trailing stop (proven in literature)
+7. Position size: 0.28 base, 0.35 for strong trend alignment
 
-Why this might beat Sharpe=0.435:
-- SIMPLER than failed regime-switching strategies (#552, #553, #556, #559, #561, #562)
-- 1w HTF filter prevents major counter-trend losses (critical for 2022 crash)
-- HMA crossover on 1d catches trend changes faster than price vs HMA
-- RSI mid-range filter avoids chasing tops/bottoms
-- Target: 20-50 trades/year on 1d (per Rule 10), enough for statistical significance
-
-Position sizing: 0.28 base (discrete per Rule 4, max 0.40)
-Stoploss: 2.5 * ATR trailing (signal → 0 when hit)
-Target: >=30 trades/symbol on train, >=3 on test, Sharpe > 0 all symbols
+Target: 20-50 trades/year on 4h (per Rule 10), Sharpe > 0.435 to beat baseline
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_crossover_rsi_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_hma_rsi_pullback_12h_simp_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -122,29 +118,31 @@ def generate_signals(prices):
     low = prices["low"].values
     n = len(close)
     
-    # Load 1w HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1w HTF HMA for major trend direction
-    hma_1w_21 = calculate_hma(df_1w['close'].values, period=21)
+    # Calculate 12h HTF HMA for major trend direction
+    hma_12h_21 = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_50 = calculate_hma(df_12h['close'].values, period=50)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
+    hma_12h_21_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_21)
+    hma_12h_50_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_50)
     
-    # Calculate 1d indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, 14)
     adx_14 = calculate_adx(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
     
-    # Calculate 1d HMA crossover signals (16/48)
-    hma_1d_16 = calculate_hma(close, period=16)
-    hma_1d_48 = calculate_hma(close, period=48)
+    # 4h HMA for entry timing
+    hma_4h_21 = calculate_hma(close, period=21)
+    hma_4h_50 = calculate_hma(close, period=50)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    # 1d timeframe: target 20-50 trades/year, size 0.28 balanced
-    POSITION_SIZE = 0.28
+    BASE_SIZE = 0.28
+    STRONG_SIZE = 0.35
     
     # Track position state for stoploss
     in_position = False
@@ -153,69 +151,70 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Track HMA crossover state to avoid repeated signals
-    prev_hma_bull_cross = False
-    prev_hma_bear_cross = False
-    
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(hma_1w_21_aligned[i]):
+        if np.isnan(hma_12h_21_aligned[i]) or np.isnan(hma_12h_50_aligned[i]):
+            continue
+        if np.isnan(hma_4h_21[i]) or np.isnan(hma_4h_50[i]):
             continue
         if np.isnan(adx_14[i]) or np.isnan(rsi_14[i]):
             continue
-        if np.isnan(hma_1d_16[i]) or np.isnan(hma_1d_48[i]):
-            continue
         
-        # === 1W MAJOR TREND (primary direction filter) ===
-        # Price above 1w HMA = bull market bias (only look for longs)
-        # Price below 1w HMA = bear market bias (only look for shorts)
-        bull_regime_1w = close[i] > hma_1w_21_aligned[i]
-        bear_regime_1w = close[i] < hma_1w_21_aligned[i]
+        # === 12H MAJOR TREND (primary direction filter) ===
+        bull_regime_12h = close[i] > hma_12h_21_aligned[i]
+        bear_regime_12h = close[i] < hma_12h_21_aligned[i]
         
-        # === 1D HMA CROSSOVER (entry timing) ===
-        # Bull cross: HMA16 crosses above HMA48
-        # Bear cross: HMA16 crosses below HMA48
-        hma_bull_cross = (hma_1d_16[i] > hma_1d_48[i]) and (hma_1d_16[i-1] <= hma_1d_48[i-1])
-        hma_bear_cross = (hma_1d_16[i] < hma_1d_48[i]) and (hma_1d_16[i-1] >= hma_1d_48[i-1])
+        # 12h HMA slope for trend strength confirmation
+        hma_12h_slope_bull = hma_12h_21_aligned[i] > hma_12h_50_aligned[i]
+        hma_12h_slope_bear = hma_12h_21_aligned[i] < hma_12h_50_aligned[i]
         
-        # Current HMA state (for holding positions)
-        hma_bull_state = hma_1d_16[i] > hma_1d_48[i]
-        hma_bear_state = hma_1d_16[i] < hma_1d_48[i]
+        # === 4H ENTRY TIMING ===
+        bull_regime_4h = close[i] > hma_4h_21[i]
+        bear_regime_4h = close[i] < hma_4h_21[i]
+        
+        # 4h HMA slope
+        hma_4h_slope_bull = hma_4h_21[i] > hma_4h_50[i]
+        hma_4h_slope_bear = hma_4h_21[i] < hma_4h_50[i]
         
         # === ADX FILTER (ensure some trend strength) ===
-        # ADX > 18 means some directional movement (lower threshold for more trades)
+        # ADX > 18 means some directional movement (lower than failed attempts)
         trend_ok = adx_14[i] > 18.0
         
-        # === RSI PULLBACK FILTER (mid-range, not extremes) ===
-        # Long: RSI 35-65 (pullback within uptrend, not oversold crash)
-        # Short: RSI 35-65 (rally within downtrend, not overbought spike)
-        rsi_ok_long = 35.0 <= rsi_14[i] <= 65.0
-        rsi_ok_short = 35.0 <= rsi_14[i] <= 65.0
+        # === RSI PULLBACK ENTRY (WIDER BANDS for more trades) ===
+        # Long: RSI 30-55 in uptrend (pullback, not oversold crash)
+        rsi_pullback_long = 30.0 <= rsi_14[i] <= 55.0
+        # Short: RSI 45-70 in downtrend (rally into resistance)
+        rsi_pullback_short = 45.0 <= rsi_14[i] <= 70.0
         
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC — SIMPLIFIED ===
         new_signal = 0.0
         
-        # LONG ENTRY: 1w bull + 1d HMA bull cross + ADX OK + RSI ok
-        if bull_regime_1w and hma_bull_cross and trend_ok and rsi_ok_long:
-            new_signal = POSITION_SIZE
+        # LONG ENTRY: 12h bull + 4h bull + RSI pullback + ADX OK
+        if bull_regime_12h and bull_regime_4h and rsi_pullback_long and trend_ok:
+            # Size based on trend alignment strength
+            if hma_12h_slope_bull and hma_4h_slope_bull:
+                new_signal = STRONG_SIZE  # Both timeframes aligned bull
+            elif hma_12h_slope_bull:
+                new_signal = BASE_SIZE  # Only 12h aligned
+            else:
+                new_signal = BASE_SIZE * 0.8  # Weak alignment
         
-        # SHORT ENTRY: 1w bear + 1d HMA bear cross + ADX OK + RSI ok
-        elif bear_regime_1w and hma_bear_cross and trend_ok and rsi_ok_short:
-            new_signal = -POSITION_SIZE
+        # SHORT ENTRY: 12h bear + 4h bear + RSI pullback + ADX OK
+        elif bear_regime_12h and bear_regime_4h and rsi_pullback_short and trend_ok:
+            # Size based on trend alignment strength
+            if hma_12h_slope_bear and hma_4h_slope_bear:
+                new_signal = -STRONG_SIZE  # Both timeframes aligned bear
+            elif hma_12h_slope_bear:
+                new_signal = -BASE_SIZE  # Only 12h aligned
+            else:
+                new_signal = -BASE_SIZE * 0.8  # Weak alignment
         
         # === HOLD POSITION LOGIC ===
         # If already in position, maintain unless exit conditions hit
         if in_position and new_signal == 0.0:
-            # Hold long if HMA still bullish and 1w regime unchanged
-            if position_side > 0 and hma_bull_state and bull_regime_1w:
-                new_signal = signals[i-1] if i > 0 else 0.0
-            # Hold short if HMA still bearish and 1w regime unchanged
-            elif position_side < 0 and hma_bear_state and bear_regime_1w:
-                new_signal = signals[i-1] if i > 0 else 0.0
-            else:
-                new_signal = 0.0
+            new_signal = signals[i-1] if i > 0 else 0.0
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
         stoploss_triggered = False
@@ -238,21 +237,15 @@ def generate_signals(prices):
         if stoploss_triggered:
             new_signal = 0.0
         
-        # === EXIT CONDITIONS (regime flip or HMA cross against) ===
-        # Exit long on 1w regime flip to bear
+        # === EXIT CONDITIONS (regime flip) ===
+        # Exit long on 12h regime flip to bear
         if in_position and position_side > 0:
-            if bear_regime_1w:
-                new_signal = 0.0
-            # Or HMA crosses bearish
-            elif hma_bear_cross:
+            if bear_regime_12h and hma_12h_slope_bear:
                 new_signal = 0.0
         
-        # Exit short on 1w regime flip to bull
+        # Exit short on 12h regime flip to bull
         if in_position and position_side < 0:
-            if bull_regime_1w:
-                new_signal = 0.0
-            # Or HMA crosses bullish
-            elif hma_bull_cross:
+            if bull_regime_12h and hma_12h_slope_bull:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -278,9 +271,5 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
         
         signals[i] = new_signal
-        
-        # Update crossover state tracking
-        prev_hma_bull_cross = hma_bull_cross
-        prev_hma_bear_cross = hma_bear_cross
     
     return signals
