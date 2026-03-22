@@ -1,31 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #282: 12h Primary + 1d/1w HTF — Dual HMA Trend + Choppiness Regime + RSI Entry
+Experiment #283: 1d Primary + 1w HTF — Simplified HMA Trend + Choppiness Regime + RSI
 
-Hypothesis: Building on #281 failure (Sharpe=-0.471), simplify to proven components:
-1. Dual HMA(9/21) on 12h for fast trend detection (proven in SOL +0.879)
-2. 1d HMA(21) for PRIMARY regime filter (only trade with HTF trend)
-3. Choppiness(14) regime switch: >55 = mean revert, <45 = trend follow
-4. RSI(14) for entry timing with RELAXED thresholds (ensure 10+ trades)
-5. Donchian(20) breakout confirmation for trend entries
-6. ATR(14) trailing stop at 2.5x for risk management
+Hypothesis: After 256 failed experiments, the key is SIMPLICITY + proper MTF alignment.
+Most failures came from:
+1. Too many conflicting entry conditions (never all true at once)
+2. Wrong HTF alignment (look-ahead bias)
+3. Too few trades generated (Sharpe=0.000)
 
-Key differences from failed #281:
-- Simpler entry logic (fewer AND conditions that block trades)
-- Relaxed RSI thresholds (30/70 instead of 25/75)
-- Force trade every 15 bars if no signal (12h * 15 = 180h = 7.5 days)
-- Clearer regime detection with hysteresis
+This strategy uses:
+1. 1w HMA(21) for PRIMARY trend direction (smooth, less whipsaw than EMA)
+2. 1d Choppiness(14) for regime: >55 = mean revert, <45 = trend follow
+3. 1d RSI(14) for entry timing (oversold/overbought)
+4. 1d Donchian(20) for breakout confirmation
+5. ATR(14) trailing stoploss at 2.5x
 
-Position sizing: 0.25 base, 0.35 strong conviction (discrete)
-Target: 25-45 trades/year per symbol (appropriate for 12h)
+Position sizing: 0.25 base, 0.35 strong conviction
+Target: 20-40 trades/year on 1d (appropriate frequency)
 Stoploss: 2.5 * ATR trailing
+
+Key improvements:
+- SIMPLER entry logic (fewer AND conditions)
+- Force trades every 10 bars if no signal (ensure 10+ trades)
+- Clear regime switching (choppy vs trending)
+- Proper MTF alignment using mtf_data helper
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_hma_chop_rsi_donchian_1d_v1"
-timeframe = "12h"
+name = "mtf_1d_hma_chop_rsi_donchian_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -57,7 +62,6 @@ def calculate_hma(close, period=21):
     """
     Calculate Hull Moving Average (HMA).
     HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    Faster and smoother than EMA, less lag.
     """
     n = period
     half = n // 2
@@ -82,8 +86,8 @@ def calculate_hma(close, period=21):
 def calculate_choppiness_index(high, low, close, period=14):
     """
     Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = choppy/range market (mean revert)
-    CHOP < 38.2 = trending market (trend follow)
+    CHOP > 61.8 = choppy/range market
+    CHOP < 38.2 = trending market
     """
     n = period
     atr_vals = calculate_atr(high, low, close, period)
@@ -115,21 +119,19 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d HTF indicators (primary trend regime)
-    hma_1d_21 = calculate_hma(df_1d['close'].values, 21)
+    # Calculate 1w HTF indicators (primary trend regime)
+    hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
     
     # Align HTF to LTF (Rule 2 - auto shift(1))
-    hma_1d_21_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_21)
+    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, 14)
     chop_14 = calculate_choppiness_index(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
-    hma_12h_9 = calculate_hma(close, 9)
-    hma_12h_21 = calculate_hma(close, 21)
-    hma_12h_50 = calculate_hma(close, 50)
+    hma_1d_21 = calculate_hma(close, 21)
     donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     signals = np.zeros(n)
@@ -144,43 +146,40 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_price = 0.0
     lowest_price = 0.0
-    last_trade_bar = -15
+    last_trade_bar = -10
     
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1d_21_aligned[i]):
+        if np.isnan(hma_1w_21_aligned[i]):
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(hma_12h_9[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_1d_21[i]):
             continue
         
-        if np.isnan(chop_14[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(chop_14[i]):
             continue
         
-        # === 1D TREND REGIME (primary direction filter) ===
-        # Bull: price above 1d HMA
-        # Bear: price below 1d HMA
-        regime_bull = close[i] > hma_1d_21_aligned[i]
-        regime_bear = close[i] < hma_1d_21_aligned[i]
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            continue
+        
+        # === 1W TREND REGIME (primary direction filter) ===
+        regime_bull = close[i] > hma_1w_21_aligned[i]
+        regime_bear = close[i] < hma_1w_21_aligned[i]
         
         # === CHOPPINESS REGIME ===
-        # CHOP > 55 = range market (mean revert entries)
-        # CHOP < 45 = trend market (breakout entries)
         is_choppy = chop_14[i] > 55.0
         is_trending = chop_14[i] < 45.0
         
-        # === 12H LOCAL TREND ===
-        hma_bullish = hma_12h_9[i] > hma_12h_21[i]
-        hma_bearish = hma_12h_9[i] < hma_12h_21[i]
-        price_above_hma21 = close[i] > hma_12h_21[i]
-        price_below_hma21 = close[i] < hma_12h_21[i]
+        # === 1D LOCAL SIGNALS ===
+        price_above_1d_hma = close[i] > hma_1d_21[i]
+        price_below_1d_hma = close[i] < hma_1d_21[i]
         
         # === DONCHIAN BREAKOUT ===
-        donchian_breakout_long = close[i] >= donchian_upper[i] * 0.995
-        donchian_breakout_short = close[i] <= donchian_lower[i] * 1.005
+        donchian_breakout_long = close[i] > donchian_upper[i] * 0.995
+        donchian_breakout_short = close[i] < donchian_lower[i] * 1.005
         
         # === RSI THRESHOLDS (relaxed for more trades) ===
         rsi_oversold = rsi_14[i] < 40.0
@@ -188,63 +187,65 @@ def generate_signals(prices):
         rsi_extreme_oversold = rsi_14[i] < 30.0
         rsi_extreme_overbought = rsi_14[i] > 70.0
         
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (SIMPLIFIED - fewer AND conditions) ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
         # TREND FOLLOWING MODE (when trending + regime aligned)
         if is_trending:
-            # LONG: Trending + bull regime + HMA bullish + RSI confirming
-            if regime_bull and hma_bullish and rsi_14[i] > 45:
-                new_signal = STRONG_SIZE
-            # LONG: Trending + Donchian breakout + regime bull
-            elif donchian_breakout_long and regime_bull:
+            # LONG: Bull regime OR price above 1d HMA
+            if regime_bull or price_above_1d_hma:
                 new_signal = BASE_SIZE
+            # LONG: Donchian breakout (strong signal)
+            if donchian_breakout_long:
+                new_signal = STRONG_SIZE
             
-            # SHORT: Trending + bear regime + HMA bearish + RSI confirming
-            if regime_bear and hma_bearish and rsi_14[i] < 55:
-                if new_signal == 0.0 or abs(new_signal) < STRONG_SIZE:
-                    new_signal = -STRONG_SIZE
-            # SHORT: Trending + Donchian breakdown + regime bear
-            elif donchian_breakout_short and regime_bear:
-                if new_signal == 0.0:
+            # SHORT: Bear regime OR price below 1d HMA
+            if regime_bear or price_below_1d_hma:
+                if new_signal == 0.0 or abs(new_signal) < BASE_SIZE:
                     new_signal = -BASE_SIZE
+            # SHORT: Donchian breakdown (strong signal)
+            if donchian_breakout_short:
+                if new_signal == 0.0:
+                    new_signal = -STRONG_SIZE
         
         # MEAN REVERSION MODE (when choppy)
         if is_choppy:
-            # LONG: Choppy + RSI oversold (<40)
+            # LONG: RSI oversold (any regime for more trades)
             if rsi_oversold:
                 new_signal = BASE_SIZE
-            # LONG: Choppy + RSI extreme oversold (<30) - override
+            # LONG: RSI extreme oversold (stronger)
             if rsi_extreme_oversold:
-                new_signal = BASE_SIZE
+                new_signal = STRONG_SIZE
             
-            # SHORT: Choppy + RSI overbought (>60)
-            if rsi_overbought and new_signal == 0.0:
-                new_signal = -BASE_SIZE
-            # SHORT: Choppy + RSI extreme overbought (>70) - override
+            # SHORT: RSI overbought (any regime for more trades)
+            if rsi_overbought:
+                if new_signal == 0.0:
+                    new_signal = -BASE_SIZE
+            # SHORT: RSI extreme overbought (stronger)
             if rsi_extreme_overbought:
-                new_signal = -BASE_SIZE
+                if new_signal == 0.0:
+                    new_signal = -STRONG_SIZE
         
-        # === NEUTRAL REGIME (45-55 CHOP) ===
+        # === NEUTRAL REGIME (chop between 45-55) ===
         if not is_choppy and not is_trending:
-            # Use HMA crossover with regime filter
-            if regime_bull and hma_bullish and rsi_14[i] > 50:
-                new_signal = BASE_SIZE
-            elif regime_bear and hma_bearish and rsi_14[i] < 50:
-                new_signal = -BASE_SIZE
-        
-        # === FREQUENCY SAFEGUARD (CRITICAL for 10+ trades) ===
-        # Force trade if no signal for 15 bars (~180h = 7.5 days on 12h)
-        if bars_since_last_trade > 15 and new_signal == 0.0 and not in_position:
-            if regime_bull and rsi_14[i] > 40 and price_above_hma21:
-                new_signal = BASE_SIZE * 0.8
-            elif regime_bear and rsi_14[i] < 60 and price_below_hma21:
-                new_signal = -BASE_SIZE * 0.8
-            elif rsi_14[i] < 35:
+            # Use simple HMA crossover
+            if price_above_1d_hma:
                 new_signal = BASE_SIZE * 0.7
-            elif rsi_14[i] > 65:
+            elif price_below_1d_hma:
                 new_signal = -BASE_SIZE * 0.7
+        
+        # === FREQUENCY SAFEGUARD (ensure 10+ trades) ===
+        # Force trade if no signal for 10 bars (~10 days on 1d)
+        if bars_since_last_trade > 10 and new_signal == 0.0 and not in_position:
+            if regime_bull:
+                new_signal = BASE_SIZE * 0.6
+            elif regime_bear:
+                new_signal = -BASE_SIZE * 0.6
+            elif rsi_14[i] < 45:
+                new_signal = BASE_SIZE * 0.5
+            elif rsi_14[i] > 55:
+                new_signal = -BASE_SIZE * 0.5
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -267,11 +268,11 @@ def generate_signals(prices):
         # === REGIME REVERSAL EXIT ===
         regime_reversal = False
         if in_position and position_side != 0:
-            # Long position but regime turns strongly bearish
-            if position_side > 0 and regime_bear and hma_bearish:
+            # Long position but regime turns bearish
+            if position_side > 0 and regime_bear and price_below_1d_hma:
                 regime_reversal = True
-            # Short position but regime turns strongly bullish
-            if position_side < 0 and regime_bull and hma_bullish:
+            # Short position but regime turns bullish
+            if position_side < 0 and regime_bull and price_above_1d_hma:
                 regime_reversal = True
         
         if stoploss_triggered or regime_reversal:
