@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #073: 1d Primary + 1w HTF — Dual Regime Adaptive Strategy
+Experiment #074: 4h Primary + 12h/1d HTF — Simplified Trend Following
 
-Hypothesis: Single-regime strategies fail because crypto alternates between trending
-and ranging markets. This strategy adapts to market regime:
+Hypothesis: Previous strategies failed due to excessive filters (Choppiness, Connors, dual-regime)
+causing too few trades or whipsaw losses. This strategy uses SIMPLIFIED trend logic:
 
-REGIME 1 - TRENDING (ADX > 25):
-- Follow 1w HMA(21) slope direction
-- Enter on 1d HMA(8/21) crossover with trend
-- RSI(14) confirms momentum (50-70 for long, 30-50 for short)
-- Exit on trend reversal or 2.5 ATR stoploss
-
-REGIME 2 - RANGING (ADX <= 25):
-- Mean revert at Bollinger Band extremes
-- Long when price < BB_lower + RSI < 35 + 1w HMA not strongly bearish
-- Short when price > BB_upper + RSI > 65 + 1w HMA not strongly bullish
-- Exit at BB middle or opposite band
+1. 12h HMA(21) SLOPE for major trend bias (not just price position)
+2. 4h HMA(8/21) crossover for entry timing (proven pattern from research)
+3. RSI(14) with 45/55 thresholds (moderate, allows more entries than 20/80)
+4. ADX(14) > 20 for trend confirmation (achievable threshold)
+5. ATR(14) stoploss at 2.5x (standard trailing stop)
+6. NO Choppiness Index, NO Connors RSI, NO complex regime detection
+7. Position size: 0.30 discrete for strong signals, 0.20 for weaker
+8. Minimum trade frequency safeguard (enter if no trade in 100 bars)
 
 Why this should work:
-- 1d timeframe naturally limits to 30-60 trades/year
-- Regime adaptation prevents trend strategies in chop and vice versa
-- 1w HTF filter prevents counter-trend trades in strong weekly trends
-- Discrete position sizing (0.25/0.30) minimizes fee churn
-- ATR stoploss protects against black swan events
+- 4h timeframe naturally limits trades to 30-60/year
+- HMA crossover is responsive but not whipsaw-prone like EMA
+- RSI 45/55 catches momentum without waiting for extremes
+- ADX > 20 is common enough in crypto trends
+- Simpler logic = more trades = better statistics
+- 12h HMA slope prevents counter-trend trades
 
-Timeframe: 1d (REQUIRED for this experiment)
-HTF: 1w via mtf_data.get_htf_data() — called ONCE before loop
-Position sizing: 0.25 base, 0.30 for strong signals
+Timeframe: 4h (REQUIRED for this experiment)
+HTF: 12h via mtf_data.get_htf_data() — called ONCE before loop
+Position sizing: 0.30 max discrete
 Stoploss: 2.5 * ATR(14) trailing
 Target trades: 30-60/year per symbol
 """
@@ -34,8 +32,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_dual_regime_adx_bb_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_hma_crossover_rsi_adx_12h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -102,7 +100,7 @@ def calculate_adx(high, low, close, period=14):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    return adx
+    return adx, plus_di, minus_di
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
@@ -113,15 +111,6 @@ def calculate_hma(close, period=21):
     wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper.values, lower.values, sma.values
 
 def calculate_hma_slope(hma_values, lookback=3):
     """Calculate HMA slope over lookback period."""
@@ -138,31 +127,30 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate HTF indicators
-    hma_1w_21 = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_slope = calculate_hma_slope(hma_1w_21, 2)
+    hma_12h_21 = calculate_hma(df_12h['close'].values, 21)
+    hma_12h_slope = calculate_hma_slope(hma_12h_21, 3)
     
     # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1w_21_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_21)
-    hma_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_slope)
+    hma_12h_21_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_21)
+    hma_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_slope)
     
-    # Calculate 1d indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, 14)
     rsi_14 = calculate_rsi(close, 14)
-    adx_14 = calculate_adx(high, low, close, 14)
-    bb_upper, bb_lower, bb_middle = calculate_bollinger_bands(close, 20, 2.0)
+    adx_14, plus_di, minus_di = calculate_adx(high, low, close, 14)
     
-    # HMA for trend following entries
+    # HMA crossover signals (fast vs slow)
     hma_8 = calculate_hma(close, 8)
     hma_21 = calculate_hma(close, 21)
     
     signals = np.zeros(n)
     
     # Base position sizing (Rule 4 - discrete levels, max 0.40)
-    BASE_SIZE = 0.25
-    STRONG_SIZE = 0.30
+    BASE_SIZE = 0.30
+    REDUCED_SIZE = 0.20
     
     # Track position state for stoploss
     in_position = False
@@ -170,105 +158,93 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_price = 0.0
     lowest_price = 0.0
-    last_trade_bar = -100
+    last_trade_bar = -50
     
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
         
-        if np.isnan(hma_1w_21_aligned[i]) or np.isnan(hma_1w_slope_aligned[i]):
+        if np.isnan(hma_12h_21_aligned[i]) or np.isnan(hma_12h_slope_aligned[i]):
             continue
         
         if np.isnan(rsi_14[i]) or np.isnan(adx_14[i]):
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
-            continue
-        
         if np.isnan(hma_8[i]) or np.isnan(hma_21[i]):
             continue
         
-        # === 1W TREND BIAS (MAJOR) ===
-        # Strong bullish: slope > 2%
-        # Strong bearish: slope < -2%
-        # Neutral: -2% to 2%
-        week_bullish_strong = hma_1w_slope_aligned[i] > 2.0
-        week_bearish_strong = hma_1w_slope_aligned[i] < -2.0
-        week_neutral = not week_bullish_strong and not week_bearish_strong
+        # === 12H TREND BIAS (MAJOR) ===
+        # HMA slope > 0.5 = bullish bias (prefer longs)
+        # HMA slope < -0.5 = bearish bias (prefer shorts)
+        trend_12h_bullish = hma_12h_slope_aligned[i] > 0.5
+        trend_12h_bearish = hma_12h_slope_aligned[i] < -0.5
         
-        week_bullish = hma_1w_slope_aligned[i] > 0
-        week_bearish = hma_1w_slope_aligned[i] < 0
+        # Price vs 12h HMA for additional confirmation
+        price_above_12h_hma = close[i] > hma_12h_21_aligned[i]
+        price_below_12h_hma = close[i] < hma_12h_21_aligned[i]
         
-        # === REGIME DETECTION ===
-        # ADX > 25 = trending regime (follow trend)
-        # ADX <= 25 = ranging regime (mean revert)
-        trending_regime = adx_14[i] > 25
-        ranging_regime = adx_14[i] <= 25
+        # === 4H HMA CROSSOVER ===
+        # Fast HMA(8) crosses above Slow HMA(21) = bullish crossover
+        # Fast HMA(8) crosses below Slow HMA(21) = bearish crossover
+        hma_bullish_cross = hma_8[i] > hma_21[i] and hma_8[i-1] <= hma_21[i-1]
+        hma_bearish_cross = hma_8[i] < hma_21[i] and hma_8[i-1] >= hma_21[i-1]
+        
+        # Current HMA alignment
+        hma_aligned_bullish = hma_8[i] > hma_21[i]
+        hma_aligned_bearish = hma_8[i] < hma_21[i]
+        
+        # === ADX TREND STRENGTH ===
+        # ADX > 20 = trending market (allow trend following)
+        trend_strong = adx_14[i] > 20
+        
+        # === RSI MOMENTUM ===
+        # RSI > 50 = bullish momentum
+        # RSI < 50 = bearish momentum
+        # Use 45/55 thresholds for entries (moderate, not extreme)
+        rsi_bullish = rsi_14[i] > 50
+        rsi_bearish = rsi_14[i] < 50
+        rsi_entry_long = rsi_14[i] > 45
+        rsi_entry_short = rsi_14[i] < 55
         
         # === POSITION SIZING ===
-        current_size = BASE_SIZE
-        if trending_regime and (week_bullish_strong or week_bearish_strong):
-            current_size = STRONG_SIZE
+        current_size = BASE_SIZE if trend_strong else REDUCED_SIZE
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         bars_since_last_trade = i - last_trade_bar
         
-        # TRENDING REGIME: Follow 1w trend on 1d HMA crossover
-        if trending_regime:
-            # LONG: 1w bullish + 1d HMA bullish cross + RSI confirmation
-            if week_bullish:
-                hma_bull_cross = hma_8[i] > hma_21[i] and hma_8[i-1] <= hma_21[i-1]
-                hma_bull_aligned = hma_8[i] > hma_21[i]
-                rsi_ok = 45 < rsi_14[i] < 70
-                
-                if hma_bull_cross and rsi_ok:
-                    new_signal = current_size
-                elif hma_bull_aligned and rsi_ok and bars_since_last_trade > 30:
+        # LONG ENTRIES
+        # Primary: 12h bullish + 4h HMA bullish cross + RSI confirmation + ADX
+        if trend_12h_bullish or price_above_12h_hma:
+            if hma_bullish_cross and rsi_entry_long:
+                if trend_strong:
                     new_signal = BASE_SIZE
-            
-            # SHORT: 1w bearish + 1d HMA bearish cross + RSI confirmation
-            if week_bearish:
-                hma_bear_cross = hma_8[i] < hma_21[i] and hma_8[i-1] >= hma_21[i-1]
-                hma_bear_aligned = hma_8[i] < hma_21[i]
-                rsi_ok = 30 < rsi_14[i] < 55
-                
-                if hma_bear_cross and rsi_ok:
-                    new_signal = -current_size
-                elif hma_bear_aligned and rsi_ok and bars_since_last_trade > 30:
-                    new_signal = -BASE_SIZE
+                else:
+                    new_signal = REDUCED_SIZE
+            # Pullback entry in established trend
+            elif hma_aligned_bullish and rsi_14[i] > 45 and rsi_14[i] < 60:
+                new_signal = REDUCED_SIZE
         
-        # RANGING REGIME: Mean revert at BB extremes
-        elif ranging_regime:
-            price_near_lower = close[i] <= bb_lower[i] * 1.005  # Within 0.5% of lower
-            price_near_upper = close[i] >= bb_upper[i] * 0.995  # Within 0.5% of upper
-            
-            # LONG: Price at BB lower + RSI oversold + 1w not strongly bearish
-            if price_near_lower and rsi_14[i] < 38 and not week_bearish_strong:
-                new_signal = BASE_SIZE
-            
-            # SHORT: Price at BB upper + RSI overbought + 1w not strongly bullish
-            if price_near_upper and rsi_14[i] > 62 and not week_bullish_strong:
-                new_signal = -BASE_SIZE
-            
-            # BB squeeze breakout (vol expansion after compression)
-            bb_width = (bb_upper[i] - bb_lower[i]) / bb_middle[i] if bb_middle[i] != 0 else 0
-            bb_width_prev = (bb_upper[i-5] - bb_lower[i-5]) / bb_middle[i-5] if bb_middle[i-5] != 0 else 0
-            
-            if bb_width > bb_width_prev * 1.2:  # Width expanding 20%
-                if week_bullish and hma_8[i] > hma_21[i] and rsi_14[i] > 50:
-                    new_signal = BASE_SIZE
-                elif week_bearish and hma_8[i] < hma_21[i] and rsi_14[i] < 50:
+        # SHORT ENTRIES
+        # Primary: 12h bearish + 4h HMA bearish cross + RSI confirmation + ADX
+        if trend_12h_bearish or price_below_12h_hma:
+            if hma_bearish_cross and rsi_entry_short:
+                if trend_strong:
                     new_signal = -BASE_SIZE
+                else:
+                    new_signal = -REDUCED_SIZE
+            # Pullback entry in established trend
+            elif hma_aligned_bearish and rsi_14[i] > 40 and rsi_14[i] < 55:
+                new_signal = -REDUCED_SIZE
         
         # === FREQUENCY SAFEGUARD ===
-        # If no trades for 60 bars (~60 days on 1d), allow weaker entry
-        if bars_since_last_trade > 60 and new_signal == 0.0 and not in_position:
-            if week_bullish and hma_8[i] > hma_21[i] and rsi_14[i] > 48:
-                new_signal = BASE_SIZE * 0.6
-            elif week_bearish and hma_8[i] < hma_21[i] and rsi_14[i] < 52:
-                new_signal = -BASE_SIZE * 0.6
+        # If no trades for 100 bars (~25 days on 4h), allow weaker entry
+        if bars_since_last_trade > 100 and new_signal == 0.0 and not in_position:
+            if trend_12h_bullish and hma_aligned_bullish and rsi_14[i] > 48:
+                new_signal = REDUCED_SIZE * 0.8
+            elif trend_12h_bearish and hma_aligned_bearish and rsi_14[i] < 52:
+                new_signal = -REDUCED_SIZE * 0.8
         
         # === STOPLOSS LOGIC (Rule 6) - 2.5 * ATR trailing ===
         stoploss_triggered = False
@@ -291,19 +267,12 @@ def generate_signals(prices):
         # === TREND REVERSAL EXIT ===
         trend_reversal = False
         if in_position and position_side != 0:
-            # Exit long if 1w trend reverses strongly bearish
-            if position_side > 0 and week_bearish_strong:
+            # Exit long if 12h trend reverses bearish
+            if position_side > 0 and trend_12h_bearish and hma_aligned_bearish:
                 trend_reversal = True
-            # Exit short if 1w trend reverses strongly bullish
-            if position_side < 0 and week_bullish_strong:
+            # Exit short if 12h trend reverses bullish
+            if position_side < 0 and trend_12h_bullish and hma_aligned_bullish:
                 trend_reversal = True
-            
-            # Exit in ranging regime if price reaches BB middle (take profit)
-            if ranging_regime:
-                if position_side > 0 and close[i] >= bb_middle[i]:
-                    trend_reversal = True
-                if position_side < 0 and close[i] <= bb_middle[i]:
-                    trend_reversal = True
         
         # Apply stoploss or trend reversal
         if stoploss_triggered or trend_reversal:
