@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 15m Multi-Timeframe Momentum with 4h HMA Trend Filter
-Hypothesis: 15m captures intraday momentum swings while 4h HMA provides trend bias.
-Entry: 15m MACD histogram turn + RSI confirmation + volume spike + aligned with 4h HMA
-Exit: 2.0*ATR trailing stop or signal reversal
-Conservative sizing (0.20-0.30) with discrete levels to minimize fee churn.
+Experiment #008: 30m HMA Trend + RSI Pullback with 4h Regime Filter
+Hypothesis: 30m captures intraday swings while 4h HMA provides trend bias.
+Key insight from #005: 12h worked best (+16.6%), so 30m with 4h HTF should
+capture more opportunities while maintaining trend alignment.
+Entry: Price pullback to EMA21 + RSI(14) in 35-50 (long) or 50-65 (short)
+       aligned with 4h HMA trend direction.
+Regime filter: Bollinger Band Width percentile to detect squeeze/expansion.
+Exit: 2.5*ATR trailing stop or opposite signal.
+Sizing: 0.25-0.30 discrete levels to minimize fee churn.
 Must work on BTC/ETH through 2022 crash and 2025 bear market.
-Timeframe: 15m (REQUIRED), HTF: 4h via mtf_data helper.
+Timeframe: 30m (REQUIRED), HTF: 4h via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_momentum_4h_hma_vol_atr_v1"
-timeframe = "15m"
+name = "mtf_30m_hma_rsi_pullback_4h_regime_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -38,16 +42,6 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram."""
-    close_s = pd.Series(close)
-    ema_fast = close_s.ewm(span=fast, min_periods=fast, adjust=False).mean()
-    ema_slow = close_s.ewm(span=slow, min_periods=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, min_periods=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
-
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average for smoother trend with less lag."""
     close_s = pd.Series(close)
@@ -58,22 +52,36 @@ def calculate_hma(close, period=21):
     wma3 = (2 * wma1 - wma2).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
     return wma3.values
 
-def calculate_ema(close, period):
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    width = (upper - lower) / sma
+    return upper, lower, width
+
+def calculate_ema(close, period=21):
     """Calculate Exponential Moving Average."""
     return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
-def calculate_volume_ratio(volume, period=20):
-    """Calculate volume ratio vs rolling average."""
-    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    ratio = volume / vol_avg
-    ratio = np.where(np.isfinite(ratio), ratio, 1.0)
-    return ratio
+def calculate_percentile_rank(values, window=100):
+    """Calculate percentile rank over rolling window."""
+    n = len(values)
+    pr = np.zeros(n)
+    pr[:] = np.nan
+    for i in range(window-1, n):
+        window_vals = values[i-window+1:i+1]
+        current = values[i]
+        rank = np.sum(window_vals <= current) / window
+        pr[i] = rank * 100
+    return pr
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -85,18 +93,19 @@ def generate_signals(prices):
     # Align HTF to LTF (Rule 2 - no manual index mapping, auto shift(1))
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 15m indicators
+    # Calculate 30m indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    macd_line, macd_signal, macd_hist = calculate_macd(close, 12, 26, 9)
     ema_21 = calculate_ema(close, 21)
     ema_50 = calculate_ema(close, 50)
-    vol_ratio = calculate_volume_ratio(volume, 20)
+    bb_upper, bb_lower, bb_width = calculate_bollinger(close, 20, 2.0)
+    
+    # Bollinger Width percentile for regime detection
+    bb_width_pr = calculate_percentile_rank(bb_width, 100)
     
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.12
-    SIZE_EXIT = 0.0
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -115,55 +124,57 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(macd_hist[i]) or np.isnan(ema_21[i]):
+        if np.isnan(rsi[i]) or np.isnan(ema_21[i]) or np.isnan(bb_width_pr[i]):
             signals[i] = 0.0
             continue
         
-        # 4h trend bias (HTF)
+        # 4h trend bias (HTF) - primary filter
         hma_4h_bullish = close[i] > hma_4h_aligned[i]
         hma_4h_bearish = close[i] < hma_4h_aligned[i]
         
-        # EMA trend confirmation on 15m
+        # 30m trend confirmation
         ema_bullish = close[i] > ema_21[i] and ema_21[i] > ema_50[i]
         ema_bearish = close[i] < ema_21[i] and ema_21[i] < ema_50[i]
         
-        # MACD momentum
-        macd_bullish = macd_hist[i] > 0 and macd_hist[i] > macd_hist[i-1] if i > 0 else macd_hist[i] > 0
-        macd_bearish = macd_hist[i] < 0 and macd_hist[i] < macd_hist[i-1] if i > 0 else macd_hist[i] < 0
+        # Regime detection via BB Width percentile
+        # Low percentile = squeeze (expect breakout), High = expansion (expect mean reversion)
+        regime_squeeze = bb_width_pr[i] < 30
+        regime_expansion = bb_width_pr[i] > 70
         
-        # MACD histogram turning point (momentum shift)
-        macd_turn_long = macd_hist[i] > macd_hist[i-1] and macd_hist[i-1] < 0 if i > 0 else False
-        macd_turn_short = macd_hist[i] < macd_hist[i-1] and macd_hist[i-1] > 0 if i > 0 else False
+        # RSI pullback levels (looser than before to generate more trades)
+        rsi_pullback_long = rsi[i] >= 35 and rsi[i] <= 55
+        rsi_pullback_short = rsi[i] >= 45 and rsi[i] <= 65
         
-        # RSI filter
-        rsi_ok_long = rsi[i] > 40 and rsi[i] < 70
-        rsi_ok_short = rsi[i] > 30 and rsi[i] < 60
+        # Price near EMA21 (pullback entry)
+        price_near_ema_long = close[i] >= ema_21[i] * 0.99 and close[i] <= ema_21[i] * 1.02
+        price_near_ema_short = close[i] <= ema_21[i] * 1.01 and close[i] >= ema_21[i] * 0.98
         
-        # Volume confirmation
-        vol_spike = vol_ratio[i] > 1.5
+        # Price near Bollinger bands for mean reversion
+        price_near_bb_lower = close[i] <= bb_lower[i] * 1.005
+        price_near_bb_upper = close[i] >= bb_upper[i] * 0.995
         
         new_signal = 0.0
         
         # === LONG ENTRY ===
-        # Primary: MACD turn + 4h HMA bullish + RSI ok + volume
-        if macd_turn_long and hma_4h_bullish and rsi_ok_long:
+        # Primary: 4h HMA bullish + RSI pullback + price near EMA21
+        if hma_4h_bullish and rsi_pullback_long and price_near_ema_long:
             new_signal = SIZE_ENTRY
-        # Secondary: EMA bullish + 4h HMA bullish + MACD positive
-        elif ema_bullish and hma_4h_bullish and macd_bullish and rsi[i] > 45:
+        # Secondary: 4h HMA bullish + price at BB lower (mean reversion in uptrend)
+        elif hma_4h_bullish and price_near_bb_lower and rsi[i] < 45:
             new_signal = SIZE_ENTRY
-        # Volume breakout with trend
-        elif vol_spike and hma_4h_bullish and close[i] > ema_21[i] and rsi[i] > 50:
+        # Tertiary: EMA bullish + RSI ok (trend continuation)
+        elif ema_bullish and hma_4h_bullish and rsi[i] > 40 and rsi[i] < 60:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRY ===
-        # Primary: MACD turn + 4h HMA bearish + RSI ok
-        if macd_turn_short and hma_4h_bearish and rsi_ok_short:
+        # Primary: 4h HMA bearish + RSI pullback + price near EMA21
+        if hma_4h_bearish and rsi_pullback_short and price_near_ema_short:
             new_signal = -SIZE_ENTRY
-        # Secondary: EMA bearish + 4h HMA bearish + MACD negative
-        elif ema_bearish and hma_4h_bearish and macd_bearish and rsi[i] < 55:
+        # Secondary: 4h HMA bearish + price at BB upper (mean reversion in downtrend)
+        elif hma_4h_bearish and price_near_bb_upper and rsi[i] > 55:
             new_signal = -SIZE_ENTRY
-        # Volume breakdown with trend
-        elif vol_spike and hma_4h_bearish and close[i] < ema_21[i] and rsi[i] < 50:
+        # Tertiary: EMA bearish + RSI ok (trend continuation)
+        elif ema_bearish and hma_4h_bearish and rsi[i] > 40 and rsi[i] < 60:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC ===
@@ -172,8 +183,8 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.0*ATR)
-            current_stop = highest_close - 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR)
+            current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -186,8 +197,8 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.0*ATR)
-            current_stop = lowest_close + 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR)
+            current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -202,7 +213,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
@@ -210,7 +221,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
         
