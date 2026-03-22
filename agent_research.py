@@ -169,8 +169,8 @@ def append_results(results: list[dict], status: str, description: str, period: s
             reader = csv.reader(f, delimiter="\t")
             next(reader, None)  # skip header
             for row in reader:
-                if len(row) >= 4:
-                    existing.add((row[1], row[2], row[-1]))  # (strategy, symbol, period)
+                if len(row) >= 15:
+                    existing.add((row[1], row[2], row[14]))  # (strategy, symbol, period)
     except Exception:
         pass
 
