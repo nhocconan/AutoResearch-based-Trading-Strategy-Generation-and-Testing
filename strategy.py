@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #009: 1h Donchian Breakout + 4h HMA Trend + Volume Z-Score + RSI Filter + ATR Stop
-Hypothesis: 1h timeframe balances trade frequency and noise reduction. Donchian breakouts 
-capture momentum moves, 4h HMA provides HTF trend bias to avoid counter-trend trades,
-volume z-score confirms breakout validity (avoids fakeouts), RSI filters extreme entries.
-Multiple entry paths ensure >=10 trades per symbol. Conservative sizing (0.25) controls DD.
-2.0*ATR stoploss appropriate for 1h bars. Must beat Sharpe=0.121 baseline.
+Experiment #009: 1h Volume-Weighted Momentum + 4h HMA Trend Bias + Regime Filter + ATR Stop
+Hypothesis: 1h timeframe balances trade frequency with noise reduction. Volume-weighted
+momentum captures institutional flow better than price-only signals. 4h HMA provides
+HTF trend alignment without excessive lag. Regime filter (ADX + BB Width) adapts
+between trend-following (ADX>25) and mean-reversion (ADX<20 + BB squeeze) modes.
+Multiple entry paths ensure >=10 trades per symbol. Conservative sizing (0.30) with
+2.5*ATR stoploss controls drawdown. Must beat Sharpe=0.499 baseline.
 Timeframe: 1h (REQUIRED), HTF: 4h via mtf_data helper.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_donchian_4h_hma_vol_zscore_rsi_atr_v1"
+name = "mtf_1h_vw_momentum_4h_hma_regime_atr_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -48,56 +49,77 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low over period)."""
-    n = len(high)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
-def calculate_volume_zscore(volume, period=20):
-    """Calculate Z-score of volume for volume confirmation."""
-    vol_s = pd.Series(volume)
-    vol_mean = vol_s.rolling(window=period, min_periods=period).mean().values
-    vol_std = vol_s.rolling(window=period, min_periods=period).std().values
-    zscore = np.where(vol_std > 0, (volume - vol_mean) / vol_std, 0.0)
-    return zscore
-
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average."""
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
     n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
+    adx = np.zeros(n)
+    adx[:] = np.nan
     
-    # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        signal = np.abs(close[i] - close[i - er_period])
-        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        if noise > 0:
-            er[i] = signal / noise
-        else:
-            er[i] = 0.0
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
     
-    # Calculate smoothing constant
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
     
-    for i in range(er_period, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        if i == er_period:
-            kama[i] = close[i]
-        else:
-            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    atr = calculate_atr(high, low, close, period)
     
-    return kama
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    for i in range(period, n):
+        if atr[i] > 0:
+            plus_di[i] = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr[i]
+            minus_di[i] = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr[i]
+    
+    dx = np.zeros(n)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx[period:] = pd.Series(dx[period:]).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
+
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / sma
+    return upper, lower, sma, bandwidth
+
+def calculate_vw_momentum(close, volume, period=14):
+    """
+    Volume-Weighted Momentum: measures price change weighted by volume.
+    High volume + price up = strong bullish momentum.
+    """
+    n = len(close)
+    vw_mom = np.zeros(n)
+    vw_mom[:] = np.nan
+    
+    for i in range(period, n):
+        price_change = close[i] - close[i-period]
+        avg_volume = np.mean(volume[i-period+1:i+1])
+        vw_mom[i] = price_change * avg_volume / 1e6  # scale down
+    
+    return vw_mom
+
+def calculate_zscore(series, period=20):
+    """Calculate Z-score for mean reversion signals."""
+    series_s = pd.Series(series)
+    mean = series_s.rolling(window=period, min_periods=period).mean().values
+    std = series_s.rolling(window=period, min_periods=period).std().values
+    zscore = (series - mean) / np.where(std > 0, std, 1e-10)
+    return zscore
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -118,17 +140,20 @@ def generate_signals(prices):
     # Calculate 1h indicators
     atr = calculate_atr(high, low, close, 14)
     rsi = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    vol_zscore = calculate_volume_zscore(volume, 20)
-    kama = calculate_kama(close, 10, 2, 30)
+    adx = calculate_adx(high, low, close, 14)
+    bb_upper, bb_lower, bb_sma, bb_bw = calculate_bollinger(close, 20, 2.0)
+    vw_mom = calculate_vw_momentum(close, volume, 14)
     
-    # Additional 1h HMA for trend confirmation
+    # 1h HMA for trend confirmation
     hma_1h = calculate_hma(close, 21)
     hma_1h_fast = calculate_hma(close, 10)
     
+    # Z-score for mean reversion
+    close_zscore = calculate_zscore(close, 20)
+    
     signals = np.zeros(n)
-    SIZE_ENTRY = 0.25
-    SIZE_HALF = 0.12
+    SIZE_ENTRY = 0.30
+    SIZE_HALF = 0.15
     
     # Track positions for stoploss
     position_side = 0
@@ -144,15 +169,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(vol_zscore[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(kama[i]) or np.isnan(hma_1h[i]):
+        if np.isnan(adx[i]) or np.isnan(vw_mom[i]):
             signals[i] = 0.0
             continue
         
@@ -160,78 +181,82 @@ def generate_signals(prices):
         htf_bullish = close[i] > hma_4h_aligned[i]
         htf_bearish = close[i] < hma_4h_aligned[i]
         
-        # 1h trend confirmation
-        ltf_bullish = close[i] > hma_1h[i]
-        ltf_bearish = close[i] < hma_1h[i]
-        hma_rising = hma_1h[i] > hma_1h[i - 1] if i > 0 else False
-        hma_falling = hma_1h[i] < hma_1h[i - 1] if i > 0 else False
+        # 1h HMA trend
+        hma_1h_bullish = close[i] > hma_1h[i]
+        hma_1h_bearish = close[i] < hma_1h[i]
+        hma_rising = hma_1h[i] > hma_1h[i-1] if i > 0 else False
+        hma_falling = hma_1h[i] < hma_1h[i-1] if i > 0 else False
         
         # Fast HMA crossover
         fast_above_slow = hma_1h_fast[i] > hma_1h[i]
         fast_below_slow = hma_1h_fast[i] < hma_1h[i]
         
-        # KAMA trend
-        kama_bullish = close[i] > kama[i]
-        kama_bearish = close[i] < kama[i]
-        
-        # Donchian breakout signals
-        donchian_breakout_long = close[i] > donchian_upper[i - 1] if i > 0 else False
-        donchian_breakout_short = close[i] < donchian_lower[i - 1] if i > 0 else False
-        
-        # Volume confirmation
-        vol_confirmed = vol_zscore[i] > 0.5  # Above average volume
+        # Regime detection
+        trend_regime = adx[i] > 25  # Strong trend
+        range_regime = adx[i] < 20  # Range-bound
+        bb_squeeze = bb_bw[i] < np.nanpercentile(bb_bw[:i], 20) if i > 100 else False
         
         # RSI zones
         rsi_oversold = rsi[i] < 35
         rsi_overbought = rsi[i] > 65
         rsi_neutral = rsi[i] > 40 and rsi[i] < 60
-        rsi_bullish = rsi[i] > 50
-        rsi_bearish = rsi[i] < 50
+        
+        # Volume-weighted momentum signals
+        vw_mom_strong_long = vw_mom[i] > 0 and vw_mom[i] > vw_mom[i-1] if i > 0 else False
+        vw_mom_strong_short = vw_mom[i] < 0 and vw_mom[i] < vw_mom[i-1] if i > 0 else False
+        
+        # Z-score extremes
+        zscore_oversold = close_zscore[i] < -1.5
+        zscore_overbought = close_zscore[i] > 1.5
+        
+        # Price vs Bollinger
+        near_bb_lower = close[i] < bb_lower[i] * 1.01
+        near_bb_upper = close[i] > bb_upper[i] * 0.99
         
         new_signal = 0.0
         
         # === LONG ENTRIES (multiple paths for >=10 trades) ===
         
-        # Path 1: Donchian breakout + HTF bullish + Volume confirmed + RSI not overbought
-        if donchian_breakout_long and htf_bullish and vol_confirmed and rsi[i] < 70:
+        # Path 1: HTF bullish + 1h trend + VW momentum strong + ADX trend regime
+        if htf_bullish and hma_1h_bullish and vw_mom_strong_long and trend_regime:
             new_signal = SIZE_ENTRY
         
-        # Path 2: HTF bullish + LTF bullish + Fast HMA crossover + RSI bullish
-        elif htf_bullish and ltf_bullish and fast_above_slow and rsi_bullish:
+        # Path 2: HTF bullish + Fast HMA crossover + RSI neutral
+        elif htf_bullish and fast_above_slow and rsi_neutral and hma_rising:
             new_signal = SIZE_ENTRY
         
-        # Path 3: HTF bullish + KAMA bullish + RSI pullback (40-50) + Volume ok
-        elif htf_bullish and kama_bullish and rsi[i] > 40 and rsi[i] < 50 and vol_zscore[i] > -0.5:
+        # Path 3: Range regime + RSI oversold + Near BB lower (mean reversion)
+        elif range_regime and rsi_oversold and near_bb_lower:
             new_signal = SIZE_ENTRY
         
-        # Path 4: HTF bullish + HMA rising + RSI neutral + Donchian near upper
-        elif htf_bullish and hma_rising and rsi_neutral and close[i] > donchian_upper[i] * 0.98 if not np.isnan(donchian_upper[i]) else False:
+        # Path 4: HTF bullish + Z-score oversold (dip buy in uptrend)
+        elif htf_bullish and zscore_oversold and rsi[i] > rsi[i-1] if i > 0 else False:
             new_signal = SIZE_ENTRY
         
-        # Path 5: HTF bullish + RSI oversold bounce (mean reversion in uptrend)
-        elif htf_bullish and rsi_oversold and rsi[i] > rsi[i - 1] if i > 0 else False:
+        # Path 5: BB squeeze breakout + HTF bullish + VW momentum building
+        elif bb_squeeze and htf_bullish and vw_mom[i] > 0 and close[i] > bb_sma[i]:
             new_signal = SIZE_ENTRY
         
         # === SHORT ENTRIES (multiple paths for >=10 trades) ===
         
-        # Path 1: Donchian breakdown + HTF bearish + Volume confirmed + RSI not oversold
-        if donchian_breakout_short and htf_bearish and vol_confirmed and rsi[i] > 30:
+        # Path 1: HTF bearish + 1h trend + VW momentum strong + ADX trend regime
+        if htf_bearish and hma_1h_bearish and vw_mom_strong_short and trend_regime:
             new_signal = -SIZE_ENTRY
         
-        # Path 2: HTF bearish + LTF bearish + Fast HMA crossover down + RSI bearish
-        elif htf_bearish and ltf_bearish and fast_below_slow and rsi_bearish:
+        # Path 2: HTF bearish + Fast HMA crossover down + RSI neutral
+        elif htf_bearish and fast_below_slow and rsi_neutral and hma_falling:
             new_signal = -SIZE_ENTRY
         
-        # Path 3: HTF bearish + KAMA bearish + RSI pullback (50-60) + Volume ok
-        elif htf_bearish and kama_bearish and rsi[i] > 50 and rsi[i] < 60 and vol_zscore[i] > -0.5:
+        # Path 3: Range regime + RSI overbought + Near BB upper (mean reversion)
+        elif range_regime and rsi_overbought and near_bb_upper:
             new_signal = -SIZE_ENTRY
         
-        # Path 4: HTF bearish + HMA falling + RSI neutral + Donchian near lower
-        elif htf_bearish and hma_falling and rsi_neutral and close[i] < donchian_lower[i] * 1.02 if not np.isnan(donchian_lower[i]) else False:
+        # Path 4: HTF bearish + Z-score overbought (rally sell in downtrend)
+        elif htf_bearish and zscore_overbought and rsi[i] < rsi[i-1] if i > 0 else False:
             new_signal = -SIZE_ENTRY
         
-        # Path 5: HTF bearish + RSI overbought drop (mean reversion in downtrend)
-        elif htf_bearish and rsi_overbought and rsi[i] < rsi[i - 1] if i > 0 else False:
+        # Path 5: BB squeeze breakdown + HTF bearish + VW momentum negative
+        elif bb_squeeze and htf_bearish and vw_mom[i] < 0 and close[i] < bb_sma[i]:
             new_signal = -SIZE_ENTRY
         
         # === STOPLOSS LOGIC (Rule 6) ===
@@ -240,8 +265,8 @@ def generate_signals(prices):
             if close[i] > highest_close:
                 highest_close = close[i]
             
-            # Calculate trailing stop (2.0*ATR for 1h timeframe)
-            current_stop = highest_close - 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR for 1h timeframe)
+            current_stop = highest_close - 2.5 * atr[i]
             if current_stop > trailing_stop:
                 trailing_stop = current_stop
             
@@ -250,7 +275,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = close[i] - entry_price
                 if profit >= 2.0 * risk:
                     new_signal = SIZE_HALF
@@ -261,8 +286,8 @@ def generate_signals(prices):
             if close[i] < lowest_close or lowest_close == 0.0:
                 lowest_close = close[i]
             
-            # Calculate trailing stop (2.0*ATR for 1h timeframe)
-            current_stop = lowest_close + 2.0 * atr[i]
+            # Calculate trailing stop (2.5*ATR for 1h timeframe)
+            current_stop = lowest_close + 2.5 * atr[i]
             if trailing_stop == 0.0 or current_stop < trailing_stop:
                 trailing_stop = current_stop
             
@@ -271,7 +296,7 @@ def generate_signals(prices):
                 new_signal = 0.0
             elif not position_reduced:
                 # Take profit at 2R
-                risk = 2.0 * atr[i]
+                risk = 2.5 * atr[i]
                 profit = entry_price - close[i]
                 if profit >= 2.0 * risk:
                     new_signal = -SIZE_HALF
@@ -284,7 +309,7 @@ def generate_signals(prices):
         if new_signal != 0.0 and prev_signal == 0.0:
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
@@ -293,7 +318,7 @@ def generate_signals(prices):
         elif new_signal != 0.0 and prev_signal != 0.0 and np.sign(new_signal) != np.sign(prev_signal):
             entry_price = close[i]
             position_side = np.sign(new_signal)
-            trailing_stop = close[i] - 2.0 * atr[i] if position_side > 0 else close[i] + 2.0 * atr[i]
+            trailing_stop = close[i] - 2.5 * atr[i] if position_side > 0 else close[i] + 2.5 * atr[i]
             highest_close = close[i] if position_side > 0 else 0.0
             lowest_close = close[i] if position_side < 0 else 0.0
             position_reduced = False
