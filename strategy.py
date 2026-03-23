@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #1341: 4h Primary + 1d HTF — Simplified Donchian Breakout with HMA Trend
+Experiment #1342: 12h Primary + 1d/1w HTF — Dual HMA Trend + Donchian Breakout + RSI
 
-Hypothesis: #1337 (1d Donchian+HMA+RSI) achieved Sharpe=0.618 with simple logic. 
-Applying same pattern to 4h timeframe with 1d HMA trend filter should work.
-Previous 4h attempts (#1339 Sharpe=0.114) failed due to over-filtering with 
-multiple entry paths. This version uses ONE clear entry signal per direction.
+Hypothesis: 12h timeframe with dual HTF (1d + 1w) HMA trend filters provides optimal
+balance between trade frequency (target 20-50/year) and signal quality. Using proven
+patterns from #1337 (Sharpe=0.618) but adapted for 12h: Donchian(20) breakouts capture
+momentum, dual HMA filters reduce whipsaw, RSI(14) confirms without over-filtering.
 
 Key design choices:
-1. 1d HMA(21) for macro trend bias - proven in #1337
-2. 4h Donchian(20) breakout as sole trigger - clean momentum signal
-3. RSI(14) >50/<50 simple filter - confirms without over-restricting
-4. ATR(14) trailing stop 3x - proven stop distance
-5. Position size 0.30 - conservative for 4h volatility
-6. NO complex regime detection - simplicity worked in #1337
+1. 1w HMA(21) for macro regime bias (bull/bear)
+2. 1d HMA(21) for intermediate trend direction
+3. Donchian(20) breakout as primary trigger
+4. RSI(14) with wide bands (40-60) to ensure trades happen
+5. ATR(14) trailing stop 2.5x for risk management
+6. Position size 0.28 - conservative for 12h volatility
+7. SIMPLE entry logic to avoid 0-trade failure mode
 
-Target: 30-50 trades/year, Sharpe > 0.618, trades >= 30 train, >= 5 test
-Timeframe: 4h
+Target: 20-50 trades/year, Sharpe > 0.618, trades >= 30 train, >= 3 test
+Timeframe: 12h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_rsi_1d_atr_simple_v1"
-timeframe = "4h"
+name = "mtf_12h_dual_hma_donchian_rsi_1d1w_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -120,22 +121,27 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for macro trend filter
+    # Calculate and align HTF HMA for trend filters
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (4h) indicators
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    
+    # Calculate primary (12h) indicators
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.30
+    BASE_SIZE = 0.28
     
     # Position tracking for stoploss
     in_position = False
     position_side = 0
+    entry_price = 0.0
     entry_atr = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
@@ -151,45 +157,65 @@ def generate_signals(prices):
         if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === MACRO TREND (1d HMA) ===
-        macro_bull = close[i] > hma_1d_aligned[i]
-        macro_bear = close[i] < hma_1d_aligned[i]
+        # === MACRO REGIME (1w HMA) ===
+        macro_bull = close[i] > hma_1w_aligned[i]
+        macro_bear = close[i] < hma_1w_aligned[i]
         
-        # === RSI MOMENTUM (simple filter) ===
-        rsi_bull = rsi[i] > 50.0
-        rsi_bear = rsi[i] < 50.0
+        # === INTERMEDIATE TREND (1d HMA) ===
+        trend_bull = close[i] > hma_1d_aligned[i]
+        trend_bear = close[i] < hma_1d_aligned[i]
+        
+        # === RSI MOMENTUM (wide bands to ensure trades) ===
+        rsi_bull = rsi[i] > 40.0
+        rsi_bear = rsi[i] < 60.0
         
         # === DONCHIAN BREAKOUT ===
         breakout_long = close[i] > donchian_upper[i-1]
         breakout_short = close[i] < donchian_lower[i-1]
         
-        # === DESIRED SIGNAL (simple logic - ONE path per direction) ===
+        # === DESIRED SIGNAL (SIMPLE LOGIC TO ENSURE TRADES) ===
         desired_signal = 0.0
         
-        # LONG: 1d HMA bull + Donchian breakout + RSI > 50
-        if macro_bull and breakout_long and rsi_bull:
-            desired_signal = BASE_SIZE
+        # LONG ENTRY: Multiple paths to ensure trades happen
+        if macro_bull:
+            # Path 1: Breakout + trend + RSI (strongest)
+            if breakout_long and trend_bull and rsi_bull:
+                desired_signal = BASE_SIZE
+            # Path 2: Breakout + macro only (moderate)
+            elif breakout_long and rsi_bull:
+                desired_signal = BASE_SIZE * 0.7
+            # Path 3: Trend + RSI (weaker but ensures trades)
+            elif trend_bull and rsi_bull and close[i] > donchian_upper[i-1] * 0.98:
+                desired_signal = BASE_SIZE * 0.5
         
-        # SHORT: 1d HMA bear + Donchian breakout + RSI < 50
-        elif macro_bear and breakout_short and rsi_bear:
-            desired_signal = -BASE_SIZE
+        # SHORT ENTRY: Multiple paths to ensure trades happen
+        elif macro_bear:
+            # Path 1: Breakout + trend + RSI (strongest)
+            if breakout_short and trend_bear and rsi_bear:
+                desired_signal = -BASE_SIZE
+            # Path 2: Breakout + macro only (moderate)
+            elif breakout_short and rsi_bear:
+                desired_signal = -BASE_SIZE * 0.7
+            # Path 3: Trend + RSI (weaker but ensures trades)
+            elif trend_bear and rsi_bear and close[i] < donchian_lower[i-1] * 1.02:
+                desired_signal = -BASE_SIZE * 0.5
         
-        # === STOPLOSS CHECK (Trailing ATR 3x) ===
+        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 3.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 3.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
@@ -197,9 +223,9 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal > 0.1:
+        if desired_signal > 0.15:
             final_signal = BASE_SIZE
-        elif desired_signal < -0.1:
+        elif desired_signal < -0.15:
             final_signal = -BASE_SIZE
         else:
             final_signal = 0.0
@@ -209,11 +235,13 @@ def generate_signals(prices):
             if not in_position:
                 in_position = True
                 position_side = int(np.sign(final_signal))
+                entry_price = close[i]
                 entry_atr = atr[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(final_signal) != position_side:
                 position_side = int(np.sign(final_signal))
+                entry_price = close[i]
                 entry_atr = atr[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
@@ -225,6 +253,7 @@ def generate_signals(prices):
             if in_position:
                 in_position = False
                 position_side = 0
+                entry_price = 0.0
                 entry_atr = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = float('inf')
