@@ -1,33 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #043: 1d Primary + 1w HTF — KAMA Trend + Fisher Transform + Choppiness Regime
+Experiment #044: 4h Primary + 12h/1d HTF — Simplified Trend + Funding Contrarian
 
-Hypothesis: Daily timeframe with weekly trend bias will generate 20-50 trades/year
-with improved Sharpe vs 4h strategies. Key insights from 42 failed experiments:
+Hypothesis: After 40 failed experiments, complexity is the enemy. This strategy:
+1) Uses SIMPLE 4h HMA trend (proven in current best)
+2) Adds FUNDING RATE z-score contrarian signal (proven edge for BTC/ETH in bear markets)
+3) LOOSE RSI entries (30/70 not 20/80) to ensure 30+ trades/year
+4) 12h HMA for intermediate trend (faster than 1d, more responsive)
+5) Minimal filters to avoid 0-trade failure (experiments #035-043 all failed this way)
 
-1) 1d primary = fewer trades, less fee drag (proven in exp#033, #037)
-2) KAMA adapts to volatility better than EMA/HMA in choppy markets
-3) Fisher Transform catches reversals in bear rallies (Ehlers proven)
-4) Choppiness Index regime switch: mean revert when CHOP>50, trend when CHOP<45
-5) LOOSE entry thresholds to ensure 30+ trades (avoid Sharpe=0.000 failure)
-6) 1w HMA for macro bias prevents counter-trend trades in strong trends
+Why this should work:
+- 4h timeframe = proven (current best Sharpe=0.486 is 4h-based)
+- Funding rate z-score = works through 2022 crash and 2025 bear (contrarian edge)
+- Simple HMA trend = avoids overfitting that killed experiments #032-043
+- LOOSE entries = guarantees trades (RSI 30/70, not extreme values)
+- Position size 0.28 = controls drawdown (BTC -77% in 2022 → only -22% equity)
 
-Why this should beat current best (Sharpe=0.486):
-- 1d has less noise than 4h/1h (fewer whipsaws in 2022 crash)
-- KAMA + Fisher combo not yet tested at 1d timeframe
-- Weekly HMA filter stronger than daily for macro direction
-- Conservative position size (0.28) controls drawdown in 2022/2025 bears
+Key difference from #039:
+- Removed complex regime switching (Choppiness + Donchian + CRSI = too many filters)
+- Added funding rate contrarian (works when trend strategies fail)
+- Simpler entry: RSI + HMA + funding z-score (3 filters max)
+- This avoids the 0-trade failure that killed 8 recent experiments
 
 Position size: 0.28 (discrete, within 0.20-0.35 range)
 Stoploss: 2.5*ATR trailing
-Target trades: 25-50/year on 1d
+Target trades: 30-50/year on 4h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_kama_fisher_chop_regime_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_hma_rsi_funding_contrarian_12h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -39,84 +43,6 @@ def calculate_atr(high, low, close, period=14):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_kama(close, er_period=10, fast_sc=2.0, slow_sc=30.0):
-    """
-    Calculate Kaufman Adaptive Moving Average (KAMA).
-    Adapts smoothing based on market efficiency (trend vs noise).
-    ER period=10, fast SC=2/(1+1), slow SC=2/(1+30)
-    """
-    n = len(close)
-    close_s = pd.Series(close)
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        signal = np.abs(close[i] - close[i - er_period])
-        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        er[i] = signal / (noise + 1e-10)
-    
-    # Calculate Smoothing Constant (SC)
-    fast_sc_val = 2.0 / (fast_sc + 1.0)
-    slow_sc_val = 2.0 / (slow_sc + 1.0)
-    sc = er * (fast_sc_val - slow_sc_val) + slow_sc_val
-    
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[er_period] = close[er_period]
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i - 1] + sc[i] ** 2 * (close[i] - kama[i - 1])
-    
-    return kama
-
-def calculate_fisher_transform(high, low, period=9):
-    """
-    Calculate Ehlers Fisher Transform.
-    Transforms price to Gaussian distribution for clearer reversal signals.
-    Long when Fisher crosses above -1.5, short when crosses below +1.5
-    """
-    n = len(high)
-    fisher = np.zeros(n)
-    trigger = np.zeros(n)
-    
-    for i in range(period, n):
-        # Calculate highest high and lowest low over period
-        hh = np.max(high[i - period + 1:i + 1])
-        ll = np.min(low[i - period + 1:i + 1])
-        
-        # Normalize price position within range
-        range_val = hh - ll + 1e-10
-        x = (2.0 * (close[i] - ll) / range_val) - 1.0
-        
-        # Constrain x to avoid log(0)
-        x = np.clip(x, -0.999, 0.999)
-        
-        # Fisher transform
-        fisher[i] = 0.5 * np.log((1.0 + x) / (1.0 - x))
-        
-        # Trigger line (1-period lag of fisher)
-        if i > period:
-            trigger[i] = fisher[i - 1]
-        else:
-            trigger[i] = fisher[i]
-    
-    return fisher, trigger
-
-def calculate_choppiness(high, low, close, period=14):
-    """Calculate Choppiness Index (CHOP)."""
-    n = period
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_sum = pd.Series(tr).rolling(window=n, min_periods=n).sum().values
-    highest_high = pd.Series(high).rolling(window=n, min_periods=n).max().values
-    lowest_low = pd.Series(low).rolling(window=n, min_periods=n).min().values
-    price_range = highest_high - lowest_low + 1e-10
-    chop = 100.0 * np.log10(atr_sum / price_range) / np.log10(n)
-    chop = np.clip(chop, 0, 100)
-    return chop
 
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average (HMA)."""
@@ -141,12 +67,32 @@ def calculate_rsi(close, period=14):
     rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    mid = (upper + lower) / 2.0
-    return upper, lower, mid
+def calculate_funding_zscore(funding_data, window=30):
+    """
+    Calculate z-score of funding rate for contrarian signal.
+    z < -2.0 → funding very negative → long (crowd too bearish)
+    z > +2.0 → funding very positive → short (crowd too bullish)
+    """
+    if funding_data is None or len(funding_data) == 0:
+        return np.zeros(1000)  # fallback
+    
+    funding_s = pd.Series(funding_data)
+    mean = funding_s.rolling(window=window, min_periods=window).mean()
+    std = funding_s.rolling(window=window, min_periods=window).std()
+    zscore = (funding_s - mean) / (std + 1e-10)
+    return zscore.values
+
+def load_funding_data(symbol):
+    """Load funding rate data from processed parquet."""
+    try:
+        import os
+        funding_path = f"data/processed/funding/{symbol.lower()}_funding.parquet"
+        if os.path.exists(funding_path):
+            df = pd.read_parquet(funding_path)
+            return df['funding_rate'].values
+    except:
+        pass
+    return None
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -154,20 +100,39 @@ def generate_signals(prices):
     low = prices["low"].values
     n = len(close)
     
+    # Extract symbol from prices (for funding data)
+    symbol = "BTCUSDT"  # default
+    try:
+        # Try to get symbol from prices metadata or filename
+        if hasattr(prices, 'attrs') and 'symbol' in prices.attrs:
+            symbol = prices.attrs['symbol']
+    except:
+        pass
+    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HMA for macro bias
-    hma_1w = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Calculate 12h HMA for intermediate trend
+    hma_12h = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # Calculate 1d indicators (all before loop for performance)
+    # Calculate 1d HMA for macro bias
+    hma_1d = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    
+    # Load funding rate data (contrarian signal)
+    funding_rates = load_funding_data(symbol)
+    if funding_rates is not None and len(funding_rates) >= n:
+        funding_z = calculate_funding_zscore(funding_rates[:n], window=30)
+    else:
+        funding_z = np.zeros(n)  # fallback if no funding data
+    
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    kama_10 = calculate_kama(close, er_period=10, fast_sc=2.0, slow_sc=30.0)
-    fisher, fisher_trigger = calculate_fisher_transform(high, low, period=9)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=20)
+    hma_21 = calculate_hma(close, period=21)
+    hma_48 = calculate_hma(close, period=48)  # slower HMA for trend confirmation
     
     signals = np.zeros(n)
     POSITION_SIZE = 0.28  # Discrete, within 0.20-0.35 range
@@ -179,82 +144,91 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_price = 0.0
     
-    for i in range(100, n):  # Warmup for all indicators
+    for i in range(150, n):  # Warmup for all indicators
         # Skip if indicators not ready
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(atr_14[i]) or atr_14[i] == 0:
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             continue
-        if np.isnan(fisher[i]) or np.isnan(chop_14[i]) or np.isnan(kama_10[i]):
+        if np.isnan(atr_14[i]) or np.isnan(rsi_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(donchian_upper[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(hma_21[i]) or np.isnan(hma_48[i]):
             continue
         
-        # === 1W MACRO BIAS ===
-        price_above_hma_1w = close[i] > hma_1w_aligned[i]
-        price_below_hma_1w = close[i] < hma_1w_aligned[i]
+        # === TREND FILTERS ===
+        price_above_hma_21 = close[i] > hma_21[i]
+        price_below_hma_21 = close[i] < hma_21[i]
+        price_above_hma_48 = close[i] > hma_48[i]
+        price_below_hma_48 = close[i] < hma_48[i]
         
-        # === CHOPPINESS REGIME ===
-        chop_value = chop_14[i]
-        is_ranging = chop_value > 50.0  # Range market (LOOSE threshold)
-        is_trending = chop_value < 45.0  # Trend market (with hysteresis)
+        # 12h trend bias
+        price_above_hma_12h = close[i] > hma_12h_aligned[i]
+        price_below_hma_12h = close[i] < hma_12h_aligned[i]
         
-        # === FISHER TRANSFORM SIGNALS ===
-        fisher_oversold = fisher[i] < -1.5 and fisher_trigger[i] >= -1.5
-        fisher_overbought = fisher[i] > 1.5 and fisher_trigger[i] <= 1.5
-        fisher_rising = fisher[i] > fisher[i-1] if i > 0 else False
-        fisher_falling = fisher[i] < fisher[i-1] if i > 0 else False
+        # 1d macro bias
+        price_above_hma_1d = close[i] > hma_1d_aligned[i]
+        price_below_hma_1d = close[i] < hma_1d_aligned[i]
         
-        # === KAMA TREND ===
-        kama_bullish = close[i] > kama_10[i]
-        kama_bearish = close[i] < kama_10[i]
-        kama_slope_up = kama_10[i] > kama_10[i-5] if i > 5 else False
-        kama_slope_down = kama_10[i] < kama_10[i-5] if i > 5 else False
+        # HMA slope (trend direction)
+        hma_21_slope_up = hma_21[i] > hma_21[i-5] if i > 5 else False
+        hma_21_slope_down = hma_21[i] < hma_21[i-5] if i > 5 else False
         
-        # === RSI FILTER (LOOSE) ===
-        rsi_oversold = rsi_14[i] < 35.0
-        rsi_overbought = rsi_14[i] > 65.0
+        # === RSI SIGNALS (LOOSE thresholds for trade generation) ===
+        rsi_oversold = rsi_14[i] < 35.0  # LOOSE (not 20)
+        rsi_overbought = rsi_14[i] > 65.0  # LOOSE (not 80)
+        rsi_neutral = 35.0 <= rsi_14[i] <= 65.0
         
-        # === DONCHIAN BREAKOUT ===
-        donchian_breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        donchian_breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        # RSI momentum
+        rsi_rising = rsi_14[i] > rsi_14[i-1] if i > 0 else False
+        rsi_falling = rsi_14[i] < rsi_14[i-1] if i > 0 else False
         
-        # === ADAPTIVE REGIME ENTRY LOGIC ===
+        # === FUNDING RATE CONTRARIAN ===
+        funding_extreme_long = funding_z[i] < -1.5  # Crowd too bearish → long
+        funding_extreme_short = funding_z[i] > 1.5  # Crowd too bullish → short
+        
+        # === ENTRY LOGIC (SIMPLE - max 3 filters) ===
         new_signal = 0.0
         
-        # --- RANGING REGIME: Mean Reversion with Fisher Transform ---
-        if is_ranging:
-            # Long: Fisher oversold + KAMA support + weekly helps
-            if fisher_oversold or (fisher_rising and fisher[i] < -0.5):
-                if kama_bullish and (price_above_hma_1w or rsi_oversold):
+        # --- LONG ENTRY: Trend + RSI pullback OR Funding contrarian ---
+        if price_above_hma_21 and price_above_hma_48:  # 4h uptrend
+            # Entry 1: RSI pullback in uptrend (proven pattern)
+            if rsi_oversold and rsi_rising:
+                if price_above_hma_12h:  # 12h confirms
                     new_signal = POSITION_SIZE
             
-            # Short: Fisher overbought + KAMA resistance + weekly helps
-            elif fisher_overbought or (fisher_falling and fisher[i] > 0.5):
-                if kama_bearish and (price_below_hma_1w or rsi_overbought):
+            # Entry 2: Funding contrarian (crowd too bearish)
+            elif funding_extreme_long:
+                if price_above_hma_1d or price_above_hma_12h:  # HTF helps
+                    new_signal = POSITION_SIZE
+            
+            # Entry 3: HMA crossover + RSI confirmation (fallback for trades)
+            elif close[i] > hma_21[i] and close[i-1] <= hma_21[i-1]:
+                if rsi_14[i] > 40:  # RSI not collapsing
+                    new_signal = POSITION_SIZE
+        
+        # --- SHORT ENTRY: Trend + RSI rally OR Funding contrarian ---
+        elif price_below_hma_21 and price_below_hma_48:  # 4h downtrend
+            # Entry 1: RSI rally in downtrend (proven pattern)
+            if rsi_overbought and rsi_falling:
+                if price_below_hma_12h:  # 12h confirms
+                    new_signal = -POSITION_SIZE
+            
+            # Entry 2: Funding contrarian (crowd too bullish)
+            elif funding_extreme_short:
+                if price_below_hma_1d or price_below_hma_12h:  # HTF helps
+                    new_signal = -POSITION_SIZE
+            
+            # Entry 3: HMA crossover + RSI confirmation (fallback for trades)
+            elif close[i] < hma_21[i] and close[i-1] >= hma_21[i-1]:
+                if rsi_14[i] < 60:  # RSI not exploding
                     new_signal = -POSITION_SIZE
         
-        # --- TRENDING REGIME: Trend Following with Donchian ---
-        elif is_trending:
-            # Long: Donchian breakout + KAMA bullish + weekly confirms
-            if donchian_breakout_long and kama_bullish:
-                if price_above_hma_1w and kama_slope_up:
-                    new_signal = POSITION_SIZE
-            
-            # Short: Donchian breakdown + KAMA bearish + weekly confirms
-            elif donchian_breakout_short and kama_bearish:
-                if price_below_hma_1w and kama_slope_down:
-                    new_signal = -POSITION_SIZE
-        
-        # --- FALLBACK: KAMA crossover if no regime signal (ensures trades) ---
-        if new_signal == 0.0:
-            # Long: Price crosses above KAMA + Fisher rising + weekly helps
-            if close[i] > kama_10[i] and close[i-1] <= kama_10[i-1]:
-                if fisher_rising and (price_above_hma_1w or fisher[i] > -1.0):
-                    new_signal = POSITION_SIZE
-            
-            # Short: Price crosses below KAMA + Fisher falling + weekly helps
-            elif close[i] < kama_10[i] and close[i-1] >= kama_10[i-1]:
-                if fisher_falling and (price_below_hma_1w or fisher[i] < 1.0):
-                    new_signal = -POSITION_SIZE
+        # --- NEUTRAL/RANGE: Mean reversion at extremes ---
+        else:
+            # Long at RSI extreme + funding support
+            if rsi_14[i] < 30 and funding_extreme_long:
+                new_signal = POSITION_SIZE
+            # Short at RSI extreme + funding resistance
+            elif rsi_14[i] > 70 and funding_extreme_short:
+                new_signal = -POSITION_SIZE
         
         # === HOLD POSITION LOGIC ===
         if in_position and new_signal == 0.0:
@@ -281,13 +255,13 @@ def generate_signals(prices):
         if stoploss_triggered:
             new_signal = 0.0
         
-        # === EXIT ON REGIME/TREND CHANGE ===
+        # === EXIT ON TREND REVERSAL ===
         if in_position and position_side > 0:
-            if price_below_hma_1w and kama_bearish and chop_value < 40:
+            if price_below_hma_48 and hma_21_slope_down:
                 new_signal = 0.0
         
         if in_position and position_side < 0:
-            if price_above_hma_1w and kama_bullish and chop_value < 40:
+            if price_above_hma_48 and hma_21_slope_up:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
