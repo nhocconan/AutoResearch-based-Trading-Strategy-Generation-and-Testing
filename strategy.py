@@ -1,30 +1,63 @@
 #!/usr/bin/env python3
 """
-Experiment #1352: 12h Primary + 1d/1w HTF — Simplified Trend Following
+Experiment #1353: 1d Primary + 1w HTF — KAMA Adaptive Trend + Donchian Breakout
 
-Hypothesis: 12h strategies failed (#1342, #1346, #1349) due to OVER-FILTERING with 
-regime switches and too many confluence requirements. Solution: Use SIMPLE trend 
-following with HTF confirmation, minimal filters to ensure trade frequency.
+Hypothesis: Current best (mtf_1d_donchian_hma_rsi_1w_atr_v1, Sharpe=0.618) uses HMA which 
+can whipsaw in range markets. KAMA (Kaufman Adaptive Moving Average) adapts smoothing 
+based on market efficiency - faster in trends, slower in chop. This should reduce 
+whipsaws while maintaining trend capture. Combined with 1w HMA macro filter and 
+Donchian breakout trigger for entry timing.
 
 Key design choices:
-1. 1d HMA(21) for primary trend bias — proven in #1345 (1h version worked)
-2. 1w HMA(21) for macro confirmation — soft filter only, not hard requirement
-3. 12h Donchian(20) breakout as trigger — captures momentum moves
-4. RSI(14) with WIDE bands (30-70) — confirms without over-filtering
-5. ATR(14) trailing stop 2.5x — proven risk management
-6. Position size 0.30 — conservative for 12h volatility
-7. NO regime filter, NO session filter — these caused 0-trade failures in #1342/#1346
+1. KAMA(10,2,30) on 1d - adapts to volatility, reduces chop whipsaws
+2. 1w HMA(21) for macro trend bias - soft filter only
+3. Donchian(20) breakout as entry trigger - captures momentum
+4. RSI(14) with asymmetric thresholds (45/55) - confirms without over-filtering
+5. ATR(14) trailing stop 3.0x - wider stop for 1d volatility
+6. Position size 0.25 - conservative for daily swings
+7. Multiple entry paths to ensure trade frequency (avoid 0-trade failure)
 
-Target: 20-50 trades/year, Sharpe > 0.618, trades >= 30 train, >= 5 test
-Timeframe: 12h
+Target: 25-50 trades/year, Sharpe > 0.618, trades >= 30 train, >= 5 test
+Timeframe: 1d
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_hma_rsi_1d1w_atr_simplified_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_donchian_rsi_1w_atr_adaptive_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
+    """
+    Kaufman Adaptive Moving Average - adapts smoothing based on market efficiency.
+    ER (Efficiency Ratio) = net change / sum of absolute changes
+    High ER = trending (use fast SC), Low ER = choppy (use slow SC)
+    """
+    n = len(close)
+    if n < er_period:
+        return np.full(n, np.nan)
+    
+    kama = np.full(n, np.nan)
+    kama[er_period - 1] = close[er_period - 1]
+    
+    for i in range(er_period, n):
+        # Efficiency Ratio: net price change / total volatility
+        net_change = abs(close[i] - close[i - er_period])
+        total_change = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        
+        if total_change > 1e-10:
+            er = net_change / total_change
+        else:
+            er = 0.0
+        
+        # Smoothing constant: scales between fast and slow based on ER
+        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+        
+        # KAMA calculation
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 def calculate_hma(close, period=21):
     """Hull Moving Average - faster response than EMA"""
@@ -63,7 +96,7 @@ def calculate_hma(close, period=21):
     return hma
 
 def calculate_rsi(close, period=14):
-    """Relative Strength Index - standard period with wide bands"""
+    """Relative Strength Index - asymmetric thresholds for entries"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -84,7 +117,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range - for stoploss and volatility scaling"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -98,7 +131,7 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_donchian(high, low, period=20):
-    """Donchian Channel - breakout levels"""
+    """Donchian Channel - breakout levels for entry triggers"""
     n = len(high)
     if n < period:
         return np.full(n, np.nan), np.full(n, np.nan)
@@ -119,23 +152,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align HTF HMA for trend filters
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
+    # Calculate and align 1w HMA for macro trend filter
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (12h) indicators
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    # Calculate primary (1d) indicators
+    kama = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.30
+    BASE_SIZE = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -156,7 +186,7 @@ def generate_signals(prices):
         if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(kama[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -164,57 +194,61 @@ def generate_signals(prices):
         macro_bull = close[i] > hma_1w_aligned[i]
         macro_bear = close[i] < hma_1w_aligned[i]
         
-        # === PRIMARY TREND (1d HMA) ===
-        trend_bull = close[i] > hma_1d_aligned[i]
-        trend_bear = close[i] < hma_1d_aligned[i]
+        # === PRIMARY TREND (KAMA slope) ===
+        kama_slope_bull = kama[i] > kama[i - 5] if i >= 5 else False
+        kama_slope_bear = kama[i] < kama[i - 5] if i >= 5 else False
         
-        # === RSI MOMENTUM (WIDE bands to ensure trades) ===
-        rsi_bull = rsi[i] > 30.0
-        rsi_bear = rsi[i] < 70.0
-        rsi_strong_bull = rsi[i] > 50.0
-        rsi_strong_bear = rsi[i] < 50.0
+        # Price relative to KAMA
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        
+        # === RSI MOMENTUM (asymmetric thresholds for more trades) ===
+        rsi_bull = rsi[i] > 45.0
+        rsi_bear = rsi[i] < 55.0
+        rsi_strong_bull = rsi[i] > 55.0
+        rsi_strong_bear = rsi[i] < 45.0
         
         # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donchian_upper[i-1]
-        breakout_short = close[i] < donchian_lower[i-1]
+        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
+        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
         
-        # === DESIRED SIGNAL ===
+        # === DESIRED SIGNAL (multiple paths to ensure trade frequency) ===
         desired_signal = 0.0
         
-        # LONG ENTRY: Simplified logic to ensure trades happen
-        # Path 1: Donchian breakout + trend confirmation (primary entry)
-        if breakout_long and trend_bull:
+        # LONG ENTRY PATHS
+        # Path 1: Donchian breakout + KAMA slope + macro bull (primary entry)
+        if breakout_long and kama_slope_bull and macro_bull:
             desired_signal = BASE_SIZE
-        # Path 2: Price above both HTF HMAs (simple trend follow)
-        elif close[i] > hma_1d_aligned[i] and close[i] > hma_1w_aligned[i]:
-            desired_signal = BASE_SIZE * 0.5
-        # Path 3: Strong RSI + above 1d HMA + macro bull
-        elif rsi_strong_bull and trend_bull and macro_bull:
-            desired_signal = BASE_SIZE * 0.5
+        # Path 2: Price above KAMA + KAMA rising + RSI confirmation
+        elif price_above_kama and kama_slope_bull and rsi_bull:
+            desired_signal = BASE_SIZE * 0.6
+        # Path 3: Strong momentum - price above both KAMA and 1w HMA
+        elif price_above_kama and macro_bull and rsi_strong_bull:
+            desired_signal = BASE_SIZE * 0.6
         
-        # SHORT ENTRY: Simplified logic to ensure trades happen
-        # Path 1: Donchian breakout + trend confirmation (primary entry)
-        elif breakout_short and trend_bear:
+        # SHORT ENTRY PATHS
+        # Path 1: Donchian breakout + KAMA slope + macro bear (primary entry)
+        elif breakout_short and kama_slope_bear and macro_bear:
             desired_signal = -BASE_SIZE
-        # Path 2: Price below both HTF HMAs (simple trend follow)
-        elif close[i] < hma_1d_aligned[i] and close[i] < hma_1w_aligned[i]:
-            desired_signal = -BASE_SIZE * 0.5
-        # Path 3: Strong RSI + below 1d HMA + macro bear
-        elif rsi_strong_bear and trend_bear and macro_bear:
-            desired_signal = -BASE_SIZE * 0.5
+        # Path 2: Price below KAMA + KAMA falling + RSI confirmation
+        elif price_below_kama and kama_slope_bear and rsi_bear:
+            desired_signal = -BASE_SIZE * 0.6
+        # Path 3: Strong momentum - price below both KAMA and 1w HMA
+        elif price_below_kama and macro_bear and rsi_strong_bear:
+            desired_signal = -BASE_SIZE * 0.6
         
-        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
+        # === STOPLOSS CHECK (Trailing ATR 3.0x for 1d volatility) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.5 * entry_atr
+            stop_price = highest_since_entry - 3.0 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.5 * entry_atr
+            stop_price = lowest_since_entry + 3.0 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
