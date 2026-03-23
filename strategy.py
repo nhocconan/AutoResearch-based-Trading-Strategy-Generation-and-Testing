@@ -1,36 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #668: 30m Primary + 4h/1d HTF — Trend-Follow with Volume + Session Filter
+Experiment #669: 4h Primary + 1d HTF — Simplified HMA Trend + RSI Pullback + Donchian
 
-Hypothesis: 30m timeframe with 4h/1d HTF trend filter provides optimal balance for
-lower TF trading. Key innovation: use HTF (4h HMA) for SIGNAL DIRECTION, 30m only
-for ENTRY TIMING within HTF trend. This gives HTF trade frequency (~40-60/year)
-with 30m execution precision.
+Hypothesis: Previous strategies failed due to overly complex regime detection and
+too-strict entry thresholds. This strategy uses SIMPLER logic:
+1. 1d HMA for macro trend bias (only trade with HTF trend)
+2. 4h HMA for primary trend direction
+3. RSI pullback entries (not extremes) — RSI 35-45 for long, 55-65 for short
+4. Donchian(20) breakout confirmation
+5. ATR(14) trailing stop at 2.5x
+6. LOOSE thresholds to ensure 30+ trades/year
 
 Why this should work:
-1. 4h HMA(21) for macro bias — prevents counter-trend trades (major failure cause)
-2. 1d HMA(21) for secondary confirmation — extra filter for quality
-3. 30m RSI(14) with MODERATE thresholds (35/65) — ensures trade generation
-4. Volume filter (>0.8x 20-bar avg) — confirms institutional participation
-5. Session filter (8-20 UTC) — avoids low-liquidity Asian session noise
-6. ATR(14) trailing stop (2.5x) — protects capital on reversals
-7. Position size 0.25 (lower for 30m TF to reduce fee drag)
+- 4h TF = ~25-40 trades/year (sweet spot for fee drag vs signal quality)
+- 1d HMA filter prevents counter-trend trades (major failure mode)
+- RSI pullback (not extremes) ensures entries happen during retracements
+- Donchian breakout confirms momentum
+- Simple logic = fewer conditions that can all fail simultaneously
+- Position size 0.25-0.30 to limit drawdown during 2022 crash
 
-Lessons from 442 failures:
-- CRSI is TOO STRICT — generates 0 trades on BTC/ETH
-- Choppiness Index alone doesn't work
-- Need LOOSER RSI thresholds (35/65 not 20/80)
-- ALL symbols must have positive Sharpe (no SOL-only)
-- Lower TF MUST have HTF direction filter + strict entry
-
-Target: Sharpe > 0.612, trades >= 30 train, >= 5 test, ALL symbols positive Sharpe
+Target: Sharpe > 0.612, trades >= 30 train, >= 3 test, ALL symbols positive Sharpe
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_hma_rsi_vol_session_4h1d_v1"
-timeframe = "30m"
+name = "mtf_4h_hma_rsi_pullback_donchian_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -96,52 +92,52 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_volume_ratio(volume, period=20):
-    """Volume ratio vs rolling average."""
-    n = len(volume)
-    vol_ratio = np.full(n, np.nan)
-    
-    if n < period:
-        return vol_ratio
-    
-    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    with np.errstate(divide='ignore', invalid='ignore'):
-        vol_ratio = volume / (vol_avg + 1e-10)
-    
-    return vol_ratio
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel — breakout detection."""
+    n = len(high)
+    donchian_upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    donchian_lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return donchian_upper, donchian_lower
 
-def get_hour_from_open_time(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)."""
-    # open_time is in milliseconds
-    hours = (open_time // (1000 * 60 * 60)) % 24
-    return hours
+def calculate_keltner(high, low, close, atr_period=10, atr_mult=2.0):
+    """Keltner Channel for volatility-based bands."""
+    n = len(close)
+    atr = calculate_atr(high, low, close, atr_period)
+    
+    ema = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    
+    kc_upper = ema + atr_mult * atr
+    kc_lower = ema - atr_mult * atr
+    
+    return kc_upper, kc_lower, ema
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 30m indicators (primary timeframe)
-    rsi_30m = calculate_rsi(close, period=14)
-    atr_30m = calculate_atr(high, low, close, period=14)
-    vol_ratio_30m = calculate_volume_ratio(volume, period=20)
+    # Calculate 4h indicators (primary timeframe)
+    hma_4h = calculate_hma(close, period=21)
+    hma_4h_fast = calculate_hma(close, period=10)
+    rsi_4h = calculate_rsi(close, period=14)
+    atr_4h = calculate_atr(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    kc_upper, kc_lower, kc_mid = calculate_keltner(high, low, close, atr_period=10, atr_mult=2.0)
     
-    # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
+    # Calculate and align HTF indicators (1d)
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
+    # RSI on 1d for additional filter
+    rsi_1d_raw = calculate_rsi(df_1d['close'].values, period=14)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_raw)
+    
     signals = np.zeros(n)
-    SIZE_LONG = 0.25
+    SIZE_LONG = 0.28
     SIZE_SHORT = 0.25
     
     # Position tracking
@@ -154,53 +150,63 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start later to ensure all indicators ready
         # Skip if indicators not ready
-        if np.isnan(rsi_30m[i]) or np.isnan(atr_30m[i]):
+        if np.isnan(hma_4h[i]) or np.isnan(rsi_4h[i]):
             continue
-        if atr_30m[i] <= 1e-10:
+        if np.isnan(atr_4h[i]) or atr_4h[i] <= 1e-10:
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
             continue
-        if np.isnan(vol_ratio_30m[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             continue
         
-        # === SESSION FILTER (8-20 UTC) ===
-        hour = get_hour_from_open_time(open_time[i])
-        in_session = 8 <= hour <= 20
+        # === HTF TREND BIAS (1d HMA + RSI) ===
+        htf_bullish = close[i] > hma_1d_aligned[i] and rsi_1d_aligned[i] > 45
+        htf_bearish = close[i] < hma_1d_aligned[i] and rsi_1d_aligned[i] < 55
         
-        # === HTF TREND BIAS (4h + 1d HMA) ===
-        htf_4h_bullish = close[i] > hma_4h_aligned[i]
-        htf_4h_bearish = close[i] < hma_4h_aligned[i]
+        # === 4h TREND (HMA) ===
+        hma_bullish = close[i] > hma_4h[i] and hma_4h_fast[i] > hma_4h[i]
+        hma_bearish = close[i] < hma_4h[i] and hma_4h_fast[i] < hma_4h[i]
         
-        htf_1d_bullish = close[i] > hma_1d_aligned[i]
-        htf_1d_bearish = close[i] < hma_1d_aligned[i]
+        # === RSI PULLBACK (LOOSE thresholds for trade generation) ===
+        # Long: RSI pulled back to 35-50 zone in uptrend
+        rsi_pullback_long = 35 <= rsi_4h[i] <= 50
+        # Short: RSI rallied to 50-65 zone in downtrend
+        rsi_pullback_short = 50 <= rsi_4h[i] <= 65
         
-        # Strong HTF bias requires both 4h and 1d aligned
-        htf_strong_bullish = htf_4h_bullish and htf_1d_bullish
-        htf_strong_bearish = htf_4h_bearish and htf_1d_bearish
+        # === DONCHIAN BREAKOUT ===
+        donchian_breakout_long = close[i] > donchian_upper[i - 1] if not np.isnan(donchian_upper[i - 1]) else False
+        donchian_breakout_short = close[i] < donchian_lower[i - 1] if not np.isnan(donchian_lower[i - 1]) else False
         
-        # === VOLUME FILTER ===
-        volume_confirmed = vol_ratio_30m[i] > 0.8
+        # === KELTNER POSITION ===
+        kc_near_lower = close[i] < kc_lower[i] if not np.isnan(kc_lower[i]) else False
+        kc_near_upper = close[i] > kc_upper[i] if not np.isnan(kc_upper[i]) else False
         
-        # === RSI SIGNALS (MODERATE thresholds for trade generation) ===
-        rsi_oversold = rsi_30m[i] < 40
-        rsi_overbought = rsi_30m[i] > 60
-        rsi_neutral = 40 <= rsi_30m[i] <= 60
+        # === VOLATILITY CHECK ===
+        atr_ratio = atr_4h[i] / (np.nanmean(atr_4h[max(0,i-50):i]) + 1e-10) if i >= 50 else 1.0
+        vol_normal = 0.5 < atr_ratio < 2.0  # Not extreme volatility
         
-        # === ENTRY CONDITIONS ===
         desired_signal = 0.0
         
-        # LONG: HTF bullish + RSI pullback + volume + session
-        if htf_strong_bullish and rsi_oversold and volume_confirmed and in_session:
+        # === LONG ENTRY ===
+        # Condition 1: HTF bullish + 4h HMA bullish + RSI pullback
+        if htf_bullish and hma_bullish and rsi_pullback_long and vol_normal:
             desired_signal = SIZE_LONG
-        # Also enter on RSI crossing up from oversold in bullish HTF
-        elif htf_strong_bullish and rsi_30m[i] > 35 and rsi_30m[i] < 50 and volume_confirmed and in_session:
+        # Condition 2: HTF bullish + Donchian breakout + RSI not overbought
+        elif htf_bullish and donchian_breakout_long and rsi_4h[i] < 70:
+            desired_signal = SIZE_LONG
+        # Condition 3: Price at Keltner lower + HTF not bearish + RSI oversold
+        elif kc_near_lower and not htf_bearish and rsi_4h[i] < 40:
             desired_signal = SIZE_LONG
         
-        # SHORT: HTF bearish + RSI rally + volume + session
-        elif htf_strong_bearish and rsi_overbought and volume_confirmed and in_session:
+        # === SHORT ENTRY ===
+        # Condition 1: HTF bearish + 4h HMA bearish + RSI pullback
+        elif htf_bearish and hma_bearish and rsi_pullback_short and vol_normal:
             desired_signal = -SIZE_SHORT
-        # Also enter on RSI crossing down from overbought in bearish HTF
-        elif htf_strong_bearish and rsi_30m[i] < 65 and rsi_30m[i] > 50 and volume_confirmed and in_session:
+        # Condition 2: HTF bearish + Donchian breakdown + RSI not oversold
+        elif htf_bearish and donchian_breakout_short and rsi_4h[i] > 30:
+            desired_signal = -SIZE_SHORT
+        # Condition 3: Price at Keltner upper + HTF not bullish + RSI overbought
+        elif kc_near_upper and not htf_bullish and rsi_4h[i] > 60:
             desired_signal = -SIZE_SHORT
         
         # === STOPLOSS CHECK (Trailing ATR) ===
@@ -221,15 +227,15 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === HOLD LOGIC — Maintain position if HTF trend unchanged ===
+        # === HOLD LOGIC — Maintain position if trend unchanged ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if 4h HMA still bullish AND RSI not extremely overbought
-                if htf_4h_bullish and rsi_30m[i] < 70:
+                # Hold long if HMA still bullish AND RSI not extremely overbought
+                if hma_bullish and rsi_4h[i] < 75:
                     desired_signal = SIZE_LONG
             elif position_side < 0:
-                # Hold short if 4h HMA still bearish AND RSI not extremely oversold
-                if htf_4h_bearish and rsi_30m[i] > 30:
+                # Hold short if HMA still bearish AND RSI not extremely oversold
+                if hma_bearish and rsi_4h[i] > 25:
                     desired_signal = -SIZE_SHORT
         
         # === DISCRETIZE SIGNAL VALUES ===
@@ -244,14 +250,14 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_30m[i]
+                entry_atr = atr_4h[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(desired_signal) != position_side:
                 # Position flip
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_30m[i]
+                entry_atr = atr_4h[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             # If same side, update trailing stop levels
