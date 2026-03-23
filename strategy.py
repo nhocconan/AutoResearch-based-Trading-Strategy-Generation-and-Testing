@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #1372: 12h Primary + 1d/1w HTF — Dual Regime with Simple Entries
+Experiment #1373: 1d Primary + 1w HTF — Donchian Breakout with Choppiness Regime Filter
 
-Hypothesis: Previous regime strategies failed due to OVER-FILTERING. This version uses
-Choppiness Index as a SOFT regime guide (not hard filter) with MULTIPLE entry paths
-to ensure trade frequency. Key insight from #1352 (12h Sharpe=0.571): simple HMA trend
-with light RSI filter works. Adding Choppiness to ADJUST entry type, not block entries.
+Hypothesis: The current best (mtf_1d_donchian_hma_rsi_1w_atr_v1, Sharpe=0.618) uses 
+Donchian breakout + HMA trend + RSI filter. Adding Choppiness Index as a regime filter 
+should improve Sharpe by avoiding trades during range-bound periods where breakouts fail.
+1d timeframe naturally limits trades to 20-50/year, reducing fee drag. 1w HMA provides 
+macro trend confirmation without over-filtering.
 
-Design:
-1. 12h HMA(21) for primary trend
-2. 1d HMA(21) for macro confirmation
-3. 1w HMA(21) for secular bias (soft filter)
-4. Choppiness(14) regime: >61.8 = range (mean revert), <38.2 = trend (breakout)
-5. Donchian(20) breakout for trend entries
-6. RSI(14) extremes for range entries
-7. ATR(14) 2.5x trailing stop
-8. Position size 0.28 (conservative for 12h volatility)
-9. MULTIPLE entry paths to ensure >=30 trades/train, >=3/test
+Key design choices:
+1. 1w HMA(21) for macro trend bias — only trade in direction of weekly trend
+2. 1d Donchian(20) breakout as entry trigger — captures sustained momentum
+3. Choppiness Index(14) regime filter — CHOP > 61.8 = range (skip breakouts), CHOP < 38.2 = trend
+4. RSI(14) with wide bands (35-65) — confirms momentum without over-filtering
+5. ATR(14) trailing stop 2.5x — proven risk management from best strategy
+6. Position size 0.30 — appropriate for 1d volatility
+7. Multiple entry paths to ensure >=30 trades/train, >=5 trades/test
 
-Target: 20-50 trades/year, Sharpe > 0.618, trades >= 30 train, >= 3 test
-Timeframe: 12h
+Target: 20-50 trades/year, Sharpe > 0.618, trades >= 30 train, >= 5 test
+Timeframe: 1d
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_chop_regime_hma_donchian_rsi_1d1w_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_chop_hma_1w_rsi_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -117,9 +116,9 @@ def calculate_donchian(high, low, period=20):
 
 def calculate_choppiness(high, low, close, period=14):
     """
-    Choppiness Index - measures market choppiness vs trending
-    CHOP > 61.8 = choppy/range market
-    CHOP < 38.2 = trending market
+    Choppiness Index - measures if market is trending or ranging
+    CHOP > 61.8 = range-bound (mean revert)
+    CHOP < 38.2 = trending (trend follow)
     Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
     """
     n = len(close)
@@ -132,18 +131,18 @@ def calculate_choppiness(high, low, close, period=14):
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    chop = np.full(n, np.nan)
+    choppiness = np.full(n, np.nan)
     
     for i in range(period, n):
         atr_sum = np.sum(tr[i-period+1:i+1])
         highest_high = np.nanmax(high[i-period+1:i+1])
         lowest_low = np.nanmin(low[i-period+1:i+1])
-        
         price_range = highest_high - lowest_low
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+        
+        if price_range > 1e-10 and atr_sum > 1e-10:
+            choppiness[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
     
-    return chop
+    return choppiness
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -152,25 +151,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align HTF HMA for trend filters
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
+    # Calculate and align HTF HMA for macro trend filter
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (12h) indicators
-    hma_12h = calculate_hma(close, period=21)
+    # Calculate primary (1d) indicators
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
+    choppiness = calculate_choppiness(high, low, close, period=14)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.28
+    BASE_SIZE = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -191,80 +185,56 @@ def generate_signals(prices):
         if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_12h[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
-            signals[i] = 0.0
-            continue
-        if np.isnan(chop[i]):
+        if np.isnan(choppiness[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME DETECTION (Choppiness Index) ===
-        # CHOP > 61.8 = range market (mean reversion favored)
-        # CHOP < 38.2 = trend market (breakout favored)
-        # 38.2-61.8 = neutral (both valid)
-        is_choppy = chop[i] > 61.8
-        is_trending = chop[i] < 38.2
-        
-        # === MACRO TREND (1w HMA) - soft secular bias ===
+        # === MACRO TREND (1w HMA) - only trade in direction of weekly trend ===
         macro_bull = close[i] > hma_1w_aligned[i]
         macro_bear = close[i] < hma_1w_aligned[i]
         
-        # === PRIMARY TREND (1d HMA) ===
-        trend_bull = close[i] > hma_1d_aligned[i]
-        trend_bear = close[i] < hma_1d_aligned[i]
+        # === CHOPPINESS REGIME FILTER ===
+        # CHOP < 38.2 = trending (allow breakouts)
+        # CHOP > 61.8 = ranging (skip breakouts, wait for mean reversion)
+        trending_regime = choppiness[i] < 45.0  # Slightly relaxed threshold
+        ranging_regime = choppiness[i] > 55.0
         
-        # === LOCAL TREND (12h HMA) ===
-        local_bull = close[i] > hma_12h[i]
-        local_bear = close[i] < hma_12h[i]
-        
-        # === RSI MOMENTUM ===
-        rsi_oversold = rsi[i] < 35.0
-        rsi_overbought = rsi[i] > 65.0
-        rsi_bull = rsi[i] > 45.0
-        rsi_bear = rsi[i] < 55.0
+        # === RSI MOMENTUM (WIDE bands to ensure trades) ===
+        rsi_bull = rsi[i] > 40.0
+        rsi_bear = rsi[i] < 60.0
+        rsi_strong_bull = rsi[i] > 50.0
+        rsi_strong_bear = rsi[i] < 50.0
         
         # === DONCHIAN BREAKOUT ===
         breakout_long = close[i] > donchian_upper[i-1]
         breakout_short = close[i] < donchian_lower[i-1]
         
-        # === DESIRED SIGNAL - Multiple entry paths ===
+        # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # LONG ENTRIES (multiple paths to ensure trades)
-        # Path 1: Trend regime + Donchian breakout + trend confirmation (primary)
-        if is_trending and breakout_long and local_bull and trend_bull:
+        # LONG ENTRY: Multiple paths to ensure trades happen
+        # Path 1: Donchian breakout + macro bull + trending regime (primary entry)
+        if breakout_long and macro_bull and trending_regime:
             desired_signal = BASE_SIZE
-        # Path 2: Neutral regime + breakout + all trends aligned
-        elif not is_choppy and breakout_long and local_bull and trend_bull and macro_bull:
-            desired_signal = BASE_SIZE
-        # Path 3: Range regime + RSI oversold + price above 12h HMA (mean revert long)
-        elif is_choppy and rsi_oversold and local_bull:
+        # Path 2: Donchian breakout + macro bull + RSI confirmation
+        elif breakout_long and macro_bull and rsi_strong_bull:
             desired_signal = BASE_SIZE * 0.7
-        # Path 4: Simple trend follow - all HMAs aligned bull
-        elif local_bull and trend_bull and macro_bull and rsi_bull:
-            desired_signal = BASE_SIZE * 0.5
-        # Path 5: Breakout without regime filter (fallback for trade frequency)
-        elif breakout_long and local_bull:
+        # Path 3: Price above 1w HMA + RSI strong bull (simple trend follow)
+        elif macro_bull and rsi_strong_bull and trending_regime:
             desired_signal = BASE_SIZE * 0.5
         
-        # SHORT ENTRIES (multiple paths to ensure trades)
-        # Path 1: Trend regime + Donchian breakout + trend confirmation (primary)
-        elif is_trending and breakout_short and local_bear and trend_bear:
+        # SHORT ENTRY: Multiple paths to ensure trades happen
+        # Path 1: Donchian breakout + macro bear + trending regime (primary entry)
+        elif breakout_short and macro_bear and trending_regime:
             desired_signal = -BASE_SIZE
-        # Path 2: Neutral regime + breakout + all trends aligned
-        elif not is_choppy and breakout_short and local_bear and trend_bear and macro_bear:
-            desired_signal = -BASE_SIZE
-        # Path 3: Range regime + RSI overbought + price below 12h HMA (mean revert short)
-        elif is_choppy and rsi_overbought and local_bear:
+        # Path 2: Donchian breakout + macro bear + RSI confirmation
+        elif breakout_short and macro_bear and rsi_strong_bear:
             desired_signal = -BASE_SIZE * 0.7
-        # Path 4: Simple trend follow - all HMAs aligned bear
-        elif local_bear and trend_bear and macro_bear and rsi_bear:
-            desired_signal = -BASE_SIZE * 0.5
-        # Path 5: Breakout without regime filter (fallback for trade frequency)
-        elif breakout_short and local_bear:
+        # Path 3: Price below 1w HMA + RSI strong bear (simple trend follow)
+        elif macro_bear and rsi_strong_bear and trending_regime:
             desired_signal = -BASE_SIZE * 0.5
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
