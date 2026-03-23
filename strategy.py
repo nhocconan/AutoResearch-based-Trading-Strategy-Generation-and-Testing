@@ -1,33 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #1399: 4h Primary + 1d HTF — Donchian Breakout with Volume Confirmation
+Experiment #1400: 1h Primary + 4h/12h HTF — Simplified Donchian Breakout with HMA Trend
 
-Hypothesis: The proven Donchian+HMA+RSI+ATR pattern works across timeframes, but 4h needs
-additional filter to compete with 1d Sharpe=0.618. Volume surge on breakouts filters false
-signals without over-complicating (regime filters failed in #1392, #1393, #1394).
+Hypothesis: Previous 1h failures (#1390, #1395 Sharpe=0.000) had TOO MANY filters
+(session 8-20 UTC, volume > 0.8x, Choppiness regime) that killed all trades.
+The working 12h pattern (#1396 Sharpe=0.525) used SIMPLE Donchian + HMA + RSI.
 
-Key insight from winners (#1391, #1396, current best): SIMPLE trend-following beats complex
-regime switching. Adding ONE smart filter (volume confirmation) improves signal quality
-without reducing trade frequency below minimum threshold.
+Key insight for 1h: Use 4h HMA for trend direction (proven), 1h Donchian(20) for
+breakout trigger, 1h RSI(14) with WIDE bands (35-65) to ensure 30-80 trades/year.
+NO session filter, NO volume filter — these killed previous 1h attempts.
 
 Design:
-1. 1d HMA(21) = macro trend direction (proven across 4h/12h/1d)
-2. 4h Donchian(20/55) breakout = entry triggers (dual period flexibility)
-3. 4h RSI(14) momentum = asymmetric thresholds (long >40, short <60) for conviction
-4. Volume surge > 1.5x 20-bar avg = filters false breakouts (NEW element)
-5. ATR(14) trailing stop 2.5x = risk management (proven)
-6. Position size 0.30 = moderate conviction for 4h volatility
-7. Multiple entry paths per direction = ensures >=30 trades/train
+1. 4h HMA(21) = trend direction (primary filter, proven on 4h/12h/1d)
+2. 12h HMA(21) = macro confirmation (secondary filter for stronger signals)
+3. 1h Donchian(20) breakout = entry trigger (single period for simplicity)
+4. 1h RSI(14) momentum = wide bands 35-65 (ensure trades, not 45-55)
+5. 1h ATR(14) trailing stop 2.5x = risk management
+6. Position size 0.25 = conservative for 1h volatility
+7. NO session/volume filters (these caused 0 trades in #1390, #1395)
 
-Target: 30-60 trades/year, Sharpe > 0.618 (beat 1d baseline), trades >= 30 train, >= 5 test
-Timeframe: 4h
+Target: 30-80 trades/year, Sharpe > 0.618 (beat 1d baseline), trades >= 30 train, >= 3 test
+Timeframe: 1h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_1d_rsi_vol_atr_v1"
-timeframe = "4h"
+name = "mtf_1h_donchian_hma_4h12h_rsi_atr_simple_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -67,7 +67,7 @@ def calculate_hma(close, period=21):
     return hma
 
 def calculate_rsi(close, period=14):
-    """Relative Strength Index - asymmetric thresholds for entry conviction"""
+    """Relative Strength Index - wide bands for entry confirmation"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -116,43 +116,31 @@ def calculate_donchian(high, low, period=20):
     
     return upper, lower
 
-def calculate_volume_sma(volume, period=20):
-    """Volume Simple Moving Average - for surge detection"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    vol_sma = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        window = volume[i-period+1:i+1]
-        if not np.any(np.isnan(window)):
-            vol_sma[i] = np.mean(window)
-    
-    return vol_sma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate and align 1d HMA for macro trend filter
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 4h HMA for trend filter
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate primary (4h) indicators
-    donchian_20_upper, donchian_20_lower = calculate_donchian(high, low, period=20)
-    donchian_55_upper, donchian_55_lower = calculate_donchian(high, low, period=55)
+    # Calculate and align 12h HMA for macro confirmation
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    
+    # Calculate primary (1h) indicators
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    vol_sma = calculate_volume_sma(volume, period=20)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.30
+    BASE_SIZE = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -170,7 +158,7 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(donchian_20_upper[i]) or np.isnan(donchian_55_upper[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -182,67 +170,59 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(vol_sma[i]) or vol_sma[i] <= 1e-10:
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === MACRO TREND (1d HMA) - primary filter ===
-        macro_bull = close[i] > hma_1d_aligned[i]
-        macro_bear = close[i] < hma_1d_aligned[i]
+        # === TREND FILTERS (4h + 12h HMA) ===
+        trend_4h_bull = close[i] > hma_4h_aligned[i]
+        trend_4h_bear = close[i] < hma_4h_aligned[i]
+        trend_12h_bull = close[i] > hma_12h_aligned[i]
+        trend_12h_bear = close[i] < hma_12h_aligned[i]
         
-        # === RSI MOMENTUM (asymmetric thresholds for conviction) ===
-        rsi_long = rsi[i] > 40.0  # asymmetric: easier to go long in bull
-        rsi_short = rsi[i] < 60.0  # asymmetric: easier to go short in bear
-        rsi_strong_long = rsi[i] > 50.0
-        rsi_strong_short = rsi[i] < 50.0
+        # === RSI MOMENTUM (WIDE bands to ensure trades) ===
+        # Wide bands: 35-65 instead of 45-55 to generate more signals
+        rsi_bull = rsi[i] > 35.0
+        rsi_bear = rsi[i] < 65.0
+        rsi_strong_bull = rsi[i] > 45.0
+        rsi_strong_bear = rsi[i] < 55.0
         
-        # === VOLUME SURGE CONFIRMATION (filters false breakouts) ===
-        volume_surge = volume[i] > 1.5 * vol_sma[i]
+        # === DONCHIAN BREAKOUT ===
+        breakout_long = close[i] > donchian_upper[i-1]
+        breakout_short = close[i] < donchian_lower[i-1]
         
-        # === DUAL DONCHIAN BREAKOUT ===
-        breakout_20_long = close[i] > donchian_20_upper[i-1]
-        breakout_20_short = close[i] < donchian_20_lower[i-1]
-        breakout_55_long = close[i] > donchian_55_upper[i-1]
-        breakout_55_short = close[i] < donchian_55_lower[i-1]
-        
-        # === DESIRED SIGNAL - MULTIPLE ENTRY PATHS PER DIRECTION ===
+        # === DESIRED SIGNAL - MULTIPLE ENTRY PATHS ===
         desired_signal = 0.0
         
         # LONG ENTRY PATHS (any one triggers entry)
-        # Path 1: Donchian-20 breakout + 1d trend + RSI + volume surge (highest conviction)
-        if breakout_20_long and macro_bull and rsi_long and volume_surge:
+        # Path 1: Breakout + 4h trend + RSI (primary entry)
+        if breakout_long and trend_4h_bull and rsi_bull:
             desired_signal = BASE_SIZE
-        # Path 2: Donchian-55 breakout + RSI strong + volume (strong breakout)
-        elif breakout_55_long and rsi_strong_long and volume_surge:
+        # Path 2: Breakout + 12h trend + RSI strong (stronger confirmation)
+        elif breakout_long and trend_12h_bull and rsi_strong_bull:
             desired_signal = BASE_SIZE
-        # Path 3: Donchian-20 breakout + 1d trend + RSI (standard entry)
-        elif breakout_20_long and macro_bull and rsi_long:
-            desired_signal = BASE_SIZE * 0.7
-        # Path 4: Price above 1d HMA + RSI momentum (trend continuation)
-        elif macro_bull and rsi_strong_long:
+        # Path 3: 4h trend + RSI strong (trend continuation without breakout)
+        elif trend_4h_bull and trend_12h_bull and rsi_strong_bull:
+            desired_signal = BASE_SIZE * 0.5
+        # Path 4: Breakout alone with RSI neutral (momentum entry)
+        elif breakout_long and rsi[i] > 40.0:
             desired_signal = BASE_SIZE * 0.5
         
         # SHORT ENTRY PATHS (any one triggers entry)
-        # Path 1: Donchian-20 breakout + 1d trend + RSI + volume surge (highest conviction)
-        elif breakout_20_short and macro_bear and rsi_short and volume_surge:
+        # Path 1: Breakout + 4h trend + RSI (primary entry)
+        elif breakout_short and trend_4h_bear and rsi_bear:
             desired_signal = -BASE_SIZE
-        # Path 2: Donchian-55 breakout + RSI strong + volume (strong breakout)
-        elif breakout_55_short and rsi_strong_short and volume_surge:
+        # Path 2: Breakout + 12h trend + RSI strong (stronger confirmation)
+        elif breakout_short and trend_12h_bear and rsi_strong_bear:
             desired_signal = -BASE_SIZE
-        # Path 3: Donchian-20 breakout + 1d trend + RSI (standard entry)
-        elif breakout_20_short and macro_bear and rsi_short:
-            desired_signal = -BASE_SIZE * 0.7
-        # Path 4: Price below 1d HMA + RSI momentum (trend continuation)
-        elif macro_bear and rsi_strong_short:
+        # Path 3: 4h trend + RSI strong (trend continuation without breakout)
+        elif trend_4h_bear and trend_12h_bear and rsi_strong_bear:
+            desired_signal = -BASE_SIZE * 0.5
+        # Path 4: Breakout alone with RSI neutral (momentum entry)
+        elif breakout_short and rsi[i] < 60.0:
             desired_signal = -BASE_SIZE * 0.5
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
@@ -266,8 +246,6 @@ def generate_signals(prices):
         # === DISCRETIZE SIGNAL VALUES ===
         if desired_signal >= BASE_SIZE * 0.4:
             final_signal = BASE_SIZE if desired_signal > 0 else -BASE_SIZE
-        elif desired_signal <= -BASE_SIZE * 0.4:
-            final_signal = -BASE_SIZE
         else:
             final_signal = 0.0
         
