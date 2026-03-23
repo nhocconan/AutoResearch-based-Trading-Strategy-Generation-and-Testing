@@ -1,124 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #171: 4h Primary + 1d HTF — Hilbert Transform Cycle Detection + Regime Filter
+Experiment #172: 12h Primary + 1d/1w HTF — Fisher Transform + HMA Trend + Regime Filter
 
-Hypothesis: Recent failures show that standard indicators (RSI, MACD, ADX) are overfit and
-fail in 2025 bear/range market. The Ehlers Hilbert Transform is UNDERUTILIZED in our
-experiment history - only 2 strategies tried it vs 20+ with RSI/Fisher.
+Hypothesis: Previous regime-switching strategies failed because they were too complex
+and had overly strict entry conditions (0 trades on BTC/ETH). Fisher Transform is
+proven to work well in bear/range markets for catching reversals. Combined with
+HMA trend filter and Choppiness regime detection, this should generate consistent
+trades across ALL symbols while maintaining positive Sharpe.
 
-Hilbert Transform advantages:
-- Extracts instantaneous trendline with minimal lag
-- Detects cycle phase (where we are in the price cycle)
-- Works in BOTH trending and ranging markets (adaptive)
-- Mathematically derived from signal processing, not curve-fit
+KEY IMPROVEMENTS:
+1. Fisher Transform (period=9) as primary reversal signal - catches bear market rallies
+2. Dual HTF bias: 1d HMA for medium-term, 1w HMA for macro bias
+3. Looser entry thresholds to ensure ≥30 trades per symbol on train
+4. Choppiness Index only for position sizing (not entry block)
+5. ATR trailing stop at 2.5x for risk management
+6. Position size: 0.25 full, 0.15 partial (discrete levels)
 
-STRATEGY LOGIC:
-1) Hilbert Transform gives us: Instantaneous Trendline + Phase
-2) Regime Filter: Bollinger Band Width percentile (compression vs expansion)
-3) Entry: Phase cross + Trend confirmation + Regime-appropriate logic
-   - Compression (BBW < 30th pct): Mean reversion at cycle extremes
-   - Expansion (BBW > 70th pct): Trend follow with Hilbert trendline
-4) HTF Filter: 1d HMA(21) for macro bias
-5) Exit: ATR(14) trailing stop at 2.5x + Phase reversal
-
-POSITION SIZING:
-- Full confluence: 0.30
-- Partial: 0.20
-- Discrete levels to minimize fee churn
-- Target: 25-45 trades/year on 4h
-
-Why this might work:
-- Hilbert is mathematically robust (not curve-fit like RSI thresholds)
-- Regime-adaptive (different logic for chop vs trend)
-- Multi-timeframe confirmation reduces false signals
-- Conservative sizing protects against 2022-style crashes
+TARGET: 25-45 trades/year, Sharpe > 0.5 on ALL symbols (BTC, ETH, SOL)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hilbert_cycle_regime_bbw_1d_v1"
-timeframe = "4h"
+name = "mtf_12h_fisher_hma_regime_1d1w_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_hilbert_transform(close, period=18):
-    """
-    Calculate Ehlers Hilbert Transform Instantaneous Trendline.
-    
-    Uses quadrature filter to extract instantaneous phase and trendline.
-    Based on "Cycle Analytics for Traders" by John Ehlers.
-    
-    Returns:
-    - trendline: Instantaneous trend (less lag than EMA)
-    - phase: Cycle phase in degrees (0-360)
-    - smooth: Smoothed price for phase calculation
-    """
-    n = len(close)
-    close = np.array(close, dtype=np.float64)
-    
-    # Detrend using difference from SMA
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    detrend = close - sma
-    
-    # Handle NaN at start
-    detrend[:period] = 0.0
-    
-    # Hilbert Transform - Quadrature Filter
-    # I = InPhase, Q = Quadrature (90-degree shifted)
-    I = np.zeros(n)
-    Q = np.zeros(n)
-    
-    for i in range(period, n):
-        # I component (current detrended value)
-        I[i] = detrend[i]
-        
-        # Q component (Hilbert transform approximation)
-        # Q = 0.0962*detrend[i] + 0.5769*detrend[i-2] - 0.5769*detrend[i-4] - 0.0962*detrend[i-6]
-        if i >= 6:
-            Q[i] = (0.0962 * detrend[i] + 
-                   0.5769 * detrend[i-2] - 
-                   0.5769 * detrend[i-4] - 
-                   0.0962 * detrend[i-6])
-        elif i >= 4:
-            Q[i] = 0.0962 * detrend[i] + 0.5769 * detrend[i-2] - 0.5769 * detrend[i-4]
-        elif i >= 2:
-            Q[i] = 0.0962 * detrend[i] + 0.5769 * detrend[i-2]
-        else:
-            Q[i] = 0.0962 * detrend[i]
-    
-    # Smooth I and Q to reduce noise
-    I_smooth = pd.Series(I).ewm(span=3, min_periods=3, adjust=False).mean().values
-    Q_smooth = pd.Series(Q).ewm(span=3, min_periods=3, adjust=False).mean().values
-    
-    # Calculate phase angle
-    phase = np.zeros(n)
-    for i in range(n):
-        if np.abs(I_smooth[i]) > 1e-10:
-            phase[i] = np.degrees(np.arctan2(Q_smooth[i], I_smooth[i]))
-        else:
-            phase[i] = phase[i-1] if i > 0 else 0.0
-    
-    # Ensure phase is continuous (unwrapped)
-    for i in range(1, n):
-        if phase[i] - phase[i-1] > 180:
-            phase[i:] -= 360
-        elif phase[i] - phase[i-1] < -180:
-            phase[i:] += 360
-    
-    # Normalize phase to 0-360
-    phase = np.mod(phase, 360)
-    
-    # Calculate Instantaneous Trendline
-    # Trendline = I / cos(phase) when phase is not near 90/270
-    trendline = np.zeros(n)
-    for i in range(period, n):
-        cos_phase = np.cos(np.radians(phase[i]))
-        if np.abs(cos_phase) > 0.1:
-            trendline[i] = sma[i] + I_smooth[i] / cos_phase
-        else:
-            trendline[i] = sma[i]
-    
-    return trendline, phase, sma
 
 def calculate_atr(high, low, close, period=14):
     """Calculate ATR using Wilder's smoothing."""
@@ -139,35 +45,106 @@ def calculate_hma(close, period=21):
     hma = wma_diff.ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
     return hma.values
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
+def calculate_fisher_transform(high, low, close, period=9):
+    """
+    Calculate Ehlers Fisher Transform.
+    Transforms price into a Gaussian normal distribution for clearer reversal signals.
+    Long when Fisher crosses above -1.5 from below
+    Short when Fisher crosses below +1.5 from above
+    """
+    hl2 = (high + low) / 2.0
+    hl2_s = pd.Series(hl2)
     
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    band_width = (upper - lower) / sma
+    # Normalize price to 0-1 range
+    lowest_low = hl2_s.rolling(window=period, min_periods=period).min().values
+    highest_high = hl2_s.rolling(window=period, min_periods=period).max().values
+    price_range = highest_high - lowest_low
     
-    return upper.values, lower.values, band_width.values
+    with np.errstate(divide='ignore', invalid='ignore'):
+        normalized = (hl2 - lowest_low) / (price_range + 1e-10)
+        normalized = np.clip(normalized, 0.001, 0.999)  # Avoid log(0)
+    
+    # Fisher transform
+    fisher = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized + 1e-10))
+    fisher = np.nan_to_num(fisher, nan=0.0)
+    
+    # Signal line (1-period lag)
+    fisher_signal = np.roll(fisher, 1)
+    fisher_signal[0] = fisher[0]
+    
+    return fisher, fisher_signal
 
-def calculate_bbw_percentile(band_width, lookback=100):
+def calculate_choppiness(high, low, close, period=14):
     """
-    Calculate Bollinger Band Width percentile over lookback period.
-    Low percentile = compression (mean reversion regime)
-    High percentile = expansion (trend regime)
+    Calculate Choppiness Index (CHOP).
+    CHOP > 61.8 = range/choppy market
+    CHOP < 38.2 = trending market
     """
-    n = len(band_width)
-    percentile = np.zeros(n)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    for i in range(lookback, n):
-        window = band_width[i-lookback:i]
-        current = band_width[i]
-        rank = np.sum(window < current)
-        percentile[i] = 100.0 * rank / lookback
+    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
     
-    percentile[:lookback] = 50.0
-    return percentile
+    price_range = highest_high - lowest_low
+    with np.errstate(divide='ignore', invalid='ignore'):
+        chop = 100.0 * np.log10(atr_sum / (price_range + 1e-10)) / np.log10(period)
+    
+    chop = np.nan_to_num(chop, nan=50.0)
+    chop = np.clip(chop, 0, 100)
+    return chop
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index) for trend strength."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    # Directional Movement
+    plus_dm = np.maximum(high_s - high_s.shift(1), 0).values
+    minus_dm = np.maximum(low_s.shift(1) - low, 0).values
+    
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    # Smooth with Wilder's method (EMA with span=period)
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = 100.0 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10)
+    minus_di = 100.0 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10)
+    
+    # DX and ADX
+    with np.errstate(divide='ignore', invalid='ignore'):
+        dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    adx = np.nan_to_num(adx, nan=0.0)
+    
+    return adx, plus_di, minus_di
+
+def calculate_rsi(close, period=14):
+    """Calculate RSI."""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rs = avg_gain / (avg_loss + 1e-10)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+    
+    rsi = rsi.fillna(50.0).values
+    return rsi
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -178,21 +155,24 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h indicators (primary timeframe)
+    # Calculate 12h indicators (primary timeframe)
     atr_14 = calculate_atr(high, low, close, period=14)
-    hma_4h = calculate_hma(close, period=21)
+    hma_21 = calculate_hma(close, period=21)
+    hma_50 = calculate_hma(close, period=50)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
+    fisher, fisher_signal = calculate_fisher_transform(high, low, close, period=9)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
+    rsi_14 = calculate_rsi(close, period=14)
     
-    # Hilbert Transform
-    hilbert_trend, hilbert_phase, hilbert_sma = calculate_hilbert_transform(close, period=18)
-    
-    # Bollinger Bands for regime detection
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    bbw_percentile = calculate_bbw_percentile(bb_width, lookback=100)
-    
-    # Calculate 1d HMA for macro bias
+    # Calculate 1d HMA for medium-term bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate 1w HMA for macro bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
     # Volume average (20-bar)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -200,6 +180,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     POSITION_SIZE_FULL = 0.30
     POSITION_SIZE_HALF = 0.20
+    POSITION_SIZE_QUARTER = 0.15
     
     # Track position state for stoploss
     in_position = False
@@ -207,98 +188,127 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     entry_price = 0.0
-    
-    # Track phase for reversal detection
-    prev_phase = 0.0
+    prev_fisher = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(hma_4h[i]) or np.isnan(atr_14[i]) or atr_14[i] == 0:
+        if np.isnan(hma_21[i]) or np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(hilbert_trend[i]) or np.isnan(hilbert_phase[i]):
+        if np.isnan(chop_14[i]) or np.isnan(fisher[i]):
             continue
-        if np.isnan(bb_width[i]) or np.isnan(bbw_percentile[i]):
-            continue
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             continue
         if np.isnan(vol_avg[i]) or vol_avg[i] == 0:
             continue
+        if np.isnan(adx[i]) or np.isnan(rsi_14[i]):
+            continue
         
-        # === VOLUME FILTER ===
-        volume_ok = volume[i] > 0.8 * vol_avg[i]
+        # === VOLUME FILTER (lenient) ===
+        volume_ok = volume[i] > 0.5 * vol_avg[i]
         
-        # === REGIME DETECTION (Bollinger Band Width Percentile) ===
-        bbw_pct = bbw_percentile[i]
-        is_compression = bbw_pct < 30.0  # Low BBW = mean reversion regime
-        is_expansion = bbw_pct > 70.0    # High BBW = trend regime
-        is_transition = not is_compression and not is_expansion
+        # === REGIME DETECTION ===
+        chop_value = chop_14[i]
+        is_trending = chop_value < 45.0  # More lenient threshold
+        is_ranging = chop_value > 55.0
         
         # === HTF MACRO BIAS ===
         price_above_hma_1d = close[i] > hma_1d_aligned[i]
         price_below_hma_1d = close[i] < hma_1d_aligned[i]
+        price_above_hma_1w = close[i] > hma_1w_aligned[i]
+        price_below_hma_1w = close[i] < hma_1w_aligned[i]
         
-        # === 4H TREND (Hilbert) ===
-        price_above_hilbert = close[i] > hilbert_trend[i]
-        price_below_hilbert = close[i] < hilbert_trend[i]
+        # === 12H TREND ===
+        price_above_hma_21 = close[i] > hma_21[i]
+        price_below_hma_21 = close[i] < hma_21[i]
+        hma_21_above_50 = hma_21[i] > hma_50[i] if not np.isnan(hma_50[i]) else False
+        hma_21_below_50 = hma_21[i] < hma_50[i] if not np.isnan(hma_50[i]) else False
         
-        # === PHASE SIGNALS ===
-        current_phase = hilbert_phase[i]
+        # === FISHER TRANSFORM SIGNALS ===
+        fisher_long_cross = (fisher[i] < -1.0) and (fisher_signal[i] < fisher[i])
+        fisher_short_cross = (fisher[i] > 1.0) and (fisher_signal[i] > fisher[i])
         
-        # Phase crossing up through 0/360 = bullish cycle start
-        # Phase crossing down through 180 = bearish cycle start
-        phase_bullish = 0 <= current_phase <= 45 or current_phase >= 315
-        phase_bearish = 135 <= current_phase <= 225
+        # Fisher reversal from extreme
+        fisher_oversold = fisher[i] < -1.5
+        fisher_overbought = fisher[i] > 1.5
         
-        # Phase reversal detection
-        phase_crossed_bullish = (prev_phase > 270 and current_phase < 90) if i > 0 else False
-        phase_crossed_bearish = (prev_phase < 90 and current_phase > 270) if i > 0 else False
+        # Fisher turning up from oversold
+        fisher_turning_up = fisher[i] > fisher_signal[i] and fisher_signal[i] < -0.5
+        fisher_turning_down = fisher[i] < fisher_signal[i] and fisher_signal[i] > 0.5
         
-        prev_phase = current_phase
+        # === RSI EXTREMES ===
+        rsi_oversold = rsi_14[i] < 35.0
+        rsi_overbought = rsi_14[i] > 65.0
         
-        # === BOLLINGER BAND POSITION ===
-        at_bb_lower = close[i] <= bb_lower[i] * 1.002  # Within 0.2% of lower band
-        at_bb_upper = close[i] >= bb_upper[i] * 0.998  # Within 0.2% of upper band
+        # === ADX TREND STRENGTH ===
+        adx_strong = adx[i] > 20.0
+        adx_weak = adx[i] < 25.0
         
-        # === ENTRY LOGIC (REGIME ADAPTIVE) ===
+        # === ENTRY LOGIC ===
         new_signal = 0.0
+        position_size = POSITION_SIZE_HALF
         
-        if is_compression:
-            # MEAN REVERSION REGIME: Fade extremes with phase confirmation
-            # Long: Price at BB lower + Phase bullish + 1d bias OK
-            if at_bb_lower and phase_bullish and price_above_hma_1d and volume_ok:
+        # LONG entries - multiple confluence patterns
+        long_confluence = 0
+        
+        if fisher_turning_up:
+            long_confluence += 1
+        if rsi_oversold:
+            long_confluence += 1
+        if price_above_hma_1d:
+            long_confluence += 1
+        if price_above_hma_21:
+            long_confluence += 1
+        if volume_ok:
+            long_confluence += 1
+        
+        # LONG: Need 2+ confluence factors
+        if long_confluence >= 2:
+            if is_trending and price_above_hma_1w:
+                # Trend regime + macro bullish = full size
                 new_signal = POSITION_SIZE_FULL
-            # Short: Price at BB upper + Phase bearish + 1d bias OK
-            elif at_bb_upper and phase_bearish and price_below_hma_1d and volume_ok:
-                new_signal = -POSITION_SIZE_FULL
-        
-        elif is_expansion:
-            # TREND REGIME: Follow Hilbert trendline with phase confirmation
-            # Long: Price above Hilbert trend + Phase bullish + 1d bias OK
-            if price_above_hilbert and phase_bullish and price_above_hma_1d and volume_ok:
-                new_signal = POSITION_SIZE_FULL
-            # Short: Price below Hilbert trend + Phase bearish + 1d bias OK
-            elif price_below_hilbert and phase_bearish and price_below_hma_1d and volume_ok:
-                new_signal = -POSITION_SIZE_FULL
-        
-        else:
-            # TRANSITION regime - reduced size, need stronger confluence
-            # Long: Phase crossed bullish + Price above 4h HMA + 1d bias
-            if phase_crossed_bullish and price_above_hma_4h and price_above_hma_1d and volume_ok:
+            elif is_ranging:
+                # Range regime = mean reversion long
                 new_signal = POSITION_SIZE_HALF
-            # Short: Phase crossed bearish + Price below 4h HMA + 1d bias
-            elif phase_crossed_bearish and price_below_hma_4h and price_below_hma_1d and volume_ok:
+            elif price_above_hma_1d:
+                # Neutral regime but 1d bias positive
+                new_signal = POSITION_SIZE_HALF
+        
+        # SHORT entries - multiple confluence patterns
+        short_confluence = 0
+        
+        if fisher_turning_down:
+            short_confluence += 1
+        if rsi_overbought:
+            short_confluence += 1
+        if price_below_hma_1d:
+            short_confluence += 1
+        if price_below_hma_21:
+            short_confluence += 1
+        if volume_ok:
+            short_confluence += 1
+        
+        # SHORT: Need 2+ confluence factors
+        if short_confluence >= 2:
+            if is_trending and price_below_hma_1w:
+                # Trend regime + macro bearish = full size
+                new_signal = -POSITION_SIZE_FULL
+            elif is_ranging:
+                # Range regime = mean reversion short
+                new_signal = -POSITION_SIZE_HALF
+            elif price_below_hma_1d:
+                # Neutral regime but 1d bias negative
                 new_signal = -POSITION_SIZE_HALF
         
         # === HOLD POSITION LOGIC ===
-        # Hold if in position and regime/trend still valid
+        # Hold if in position and trend still valid
         if in_position and new_signal == 0.0:
             if position_side > 0:
-                # Hold long if price still above Hilbert trendline
-                if price_above_hilbert and price_above_hma_1d:
+                # Hold long if price still above 12h HMA
+                if price_above_hma_21:
                     new_signal = signals[i-1] if i > 0 else 0.0
             elif position_side < 0:
-                # Hold short if price still below Hilbert trendline
-                if price_below_hilbert and price_below_hma_1d:
+                # Hold short if price still below 12h HMA
+                if price_below_hma_21:
                     new_signal = signals[i-1] if i > 0 else 0.0
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
@@ -322,28 +332,19 @@ def generate_signals(prices):
         if stoploss_triggered:
             new_signal = 0.0
         
-        # === PHASE REVERSAL EXIT ===
-        # Exit long if phase crosses into bearish zone
-        if in_position and position_side > 0 and phase_bearish:
-            new_signal = 0.0
-        
-        # Exit short if phase crosses into bullish zone
-        if in_position and position_side < 0 and phase_bullish:
-            new_signal = 0.0
-        
         # === TREND REVERSAL EXIT ===
-        # Exit long if price crosses below Hilbert trendline
-        if in_position and position_side > 0 and price_below_hilbert:
+        # Exit long if price crosses below 12h HMA significantly
+        if in_position and position_side > 0 and price_below_hma_21:
             new_signal = 0.0
         
-        # Exit short if price crosses above Hilbert trendline
-        if in_position and position_side < 0 and price_above_hilbert:
+        # Exit short if price crosses above 12h HMA significantly
+        if in_position and position_side < 0 and price_above_hma_21:
             new_signal = 0.0
         
-        # Exit if macro bias flips against position
-        if in_position and position_side > 0 and price_below_hma_1d:
+        # Exit if macro bias flips strongly against position
+        if in_position and position_side > 0 and price_below_hma_1w:
             new_signal = 0.0
-        if in_position and position_side < 0 and price_above_hma_1d:
+        if in_position and position_side < 0 and price_above_hma_1w:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -369,5 +370,6 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
         
         signals[i] = new_signal
+        prev_fisher = fisher[i]
     
     return signals
