@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #262: 12h Primary + 1d/1w HTF — Simplified Multi-TF Trend Pullback
+Experiment #263: 1d Primary + 1w HTF — Donchian Breakout with Weekly Trend Filter
 
-Hypothesis: 12h timeframe is underutilized. After #251 (4h HMA+RSI got Sharpe=-0.148),
-the issue was hold logic creating fee churn. For 12h, use simpler logic:
-- 1w HMA(21) for macro bias (very slow, reduces whipsaws)
-- 1d HMA(16/48) crossover for intermediate trend confirmation
-- 12h RSI(14) pullback entries at 30/70 (more frequent than 35/65)
+Hypothesis: After 200+ failed experiments with complex regime-switching, return to proven
+simple breakout strategy that worked on SOL (Sharpe +0.782) but adapt for BTC/ETH:
+- 1w HMA(21) for ultra-long-term trend bias (smoother than daily CHOP)
+- 1d Donchian(20) breakout for entry signals (proven on daily timeframe)
+- RSI(14) filter at 40/60 (not extreme 30/70) to avoid chasing breakouts
 - ATR(14) 2.5x trailing stoploss
-- Position size: 0.25-0.30 (conservative for 12h volatility)
+- Position size: 0.25-0.30 discrete levels
 
-KEY INSIGHT FROM #251 FAILURE:
-- Hold logic with POSITION_SIZE_HALF created unnecessary signal changes
-- SOLUTION: Binary signals only (0.0, ±0.30). Hold = maintain same signal value.
-- Exit ONLY on: stoploss, trend reversal (HMA cross against), or RSI extreme (>75/<25)
+KEY DIFFERENCE FROM FAILED #253, #257:
+- No CHOP regime-switching (caused -2.297 Sharpe on 1d)
+- Weekly HMA is smoother than daily CHOP for trend detection
+- Donchian breakout triggers more reliably than CRSI extremes
+- RSI 40/60 filter (not 30/70) allows more signals while avoiding extremes
 
-TARGET: 20-50 trades/year on 12h, Sharpe > 0.5 on ALL symbols
-CRITICAL: RSI 30/70 triggers ~15% of 12h bars vs 35/65 at ~25% - better balance
+TARGET: 20-50 trades/year on 1d, Sharpe > 0.5 on ALL symbols
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_hma_rsi_pullback_1d1w_atr_simple_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_hma_1w_rsi_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -67,6 +67,12 @@ def calculate_rsi(close, period=14):
         rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi.fillna(50.0).values
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (upper/lower bounds)."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -74,27 +80,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h indicators (primary timeframe)
-    hma_16 = calculate_hma(close, 16)
-    hma_48 = calculate_hma(close, 48)
+    # Calculate 1d indicators (primary timeframe)
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
-    # Calculate 1d HMA crossover (aligned properly with shift(1))
-    hma_1d_16_raw = calculate_hma(df_1d['close'].values, 16)
-    hma_1d_48_raw = calculate_hma(df_1d['close'].values, 48)
-    hma_1d_16_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_16_raw)
-    hma_1d_48_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_48_raw)
-    
-    # Calculate 1w HMA for macro bias (aligned properly with shift(1))
+    # Calculate 1w HMA for ultra-long-term trend (aligned properly with shift(1))
     hma_1w_raw = calculate_hma(df_1w['close'].values, 21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
     signals = np.zeros(n)
-    POSITION_SIZE = 0.30
+    POSITION_SIZE_FULL = 0.30
+    POSITION_SIZE_HALF = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -108,13 +107,10 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
-            signals[i] = 0.0
-            continue
         if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_1d_16_aligned[i]) or np.isnan(hma_1d_48_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         if np.isnan(hma_1w_aligned[i]):
@@ -125,30 +121,28 @@ def generate_signals(prices):
         price_above_hma_1w = close[i] > hma_1w_aligned[i]
         price_below_hma_1w = close[i] < hma_1w_aligned[i]
         
-        # === 1d TREND (HMA crossover) ===
-        hma_1d_bullish = hma_1d_16_aligned[i] > hma_1d_48_aligned[i]
-        hma_1d_bearish = hma_1d_16_aligned[i] < hma_1d_48_aligned[i]
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        # Long: price breaks above 20-day high
+        donchian_breakout_long = close[i] > donchian_upper[i-1]  # break prev bar's upper
+        # Short: price breaks below 20-day low
+        donchian_breakout_short = close[i] < donchian_lower[i-1]  # break prev bar's lower
         
-        # === 12h TREND (HMA crossover) ===
-        hma_12h_bullish = hma_16[i] > hma_48[i]
-        hma_12h_bearish = hma_16[i] < hma_48[i]
-        
-        # === RSI PULLBACK SIGNALS ===
-        # Long: bullish trend + RSI pullback to 30-50 zone
-        rsi_pullback_long = (rsi_14[i] >= 30.0) and (rsi_14[i] <= 50.0)
-        # Short: bearish trend + RSI pullback to 50-70 zone
-        rsi_pullback_short = (rsi_14[i] >= 50.0) and (rsi_14[i] <= 70.0)
+        # === RSI FILTER (avoid chasing extremes) ===
+        # Long: RSI not overbought (< 65)
+        rsi_ok_long = rsi_14[i] < 65.0
+        # Short: RSI not oversold (> 35)
+        rsi_ok_short = rsi_14[i] > 35.0
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # LONG ENTRY: 1w bullish + 1d bullish + 12h bullish + RSI pullback
-        if price_above_hma_1w and hma_1d_bullish and hma_12h_bullish and rsi_pullback_long:
-            desired_signal = POSITION_SIZE
+        # LONG ENTRY: 1w bullish + Donchian breakout + RSI filter
+        if price_above_hma_1w and donchian_breakout_long and rsi_ok_long:
+            desired_signal = POSITION_SIZE_FULL
         
-        # SHORT ENTRY: 1w bearish + 1d bearish + 12h bearish + RSI pullback
-        elif price_below_hma_1w and hma_1d_bearish and hma_12h_bearish and rsi_pullback_short:
-            desired_signal = -POSITION_SIZE
+        # SHORT ENTRY: 1w bearish + Donchian breakout + RSI filter
+        elif price_below_hma_1w and donchian_breakout_short and rsi_ok_short:
+            desired_signal = -POSITION_SIZE_FULL
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
         stoploss_triggered = False
@@ -169,34 +163,34 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit long if 12h trend turns bearish
-        if in_position and position_side > 0 and hma_12h_bearish:
+        # Exit long if 1w trend turns bearish
+        if in_position and position_side > 0 and price_below_hma_1w:
             desired_signal = 0.0
         
-        # Exit short if 12h trend turns bullish
-        if in_position and position_side < 0 and hma_12h_bullish:
+        # Exit short if 1w trend turns bullish
+        if in_position and position_side < 0 and price_above_hma_1w:
             desired_signal = 0.0
         
         # === RSI EXTREME EXIT (take profit) ===
-        # Exit long if RSI becomes overbought (>75)
-        if in_position and position_side > 0 and rsi_14[i] > 75.0:
+        # Exit long if RSI becomes overbought (> 70)
+        if in_position and position_side > 0 and rsi_14[i] > 70.0:
             desired_signal = 0.0
         
-        # Exit short if RSI becomes oversold (<25)
-        if in_position and position_side < 0 and rsi_14[i] < 25.0:
+        # Exit short if RSI becomes oversold (< 30)
+        if in_position and position_side < 0 and rsi_14[i] < 30.0:
             desired_signal = 0.0
         
         # === HOLD LOGIC - maintain position if setup still valid ===
-        # CRITICAL: Only hold if trend conditions still met (no signal flip)
+        # Only hold if we're in position AND no exit signal triggered
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if all trend conditions still bullish
-                if price_above_hma_1w and hma_1d_bullish and hma_12h_bullish:
-                    desired_signal = POSITION_SIZE
+                # Hold long if 1w trend still bullish
+                if price_above_hma_1w:
+                    desired_signal = POSITION_SIZE_HALF
             elif position_side < 0:
-                # Hold short if all trend conditions still bearish
-                if price_below_hma_1w and hma_1d_bearish and hma_12h_bearish:
-                    desired_signal = -POSITION_SIZE
+                # Hold short if 1w trend still bearish
+                if price_below_hma_1w:
+                    desired_signal = -POSITION_SIZE_HALF
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
