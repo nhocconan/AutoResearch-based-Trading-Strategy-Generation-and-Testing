@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #307: 1d Primary + 1w HTF — Simplified Dual Regime Strategy
+Experiment #308: 30m Primary + 4h/1d HTF — Dual Regime with HTF Direction Filter
 
-Hypothesis: Daily timeframe needs fewer, higher-quality trades. Recent 1d attempt (#303)
-got Sharpe=0.262 but we can improve with cleaner regime logic and better entry timing.
+Hypothesis: Failed #298 (30m) had 0 trades from over-filtering (session/volume).
+This version uses HTF (4h/1d) for SIGNAL DIRECTION, 30m only for ENTRY TIMING.
+Key insight: Lower TF should match HTF trade frequency, not trade more often.
 
-Key improvements over #303:
-- Simpler regime detection: Choppiness(14) with wider bands (50/60 vs 45/55)
-- Range regime: CRSI extremes <15/>85 (more selective = fewer but better trades)
-- Trend regime: HMA(16/48) crossover + ADX(14)>20 confirmation
-- 1w HMA(21) for macro bias only (not exit trigger - reduces premature exits)
-- ATR(14) 3x trailing stoploss (wider for daily timeframe)
-- Position size: 0.28 (conservative for daily)
+Strategy Logic:
+- 1d HMA(21): MACRO bias filter (long only if price > 1d HMA, short only if <)
+- 4h Choppiness(14): Regime detection (>55 = range, <45 = trend)
+- 30m Connors RSI: Mean reversion entries WITHIN HTF trend direction
+- 30m Donchian(20): Breakout entries WITHIN HTF trend direction
+- ATR(14) 2.5x trailing stoploss
+- NO session/volume filters (killed trades in #298)
+- Position size: 0.25 (conservative for 30m, reduces fee impact)
 
-TARGET: 25-40 trades/year on 1d, Sharpe > 0.6 on ALL symbols
+CRITICAL FOR 30m: Use HTF for direction, 30m only for timing precision.
+This gives ~40-60 trades/year (HTF frequency) with 30m entry optimization.
+
+TARGET: 30-80 trades/year, Sharpe > 0.6 on ALL symbols (beat #301's 0.612)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_regime_crsi_hma_1w_atr_v1"
-timeframe = "1d"
+name = "mtf_30m_regime_crsi_donchian_4h1d_hma_atr_v2"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -64,33 +69,6 @@ def calculate_rsi(close, period=14):
         rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi.fillna(50.0).values
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    
-    plus_dm = high_s.diff()
-    minus_dm = -low_s.diff()
-    
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean() / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean() / (atr + 1e-10)
-    
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return adx.fillna(0).values
-
 def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
     """
     Calculate Connors RSI (CRSI).
@@ -129,6 +107,7 @@ def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
         rs_streak = avg_gain_streak / (avg_loss_streak + 1e-10)
         streak_rsi = 100.0 - (100.0 / (1.0 + rs_streak))
     streak_rsi = streak_rsi.fillna(50.0)
+    # Adjust for direction
     streak_rsi = np.where(delta > 0, streak_rsi, 100 - streak_rsi)
     
     # Percent Rank (100)
@@ -159,32 +138,39 @@ def calculate_choppiness(high, low, close, period=14):
     chop = np.clip(chop, 0, 100)
     return chop
 
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel (upper and lower)."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     n = len(close)
     
-    # Load 1w HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d indicators (primary timeframe)
+    # Calculate 30m indicators (primary timeframe)
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    adx_14 = calculate_adx(high, low, close, period=14)
     crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
-    chop = calculate_choppiness(high, low, close, period=14)
+    chop_30m = calculate_choppiness(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
-    # HMA for trend detection
-    hma_16 = calculate_hma(close, 16)
-    hma_48 = calculate_hma(close, 48)
+    # Calculate and align 4h Choppiness for regime
+    chop_4h_raw = calculate_choppiness(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, period=14)
+    chop_4h_aligned = align_htf_to_ltf(prices, df_4h, chop_4h_raw)
     
-    # Calculate and align 1w HMA for macro bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 1d HMA for macro bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
     signals = np.zeros(n)
-    POSITION_SIZE = 0.28
+    POSITION_SIZE = 0.25  # Conservative for 30m
     
     # Position tracking for stoploss
     in_position = False
@@ -198,61 +184,59 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(rsi_14[i]) or np.isnan(crsi[i]) or np.isnan(chop[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(crsi[i]) or np.isnan(chop_30m[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(adx_14[i]) or np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(chop_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === MACRO BIAS (1w HMA) ===
-        price_above_hma_1w = close[i] > hma_1w_aligned[i]
-        price_below_hma_1w = close[i] < hma_1w_aligned[i]
+        # === MACRO BIAS (1d HMA) - DIRECTION FILTER ===
+        # Only long if price > 1d HMA, only short if price < 1d HMA
+        bullish_macro = close[i] > hma_1d_aligned[i]
+        bearish_macro = close[i] < hma_1d_aligned[i]
         
-        # === REGIME DETECTION (Choppiness Index) ===
-        # Wider bands: >60 = choppy, <50 = trending
-        is_choppy = chop[i] > 60.0
-        is_trending = chop[i] < 50.0
+        # === REGIME DETECTION (4h Choppiness) ===
+        # Use 4h CHOP for regime (more stable than 30m)
+        is_choppy = chop_4h_aligned[i] > 55.0  # Range market
+        is_trending = chop_4h_aligned[i] < 45.0  # Trend market
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
         if is_choppy:
-            # RANGE REGIME: Connors RSI Mean Reversion
-            # Very extreme thresholds for fewer, better trades
-            if crsi[i] < 15.0 and price_above_hma_1w:
+            # RANGE REGIME: Connors RSI Mean Reversion WITH MACRO BIAS
+            # Long: CRSI < 20 (oversold) + bullish macro
+            # Short: CRSI > 80 (overbought) + bearish macro
+            if crsi[i] < 20.0 and bullish_macro:
                 desired_signal = POSITION_SIZE
-            elif crsi[i] > 85.0 and price_below_hma_1w:
+            elif crsi[i] > 80.0 and bearish_macro:
                 desired_signal = -POSITION_SIZE
         
-        elif is_trending:
-            # TREND REGIME: HMA Crossover + ADX confirmation
-            hma_bullish = hma_16[i] > hma_48[i]
-            hma_bearish = hma_16[i] < hma_48[i]
-            trend_strong = adx_14[i] > 20.0
-            
-            # LONG: HMA16 > HMA48 + ADX > 20 + bullish macro
-            if hma_bullish and trend_strong and price_above_hma_1w:
+        else:  # is_trending or neutral (45-55)
+            # TREND REGIME: Donchian Breakout WITH MACRO BIAS + RSI confirmation
+            # Long: Price breaks Donchian upper + RSI > 50 + bullish macro
+            # Short: Price breaks Donchian lower + RSI < 50 + bearish macro
+            if close[i] > donchian_upper[i-1] and rsi_14[i] > 50.0 and bullish_macro:
                 desired_signal = POSITION_SIZE
-            # SHORT: HMA16 < HMA48 + ADX > 20 + bearish macro
-            elif hma_bearish and trend_strong and price_below_hma_1w:
+            elif close[i] < donchian_lower[i-1] and rsi_14[i] < 50.0 and bearish_macro:
                 desired_signal = -POSITION_SIZE
         
-        # === STOPLOSS CHECK (3.0 * ATR trailing for daily) ===
+        # === STOPLOSS CHECK (2.5 * ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 3.0 * atr_14[i]
+            stop_price = highest_since_entry - 2.5 * atr_14[i]
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 3.0 * atr_14[i]
+            stop_price = lowest_since_entry + 2.5 * atr_14[i]
             if close[i] > stop_price:
                 stoploss_triggered = True
         
@@ -260,12 +244,12 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === MACRO BIAS REVERSAL EXIT ===
-        # Exit long if price crosses below 1w HMA (major trend change)
-        if in_position and position_side > 0 and price_below_hma_1w:
+        # Exit long if price crosses below 1d HMA
+        if in_position and position_side > 0 and bearish_macro:
             desired_signal = 0.0
         
-        # Exit short if price crosses above 1w HMA
-        if in_position and position_side < 0 and price_above_hma_1w:
+        # Exit short if price crosses above 1d HMA
+        if in_position and position_side < 0 and bullish_macro:
             desired_signal = 0.0
         
         # === CRSI EXTREME EXIT (take profit in range regime) ===
@@ -277,11 +261,10 @@ def generate_signals(prices):
         
         # === HOLD LOGIC (maintain position unless exit trigger) ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
-            # Hold long if trend still bullish
-            if position_side > 0 and hma_16[i] > hma_48[i] and price_above_hma_1w:
+            # Only hold if macro bias still supports position
+            if position_side > 0 and bullish_macro:
                 desired_signal = POSITION_SIZE
-            # Hold short if trend still bearish
-            elif position_side < 0 and hma_16[i] < hma_48[i] and price_below_hma_1w:
+            elif position_side < 0 and bearish_macro:
                 desired_signal = -POSITION_SIZE
         
         # === UPDATE POSITION TRACKING ===
