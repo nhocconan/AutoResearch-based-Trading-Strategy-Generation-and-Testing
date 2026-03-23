@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #695: 1h Primary + 4h/1d HTF — Funding Rate Contrarian + HTF Trend + RSI Pullback
+Experiment #696: 12h Primary + 1d HTF — Donchian Breakout + HMA Trend + RSI Filter
 
-Hypothesis: Funding rate mean reversion is the BEST edge for BTC/ETH (proven through 2022 crash).
-When funding is extreme (>2 std dev), crowds are positioned wrong → contrarian entry.
-Combined with 4h HMA trend bias and 1h RSI pullback timing, this captures reversals
-with HTF confirmation. Session filter (8-20 UTC) ensures high liquidity entries.
+Hypothesis: Donchian breakouts capture major moves while HMA trend filter prevents
+counter-trend whipsaws. Simpler than #692 (no BB/Keltner squeeze) to ensure trade
+frequency on ALL symbols. RSI filter adds timing precision without over-constraining.
 
-Why this should work where others failed:
-1. Funding rate contrarian worked through 2022 crash (Sharpe 0.8-1.5 per research)
-2. 4h HMA provides trend bias without whipsaw of 1h trend signals
-3. RSI pullback (not extreme) ensures we enter on retracement, not chase
-4. Session filter reduces false signals in low-liquidity hours
-5. Very strict confluence (3+ filters) = few trades (target 30-60/year on 1h)
-6. Small position size (0.20-0.25) limits drawdown on 77% BTC crash
+Key Changes from #692:
+1. Donchian(20) breakout instead of BB/Keltner squeeze (more reliable, more trades)
+2. Single HTF filter (1d HMA only, not 1d+1w) to reduce over-filtering
+3. Looser RSI thresholds (35/65 not 30/70) to ensure entries on BTC/ETH
+4. Simpler hold logic — maintain position until trend reverses or stoploss
+5. Remove ADX filter (was preventing trades in #692)
 
-Key differences from failed 1h strategies (#685, #690):
-- Funding rate as PRIMARY signal (not just technical)
-- 4h HMA for trend (not 1h EMA crossover)
-- RSI 35-65 pullback zone (not extreme 20/80)
-- Session filter 8-20 UTC only
-- Stricter confluence = fewer trades = less fee drag
+Why this should work:
+- Donchian breakouts proven in #686 (SOL Sharpe +0.782)
+- 12h TF worked in #682 (Sharpe=0.404) with simpler logic
+- Single HTF filter reduces over-constraint that caused 0 trades in #693/#695
+- ATR trailing stop protects against 2022-style crashes
 
 Target: Sharpe > 0.612, trades >= 30 train, >= 3 test, ALL symbols positive Sharpe
 """
@@ -28,9 +25,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_funding_contrarian_hma_rsi_session_4h1d_v1"
-timeframe = "1h"
+name = "mtf_12h_donchian_hma_rsi_atr_1d_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channels - highest high and lowest low over period."""
+    n = len(high)
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2
+    return upper, lower, mid
 
 def calculate_hma(series, period):
     """Hull Moving Average - smoother and more responsive than EMA."""
@@ -74,7 +79,6 @@ def calculate_atr(high, low, close, period=14):
     n = len(close)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
-    
     for i in range(1, n):
         tr1 = high[i] - low[i]
         tr2 = np.abs(high[i] - close[i-1])
@@ -88,80 +92,29 @@ def calculate_sma(close, period):
     """Simple Moving Average."""
     return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
-def calculate_funding_zscore(funding_data, window=720):
-    """
-    Calculate z-score of funding rate over rolling window.
-    window=720 hours = 30 days for 1h data
-    Positive z-score = longs paying shorts (crowd long) → contrarian short signal
-    Negative z-score = shorts paying longs (crowd short) → contrarian long signal
-    """
-    if funding_data is None or len(funding_data) < window:
-        return None
-    
-    funding = funding_data['funding_rate'].values
-    n = len(funding)
-    zscore = np.full(n, np.nan)
-    
-    for i in range(window, n):
-        window_data = funding[i-window:i]
-        mean = np.mean(window_data)
-        std = np.std(window_data)
-        if std > 1e-10:
-            zscore[i] = (funding[i] - mean) / std
-    
-    return zscore
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Load funding rate data (contrarian signal)
-    funding_path = f"data/processed/funding/{prices['symbol'].iloc[0] if 'symbol' in prices.columns else 'BTCUSDT'}.parquet"
-    try:
-        funding_df = pd.read_parquet(funding_path)
-        # Align funding to prices timeframe
-        funding_zscore = calculate_funding_zscore(funding_df, window=720)
-        # Need to align funding zscore to prices index
-        # Funding is typically 8h intervals, we need to forward-fill to 1h
-        if funding_zscore is not None:
-            funding_aligned = np.interp(
-                np.arange(n),
-                np.linspace(0, len(funding_zscore)-1, len(funding_zscore)) * (n / len(funding_zscore)),
-                funding_zscore
-            )
-            funding_aligned = np.nan_to_num(funding_aligned, nan=0.0)
-        else:
-            funding_aligned = np.zeros(n)
-    except:
-        # Fallback if funding data not available
-        funding_aligned = np.zeros(n)
-    
-    # Calculate primary (1h) indicators
-    rsi_1h = calculate_rsi(close, period=14)
-    atr_1h = calculate_atr(high, low, close, period=14)
+    # Calculate primary (12h) indicators
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=20)
+    rsi_12h = calculate_rsi(close, period=14)
+    atr_12h = calculate_atr(high, low, close, period=14)
+    sma_50 = calculate_sma(close, period=50)
     sma_200 = calculate_sma(close, period=200)
     
-    # Volume MA for filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     # Calculate and align HTF HMA for trend bias
-    hma_4h_raw = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
     hma_1d_raw = calculate_hma(df_1d['close'].values, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.25  # Smaller for 1h TF to reduce fee impact
-    REDUCED_SIZE = 0.15
+    BASE_SIZE = 0.30
+    REDUCED_SIZE = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -173,81 +126,60 @@ def generate_signals(prices):
     
     for i in range(250, n):  # Need 200 for SMA + buffer for HTF alignment
         # Skip if indicators not ready
-        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]):
+        if np.isnan(rsi_12h[i]) or np.isnan(atr_12h[i]):
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             continue
-        if np.isnan(sma_200[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(hma_1d_aligned[i]):
             continue
-        if atr_1h[i] <= 1e-10:
+        if np.isnan(sma_50[i]) or np.isnan(sma_200[i]):
+            continue
+        if atr_12h[i] <= 1e-10:
             continue
         
-        # === SESSION FILTER (8-20 UTC only - high liquidity) ===
-        # open_time is in milliseconds
-        hour_utc = (open_time[i] // 3600000) % 24
-        in_session = 8 <= hour_utc <= 20
+        # === TREND BIAS (1d HMA) ===
+        trend_bullish = close[i] > hma_1d_aligned[i]
+        trend_bearish = close[i] < hma_1d_aligned[i]
         
-        # === VOLUME FILTER ===
-        volume_ok = volume[i] > 0.8 * vol_ma[i]
-        
-        # === TREND BIAS (HTF HMA) ===
-        trend_bullish_4h = close[i] > hma_4h_aligned[i]
-        trend_bearish_4h = close[i] < hma_4h_aligned[i]
-        trend_bullish_1d = close[i] > hma_1d_aligned[i]
-        trend_bearish_1d = close[i] < hma_1d_aligned[i]
-        
-        # Strong bias when both HTF agree
-        trend_strong_bullish = trend_bullish_4h and trend_bullish_1d
-        trend_strong_bearish = trend_bearish_4h and trend_bearish_1d
-        
-        # === FUNDING RATE CONTRARIAN SIGNAL ===
-        # Z-score > +2.0 = crowd long → contrarian short
-        # Z-score < -2.0 = crowd short → contrarian long
-        funding_extreme_long = funding_aligned[i] > 2.0
-        funding_extreme_short = funding_aligned[i] < -2.0
-        funding_neutral = -1.5 <= funding_aligned[i] <= 1.5
-        
-        # === RSI PULLBACK (not extreme - we want pullback in trend) ===
-        # In bullish trend: RSI 35-50 = pullback entry
-        # In bearish trend: RSI 50-65 = pullback entry
-        rsi_pullback_long = 35 <= rsi_1h[i] <= 55
-        rsi_pullback_short = 45 <= rsi_1h[i] <= 65
-        
-        # === SMA200 FILTER ===
+        # === SMA FILTERS ===
+        above_sma50 = close[i] > sma_50[i]
         above_sma200 = close[i] > sma_200[i]
+        below_sma50 = close[i] < sma_50[i]
         below_sma200 = close[i] < sma_200[i]
+        
+        # === RSI FILTER ===
+        rsi_neutral = 35 <= rsi_12h[i] <= 65
+        rsi_bullish = rsi_12h[i] > 45
+        rsi_bearish = rsi_12h[i] < 55
         
         desired_signal = 0.0
         current_size = BASE_SIZE
         
-        # === LONG ENTRY (3+ confluence required) ===
-        # Must have: session + volume + (HTF trend OR funding contrarian) + RSI pullback
-        if in_session and volume_ok:
-            # Scenario 1: Strong bullish trend + RSI pullback
-            if trend_strong_bullish and rsi_pullback_long and above_sma200:
-                desired_signal = current_size
-            
-            # Scenario 2: Funding extreme short (contrarian long) + HTF not bearish
-            elif funding_extreme_short and not trend_strong_bearish and rsi_pullback_long:
-                desired_signal = current_size
-            
-            # Scenario 3: 4h bullish + funding neutral + RSI pullback
-            elif trend_bullish_4h and funding_neutral and rsi_pullback_long and above_sma200:
-                desired_signal = REDUCED_SIZE
+        # Reduce size in high volatility
+        atr_median = np.nanmedian(atr_12h[max(0,i-100):i+1])
+        atr_ratio = atr_12h[i] / (atr_median + 1e-10)
+        if atr_ratio > 1.8:
+            current_size = REDUCED_SIZE
         
-        # === SHORT ENTRY (3+ confluence required) ===
-        if in_session and volume_ok:
-            # Scenario 1: Strong bearish trend + RSI pullback
-            if trend_strong_bearish and rsi_pullback_short and below_sma200:
+        # === LONG ENTRY: Donchian Breakout + Trend Confirmation ===
+        # Primary: Breakout above Donchian upper + bullish 1d HMA + above SMA50
+        if close[i] > donchian_upper[i-1] and trend_bullish and above_sma50:
+            # Strong signal if also above SMA200
+            if above_sma200 and rsi_bullish:
+                desired_signal = current_size
+            # Weaker signal but still valid
+            elif rsi_12h[i] > 40:
+                desired_signal = current_size * 0.7
+        
+        # === SHORT ENTRY: Donchian Breakdown + Trend Confirmation ===
+        # Primary: Breakdown below Donchian lower + bearish 1d HMA + below SMA50
+        elif close[i] < donchian_lower[i-1] and trend_bearish and below_sma50:
+            # Strong signal if also below SMA200
+            if below_sma200 and rsi_bearish:
                 desired_signal = -current_size
-            
-            # Scenario 2: Funding extreme long (contrarian short) + HTF not bullish
-            elif funding_extreme_long and not trend_strong_bullish and rsi_pullback_short:
-                desired_signal = -current_size
-            
-            # Scenario 3: 4h bearish + funding neutral + RSI pullback
-            elif trend_bearish_4h and funding_neutral and rsi_pullback_short and below_sma200:
-                desired_signal = -REDUCED_SIZE
+            # Weaker signal but still valid
+            elif rsi_12h[i] < 60:
+                desired_signal = -current_size * 0.7
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -267,37 +199,47 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === HOLD LOGIC — Maintain position if conditions still valid ===
+        # === HOLD LOGIC — Maintain position if trend intact ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if trend intact and RSI not overbought
-                if trend_bullish_4h and rsi_1h[i] < 70:
+                # Hold long if 1d HMA still bullish and RSI not extreme
+                if trend_bullish and rsi_12h[i] < 80:
                     desired_signal = BASE_SIZE
             elif position_side < 0:
-                # Hold short if trend intact and RSI not oversold
-                if trend_bearish_4h and rsi_1h[i] > 30:
+                # Hold short if 1d HMA still bearish and RSI not extreme
+                if trend_bearish and rsi_12h[i] > 20:
                     desired_signal = -BASE_SIZE
         
         # === EXIT CONDITIONS ===
-        # Long exit: RSI overbought OR trend reverses
+        # Long exit: RSI overbought OR trend reverses below 1d HMA
         if in_position and position_side > 0:
-            if rsi_1h[i] > 75:
+            if rsi_12h[i] > 85:
                 desired_signal = 0.0
-            elif close[i] < hma_4h_aligned[i] and close[i] < sma_200[i]:
+            elif close[i] < hma_1d_aligned[i]:
                 desired_signal = 0.0
         
-        # Short exit: RSI oversold OR trend reverses
+        # Short exit: RSI oversold OR trend reverses above 1d HMA
         if in_position and position_side < 0:
-            if rsi_1h[i] < 25:
+            if rsi_12h[i] < 15:
                 desired_signal = 0.0
-            elif close[i] > hma_4h_aligned[i] and close[i] > sma_200[i]:
+            elif close[i] > hma_1d_aligned[i]:
                 desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
         if desired_signal > 0:
-            desired_signal = BASE_SIZE if desired_signal >= BASE_SIZE * 0.8 else REDUCED_SIZE
+            if desired_signal >= BASE_SIZE * 0.9:
+                desired_signal = BASE_SIZE
+            elif desired_signal >= REDUCED_SIZE * 0.9:
+                desired_signal = REDUCED_SIZE
+            else:
+                desired_signal = 0.0
         elif desired_signal < 0:
-            desired_signal = -BASE_SIZE if desired_signal <= -BASE_SIZE * 0.8 else -REDUCED_SIZE
+            if desired_signal <= -BASE_SIZE * 0.9:
+                desired_signal = -BASE_SIZE
+            elif desired_signal <= -REDUCED_SIZE * 0.9:
+                desired_signal = -REDUCED_SIZE
+            else:
+                desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -305,13 +247,14 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_1h[i]
+                entry_atr = atr_12h[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(desired_signal) != position_side:
+                # Position flip
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_1h[i]
+                entry_atr = atr_12h[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
