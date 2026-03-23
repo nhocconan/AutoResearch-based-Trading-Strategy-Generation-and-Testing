@@ -1,52 +1,45 @@
 #!/usr/bin/env python3
 """
-Experiment #886: 12h Primary + 1d HTF — Funding Rate Mean Reversion + Trend Filter
+Experiment #887: 1d Primary + 1w HTF — Simplified Regime + CRSI + Donchian
 
-Hypothesis: After 600+ failed strategies, funding rate mean reversion is the BEST edge
-for BTC/ETH (Sharpe 0.8-1.5 through 2022 crash per research). This strategy combines:
+Hypothesis: After 600+ failed strategies, daily timeframe with SIMPLIFIED logic
+should generate consistent trades across ALL symbols while maintaining positive Sharpe.
 
-1. Funding Rate Z-Score (30-day lookback): Primary signal driver
-   - Z < -1.5 = extreme negative funding = long contrarian signal
-   - Z > +1.5 = extreme positive funding = short contrarian signal
-   - This captures crowd positioning extremes (best for BTC/ETH specifically)
+Key insights from research and failures:
+1. 1d Primary TF: Target 20-40 trades/year (minimal fee drag)
+2. 1w HMA(21) for macro regime ONLY (bull/bear filter)
+3. Choppiness Index(14) for regime: CHOP>55=range, CHOP<45=trend
+4. Connors RSI for mean reversion (thresholds: 25/75 - relaxed for trades)
+5. Donchian(20) breakout for trend following
+6. ATR(14) trailing stop (2.5x) for risk management
 
-2. 1d HMA(21) Trend Filter: Only take signals aligned with HTF trend
-   - Long only when price > 1d HMA (bullish bias)
-   - Short only when price < 1d HMA (bearish bias)
-   - Prevents counter-trend trades that fail in strong trends
+CRITICAL LESSONS FROM FAILURES:
+- Exp #875, #877, #881, #885: 0 trades = entry conditions TOO STRICT
+- Exp #878, #879, #882, #883, #886: Negative Sharpe = wrong regime logic
+- Exp #884: Vol spike strategies fail on 1d (too few signals)
+- Exp #886: Funding rate doesn't work on daily timeframe
 
-3. 12h RSI(14) Entry Timing: Refine entry within funding signal
-   - Long: RSI < 45 (pullback in uptrend)
-   - Short: RSI > 55 (rally in downtrend)
-
-4. ATR(14) Trailing Stop (2.5x): Risk management
-   - Exit when price moves 2.5*ATR against position
-
-Why this should beat Sharpe 0.612:
-- Funding rate is PROVEN edge for BTC/ETH (research shows 0.8-1.5 Sharpe)
-- 12h TF = 20-50 trades/year target (low fee drag)
-- Simpler logic = fewer conditions that can all fail = MORE trades
-- Contrarian funding + trend filter = high win rate in range/bear markets
-- ALL symbols should benefit (funding extremes occur on all perpetuals)
-
-Critical improvements from failed experiments:
-- FUNDING RATE as primary signal (not just RSI/CRSI)
-- RELAXED z-score thresholds (-1.5/+1.5 not -2/+2) to ensure trades
-- Simple trend filter (1d HMA) not complex multi-HTF regime
-- Discrete signal sizes (0.0, ±0.25, ±0.30) minimize fee churn
-- Hold logic maintains position through minor pullbacks
+Why 1d should work:
+- Daily bars filter out intraday noise
+- Fewer trades = less fee drag (0.05% per round trip)
+- 1w HTF provides strong macro bias
+- Relaxed CRSI (25/75 not 10/90) ensures 30+ trades per symbol
+- Simple binary regime (range vs trend) avoids overfitting
 
 Target: Sharpe > 0.612, trades >= 30 train, >= 3 test, ALL symbols positive
-Timeframe: 12h (target 25-40 trades/year)
+Timeframe: 1d (target 25-40 trades/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-import os
 
-name = "mtf_12h_funding_zscore_1d_hma_rsi_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_simplified_regime_crsi_donchian_1w_hma_atr_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_sma(series, period):
+    """Simple Moving Average with min_periods."""
+    return pd.Series(series).rolling(window=period, min_periods=period).mean().values
 
 def calculate_hma(series, period):
     """Hull Moving Average."""
@@ -87,6 +80,113 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Connors RSI (CRSI) = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    
+    Relaxed thresholds (25/75) to ensure trades on all symbols.
+    """
+    n = len(close)
+    crsi = np.full(n, np.nan)
+    
+    if n < max(rsi_period, streak_period, rank_period) + 2:
+        return crsi
+    
+    # RSI(3)
+    rsi_short = calculate_rsi(close, rsi_period)
+    
+    # RSI Streak (consecutive up/down days)
+    streak = np.zeros(n)
+    direction = np.zeros(n)
+    
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            if direction[i-1] == 1:
+                streak[i] = streak[i-1] + 1
+            else:
+                streak[i] = 1
+            direction[i] = 1
+        elif close[i] < close[i-1]:
+            if direction[i-1] == -1:
+                streak[i] = streak[i-1] + 1
+            else:
+                streak[i] = -1
+            direction[i] = -1
+        else:
+            streak[i] = 0
+            direction[i] = 0
+    
+    # Convert streak to RSI-like value
+    streak_rsi = np.full(n, np.nan)
+    for i in range(streak_period, n):
+        streak_vals = streak[i-streak_period+1:i+1]
+        up_streaks = np.sum(streak_vals > 0)
+        down_streaks = np.sum(streak_vals < 0)
+        total = up_streaks + down_streaks
+        if total > 0:
+            streak_rsi[i] = 100 * up_streaks / total
+        else:
+            streak_rsi[i] = 50
+    
+    # Percent Rank of price change
+    percent_rank = np.full(n, np.nan)
+    for i in range(rank_period, n):
+        returns = np.diff(close[i-rank_period:i+1])
+        if len(returns) > 0:
+            current_return = close[i] - close[i-1]
+            rank = np.sum(returns < current_return) / len(returns)
+            percent_rank[i] = 100 * rank
+        else:
+            percent_rank[i] = 50
+    
+    # Combine into CRSI
+    for i in range(rank_period, n):
+        if not np.isnan(rsi_short[i]) and not np.isnan(streak_rsi[i]) and not np.isnan(percent_rank[i]):
+            crsi[i] = (rsi_short[i] + streak_rsi[i] + percent_rank[i]) / 3.0
+    
+    return crsi
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index — measures market choppy vs trending.
+    CHOP > 55 = ranging, CHOP < 45 = trending.
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    if n < period + 1:
+        return chop
+    
+    for i in range(period, n):
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        
+        if highest_high == lowest_low:
+            chop[i] = 100
+            continue
+        
+        tr_sum = 0.0
+        for j in range(i-period+1, i+1):
+            tr = max(high[j] - low[j], np.abs(high[j] - close[j-1]), np.abs(low[j] - close[j-1]))
+            tr_sum += tr
+        
+        chop[i] = 100 * np.log10(tr_sum / (highest_high - lowest_low)) / np.log10(period)
+    
+    chop = np.clip(chop, 0, 100)
+    return chop
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channels."""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    return upper, lower
+
 def calculate_atr(high, low, close, period=14):
     """Average True Range."""
     n = len(close)
@@ -103,90 +203,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def load_funding_data(prices):
-    """
-    Load funding rate data for the symbol.
-    Funding data is stored in data/processed/funding/{symbol}_funding.parquet
-    Returns array aligned with prices index, or None if not available.
-    """
-    try:
-        # Try to infer symbol from prices metadata or use default path structure
-        # Funding files are named: BTCUSDT_funding.parquet, ETHUSDT_funding.parquet, SOLUSDT_funding.parquet
-        
-        # Check if prices has symbol attribute or column
-        symbol = None
-        if hasattr(prices, 'symbol'):
-            symbol = prices.symbol
-        elif 'symbol' in prices.columns:
-            symbol = prices['symbol'].iloc[0]
-        
-        # Try common symbol formats
-        if symbol is None:
-            # Try to infer from file path context (this is a workaround)
-            # Default to trying BTC first, will fail gracefully
-            possible_symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
-            for sym in possible_symbols:
-                funding_path = f"data/processed/funding/{sym}_funding.parquet"
-                if os.path.exists(funding_path):
-                    symbol = sym
-                    break
-        
-        if symbol is None:
-            return None
-        
-        funding_path = f"data/processed/funding/{symbol}_funding.parquet"
-        
-        if not os.path.exists(funding_path):
-            return None
-        
-        df_funding = pd.read_parquet(funding_path)
-        
-        # Funding data should have: open_time, funding_rate
-        # Align to prices open_time
-        if 'open_time' in df_funding.columns and 'open_time' in prices.columns:
-            # Merge on open_time
-            df_merged = prices[['open_time']].merge(
-                df_funding[['open_time', 'funding_rate']], 
-                on='open_time', 
-                how='left'
-            )
-            funding_rates = df_merged['funding_rate'].values
-        else:
-            # Fallback: assume same length and alignment
-            if len(df_funding) >= len(prices):
-                funding_rates = df_funding['funding_rate'].values[:len(prices)]
-            else:
-                funding_rates = np.full(len(prices), np.nan)
-        
-        return funding_rates
-        
-    except Exception as e:
-        # If funding data not available, return None
-        return None
-
-def calculate_zscore(series, window=30):
-    """Calculate rolling z-score."""
-    n = len(series)
-    zscore = np.full(n, np.nan)
-    
-    if n < window:
-        return zscore
-    
-    for i in range(window, n):
-        window_data = series[i-window:i]
-        valid_data = window_data[~np.isnan(window_data)]
-        
-        if len(valid_data) < window // 2:
-            continue
-        
-        mean = np.mean(valid_data)
-        std = np.std(valid_data)
-        
-        if std > 1e-10:
-            zscore[i] = (series[i] - mean) / std
-    
-    return zscore
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -194,26 +210,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate primary (12h) indicators
-    rsi_12h = calculate_rsi(close, period=14)
-    atr_12h = calculate_atr(high, low, close, period=14)
+    # Calculate primary (1d) indicators
+    rsi_1d = calculate_rsi(close, period=14)
+    crsi_1d = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    chop_1d = calculate_choppiness(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    atr_1d = calculate_atr(high, low, close, period=14)
+    sma_50 = calculate_sma(close, 50)
+    sma_200 = calculate_sma(close, 200)
     
-    # Calculate and align 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
-    # Load funding rate data
-    funding_rates = load_funding_data(prices)
-    
-    # Calculate funding z-score if funding data available
-    if funding_rates is not None:
-        funding_zscore = calculate_zscore(funding_rates, window=30)
-        has_funding = True
-    else:
-        funding_zscore = np.full(n, np.nan)
-        has_funding = False
+    # Calculate and align 1w HMA for macro regime
+    hma_1w_raw = calculate_hma(df_1w['close'].values, 21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
     signals = np.zeros(n)
     BASE_SIZE = 0.30
@@ -227,58 +237,94 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(200, n):
+    for i in range(250, n):
         # Skip if indicators not ready
-        if np.isnan(rsi_12h[i]) or np.isnan(atr_12h[i]) or atr_12h[i] <= 1e-10:
+        if np.isnan(rsi_1d[i]) or np.isnan(crsi_1d[i]) or np.isnan(chop_1d[i]):
             continue
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(atr_1d[i]) or atr_1d[i] <= 1e-10:
+            continue
+        if np.isnan(hma_1w_aligned[i]):
+            continue
+        if np.isnan(sma_50[i]) or np.isnan(sma_200[i]):
+            continue
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             continue
         
-        # === TREND BIAS (1d HTF HMA21) ===
-        trend_bullish = close[i] > hma_1d_aligned[i]
-        trend_bearish = close[i] < hma_1d_aligned[i]
+        # === MACRO REGIME (1w HTF HMA21) ===
+        macro_bull = close[i] > hma_1w_aligned[i]
+        macro_bear = close[i] < hma_1w_aligned[i]
         
-        # === FUNDING RATE SIGNALS ===
-        funding_signal = 0.0
-        if has_funding and not np.isnan(funding_zscore[i]):
-            # Extreme negative funding = long signal (crowd too short)
-            if funding_zscore[i] < -1.5:
-                funding_signal = 1.0
-            # Extreme positive funding = short signal (crowd too long)
-            elif funding_zscore[i] > 1.5:
-                funding_signal = -1.0
+        # === TREND FILTER (SMA50/200) ===
+        above_sma50 = close[i] > sma_50[i]
+        below_sma50 = close[i] < sma_50[i]
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
         
-        # === RSI ENTRY TIMING ===
-        rsi_long_setup = rsi_12h[i] < 45  # Pullback in uptrend
-        rsi_short_setup = rsi_12h[i] > 55  # Rally in downtrend
-        rsi_extreme_long = rsi_12h[i] < 30  # Oversold
-        rsi_extreme_short = rsi_12h[i] > 70  # Overbought
+        # === REGIME DETECTION (Choppiness Index) ===
+        ranging_regime = chop_1d[i] > 55
+        trending_regime = chop_1d[i] < 45
+        
+        # === CONNORS RSI SIGNALS (Relaxed: 25/75 for trades) ===
+        crsi_oversold = crsi_1d[i] < 25
+        crsi_overbought = crsi_1d[i] > 75
+        crsi_extreme_oversold = crsi_1d[i] < 15
+        crsi_extreme_overbought = crsi_1d[i] > 85
+        
+        # === RSI SIGNALS ===
+        rsi_oversold = rsi_1d[i] < 35
+        rsi_overbought = rsi_1d[i] > 65
+        
+        # === DONCHIAN BREAKOUT ===
+        donchian_breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
+        donchian_breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
         
         desired_signal = 0.0
         
-        # === PRIMARY LOGIC: Funding + Trend Confluence ===
-        if has_funding and not np.isnan(funding_zscore[i]):
-            # Long: Extreme negative funding + bullish trend + RSI pullback
-            if funding_signal > 0 and trend_bullish and rsi_long_setup:
+        # === RANGING REGIME (CHOP > 55) — Mean Reversion ===
+        if ranging_regime:
+            # Long: CRSI oversold + any bullish confirmation
+            if crsi_oversold and (macro_bull or above_sma50 or above_sma200):
                 desired_signal = BASE_SIZE
-            # Long: Extreme negative funding + RSI extremely oversold (override trend)
-            elif funding_signal > 0 and rsi_extreme_long:
+            elif crsi_extreme_oversold:
+                desired_signal = REDUCED_SIZE
+            elif rsi_oversold and above_sma200:
                 desired_signal = REDUCED_SIZE
             
-            # Short: Extreme positive funding + bearish trend + RSI rally
-            if funding_signal < 0 and trend_bearish and rsi_short_setup:
+            # Short: CRSI overbought + any bearish confirmation
+            if crsi_overbought and (macro_bear or below_sma50 or below_sma200):
                 desired_signal = -BASE_SIZE
-            # Short: Extreme positive funding + RSI extremely overbought (override trend)
-            elif funding_signal < 0 and rsi_extreme_short:
+            elif crsi_extreme_overbought:
+                desired_signal = -REDUCED_SIZE
+            elif rsi_overbought and below_sma200:
                 desired_signal = -REDUCED_SIZE
         
-        # === FALLBACK LOGIC: RSI Mean Reversion (if no funding data) ===
-        if not has_funding or desired_signal == 0.0:
-            # Long: RSI oversold + above 1d HMA
-            if rsi_extreme_long and trend_bullish:
+        # === TRENDING REGIME (CHOP < 45) — Trend Following ===
+        elif trending_regime:
+            # Long: Bullish macro + breakout or pullback
+            if macro_bull or above_sma50:
+                if donchian_breakout_long:
+                    desired_signal = BASE_SIZE
+                elif crsi_oversold:
+                    desired_signal = REDUCED_SIZE
+            
+            # Short: Bearish macro + breakout or rally
+            if macro_bear or below_sma50:
+                if donchian_breakout_short:
+                    desired_signal = -BASE_SIZE
+                elif crsi_overbought:
+                    desired_signal = -REDUCED_SIZE
+        
+        # === NEUTRAL REGIME (45 <= CHOP <= 55) ===
+        else:
+            # Conservative: require stronger confluence
+            if crsi_oversold and macro_bull and above_sma200:
                 desired_signal = REDUCED_SIZE
-            # Short: RSI overbought + below 1d HMA
-            if rsi_extreme_short and trend_bearish:
+            elif crsi_extreme_oversold and above_sma200:
+                desired_signal = REDUCED_SIZE
+            
+            if crsi_overbought and macro_bear and below_sma200:
+                desired_signal = -REDUCED_SIZE
+            elif crsi_extreme_overbought and below_sma200:
                 desired_signal = -REDUCED_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
@@ -302,23 +348,23 @@ def generate_signals(prices):
         # === HOLD LOGIC — Maintain position if conditions intact ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if trend intact and RSI not overbought
-                if trend_bullish and rsi_12h[i] < 65:
+                # Hold long if macro bullish and CRSI not overbought
+                if macro_bull and crsi_1d[i] < 70:
                     desired_signal = BASE_SIZE
             elif position_side < 0:
-                # Hold short if trend intact and RSI not oversold
-                if trend_bearish and rsi_12h[i] > 35:
+                # Hold short if macro bearish and CRSI not oversold
+                if macro_bear and crsi_1d[i] > 30:
                     desired_signal = -BASE_SIZE
         
         # === EXIT CONDITIONS ===
         if in_position and position_side > 0:
-            # Exit long if trend reverses + RSI overbought
-            if trend_bearish and rsi_12h[i] > 65:
+            # Exit long if macro reverses + CRSI overbought
+            if macro_bear and crsi_1d[i] > 75:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
-            # Exit short if trend reverses + RSI oversold
-            if trend_bullish and rsi_12h[i] < 35:
+            # Exit short if macro reverses + CRSI oversold
+            if macro_bull and crsi_1d[i] < 25:
                 desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
@@ -333,13 +379,13 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_12h[i]
+                entry_atr = atr_1d[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(desired_signal) != position_side:
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_12h[i]
+                entry_atr = atr_1d[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
