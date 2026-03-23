@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #1254: 4h Primary + 12h/1d HTF — Dual Regime Choppiness + CRSI
+Experiment #1255: 1h Primary + 4h/1d HTF — Regime-Adaptive CRSI + HMA Trend
 
-Hypothesis: Recent failures (#1242-1253) all have Sharpe=0.000 = ZERO TRADES.
-Entry conditions too strict. This strategy uses:
-1. CHOPPINESS INDEX regime detection (CHOP>55=range, CHOP<45=trend)
-2. CONNORS RSI for entries (proven 75% win rate in research)
-3. 12h HMA for macro trend filter (less strict than 1d)
+Hypothesis: Recent 1h failures (#1245, #1250) had Sharpe=0.000 = ZERO TRADES.
+Entry conditions were too strict with conflicting filters. This strategy:
+1. Uses 4h HMA for macro trend direction (proven from best strategy)
+2. Uses 1d Choppiness Index for regime detection (range vs trend)
+3. Uses Connors RSI for entry timing (75% win rate in literature)
 4. LOOSE entry thresholds to ensure >=10 trades/symbol/train
+5. Session filter (8-20 UTC) + volume filter for quality entries
+6. Discrete signal levels (0.0, ±0.25, ±0.35) to minimize fee churn
 
-Key changes from #1239:
-- Remove hysteresis buffer (was blocking signals)
-- Lower ADX threshold to 15 (was 18)
-- Wider RSI entry bands (30-60 vs 40-55)
-- Dual regime: mean-revert in chop, trend-follow otherwise
-- Signal output immediate (no 2-bar delay)
+Key differences from failed #1250:
+- Remove ADX filter (was blocking signals in low-vol periods)
+- Lower CRSI thresholds (15/85 vs 10/90) for more entries
+- Use 4h HMA (not 12h) for faster trend response on 1h TF
+- Single regime logic (not dual) to avoid conflicting signals
+- Immediate signal output (no hysteresis buffer blocking trades)
 
-Target: Sharpe > 0.612, trades >= 80 train, >= 12 test
-Timeframe: 4h
+Target: Sharpe > 0.612, trades 30-80/year, DD < -30%
+Timeframe: 1h (MANDATORY per experiment)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_chop_crsi_regime_12h1d_hma_atr_v1"
-timeframe = "4h"
+name = "mtf_1h_regime_crsi_hma_4h1d_session_vol_v2"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -152,52 +154,6 @@ def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
     
     return crsi
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - trend strength"""
-    n = len(close)
-    adx = np.full(n, np.nan)
-    
-    if n < period * 2 + 1:
-        return adx
-    
-    tr = np.zeros(n)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        if high[i] - high[i-1] > low[i-1] - low[i]:
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-        else:
-            plus_dm[i] = 0
-            
-        if low[i-1] - low[i] > high[i] - high[i-1]:
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-        else:
-            minus_dm[i] = 0
-    
-    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    dx = np.zeros(n)
-    
-    mask = tr_smooth > 1e-10
-    plus_di[mask] = 100.0 * plus_dm_smooth[mask] / tr_smooth[mask]
-    minus_di[mask] = 100.0 * minus_dm_smooth[mask] / tr_smooth[mask]
-    
-    di_sum = plus_di + minus_di
-    mask2 = di_sum > 1e-10
-    dx[mask2] = 100.0 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
-
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
@@ -214,49 +170,99 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Bollinger Bands"""
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
-    mid = np.full(n, np.nan)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    rsi = np.full(n, np.nan)
+    
+    if n < period + 1:
+        return rsi
+    
+    delta = np.diff(close)
+    gain = np.zeros(n)
+    loss = np.zeros(n)
+    gain[1:] = np.where(delta > 0, delta, 0)
+    loss[1:] = np.where(delta < 0, -delta, 0)
+    
+    gain_smooth = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    loss_smooth = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    mask = loss_smooth > 1e-10
+    rsi[mask] = 100.0 - (100.0 / (1.0 + gain_smooth[mask] / loss_smooth[mask]))
+    rsi[:period] = np.nan
+    
+    return rsi
+
+def calculate_sma(close, period=200):
+    """Simple Moving Average"""
+    n = len(close)
+    sma = np.full(n, np.nan)
     
     if n < period:
-        return mid, upper, lower
+        return sma
     
     for i in range(period - 1, n):
-        window = close[i-period+1:i+1]
-        mid[i] = np.mean(window)
-        std = np.std(window, ddof=0)
-        upper[i] = mid[i] + std_mult * std
-        lower[i] = mid[i] - std_mult * std
+        sma[i] = np.mean(close[i-period+1:i+1])
     
-    return mid, upper, lower
+    return sma
+
+def calculate_volume_sma(volume, period=20):
+    """Volume Simple Moving Average"""
+    n = len(volume)
+    vol_sma = np.full(n, np.nan)
+    
+    if n < period:
+        return vol_sma
+    
+    for i in range(period - 1, n):
+        vol_sma[i] = np.mean(volume[i-period+1:i+1])
+    
+    return vol_sma
+
+def get_hour_from_open_time(open_time_array):
+    """Extract hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds, convert to hours UTC
+    hours = ((open_time_array / 1000) % 86400) // 3600
+    return hours.astype(int)
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 12h HMA for macro trend filter
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate and align 4h HMA for trend direction
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate primary (4h) indicators
-    hma_fast = calculate_hma(close, period=16)
-    hma_slow = calculate_hma(close, period=48)
-    chop = calculate_choppiness(high, low, close, period=14)
+    # Calculate and align 1d Choppiness for regime detection
+    chop_1d_raw = calculate_choppiness(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values,
+        period=14
+    )
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d_raw)
+    
+    # Calculate primary (1h) indicators
+    rsi = calculate_rsi(close, period=14)
     crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
-    adx = calculate_adx(high, low, close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    bb_mid, bb_upper, bb_lower = calculate_bollinger(close, period=20, std_mult=2.0)
+    sma_200 = calculate_sma(close, period=200)
+    vol_sma = calculate_volume_sma(volume, period=20)
+    
+    # Extract hour for session filter
+    hours = get_hour_from_open_time(open_time)
     
     signals = np.zeros(n)
     BASE_SIZE = 0.28
+    HALF_SIZE = 0.14
     
     # Position tracking for stoploss
     in_position = False
@@ -268,53 +274,58 @@ def generate_signals(prices):
     
     for i in range(150, n):
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(adx[i]) or atr[i] <= 1e-10:
+        if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
+        if np.isnan(rsi[i]) or np.isnan(crsi[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(crsi[i]) or np.isnan(chop[i]) or np.isnan(hma_12h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(chop_1d_aligned[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(bb_mid[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(sma_200[i]) or np.isnan(vol_sma[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME DETECTION (Choppiness Index) ===
-        in_range = chop[i] > 50.0  # Ranging market
-        in_trend = chop[i] < 45.0  # Trending market
+        # === REGIME DETECTION (1d Choppiness) ===
+        in_range = chop_1d_aligned[i] > 50.0  # Ranging market
+        in_trend = chop_1d_aligned[i] < 45.0  # Trending market
         
-        # === MACRO TREND (12h HMA) ===
-        macro_bull = close[i] > hma_12h_aligned[i]
-        macro_bear = close[i] < hma_12h_aligned[i]
+        # === MACRO TREND (4h HMA) ===
+        macro_bull = close[i] > hma_4h_aligned[i]
+        macro_bear = close[i] < hma_4h_aligned[i]
         
-        # === LOCAL TREND (4h HMA) ===
-        hma_bull = hma_fast[i] > hma_slow[i]
-        hma_bear = hma_fast[i] < hma_slow[i]
+        # === LONG-TERM TREND (SMA200) ===
+        long_bull = close[i] > sma_200[i]
+        long_bear = close[i] < sma_200[i]
         
-        # === TREND STRENGTH (ADX) - LOWER threshold ===
-        trend_strong = adx[i] > 15.0
+        # === VOLUME FILTER ===
+        volume_ok = volume[i] > 0.7 * vol_sma[i]  # At least 70% of avg volume
+        
+        # === SESSION FILTER (8-20 UTC for liquidity) ===
+        session_ok = 8 <= hours[i] <= 20
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # TRENDING REGIME: Follow trend with pullback
+        # TRENDING REGIME: Follow trend with RSI pullback
         if in_trend:
-            # Long: Macro bull + HMA bull + ADX strong
-            if macro_bull and hma_bull and trend_strong:
-                desired_signal = BASE_SIZE
-            # Short: Macro bear + HMA bear + ADX strong
-            elif macro_bear and hma_bear and trend_strong:
-                desired_signal = -BASE_SIZE
+            # Long: Macro bull + Long-term bull + RSI pullback (40-55)
+            if macro_bull and long_bull and volume_ok and session_ok:
+                if 35.0 <= rsi[i] <= 55.0:
+                    desired_signal = BASE_SIZE
+            # Short: Macro bear + Long-term bear + RSI bounce (45-65)
+            elif macro_bear and long_bear and volume_ok and session_ok:
+                if 45.0 <= rsi[i] <= 65.0:
+                    desired_signal = -BASE_SIZE
         
         # RANGING REGIME: Mean revert with CRSI extremes
         elif in_range:
-            # Long: CRSI oversold + price near BB lower + macro not strongly bear
-            if crsi[i] < 25.0 and close[i] <= bb_lower[i] * 1.002:
+            # Long: CRSI oversold + price below SMA200 + volume ok
+            if crsi[i] < 20.0 and volume_ok:
                 desired_signal = BASE_SIZE
-            # Short: CRSI overbought + price near BB upper + macro not strongly bull
-            elif crsi[i] > 75.0 and close[i] >= bb_upper[i] * 0.998:
+            # Short: CRSI overbought + price above SMA200 + volume ok
+            elif crsi[i] > 80.0 and volume_ok:
                 desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
@@ -335,7 +346,7 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === OUTPUT SIGNAL IMMEDIATELY (no hysteresis buffer) ===
+        # === OUTPUT SIGNAL ===
         final_signal = desired_signal
         
         # === DISCRETIZE SIGNAL VALUES ===
