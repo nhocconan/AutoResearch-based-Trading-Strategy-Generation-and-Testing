@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #1317: 1d Primary + 1w HTF — Donchian Breakout + HMA Trend + RSI Pullback
+Experiment #1318: 30m Primary + 4h/1d HTF — Simplified HMA Trend + RSI Pullback
 
-Hypothesis: Daily timeframe with weekly trend filter should produce 20-50 trades/year.
-Learning from #1316 (12h Sharpe=-0.067): simplify entry logic, use Donchian breakouts
-which work well on daily charts. Weekly HMA provides macro trend filter to avoid
-counter-trend trades in strong bear markets (2022, 2025).
+Hypothesis: #1308 failed with ZERO trades due to too many filters (session + volume + chop).
+This strategy SIMPLIFIES for 30m timeframe to ensure trades actually generate:
+1. 4h HMA for trend direction (align properly with mtf_data)
+2. 1d HMA for macro bias filter (loose OR logic)
+3. 30m RSI(14) pullback entries with WIDE bands (25-65 long, 35-75 short)
+4. ATR(14) trailing stop at 2.5x for risk management
+5. NO session filter (killed #1308)
+6. NO volume filter (killed #1308)
+7. NO Choppiness Index (failed 6+ experiments)
+8. LOOSE macro trend logic (OR instead of AND)
 
-Key components:
-1. 1w HMA(21) for macro trend direction (align with mtf_data)
-2. 1d Donchian(20) breakout for entry triggers
-3. 1d HMA(13/34) crossover for local trend confirmation
-4. RSI(14) pullback entries with WIDE bands (25-75) to ensure trades
-5. ATR(14) 2.5x trailing stop for risk management
-6. Position size: 0.28 discrete levels
-
-Target: 20-50 trades/year, Sharpe > 0.612, trades >= 40 train, >= 5 test
-Timeframe: 1d
+Target: 40-80 trades/year on 30m, Sharpe > 0.612, trades >= 160 train (4yr), >= 12 test (15mo)
+Timeframe: 30m
+Size: 0.25 discrete levels (conservative for lower TF)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_hma_rsi_1w_trend_atr_v1"
-timeframe = "1d"
+name = "mtf_30m_hma_rsi_pullback_4h1d_trend_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -96,22 +95,7 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - breakout detection"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
-
-def calculate_sma(close, period=50):
+def calculate_sma(close, period=200):
     """Simple Moving Average"""
     n = len(close)
     if n < period:
@@ -129,22 +113,30 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 1w HMA for macro trend filter
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 4h HMA for trend direction
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate primary (1d) indicators
+    # Calculate and align 1d HMA for macro bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate 1d SMA50 for major trend
+    sma_1d_raw = calculate_sma(df_1d['close'].values, period=50)
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_raw)
+    
+    # Calculate primary (30m) indicators
     hma_fast = calculate_hma(close, period=13)
     hma_slow = calculate_hma(close, period=34)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    sma_50 = calculate_sma(close, period=50)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    sma_200 = calculate_sma(close, period=200)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.28
+    BASE_SIZE = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -154,7 +146,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(100, n):
+    for i in range(300, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -162,67 +154,66 @@ def generate_signals(prices):
         if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(rsi[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(sma_50[i]):
+        if np.isnan(sma_200[i]):
             signals[i] = 0.0
             continue
         
-        # === MACRO TREND (1w HMA) ===
-        macro_bull = close[i] > hma_1w_aligned[i]
-        macro_bear = close[i] < hma_1w_aligned[i]
+        # === MACRO TREND (1d HMA OR SMA50) - LOOSE logic for more trades ===
+        macro_bull = (close[i] > hma_1d_aligned[i]) or (close[i] > sma_1d_aligned[i])
+        macro_bear = (close[i] < hma_1d_aligned[i]) or (close[i] < sma_1d_aligned[i])
         
-        # === LOCAL TREND (1d HMA crossover) ===
+        # === 4h TREND (HMA slope) ===
+        hma_4h_bull = close[i] > hma_4h_aligned[i]
+        hma_4h_bear = close[i] < hma_4h_aligned[i]
+        
+        # === LOCAL TREND (30m HMA crossover) ===
         hma_bull = hma_fast[i] > hma_slow[i]
         hma_bear = hma_fast[i] < hma_slow[i]
         
-        # === SMA50 FILTER ===
-        above_sma50 = close[i] > sma_50[i]
-        below_sma50 = close[i] < sma_50[i]
-        
-        # === DONCHIAN BREAKOUT ===
-        breakout_high = close[i] > donchian_upper[i-1]  # Break above previous upper
-        breakout_low = close[i] < donchian_lower[i-1]   # Break below previous lower
+        # === SMA200 FILTER ===
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # LONG ENTRY: Macro bull + HMA bull + Donchian breakout OR RSI pullback
-        if macro_bull and hma_bull and above_sma50:
-            # Donchian breakout long
-            if breakout_high:
+        # LONG ENTRY: Macro/4h bull + RSI pullback (WIDE bands for trades)
+        if (macro_bull or hma_4h_bull) and hma_bull:
+            # RSI pullback in uptrend (25-60 range - very wide)
+            if 25.0 <= rsi[i] <= 60.0:
                 desired_signal = BASE_SIZE
-            # RSI pullback in uptrend (wide bands for more trades)
-            elif 25.0 <= rsi[i] <= 55.0:
+            # RSI oversold bounce with SMA200 support
+            elif rsi[i] < 30.0 and above_sma200:
                 desired_signal = BASE_SIZE
-            # RSI oversold bounce
-            elif rsi[i] < 30.0:
+            # RSI breaking above 45 with trend
+            elif 45.0 < rsi[i] < 65.0 and hma_bull:
                 desired_signal = BASE_SIZE
         
-        # SHORT ENTRY: Macro bear + HMA bear + Donchian breakdown OR RSI bounce
-        elif macro_bear and hma_bear and below_sma50:
-            # Donchian breakdown short
-            if breakout_low:
+        # SHORT ENTRY: Macro/4h bear + RSI bounce (WIDE bands for trades)
+        elif (macro_bear or hma_4h_bear) and hma_bear:
+            # RSI bounce in downtrend (40-75 range - very wide)
+            if 40.0 <= rsi[i] <= 75.0:
                 desired_signal = -BASE_SIZE
-            # RSI bounce in downtrend (wide bands for more trades)
-            elif 45.0 <= rsi[i] <= 75.0:
+            # RSI overbought rejection with SMA200 resistance
+            elif rsi[i] > 70.0 and below_sma200:
                 desired_signal = -BASE_SIZE
-            # RSI overbought rejection
-            elif rsi[i] > 70.0:
+            # RSI breaking below 55 with trend
+            elif 35.0 < rsi[i] < 55.0 and hma_bear:
                 desired_signal = -BASE_SIZE
         
-        # === RANGE MARKET: Mean revert at extremes (when HMA flat) ===
-        hma_flat = abs(hma_fast[i] - hma_slow[i]) / close[i] < 0.005
-        if hma_flat and desired_signal == 0.0:
-            # Long at RSI oversold
-            if rsi[i] < 30.0 and above_sma50:
+        # === RANGE MARKET: Mean revert at extremes (no trend filter) ===
+        if desired_signal == 0.0:
+            # Long at deep oversold with SMA200
+            if rsi[i] < 25.0 and above_sma200:
                 desired_signal = BASE_SIZE
-            # Short at RSI overbought
-            elif rsi[i] > 70.0 and below_sma50:
+            # Short at deep overbought with SMA200
+            elif rsi[i] > 75.0 and below_sma200:
                 desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
