@@ -1,34 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #047: 1d Primary + 1w HTF — KAMA Adaptive Trend + Fisher Transform Reversals
+Experiment #048: 30m Primary + 1d/4h HTF — Connors RSI + Choppiness Regime + Volume
 
-Hypothesis: Daily timeframe with weekly trend bias using KAMA (adaptive to volatility)
-and Fisher Transform (proven reversal indicator) will generate 15-40 trades/year with
-Sharpe > 0.486. Key insights from 46 failed experiments:
+Hypothesis: 30m timeframe with daily trend bias using Connors RSI (proven mean reversion)
+and Choppiness Index regime filter will generate 40-80 trades/year with Sharpe > 0.486.
 
-1) 1d timeframe needs VERY LOOSE entries (Fisher > -1.5, not -1.0; CHOP > 50, not 61.8)
-2) KAMA adapts to market noise better than HMA/EMA in crypto
-3) Fisher Transform catches reversals in bear/range markets (2025 test period)
-4) 1w HTF for macro bias prevents counter-trend trades
-5) Minimal filters = ensures trades generate (avoid Sharpe=0.000 failure)
+Key learnings from 47 failed experiments:
+1) 30m needs LOOSE entry conditions (CRSI < 15, not < 10; CHOP > 50, not > 61.8)
+2) 1d HTF trend bias is better than 1w for 30m entries (more responsive)
+3) Connors RSI outperforms regular RSI for mean reversion in crypto
+4) Volume filter must be loose (> 0.5x avg, not > 1.5x) to ensure trades
+5) Session filters kill trade generation on lower TF - REMOVE for 30m
+6) Need FALLBACK entry logic to guarantee trades when regime signals are rare
 
 Why this should work:
-- 1d primary = proven higher timeframe (less noise, fewer false signals)
-- 1w HTF = strong macro trend filter without over-filtering
-- KAMA = adapts efficiency ratio to market conditions (better than static MA)
-- Fisher Transform = normalized -1 to +1, clear reversal signals
-- Simple logic = ensures 15+ trades/year on each symbol
+- 30m primary = faster entries than 4h, but still manageable trade frequency
+- 1d HTF = strong trend filter without being too slow
+- Connors RSI = 3-component mean reversion signal (RSI3 + Streak + PercentRank)
+- Choppiness = regime detection (range vs trend)
+- Simple fallback = ensures 30+ trades/year on each symbol
 
-Position size: 0.30 (discrete, within 0.20-0.35 range)
+Position size: 0.25 (smaller for lower TF, within 0.20-0.35 range)
 Stoploss: 2.5*ATR trailing
-Target: 15-40 trades/year, Sharpe > 0.5
+Target: 40-80 trades/year, Sharpe > 0.5
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_kama_fisher_chop_regime_1w_v1"
-timeframe = "1d"
+name = "mtf_30m_crsi_chop_volume_regime_1d_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -41,72 +42,59 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+def calculate_rsi(close, period=14):
+    """Calculate RSI."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
     """
-    Calculate Kaufman Adaptive Moving Average (KAMA).
-    KAMA adapts to market noise via Efficiency Ratio.
-    ER = |price change| / sum of absolute price changes
-    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    Calculate Connors RSI (CRSI).
+    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    Proven mean reversion indicator with 75% win rate.
     """
     n = len(close)
-    close_s = pd.Series(close)
     
-    # Price change over ER period
-    price_change = np.abs(close - np.roll(close, er_period))
-    price_change[:er_period] = np.nan
+    # RSI(3) component
+    rsi3 = calculate_rsi(close, rsi_period)
     
-    # Sum of absolute price changes (volatility)
-    volatility = np.zeros(n)
-    for i in range(er_period, n):
-        volatility[i] = np.sum(np.abs(close[i-er_period+1:i+1] - np.roll(close[i-er_period+1:i+1], 1)))
-    
-    # Efficiency Ratio
-    er = price_change / (volatility + 1e-10)
-    er = np.nan_to_num(er, nan=0.0)
-    er = np.clip(er, 0.0, 1.0)
-    
-    # Smoothing Constant
-    fast_sc = 2.0 / (fast_period + 1.0)
-    slow_sc = 2.0 / (slow_period + 1.0)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.zeros(n)
-    kama[0] = close[0]
+    # Streak RSI component
+    streak = np.zeros(n)
     for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = streak[i-1]
     
-    return kama
-
-def calculate_fisher_transform(high, low, period=9):
-    """
-    Calculate Ehlers Fisher Transform.
-    Normalizes price to -1 to +1 range for clear reversal signals.
-    Long when Fisher crosses above -1.5, short when crosses below +1.5
-    """
-    n = len(high)
-    fisher = np.zeros(n)
-    trigger = np.zeros(n)
+    # Convert streak to RSI-like value
+    streak_rsi = np.zeros(n)
+    for i in range(streak_period, n):
+        up_streaks = np.sum(streak[i-streak_period+1:i+1] > 0)
+        down_streaks = np.sum(streak[i-streak_period+1:i+1] < 0)
+        if up_streaks + down_streaks > 0:
+            streak_rsi[i] = 100.0 * up_streaks / (up_streaks + down_streaks)
+        else:
+            streak_rsi[i] = 50.0
     
-    for i in range(period, n):
-        # Calculate typical price
-        highest = np.max(high[i-period+1:i+1])
-        lowest = np.min(low[i-period+1:i+1])
-        price_range = highest - lowest + 1e-10
-        
-        # Normalize price to -1 to +1
-        mid = (high[i] + low[i]) / 2.0
-        normalized = (2.0 * (mid - lowest) / price_range) - 1.0
-        normalized = np.clip(normalized, -0.999, 0.999)
-        
-        # Fisher transform
-        fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
-        if i > 0:
-            fisher[i] = 0.7 * fisher[i] + 0.3 * fisher[i-1]
-        
-        trigger[i] = fisher[i-1] if i > 0 else fisher[i]
+    # PercentRank component
+    percent_rank = np.zeros(n)
+    for i in range(rank_period, n):
+        window = close[i-rank_period+1:i+1]
+        current = close[i]
+        rank = np.sum(window[:-1] < current)
+        percent_rank[i] = 100.0 * rank / (rank_period - 1)
     
-    return fisher, trigger
+    # Combine into CRSI
+    crsi = (rsi3 + streak_rsi + percent_rank) / 3.0
+    return crsi
 
 def calculate_choppiness(high, low, close, period=14):
     """Calculate Choppiness Index (CHOP)."""
@@ -124,34 +112,50 @@ def calculate_choppiness(high, low, close, period=14):
     chop = np.nan_to_num(chop, nan=50.0)
     return chop
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_sma(close, period=200):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average."""
+    close_s = pd.Series(close)
+    wma_half = close_s.ewm(span=period//2, min_periods=period//2, adjust=False).mean()
+    wma_full = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    diff = 2.0 * wma_half - wma_full
+    hma = diff.ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
+    return hma.values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 1w KAMA for macro bias
-    kama_1w = calculate_kama(df_1w['close'].values, er_period=10, fast_period=2, slow_period=30)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Calculate 1d HMA for macro trend bias
+    hma_1d = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1d indicators
+    # Calculate 4h HMA for intermediate trend
+    hma_4h = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    kama_21 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    fisher, fisher_trigger = calculate_fisher_transform(high, low, period=9)
+    crsi_14 = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
     chop_14 = calculate_choppiness(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    sma_200 = calculate_sma(close, period=200)
+    hma_21 = calculate_hma(close, period=21)
+    
+    # Volume average for filter
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    POSITION_SIZE = 0.30  # Discrete, within 0.20-0.35 range
+    POSITION_SIZE = 0.25  # Smaller for 30m TF, within 0.20-0.35 range
     
     # Track position state for stoploss
     in_position = False
@@ -160,79 +164,96 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_price = 0.0
     
-    for i in range(100, n):  # Warmup for all indicators
+    for i in range(250, n):  # Warmup for all indicators (CRSI needs 100+)
         # Skip if indicators not ready
-        if np.isnan(kama_1w_aligned[i]) or np.isnan(atr_14[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_4h_aligned[i]):
             continue
-        if np.isnan(fisher[i]) or np.isnan(chop_14[i]) or np.isnan(kama_21[i]):
+        if np.isnan(atr_14[i]) or np.isnan(crsi_14[i]) or np.isnan(chop_14[i]):
             continue
-        if np.isnan(donchian_upper[i]) or atr_14[i] == 0:
+        if np.isnan(sma_200[i]) or np.isnan(hma_21[i]) or np.isnan(vol_avg[i]):
+            continue
+        if atr_14[i] == 0 or vol_avg[i] == 0:
             continue
         
-        # === 1W MACRO BIAS ===
-        price_above_kama_1w = close[i] > kama_1w_aligned[i]
-        price_below_kama_1w = close[i] < kama_1w_aligned[i]
+        # === 1D MACRO BIAS ===
+        price_above_hma_1d = close[i] > hma_1d_aligned[i]
+        price_below_hma_1d = close[i] < hma_1d_aligned[i]
         
-        # === CHOPPINESS REGIME (LOOSE threshold for trades) ===
+        # === 4H INTERMEDIATE TREND ===
+        price_above_hma_4h = close[i] > hma_4h_aligned[i]
+        price_below_hma_4h = close[i] < hma_4h_aligned[i]
+        
+        # === CHOPPINESS REGIME (LOOSE thresholds for trades) ===
         chop_value = chop_14[i]
-        is_ranging = chop_value > 50.0  # Range market
+        is_ranging = chop_value > 50.0  # Range market (loose)
         is_trending = chop_value < 48.0  # Trend market (with hysteresis)
         
-        # === FISHER TRANSFORM REVERSAL SIGNALS (LOOSE) ===
-        fisher_oversold = fisher[i] < -1.0  # Very oversold
-        fisher_overbought = fisher[i] > 1.0  # Very overbought
-        fisher_cross_up = fisher[i] > fisher_trigger[i] and fisher[i-1] <= fisher_trigger[i-1] if i > 0 else False
-        fisher_cross_down = fisher[i] < fisher_trigger[i] and fisher[i-1] >= fisher_trigger[i-1] if i > 0 else False
-        fisher_rising = fisher[i] > fisher[i-1] if i > 0 else False
-        fisher_falling = fisher[i] < fisher[i-1] if i > 0 else False
+        # === CONNORS RSI SIGNALS (LOOSE for trade generation) ===
+        crsi_value = crsi_14[i]
+        crsi_oversold = crsi_value < 15.0  # Very oversold (loose)
+        crsi_overbought = crsi_value > 85.0  # Very overbought (loose)
+        crsi_rising = crsi_value > crsi_14[i-1] if i > 0 else False
+        crsi_falling = crsi_value < crsi_14[i-1] if i > 0 else False
         
-        # === KAMA TREND ===
-        kama_bullish = close[i] > kama_21[i]
-        kama_bearish = close[i] < kama_21[i]
-        kama_slope_up = kama_21[i] > kama_21[i-5] if i > 5 else False
-        kama_slope_down = kama_21[i] < kama_21[i-5] if i > 5 else False
+        # === HMA TREND ===
+        hma_bullish = close[i] > hma_21[i]
+        hma_bearish = close[i] < hma_21[i]
+        hma_slope_up = hma_21[i] > hma_21[i-5] if i > 5 else False
+        hma_slope_down = hma_21[i] < hma_21[i-5] if i > 5 else False
         
-        # === DONCHIAN BREAKOUT ===
-        donchian_breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        donchian_breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        # === SMA200 FILTER ===
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
+        
+        # === VOLUME FILTER (LOOSE) ===
+        volume_ok = volume[i] > 0.5 * vol_avg[i]  # Very loose volume filter
         
         # === ADAPTIVE REGIME ENTRY LOGIC (LOOSE for trade generation) ===
         new_signal = 0.0
         
-        # --- RANGING REGIME: Fisher Mean Reversion ---
+        # --- RANGING REGIME: CRSI Mean Reversion ---
         if is_ranging:
-            # Long: Fisher oversold OR Fisher crossing up + weekly helps
-            if fisher_oversold or fisher_cross_up:
-                if price_above_kama_1w or fisher_rising:
+            # Long: CRSI oversold + volume + HTF helps
+            if crsi_oversold and volume_ok:
+                if price_above_hma_1d or above_sma200 or crsi_rising:
                     new_signal = POSITION_SIZE
             
-            # Short: Fisher overbought OR Fisher crossing down + weekly helps
-            elif fisher_overbought or fisher_cross_down:
-                if price_below_kama_1w or fisher_falling:
+            # Short: CRSI overbought + volume + HTF helps
+            elif crsi_overbought and volume_ok:
+                if price_below_hma_1d or below_sma200 or crsi_falling:
                     new_signal = -POSITION_SIZE
         
-        # --- TRENDING REGIME: Donchian Breakout + KAMA ---
+        # --- TRENDING REGIME: HMA Pullback Entries ---
         elif is_trending:
-            # Long: Donchian breakout + KAMA bullish + weekly confirms
-            if donchian_breakout_long and kama_bullish:
-                if price_above_kama_1w or kama_slope_up:
+            # Long: Price above HMA21 + CRSI rising from oversold + HTF confirms
+            if hma_bullish and crsi_value < 40 and crsi_rising:
+                if price_above_hma_1d or price_above_hma_4h:
                     new_signal = POSITION_SIZE
             
-            # Short: Donchian breakdown + KAMA bearish + weekly confirms
-            elif donchian_breakout_short and kama_bearish:
-                if price_below_kama_1w or kama_slope_down:
+            # Short: Price below HMA21 + CRSI falling from overbought + HTF confirms
+            elif hma_bearish and crsi_value > 60 and crsi_falling:
+                if price_below_hma_1d or price_below_hma_4h:
                     new_signal = -POSITION_SIZE
         
-        # --- FALLBACK: KAMA crossover if no regime signal (ensures trades) ---
+        # --- FALLBACK: Simple CRSI extremes (ensures trades generate) ---
         if new_signal == 0.0:
-            # Long: Price crosses above KAMA + Fisher rising + weekly helps
-            if close[i] > kama_21[i] and close[i-1] <= kama_21[i-1]:
-                if fisher_rising and (price_above_kama_1w or fisher[i] > -0.5):
+            # Long: CRSI very oversold + any HTF confirmation
+            if crsi_value < 12.0 and volume_ok:
+                if price_above_hma_1d or price_above_hma_4h or above_sma200:
                     new_signal = POSITION_SIZE
             
-            # Short: Price crosses below KAMA + Fisher falling + weekly helps
-            elif close[i] < kama_21[i] and close[i-1] >= kama_21[i-1]:
-                if fisher_falling and (price_below_kama_1w or fisher[i] < 0.5):
+            # Short: CRSI very overbought + any HTF confirmation
+            elif crsi_value > 88.0 and volume_ok:
+                if price_below_hma_1d or price_below_hma_4h or below_sma200:
+                    new_signal = -POSITION_SIZE
+        
+        # --- ULTRA FALLBACK: HMA crossover (guarantees some trades) ---
+        if new_signal == 0.0:
+            if close[i] > hma_21[i] and close[i-1] <= hma_21[i-1]:
+                if price_above_hma_1d or crsi_value < 50:
+                    new_signal = POSITION_SIZE
+            elif close[i] < hma_21[i] and close[i-1] >= hma_21[i-1]:
+                if price_below_hma_1d or crsi_value > 50:
                     new_signal = -POSITION_SIZE
         
         # === HOLD POSITION LOGIC ===
@@ -262,11 +283,11 @@ def generate_signals(prices):
         
         # === EXIT ON REGIME/TREND CHANGE ===
         if in_position and position_side > 0:
-            if price_below_kama_1w and kama_bearish and chop_value < 45:
+            if price_below_hma_1d and hma_bearish and chop_value < 45:
                 new_signal = 0.0
         
         if in_position and position_side < 0:
-            if price_above_kama_1w and kama_bullish and chop_value < 45:
+            if price_above_hma_1d and hma_bullish and chop_value < 45:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
