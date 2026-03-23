@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Auto-generated: keltner_channel trend + cci entry + adx_filter regime on 15m"""
+"""Auto-generated: ichimoku trend + pin_bar entry + adx_filter regime on 4h"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "gen_keltner_channel_cci_adx_filter_15m_v1"
-timeframe = "15m"
+name = "gen_ichimoku_pin_bar_adx_filter_4h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,26 +23,21 @@ def generate_signals(prices):
 
     # TREND indicator
 
-    _kc_mid = close_s.ewm(span=20, min_periods=20, adjust=False).mean().values
-    _kc_tr = np.zeros(n)
-    for i in range(1, n): _kc_tr[i] = max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1]))
-    _kc_atr = pd.Series(_kc_tr).rolling(20, min_periods=20).mean().values
-    _kc_upper = _kc_mid + 1.5 * _kc_atr
-    _kc_lower = _kc_mid - 1.5 * _kc_atr
+    tenkan = (pd.Series(high).rolling(20).max().values + pd.Series(low).rolling(20).min().values) / 2
+    kijun = (pd.Series(high).rolling(60).max().values + pd.Series(low).rolling(60).min().values) / 2
     trend = np.zeros(n)
-    for i in range(20, n):
-        if close[i] > _kc_upper[i]: trend[i] = 1.0
-        elif close[i] < _kc_lower[i]: trend[i] = -1.0
-        else: trend[i] = trend[i-1]
+    for i in range(60, n):
+        if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
+            trend[i] = 1.0 if tenkan[i] > kijun[i] and close[i] > kijun[i] else (-1.0 if tenkan[i] < kijun[i] and close[i] < kijun[i] else 0.0)
 
     # ENTRY filter
 
-    tp = (high + low + close) / 3
-    tp_sma = pd.Series(tp).rolling(20, min_periods=20).mean().values
-    tp_mad = pd.Series(tp).rolling(20, min_periods=20).apply(lambda x: np.mean(np.abs(x - x.mean()))).values
-    cci = np.where(tp_mad > 0, (tp - tp_sma) / (0.015 * tp_mad), 0)
-    entry_ok_long = cci < -100
-    entry_ok_short = cci > 50
+    _body = np.abs(close - prices["open"].values) if "open" in prices.columns else np.ones(n)
+    _range = high - low
+    _upper_wick = high - np.maximum(close, prices["open"].values if "open" in prices.columns else close)
+    _lower_wick = np.minimum(close, prices["open"].values if "open" in prices.columns else close) - low
+    entry_ok_long = np.array([_lower_wick[i] > 2*_body[i] and _range[i]>0 for i in range(n)])
+    entry_ok_short = np.array([_upper_wick[i] > 2*_body[i] and _range[i]>0 for i in range(n)])
 
     # REGIME filter
 
