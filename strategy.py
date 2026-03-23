@@ -1,45 +1,66 @@
 #!/usr/bin/env python3
 """
-Experiment #455: 1h Primary + 4h/1d HTF — Regime-Adaptive Mean Reversion with Session Filter
+Experiment #456: 12h Primary + 1d HTF — KAMA Adaptive Trend + Choppiness Regime + RSI Entries
 
-Hypothesis: Lower timeframe (1h) strategies fail due to excessive trades → fee drag.
-Solution: Use 4h/1d for TREND DIRECTION, 1h only for ENTRY TIMING within HTF trend.
-Add session filter (8-20 UTC) to avoid low-liquidity periods. Use Choppiness Index
-to switch between mean-reversion (range) and trend-follow regimes.
+Hypothesis: Building on #452 (Sharpe=0.209 with KAMA), improve with cleaner regime logic.
+Key features:
+1. KAMA (Kaufman Adaptive MA) - adapts to volatility, less whipsaw than HMA/EMA
+2. Choppiness Index for regime detection (CHOP>61.8=range, <38.2=trend)
+3. RSI(14) for entry timing with relaxed thresholds (35/65)
+4. 1d HMA for HTF trend bias
+5. ATR(14) trailing stop at 2.5x
+6. Position size: 0.25 base, 0.30 on strong confluence, discrete levels
 
-Key innovations:
-1. 4h HMA(21) for primary trend bias (call ONCE before loop)
-2. 1d HMA(21) for macro trend confirmation (call ONCE before loop)
-3. Choppiness Index(14) for regime: >55=range(revert), <45=trend(follow)
-4. Connors RSI(3,2,100) for precise entry timing in range regime
-5. Session filter: only trade 8-20 UTC (high liquidity periods)
-6. Volume confirmation: taker_buy_ratio >0.55 for longs, <0.45 for shorts
-7. ATR(14) trailing stoploss at 2.5x
-8. Position size: 0.20 base, 0.30 on strong confluence (discrete levels)
-
-Target: Sharpe > 0.612, 40-80 trades/year, DD < -35%
-Timeframe: 1h (lower TF requires stricter entry filters)
+Target: Sharpe > 0.612, 80-200 trades over 4-year train, DD < -35%
+Timeframe: 12h (higher TF = fewer trades, less fee drag, proven in history)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_regime_crsi_session_4h1d_v1"
-timeframe = "1h"
+name = "mtf_12h_kama_chop_rsi_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average."""
-    close_s = pd.Series(close)
-    half = period // 2
-    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    diff = 2.0 * wma1 - wma2
-    sqrt_period = int(np.sqrt(period))
-    hma = diff.ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
-    return hma.values
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average."""
+    n = len(close)
+    kama = np.full(n, np.nan)
+    
+    if n < period + slow:
+        return kama
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.full(n, np.nan)
+    for i in range(period, n):
+        price_change = abs(close[i] - close[i - period])
+        volatility = np.nansum(np.abs(np.diff(close[i-period:i+1])))
+        if volatility > 1e-10:
+            er[i] = price_change / volatility
+        else:
+            er[i] = 0.0
+    
+    er = np.nan_to_num(er, nan=0.0)
+    er = np.clip(er, 0, 1)
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    # Calculate KAMA
+    for i in range(period + 1, n):
+        if np.isnan(kama[i-1]):
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
-def calculate_rsi(close, period):
+def calculate_rsi(close, period=14):
     """Calculate RSI using Wilder's smoothing."""
     n = len(close)
     rsi = np.full(n, np.nan)
@@ -91,123 +112,86 @@ def calculate_choppiness(high, low, close, period=14):
     chop = np.clip(chop, 0, 100)
     return chop
 
-def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
-    """Calculate Connors RSI (CRSI)."""
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average."""
+    close_s = pd.Series(close)
+    half = period // 2
+    wma1 = close_s.ewm(span=half, min_periods=half, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    diff = 2.0 * wma1 - wma2
+    sqrt_period = int(np.sqrt(period))
+    hma = diff.ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean()
+    return hma.values
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)."""
     n = len(close)
+    adx = np.full(n, np.nan)
     
-    rsi = calculate_rsi(close, rsi_period)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
     
-    streak_rsi = np.full(n, np.nan)
-    for i in range(streak_period, n):
-        up_streak = 0
-        down_streak = 0
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
         
-        for j in range(i, max(i - streak_period - 5, 0), -1):
-            if j == 0:
-                break
-            if close[j] > close[j-1]:
-                up_streak += 1
-                down_streak = 0
-            elif close[j] < close[j-1]:
-                down_streak += 1
-                up_streak = 0
-            else:
-                break
-        
-        streak = up_streak if up_streak > 0 else -down_streak
-        
-        if streak > 0:
-            streak_rsi[i] = 50.0 + (streak / (streak_period + 1)) * 50.0
-        elif streak < 0:
-            streak_rsi[i] = 50.0 - (abs(streak) / (streak_period + 1)) * 50.0
-        else:
-            streak_rsi[i] = 50.0
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
     
-    streak_rsi = np.clip(streak_rsi, 0, 100)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    pct_rank = np.full(n, np.nan)
-    returns = np.diff(close) / (close[:-1] + 1e-10)
-    returns = np.insert(returns, 0, 0)
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    for i in range(rank_period, n):
-        window = returns[i-rank_period+1:i+1]
-        current = returns[i]
-        pct_rank[i] = 100.0 * np.sum(window < current) / rank_period
+    plus_di_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_di_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    with np.errstate(invalid='ignore'):
-        crsi = (rsi + streak_rsi + pct_rank) / 3.0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        plus_di = 100.0 * plus_di_s / (atr + 1e-10)
+        minus_di = 100.0 * minus_di_s / (atr + 1e-10)
+        dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     
-    return crsi
-
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma
-
-def calculate_keltner(high, low, close, period=20, atr_period=10, mult=2.0):
-    """Calculate Keltner Channel."""
-    close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
-    atr = calculate_atr(high, low, close, atr_period)
-    upper = ema + mult * atr
-    lower = ema - mult * atr
-    return upper, lower, ema
-
-def get_utc_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)."""
-    return (open_time // 3600000) % 24
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1h indicators (primary timeframe)
-    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
-    rsi_14 = calculate_rsi(close, 14)
+    # Calculate 12h indicators (primary timeframe)
+    kama_fast = calculate_kama(close, period=10, fast=2, slow=30)
+    kama_slow = calculate_kama(close, period=20, fast=2, slow=30)
+    rsi = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
     chop = calculate_choppiness(high, low, close, period=14)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, period=20, std_mult=2.0)
-    kc_upper, kc_lower, kc_mid = calculate_keltner(high, low, close, period=20, atr_period=10, mult=2.0)
+    adx = calculate_adx(high, low, close, period=14)
     
-    # Calculate taker buy ratio for volume confirmation
-    taker_ratio = np.zeros(n)
-    for i in range(n):
-        if volume[i] > 0:
-            taker_ratio[i] = taker_buy_volume[i] / volume[i]
-        else:
-            taker_ratio[i] = 0.5
-    
-    # Calculate and align HTF HMA for bias (4h and 1d)
-    hma_4h_raw = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
+    # Calculate and align HTF HMA for bias (1d)
     hma_1d_raw = calculate_hma(df_1d['close'].values, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
     # Calculate median ATR for vol filter
-    valid_atr = atr_14[200:]
+    valid_atr = atr_14[100:]
     atr_median = np.nanmedian(valid_atr[~np.isnan(valid_atr)])
     if np.isnan(atr_median) or atr_median <= 0:
         atr_median = np.nanmean(valid_atr[~np.isnan(valid_atr)])
-    
-    # Calculate average volume for volume filter
-    vol_sma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    if np.isnan(atr_median) or atr_median <= 0:
+        atr_median = 1.0
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.20  # 20% base position size for 1h (lower TF = smaller size)
+    BASE_SIZE = 0.28  # 28% base position size for 12h
     
     # Position tracking for stoploss
     in_position = False
@@ -217,50 +201,40 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(250, n):
+    for i in range(200, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             continue
-        if np.isnan(crsi[i]) or np.isnan(chop[i]):
+        if np.isnan(rsi[i]) or np.isnan(chop[i]):
             continue
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             continue
-        
-        # === SESSION FILTER (8-20 UTC only) ===
-        utc_hour = get_utc_hour(open_time[i])
-        in_session = 8 <= utc_hour <= 20
+        if np.isnan(adx[i]):
+            continue
         
         # === REGIME DETECTION (Choppiness Index) ===
-        regime_range = chop[i] > 55.0  # Range market → mean revert
-        regime_trend = chop[i] < 45.0  # Trending market → trend follow
+        regime_chop = chop[i] > 55.0  # Range market (relaxed from 61.8)
+        regime_trend = chop[i] < 45.0  # Trending market (relaxed from 38.2)
         
-        # === HTF TREND BIAS (4h + 1d HMA) ===
-        price_above_hma_4h = close[i] > hma_4h_aligned[i]
-        price_below_hma_4h = close[i] < hma_4h_aligned[i]
+        # === HTF TREND BIAS (1d HMA) ===
         price_above_hma_1d = close[i] > hma_1d_aligned[i]
         price_below_hma_1d = close[i] < hma_1d_aligned[i]
         
-        htf_bullish = price_above_hma_4h and price_above_hma_1d
-        htf_bearish = price_below_hma_4h and price_below_hma_1d
-        htf_neutral = not htf_bullish and not htf_bearish
+        # === PRIMARY TREND (KAMA crossover) ===
+        kama_bullish = kama_fast[i] > kama_slow[i]
+        kama_bearish = kama_fast[i] < kama_slow[i]
         
-        # === CRSI SIGNALS (Mean Reversion) ===
-        crsi_oversold = crsi[i] < 25.0
-        crsi_overbought = crsi[i] > 75.0
-        crsi_extreme_oversold = crsi[i] < 15.0
-        crsi_extreme_overbought = crsi[i] > 85.0
+        # === RSI SIGNALS (Relaxed thresholds for more trades) ===
+        rsi_oversold = rsi[i] < 40.0
+        rsi_overbought = rsi[i] > 60.0
+        rsi_extreme_oversold = rsi[i] < 30.0
+        rsi_extreme_overbought = rsi[i] > 70.0
         
-        # === BOLLINGER BAND SIGNALS ===
-        bb_break_lower = close[i] < bb_lower[i]
-        bb_break_upper = close[i] > bb_upper[i]
-        bb_squeeze = (bb_upper[i] - bb_lower[i]) / (bb_mid[i] + 1e-10) < 0.05
-        
-        # === VOLUME CONFIRMATION ===
-        volume_above_avg = volume[i] > 0.8 * (vol_sma[i] if not np.isnan(vol_sma[i]) else volume[i])
-        volume_bullish = taker_ratio[i] > 0.55
-        volume_bearish = taker_ratio[i] < 0.45
+        # === ADX TREND STRENGTH ===
+        adx_strong = adx[i] > 20.0  # Relaxed from 25
+        adx_weak = adx[i] < 25.0
         
         # === VOL FILTER ===
         vol_ratio = atr_14[i] / (atr_median + 1e-10)
@@ -273,74 +247,52 @@ def generate_signals(prices):
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
-        signal_strength = 0
         
-        # === REGIME 1: RANGE (CHOP > 55) — MEAN REVERSION ===
-        if regime_range and in_session:
-            # Long: CRSI oversold + BB lower + HTF not bearish + volume
-            if crsi_oversold and bb_break_lower and not htf_bearish:
-                signal_strength = 2
-                if crsi_extreme_oversold:
-                    signal_strength += 1
-                if volume_bullish and volume_above_avg:
-                    signal_strength += 1
-                if price_above_hma_4h:  # 4h still bullish
-                    signal_strength += 1
-                if signal_strength >= 3:
-                    desired_signal = position_size * (0.8 + 0.2 * min(signal_strength, 5) / 5)
-            
-            # Short: CRSI overbought + BB upper + HTF not bullish + volume
-            if crsi_overbought and bb_break_upper and not htf_bullish:
-                if desired_signal == 0:
-                    signal_strength = 2
-                    if crsi_extreme_overbought:
-                        signal_strength += 1
-                    if volume_bearish and volume_above_avg:
-                        signal_strength += 1
-                    if price_below_hma_4h:  # 4h still bearish
-                        signal_strength += 1
-                    if signal_strength >= 3:
-                        desired_signal = -position_size * (0.8 + 0.2 * min(signal_strength, 5) / 5)
+        # === REGIME 1: CHOPPY/RANGE (CHOP > 55) — MEAN REVERSION ===
+        if regime_chop:
+            # Long: RSI oversold + price above 1d HMA (bullish bias)
+            if rsi_oversold and price_above_hma_1d:
+                desired_signal = position_size * 0.8
+                if rsi_extreme_oversold:
+                    desired_signal = position_size
+            # Short: RSI overbought + price below 1d HMA (bearish bias)
+            elif rsi_overbought and price_below_hma_1d:
+                desired_signal = -position_size * 0.8
+                if rsi_extreme_overbought:
+                    desired_signal = -position_size
         
-        # === REGIME 2: TREND (CHOP < 45) — TREND FOLLOW ===
-        elif regime_trend and in_session:
-            # Long: Pullback to BB mid + HTF bullish + volume
-            if htf_bullish and close[i] < bb_mid[i] and close[i] > bb_lower[i]:
-                if crsi_oversold:
-                    signal_strength = 2
-                    if volume_bullish and volume_above_avg:
-                        signal_strength += 1
-                    if price_above_hma_4h:
-                        signal_strength += 1
-                    if signal_strength >= 3:
-                        desired_signal = position_size * (0.8 + 0.2 * min(signal_strength, 4) / 4)
-            
-            # Short: Rally to BB mid + HTF bearish + volume
-            if htf_bearish and close[i] > bb_mid[i] and close[i] < bb_upper[i]:
-                if desired_signal == 0 and crsi_overbought:
-                    signal_strength = 2
-                    if volume_bearish and volume_above_avg:
-                        signal_strength += 1
-                    if price_below_hma_4h:
-                        signal_strength += 1
-                    if signal_strength >= 3:
-                        desired_signal = -position_size * (0.8 + 0.2 * min(signal_strength, 4) / 4)
+        # === REGIME 2: TRENDING (CHOP < 45) — TREND FOLLOW ===
+        elif regime_trend:
+            # Long: KAMA bullish + RSI not overbought + ADX strong
+            if kama_bullish and not rsi_overbought:
+                if adx_strong:
+                    desired_signal = position_size
+                else:
+                    desired_signal = position_size * 0.7
+            # Short: KAMA bearish + RSI not oversold + ADX strong
+            elif kama_bearish and not rsi_oversold:
+                if adx_strong:
+                    desired_signal = -position_size
+                else:
+                    desired_signal = -position_size * 0.7
         
-        # === REGIME 3: TRANSITION (45-55) — CONSERVATIVE ===
+        # === REGIME 3: TRANSITION (45-55) — HYBRID ===
         else:
-            # Only take extreme CRSI signals with strong HTF confirmation
-            if crsi_extreme_oversold and htf_bullish and in_session:
-                if volume_bullish:
-                    desired_signal = position_size * 0.6
-            elif crsi_extreme_overbought and htf_bearish and in_session:
-                if desired_signal == 0 and volume_bearish:
-                    desired_signal = -position_size * 0.6
+            # KAMA crossover with RSI confirmation
+            if kama_bullish and rsi_oversold:
+                desired_signal = position_size * 0.6
+            elif kama_bearish and rsi_overbought:
+                desired_signal = -position_size * 0.6
+            elif kama_bullish and price_above_hma_1d:
+                desired_signal = position_size * 0.5
+            elif kama_bearish and price_below_hma_1d:
+                desired_signal = -position_size * 0.5
         
-        # === CAP SIGNAL TO MAX 0.30 ===
-        if desired_signal > 0.30:
-            desired_signal = 0.30
-        elif desired_signal < -0.30:
-            desired_signal = -0.30
+        # === CAP SIGNAL TO MAX 0.35 ===
+        if desired_signal > 0.35:
+            desired_signal = 0.35
+        elif desired_signal < -0.35:
+            desired_signal = -0.35
         
         # === STOPLOSS CHECK (Trailing ATR) ===
         stoploss_triggered = False
@@ -360,34 +312,34 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === CRSI EXTREME EXIT (Take Profit) ===
-        if in_position and position_side > 0 and crsi[i] > 80.0:
+        # === RSI EXTREME EXIT (Take Profit) ===
+        if in_position and position_side > 0 and rsi[i] > 75.0:
             desired_signal = 0.0
         
-        if in_position and position_side < 0 and crsi[i] < 20.0:
+        if in_position and position_side < 0 and rsi[i] < 25.0:
             desired_signal = 0.0
         
         # === HOLD LOGIC — Maintain position if bias unchanged ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
-            if position_side > 0 and (price_above_hma_4h or price_above_hma_1d):
-                desired_signal = position_size
-            elif position_side < 0 and (price_below_hma_4h or price_below_hma_1d):
-                desired_signal = -position_size
+            if position_side > 0 and (kama_bullish or price_above_hma_1d):
+                desired_signal = position_size * 0.5
+            elif position_side < 0 and (kama_bearish or price_below_hma_1d):
+                desired_signal = -position_size * 0.5
         
         # === DISCRETIZE SIGNAL VALUES ===
         if desired_signal != 0.0:
             if desired_signal > 0:
-                if desired_signal >= 0.25:
+                if desired_signal >= 0.28:
                     desired_signal = 0.30
-                elif desired_signal >= 0.15:
-                    desired_signal = 0.20
+                elif desired_signal >= 0.18:
+                    desired_signal = 0.25
                 else:
                     desired_signal = 0.15
             else:
-                if desired_signal <= -0.25:
+                if desired_signal <= -0.28:
                     desired_signal = -0.30
-                elif desired_signal <= -0.15:
-                    desired_signal = -0.20
+                elif desired_signal <= -0.18:
+                    desired_signal = -0.25
                 else:
                     desired_signal = -0.15
         
