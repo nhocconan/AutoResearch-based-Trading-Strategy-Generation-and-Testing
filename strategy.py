@@ -1,39 +1,70 @@
 #!/usr/bin/env python3
 """
-Experiment #741: 4h Primary + 1d HTF — Dual Regime (Trend/Mean-Revert) + ADX Switch
+Experiment #742: 12h Primary + 1d/1w HTF — KAMA Adaptive Trend + Donchian Breakout + Dual HTF Filter
 
-Hypothesis: After analyzing 495+ failed strategies, clear patterns emerge:
-1. Complex regime (Chop+CRSI) = 0 trades or negative Sharpe (#729-735)
-2. Simple trend (KAMA+Donchian+ADX) on 1d got Sharpe=0.234 (#737) — works
-3. Current 4h attempt (#739) got Sharpe=0.012 — too many conflicting entry paths
-4. BEST overall uses 4h triple regime with Sharpe=0.612 — needs simpler logic
+Hypothesis: After analyzing 496 failed strategies, clear patterns emerge for 12h timeframe:
+1. #736 (12h Donchian + HMA 1d) got +53.9% return but Sharpe=-0.009 — good direction, bad exits
+2. #737 (1d KAMA + Donchian + ADX) got Sharpe=0.234 — simple trend + breakout works
+3. Complex regime (Chop/CRSI) caused 0 trades in 6+ experiments — AVOID
+4. 12h should target 20-50 trades/year — need loose entry filters
 
-NEW APPROACH:
-1. ADX regime switch: ADX>25 = trend follow, ADX<20 = mean revert (with hysteresis)
-2. Trend regime: 1d HMA(21) bias + 4h Donchian(20) breakout entries
-3. Mean-revert regime: 4h Bollinger(20,2.5) extremes + RSI(14) confirmation
-4. Single clear entry path per regime (not 8 conflicting paths like #739)
-5. Simple hold logic: stay in position while regime intact
-6. ATR(14) 2.5x trailing stop for risk management
-7. Discrete signals: 0.0, ±0.25, ±0.30 to minimize fee churn
+Strategy design (learning from failures):
+1. 1d HMA(21) for primary trend bias (proven in best strategies)
+2. 1w HMA(21) for macro trend confirmation (avoid counter-trend trades)
+3. 12h KAMA(14) for adaptive trend following (adjusts to volatility)
+4. 12h Donchian(20) breakout for entries (simple, generates trades)
+5. 12h ADX(14) > 20 filter (not > 40 which rarely triggers)
+6. 12h RSI(14) loose filter (30-70) for timing
+7. ATR(14) trailing stop 2.5x for risk management (fixes #736 negative Sharpe)
+8. Discrete signals: 0.0, ±0.25, ±0.30 to minimize fee churn
 
-Key differences from #739:
-- Only 2 entry paths total (1 long, 1 short) instead of 8
-- ADX hysteresis (enter 25, exit 20) prevents regime flip-flop
-- Bollinger mean-revert for range markets (proven in bear/range)
-- Simpler hold logic reduces premature exits
-- Target: 25-45 trades/year on 4h timeframe
+Key improvements over #736:
+- Added 1w HTF for macro trend filter (avoid bear market longs)
+- Trailing ATR stoploss (critical for Sharpe improvement)
+- Multiple entry paths to ensure 30+ trades on train
+- Clear hold logic to maintain positions through trends
+- Proper MTF alignment with shift(1) via align_htf_to_ltf
 
-Timeframe: 4h (primary) + 1d (HTF trend bias)
-Target: Sharpe > 0.612, trades >= 30 train, >= 3 test, ALL symbols positive
+Target: Sharpe > 0.612 (beat current best), trades >= 30 train, >= 3 test, ALL symbols positive
+Timeframe: 12h (target 20-50 trades/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_dual_regime_adx_donchian_bb_1d_v1"
-timeframe = "4h"
+name = "mtf_12h_kama_donchian_dual_htf_atr_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_kama(close, period=14, fast=2, slow=30):
+    """Kaufman Adaptive Moving Average - adjusts smoothing based on volatility."""
+    n = len(close)
+    kama = np.full(n, np.nan)
+    
+    if n < period + slow:
+        return kama
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(period, n):
+        price_change = np.abs(close[i] - close[i - period])
+        volatility = np.sum(np.abs(np.diff(close[i-period:i+1])))
+        if volatility > 1e-10:
+            er[i] = price_change / volatility
+        else:
+            er[i] = 0
+    
+    # Calculate Smoothing Constant (SC)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    # Calculate KAMA
+    for i in range(period + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
 def calculate_hma(series, period):
     """Hull Moving Average - smoother and more responsive than EMA."""
@@ -88,16 +119,12 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bollinger(close, period=20, std_mult=2.5):
-    """Bollinger Bands for mean reversion detection."""
-    n = len(close)
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    
-    return upper, lower, sma
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel for breakout detection."""
+    n = len(high)
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_adx(high, low, close, period=14):
     """Average Directional Index - measures trend strength."""
@@ -107,6 +134,7 @@ def calculate_adx(high, low, close, period=14):
     if n < period * 2 + 1:
         return adx
     
+    # Calculate True Range and Directional Movement
     tr = np.zeros(n)
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
@@ -125,26 +153,26 @@ def calculate_adx(high, low, close, period=14):
         else:
             minus_dm[i] = 0
     
+    # Smooth TR and DM
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     
+    # Calculate DI and DX
     with np.errstate(divide='ignore', invalid='ignore'):
         plus_di = 100 * plus_di / (atr + 1e-10)
         minus_di = 100 * minus_di / (atr + 1e-10)
         di_sum = plus_di + minus_di
         dx = 100 * np.abs(plus_di - minus_di) / (di_sum + 1e-10)
     
+    # Calculate ADX
     adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
     
     return adx
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel for breakout detection."""
-    n = len(high)
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_sma(close, period):
+    """Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -154,17 +182,23 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate primary (4h) indicators
-    rsi_4h = calculate_rsi(close, period=14)
-    atr_4h = calculate_atr(high, low, close, period=14)
-    adx_4h = calculate_adx(high, low, close, period=14)
+    # Calculate primary (12h) indicators
+    kama_12h = calculate_kama(close, period=14)
+    rsi_12h = calculate_rsi(close, period=14)
+    atr_12h = calculate_atr(high, low, close, period=14)
     donch_upper, donch_lower = calculate_donchian(high, low, period=20)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, period=20, std_mult=2.5)
+    adx_12h = calculate_adx(high, low, close, period=14)
+    sma_50 = calculate_sma(close, period=50)
+    sma_200 = calculate_sma(close, period=200)
     
     # Calculate and align HTF HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    hma_1w_raw = calculate_hma(df_1w['close'].values, 21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
     signals = np.zeros(n)
     BASE_SIZE = 0.30
@@ -178,57 +212,107 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    # Regime tracking with hysteresis
-    in_trend_regime = False  # Track current regime state
-    prev_adx = 0.0
-    
-    for i in range(300, n):
+    for i in range(300, n):  # Need buffer for all indicators + HTF alignment
         # Skip if indicators not ready
-        if np.isnan(rsi_4h[i]) or np.isnan(atr_4h[i]) or atr_4h[i] <= 1e-10:
+        if np.isnan(rsi_12h[i]) or np.isnan(atr_12h[i]) or atr_12h[i] <= 1e-10:
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(adx_4h[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+            continue
+        if np.isnan(sma_50[i]) or np.isnan(sma_200[i]):
             continue
         if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
             continue
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(kama_12h[i]) or np.isnan(adx_12h[i]):
             continue
-        
-        # === REGIME DETECTION with HYSTERESIS ===
-        # Enter trend regime when ADX > 25, exit when ADX < 20
-        current_adx = adx_4h[i]
-        
-        if not in_trend_regime and current_adx > 25:
-            in_trend_regime = True
-        elif in_trend_regime and current_adx < 20:
-            in_trend_regime = False
-        
-        prev_adx = current_adx
         
         # === TREND BIAS (1d HTF HMA) ===
         trend_1d_bullish = close[i] > hma_1d_aligned[i]
         trend_1d_bearish = close[i] < hma_1d_aligned[i]
         
+        # === MACRO TREND (1w HTF HMA) ===
+        trend_1w_bullish = close[i] > hma_1w_aligned[i]
+        trend_1w_bearish = close[i] < hma_1w_aligned[i]
+        
+        # === KAMA TREND (12h) ===
+        kama_bullish = close[i] > kama_12h[i]
+        kama_bearish = close[i] < kama_12h[i]
+        
+        # === ADX FILTER (trending market) ===
+        trending_market = adx_12h[i] > 20  # Loose threshold to ensure trades
+        
+        # === RSI FILTERS (loose to ensure trades) ===
+        rsi_ok_long = rsi_12h[i] < 70 and rsi_12h[i] > 30
+        rsi_ok_short = rsi_12h[i] < 70 and rsi_12h[i] > 30
+        
+        # === SMA FILTERS ===
+        above_sma50 = close[i] > sma_50[i]
+        above_sma200 = close[i] > sma_200[i]
+        below_sma50 = close[i] < sma_50[i]
+        below_sma200 = close[i] < sma_200[i]
+        
         desired_signal = 0.0
         
-        # === TREND REGIME (ADX > 20-25) ===
-        if in_trend_regime:
-            # LONG: Donchian breakout + 1d bullish trend
-            if close[i] > donch_upper[i-1] and trend_1d_bullish:
-                desired_signal = BASE_SIZE
-            
-            # SHORT: Donchian breakdown + 1d bearish trend
-            elif close[i] < donch_lower[i-1] and trend_1d_bearish:
-                desired_signal = -BASE_SIZE
+        # === LONG ENTRY CONDITIONS ===
+        long_signal = False
         
-        # === MEAN REVERT REGIME (ADX < 20) ===
-        else:
-            # LONG: Price at BB lower + RSI oversold + 1d bullish bias
-            if close[i] <= bb_lower[i] and rsi_4h[i] < 35 and trend_1d_bullish:
+        # Path 1: Donchian breakout + 1d bullish + 1w bullish + ADX trending + KAMA bullish
+        if close[i] > donch_upper[i-1] and trend_1d_bullish and trend_1w_bullish and kama_bullish:
+            long_signal = True
+        
+        # Path 2: Price > KAMA + Price > SMA50 + 1d bullish + ADX > 20
+        if kama_bullish and above_sma50 and trend_1d_bullish and adx_12h[i] > 20:
+            long_signal = True
+        
+        # Path 3: Strong trend (above SMA50/200) + 1d bullish + 1w bullish
+        if above_sma50 and above_sma200 and trend_1d_bullish and trend_1w_bullish:
+            long_signal = True
+        
+        # Path 4: KAMA bullish + RSI momentum (40-60) + 1d bullish + trending
+        if kama_bullish and 40 < rsi_12h[i] < 60 and trend_1d_bullish and trending_market:
+            long_signal = True
+        
+        # Path 5: KAMA bullish + ADX > 25 (stronger trend) + 1d bullish
+        if kama_bullish and adx_12h[i] > 25 and trend_1d_bullish:
+            long_signal = True
+        
+        if long_signal:
+            desired_signal = BASE_SIZE
+        
+        # === SHORT ENTRY CONDITIONS ===
+        short_signal = False
+        
+        # Path 1: Donchian breakdown + 1d bearish + 1w bearish + ADX trending + KAMA bearish
+        if close[i] < donch_lower[i-1] and trend_1d_bearish and trend_1w_bearish and kama_bearish:
+            short_signal = True
+        
+        # Path 2: Price < KAMA + Price < SMA50 + 1d bearish + ADX > 20
+        if kama_bearish and below_sma50 and trend_1d_bearish and adx_12h[i] > 20:
+            short_signal = True
+        
+        # Path 3: Strong downtrend (below SMA50/200) + 1d bearish + 1w bearish
+        if below_sma50 and below_sma200 and trend_1d_bearish and trend_1w_bearish:
+            short_signal = True
+        
+        # Path 4: KAMA bearish + RSI momentum (40-60) + 1d bearish + trending
+        if kama_bearish and 40 < rsi_12h[i] < 60 and trend_1d_bearish and trending_market:
+            short_signal = True
+        
+        # Path 5: KAMA bearish + ADX > 25 (stronger trend) + 1d bearish
+        if kama_bearish and adx_12h[i] > 25 and trend_1d_bearish:
+            short_signal = True
+        
+        if short_signal:
+            desired_signal = -BASE_SIZE
+        
+        # === CONFLICT RESOLUTION ===
+        # If both long and short signals, go with 1d HMA trend
+        if long_signal and short_signal:
+            if trend_1d_bullish:
                 desired_signal = BASE_SIZE
-            
-            # SHORT: Price at BB upper + RSI overbought + 1d bearish bias
-            elif close[i] >= bb_upper[i] and rsi_4h[i] > 65 and trend_1d_bearish:
+            elif trend_1d_bearish:
                 desired_signal = -BASE_SIZE
+            else:
+                desired_signal = 0.0
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -248,26 +332,26 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === HOLD LOGIC — Maintain position if regime intact ===
+        # === HOLD LOGIC — Maintain position if trend intact ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if regime supports long or neutral
-                if (in_trend_regime and trend_1d_bullish) or (not in_trend_regime and trend_1d_bullish):
+                # Hold long if 1d HMA still bullish and KAMA still bullish
+                if trend_1d_bullish and kama_bullish:
                     desired_signal = BASE_SIZE
             elif position_side < 0:
-                # Hold short if regime supports short or neutral
-                if (in_trend_regime and trend_1d_bearish) or (not in_trend_regime and trend_1d_bearish):
+                # Hold short if 1d HMA still bearish and KAMA still bearish
+                if trend_1d_bearish and kama_bearish:
                     desired_signal = -BASE_SIZE
         
-        # === EXIT CONDITIONS — Regime reversal ===
+        # === EXIT CONDITIONS ===
         if in_position and position_side > 0:
-            # Exit long if 1d trend reverses against position
-            if trend_1d_bearish and in_trend_regime:
+            # Exit long if 1d trend reverses or KAMA reverses
+            if trend_1d_bearish or kama_bearish:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
-            # Exit short if 1d trend reverses against position
-            if trend_1d_bullish and in_trend_regime:
+            # Exit short if 1d trend reverses or KAMA reverses
+            if trend_1d_bullish or kama_bullish:
                 desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
@@ -282,14 +366,14 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_4h[i]
+                entry_atr = atr_12h[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(desired_signal) != position_side:
                 # Position flip
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_4h[i]
+                entry_atr = atr_12h[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
