@@ -1,36 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #1380: 1h Primary + 4h/12h HTF — Trend Pullback with Session/Volume Filter
+Experiment #1381: 4h Primary + 1d HTF — Clean Trend Following with Fisher Transform Entry
 
-Hypothesis: Lower TF (1h) strategies fail due to excessive trades and fee drag.
-Solution: Use 4h/12h for TREND DIRECTION, 1h only for ENTRY TIMING.
-This gives HTF trade frequency (30-60/year) with 1h entry precision.
+Hypothesis: Previous regime-filter strategies (#1369, #1371, #1372, #1373) failed due to
+over-filtering. Working strategies (#1374, #1376) used clean trend following with
+multiple entry paths. Adding Fisher Transform improves entry timing in bear/range markets
+by catching reversals that pure breakout strategies miss.
 
-Key changes from #1375 (which failed with 0 trades):
-1. Relaxed RSI thresholds (35/65 instead of 40/60) to ensure entries
-2. Removed strict volume filter (was blocking too many trades)
-3. Session filter kept but less restrictive (6-22 UTC instead of 8-20)
-4. Added HMA slope confirmation for stronger trend signal
-5. Lowered BASE_SIZE to 0.22 for better risk control on 1h
+Key insight: 4h timeframe balances noise reduction with trade frequency. Fisher Transform
+(period=9) identifies extreme reversals (crossing ±1.5) that precede trend moves.
+Combined with Donchian breakout + HMA trend = high-probability entries.
 
 Design:
-1. 4h HMA(21) + slope = primary trend bias
-2. 12h HMA(21) = secondary confirmation (at least one aligned)
-3. 1h RSI(7) pullback = entry timing (RSI<35 in uptrend, RSI>65 in downtrend)
-4. Session filter = 6-22 UTC (high liquidity hours, relaxed from 8-20)
-5. ATR(14) trailing stop 2.5x = risk management
-6. Position size 0.22 = conservative for 1h volatility
-7. Discrete signals (0.0, ±0.22) to minimize fee churn
+1. 1d HMA(21) = macro trend bias (soft filter, not hard requirement)
+2. 4h HMA(21) + slope = primary trend confirmation
+3. Donchian(20) breakout = entry trigger
+4. Fisher Transform(9) = entry timing refinement (catches reversals)
+5. RSI(14) wide bands (30-70) = momentum confirmation without over-filtering
+6. ATR(14) trailing stop 2.5x = risk management
+7. Position size 0.30 = conservative for 4h volatility
+8. FIVE entry paths per direction = ensures >=30 trades/train
 
-Target: 30-60 trades/year, Sharpe > 0.618, trades >= 30 train, >= 3 test
-Timeframe: 1h
+Target: 30-50 trades/year, Sharpe > 0.618, trades >= 30 train, >= 3 test
+Timeframe: 4h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_4h12h_session_atr_pullback_v2"
-timeframe = "1h"
+name = "mtf_4h_fisher_donchian_hma_1d_rsi_atr_multipath_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -75,11 +74,12 @@ def calculate_hma_slope(hma, lookback=5):
     slope = np.full(n, np.nan)
     for i in range(lookback, n):
         if not np.isnan(hma[i]) and not np.isnan(hma[i - lookback]):
-            slope[i] = (hma[i] - hma[i - lookback]) / hma[i - lookback] * 100.0
+            if hma[i - lookback] != 0:
+                slope[i] = (hma[i] - hma[i - lookback]) / hma[i - lookback] * 100.0
     return slope
 
-def calculate_rsi(close, period=7):
-    """Relative Strength Index - short period for pullback detection"""
+def calculate_rsi(close, period=14):
+    """Relative Strength Index - wide bands for entry confirmation"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -113,6 +113,58 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - breakout levels for entry trigger"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.nanmax(high[i-period+1:i+1])
+        lower[i] = np.nanmin(low[i-period+1:i+1])
+    
+    return upper, lower
+
+def calculate_fisher_transform(high, low, close, period=9):
+    """Ehlers Fisher Transform - catches reversals in bear/range markets
+    Long when Fisher crosses above -1.5 from below
+    Short when Fisher crosses below +1.5 from above
+    """
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    fisher = np.full(n, np.nan)
+    fisher_prev = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        # Calculate typical price
+        typical = (high[i] + low[i] + close[i]) / 3.0
+        
+        # Find highest high and lowest low over period
+        highest = np.nanmax(high[i-period+1:i+1])
+        lowest = np.nanmin(low[i-period+1:i+1])
+        
+        if highest == lowest:
+            continue
+        
+        # Normalize price to -1 to +1 range
+        normalized = 2.0 * (typical - lowest) / (highest - lowest) - 1.0
+        
+        # Clamp to avoid division issues
+        normalized = max(-0.999, min(0.999, normalized))
+        
+        # Fisher transform
+        fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
+        
+        if i >= 1 and not np.isnan(fisher[i-1]):
+            fisher_prev[i] = fisher[i-1]
+    
+    return fisher, fisher_prev
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -120,33 +172,22 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF HMAs for trend direction
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align HTF HMA for macro trend filter
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
-    
-    # Calculate HTF HMA slopes
-    hma_4h_slope_raw = calculate_hma_slope(hma_4h_raw, lookback=3)
-    hma_4h_slope_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_slope_raw)
-    
-    hma_12h_slope_raw = calculate_hma_slope(hma_12h_raw, lookback=3)
-    hma_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_slope_raw)
-    
-    # Calculate primary (1h) indicators
-    rsi = calculate_rsi(close, period=7)
+    # Calculate primary (4h) indicators
+    hma_4h = calculate_hma(close, period=21)
+    hma_4h_slope = calculate_hma_slope(hma_4h, lookback=5)
+    donchian_20_upper, donchian_20_lower = calculate_donchian(high, low, period=20)
+    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    
-    # Extract hour from timestamp for session filtering
-    open_times = pd.to_datetime(prices['open_time'], unit='ms')
-    hours = open_times.dt.hour.values
+    fisher, fisher_prev = calculate_fisher_transform(high, low, close, period=9)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.22
+    BASE_SIZE = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -161,55 +202,82 @@ def generate_signals(prices):
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(rsi[i]):
+        if np.isnan(donchian_20_upper[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(hma_4h[i]) or np.isnan(hma_4h_slope[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_4h_slope_aligned[i]) or np.isnan(hma_12h_slope_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === MACRO TREND (4h + 12h HMA alignment) ===
-        # At least one HTF must confirm trend direction
-        price_above_4h = close[i] > hma_4h_aligned[i]
-        price_above_12h = close[i] > hma_12h_aligned[i]
-        price_below_4h = close[i] < hma_4h_aligned[i]
-        price_below_12h = close[i] < hma_12h_aligned[i]
+        # === MACRO TREND (1d HMA) - soft filter only ===
+        macro_bull = close[i] > hma_1d_aligned[i]
+        macro_bear = close[i] < hma_1d_aligned[i]
         
-        slope_4h_pos = hma_4h_slope_aligned[i] > 0.0
-        slope_4h_neg = hma_4h_slope_aligned[i] < 0.0
-        slope_12h_pos = hma_12h_slope_aligned[i] > 0.0
-        slope_12h_neg = hma_12h_slope_aligned[i] < 0.0
+        # === PRIMARY TREND (4h HMA + slope) ===
+        trend_bull = close[i] > hma_4h[i] and hma_4h_slope[i] > 0.0
+        trend_bear = close[i] < hma_4h[i] and hma_4h_slope[i] < 0.0
         
-        # Strong bull: price above both HMAs OR (above one + positive slope on both)
-        trend_bull = (price_above_4h and price_above_12h) or \
-                     (price_above_4h and slope_4h_pos and slope_12h_pos) or \
-                     (price_above_12h and slope_4h_pos and slope_12h_pos)
+        # === RSI MOMENTUM (WIDE bands to ensure trades) ===
+        rsi_bull = rsi[i] > 30.0
+        rsi_bear = rsi[i] < 70.0
+        rsi_strong_bull = rsi[i] > 50.0
+        rsi_strong_bear = rsi[i] < 50.0
         
-        # Strong bear: price below both HMAs OR (below one + negative slope on both)
-        trend_bear = (price_below_4h and price_below_12h) or \
-                     (price_below_4h and slope_4h_neg and slope_12h_neg) or \
-                     (price_below_12h and slope_4h_neg and slope_12h_neg)
+        # === DONCHIAN BREAKOUT ===
+        breakout_long = close[i] > donchian_20_upper[i-1]
+        breakout_short = close[i] < donchian_20_lower[i-1]
         
-        # === SESSION FILTER (6-22 UTC - relaxed from 8-20) ===
-        in_session = 6 <= hours[i] <= 22
+        # === FISHER TRANSFORM REVERSAL ===
+        fisher_bull = False
+        fisher_bear = False
         
-        # === RSI PULLBACK ENTRY (relaxed thresholds) ===
-        rsi_oversold = rsi[i] < 35.0  # Pullback in uptrend
-        rsi_overbought = rsi[i] > 65.0  # Pullback in downtrend
+        if not np.isnan(fisher[i]) and not np.isnan(fisher_prev[i]):
+            # Long: Fisher crosses above -1.5 from below
+            if fisher_prev[i] < -1.5 and fisher[i] >= -1.5:
+                fisher_bull = True
+            # Short: Fisher crosses below +1.5 from above
+            if fisher_prev[i] > 1.5 and fisher[i] <= 1.5:
+                fisher_bear = True
         
-        # === DESIRED SIGNAL ===
+        # === DESIRED SIGNAL - FIVE ENTRY PATHS PER DIRECTION ===
         desired_signal = 0.0
         
-        # LONG: Trend bull + RSI pullback + session
-        if trend_bull and rsi_oversold and in_session:
+        # LONG ENTRY PATHS (any one triggers entry)
+        # Path 1: Donchian breakout + trend confirmation (primary)
+        if breakout_long and trend_bull and rsi_bull:
             desired_signal = BASE_SIZE
+        # Path 2: Donchian breakout + macro confirmation (strong)
+        elif breakout_long and macro_bull and rsi_strong_bull:
+            desired_signal = BASE_SIZE
+        # Path 3: Fisher reversal + above 4h HMA (reversal play)
+        elif fisher_bull and close[i] > hma_4h[i]:
+            desired_signal = BASE_SIZE * 0.5
+        # Path 4: Price above both HMAs + positive slope (trend continuation)
+        elif close[i] > hma_4h[i] and close[i] > hma_1d_aligned[i] and hma_4h_slope[i] > 0.05:
+            desired_signal = BASE_SIZE * 0.5
+        # Path 5: Strong RSI + trend (momentum play)
+        elif rsi[i] > 55.0 and trend_bull:
+            desired_signal = BASE_SIZE * 0.5
         
-        # SHORT: Trend bear + RSI pullback + session
-        elif trend_bear and rsi_overbought and in_session:
+        # SHORT ENTRY PATHS (any one triggers entry)
+        # Path 1: Donchian breakout + trend confirmation (primary)
+        elif breakout_short and trend_bear and rsi_bear:
             desired_signal = -BASE_SIZE
+        # Path 2: Donchian breakout + macro confirmation (strong)
+        elif breakout_short and macro_bear and rsi_strong_bear:
+            desired_signal = -BASE_SIZE
+        # Path 3: Fisher reversal + below 4h HMA (reversal play)
+        elif fisher_bear and close[i] < hma_4h[i]:
+            desired_signal = -BASE_SIZE * 0.5
+        # Path 4: Price below both HMAs + negative slope (trend continuation)
+        elif close[i] < hma_4h[i] and close[i] < hma_1d_aligned[i] and hma_4h_slope[i] < -0.05:
+            desired_signal = -BASE_SIZE * 0.5
+        # Path 5: Weak RSI + trend (momentum play)
+        elif rsi[i] < 45.0 and trend_bear:
+            desired_signal = -BASE_SIZE * 0.5
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -229,10 +297,11 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === DISCRETIZE SIGNAL ===
-        final_signal = 0.0
-        if abs(desired_signal) >= BASE_SIZE * 0.5:
+        # === DISCRETIZE SIGNAL VALUES ===
+        if desired_signal >= BASE_SIZE * 0.4:
             final_signal = BASE_SIZE if desired_signal > 0 else -BASE_SIZE
+        else:
+            final_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if final_signal != 0.0:
