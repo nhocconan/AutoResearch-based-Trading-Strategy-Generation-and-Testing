@@ -1,35 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #1300: 1h Primary + 4h/12h HTF — Simplified Pullback Strategy
+Experiment #1301: 4h Primary + 1d/1w HTF — Simplified Trend + RSI Pullback
 
-Hypothesis: Recent 1h/30m failures (#1288, #1295, #1298) all have Sharpe=0.000 = ZERO TRADES.
-Entry conditions were TOO STRICT with too many confluence filters.
+Hypothesis: Recent failures show complex regime detection (Choppiness, CRSI, Fisher)
+blocks too many trades (Sharpe=0.000 = ZERO TRADES) or loses money when triggered.
 
-This strategy uses SIMPLIFIED but PROVEN logic:
-1. 4h HMA(21) for macro trend direction (HTF filter)
-2. 1h RSI(14) pullback entries within HTF trend (RSI<45 long, RSI>55 short)
-3. Volume filter (LOOSE: >0.5x 20-bar avg, not 0.8x)
-4. Session filter (8-20 UTC only) — reduces noise, focuses on liquid hours
-5. ATR(14) stoploss at 2.5x
-6. Position size: 0.25 (conservative for 1h TF)
+New approach - SIMPLER and LOOSER:
+1. MACRO trend: 1d HMA + 1w HMA agreement (proven in best strategy)
+2. ENTRY: RSI(14) pullback - NOT extreme values (30-55 long, 45-70 short)
+3. VOLUME: Confirm with volume > 1.2x 20-bar average
+4. STOPLOSS: 2.5x ATR trailing stop
+5. LOOSE thresholds to ensure >= 10 trades/symbol/train
 
-Key difference from failed #1295/#1298:
-- REMOVED: Choppiness Index (too many false regime switches)
-- REMOVED: ADX threshold (blocks too many valid entries)
-- REMOVED: Multiple HMA crossovers (laggy)
-- ADDED: Simpler RSI bands (45/55 vs 30/70) — generates MORE trades
-- ADDED: Looser volume filter (0.5x vs 0.8x)
-- ADDED: SMA50 confirmation (simple, effective)
+Key changes from failed #1254:
+- REMOVE Choppiness Index (was blocking trades)
+- REMOVE CRSI (too rare, complex)
+- USE simple RSI(14) pullback (more frequent signals)
+- WIDER RSI bands (30-55 vs 10-25 for long)
+- ADD volume confirmation (breakout validity)
 
-Target: Sharpe > 0.612, trades >= 30/year, DD < -30%
-Timeframe: 1h
+Target: Sharpe > 0.612, trades >= 80 train, >= 12 test
+Timeframe: 4h
+Size: 0.28 (discrete)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_pullback_4h_session_vol_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_trend_rsi_pullback_1d1w_hma_vol_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -87,7 +86,6 @@ def calculate_rsi(close, period=14):
     
     mask = loss_smooth > 1e-10
     rsi[mask] = 100.0 - (100.0 / (1.0 + gain_smooth[mask] / loss_smooth[mask]))
-    rsi[loss_smooth <= 1e-10] = 100.0
     rsi[:period] = np.nan
     
     return rsi
@@ -108,60 +106,34 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(close, period=50):
-    """Simple Moving Average"""
-    n = len(close)
-    sma = np.full(n, np.nan)
-    
-    if n < period:
-        return sma
-    
-    for i in range(period - 1, n):
-        sma[i] = np.mean(close[i-period+1:i+1])
-    
-    return sma
-
-def calculate_volume_avg(volume, period=20):
-    """Volume moving average"""
-    n = len(volume)
-    vol_avg = np.full(n, np.nan)
-    
-    if n < period:
-        return vol_avg
-    
-    for i in range(period - 1, n):
-        vol_avg[i] = np.mean(volume[i-period+1:i+1])
-    
-    return vol_avg
-
-def get_utc_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    # open_time is in milliseconds since epoch
-    return (open_time // (1000 * 3600)) % 24
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 4h HMA for macro trend filter
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align HTF HMA for macro trend
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (1h) indicators
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    
+    # Calculate primary (4h) indicators
+    hma_4h = calculate_hma(close, period=21)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    sma50 = calculate_sma(close, period=50)
-    vol_avg = calculate_volume_avg(volume, period=20)
+    
+    # Volume SMA for confirmation
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.25
+    BASE_SIZE = 0.28
     
     # Position tracking for stoploss
     in_position = False
@@ -171,64 +143,47 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or atr[i] <= 1e-10:
+        if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(sma50[i]) or np.isnan(vol_avg[i]) or vol_avg[i] <= 1e-10:
+        if np.isnan(hma_4h[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
-        
-        # Extract UTC hour for session filter
-        utc_hour = get_utc_hour(open_time[i])
-        
-        # Session filter: only trade 8-20 UTC (liquid hours)
-        in_session = 8 <= utc_hour <= 20
-        
-        if not in_session:
-            # Close existing positions outside session
-            if in_position:
-                signals[i] = 0.0
-                in_position = False
-                position_side = 0
-                entry_price = 0.0
-                entry_atr = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = float('inf')
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume filter (LOOSE: >0.5x average)
-        volume_ok = volume[i] > 0.5 * vol_avg[i]
-        
-        if not volume_ok:
+        if np.isnan(vol_sma[i]) or vol_sma[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        # === MACRO TREND (4h HMA) ===
-        macro_bull = close[i] > hma_4h_aligned[i]
-        macro_bear = close[i] < hma_4h_aligned[i]
+        # === MACRO TREND (1d + 1w HMA) ===
+        # Both HTF HMAs must agree for strong trend signal
+        macro_bull = close[i] > hma_1d_aligned[i] and close[i] > hma_1w_aligned[i]
+        macro_bear = close[i] < hma_1d_aligned[i] and close[i] < hma_1w_aligned[i]
         
-        # === LOCAL TREND CONFIRMATION (SMA50) ===
-        local_bull = close[i] > sma50[i]
-        local_bear = close[i] < sma50[i]
+        # === LOCAL TREND (4h HMA) ===
+        local_bull = close[i] > hma_4h[i]
+        local_bear = close[i] < hma_4h[i]
         
-        # === DESIRED SIGNAL ===
+        # === VOLUME CONFIRMATION ===
+        vol_confirmed = volume[i] > 1.2 * vol_sma[i]
+        
+        # === RSI PULLBACK ENTRY (LOOSE thresholds for trade frequency) ===
+        # Long: Macro bull + Local bull + RSI pulled back to 30-55 range
+        # Short: Macro bear + Local bear + RSI rallied to 45-70 range
+        
         desired_signal = 0.0
         
-        # LONG: Macro bull + Local bull + RSI pullback (not oversold, just dipped)
+        # LONG ENTRY: Strong uptrend + RSI pullback (not oversold, just cooling)
         if macro_bull and local_bull:
-            if rsi[i] < 45.0:  # Pullback in uptrend
+            if 30.0 <= rsi[i] <= 55.0 and vol_confirmed:
                 desired_signal = BASE_SIZE
         
-        # SHORT: Macro bear + Local bear + RSI bounce (not overbought, just rallied)
+        # SHORT ENTRY: Strong downtrend + RSI rally (not overbought, just bouncing)
         elif macro_bear and local_bear:
-            if rsi[i] > 55.0:  # Rally in downtrend
+            if 45.0 <= rsi[i] <= 70.0 and vol_confirmed:
                 desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
