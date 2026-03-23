@@ -22,7 +22,8 @@ from pathlib import Path
 import numpy as np
 
 from backtest import run_strategy_backtest, print_result_summary
-from evaluate import compute_metrics, print_metrics, metrics_to_tsv_row, TSV_HEADER
+from evaluate import compute_metrics, print_metrics
+from results_db import append_results as _db_append
 from prepare import load_config
 
 
@@ -38,11 +39,9 @@ def get_git_commit() -> str:
         return "unknown"
 
 
-def ensure_results_file(results_path: Path):
-    """Create results.tsv with header if it doesn't exist."""
-    if not results_path.exists():
-        with open(results_path, "w") as f:
-            f.write(TSV_HEADER + "\n")
+def ensure_results_file(results_path: Path = None):
+    """No-op: results.db is auto-initialized by results_db module."""
+    pass
 
 
 def run_experiment(
@@ -120,25 +119,18 @@ def run_experiment(
 
 def log_results(
     experiment: dict,
-    results_path: Path,
+    results_path: Path = None,
     description: str = "",
 ):
-    """Append experiment results to results.tsv."""
-    ensure_results_file(results_path)
-    commit = get_git_commit()
-
-    with open(results_path, "a") as f:
-        for symbol, metrics in experiment["metrics"].items():
-            result = experiment["results"][symbol]
-            row = metrics_to_tsv_row(
-                metrics=metrics,
-                strategy_name=result.strategy_name,
-                symbol=symbol,
-                commit=commit,
-                status=experiment["status"],
-                description=description,
-            )
-            f.write(row + "\n")
+    """Append experiment results to results.db."""
+    results = []
+    for symbol, metrics in experiment["metrics"].items():
+        result = experiment["results"][symbol]
+        m = dict(metrics)
+        m["strategy"] = result.strategy_name
+        m["symbol"] = symbol
+        results.append(m)
+    _db_append(results, experiment["status"], description)
 
 
 def main():
