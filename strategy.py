@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #1320: 1h Primary + 4h/12h HTF — Simplified HMA Trend + RSI Pullback
+Experiment #1321: 4h Primary + 1d/1w HTF — KAMA Adaptive Trend + RSI Pullback
 
-Hypothesis: Lower TF (1h) failed in #1315 (Sharpe -5.330) due to TOO MANY filters
-(volume + session + multiple regime). This strategy SIMPLIFIES:
-1. 12h HMA for macro trend (bull/bear regime)
-2. 4h HMA for intermediate trend confirmation
-3. 1h RSI(14) pullback entries with WIDE bands (30-60 long, 40-70 short)
-4. ATR(14) trailing stop at 2.5x for risk management
-5. NO session filter (kills trades)
-6. NO volume filter (kills trades)
-7. LOOSE confluence: only need 2/3 HTF signals aligned
+Hypothesis: Recent failures show complex regime filters = ZERO trades. 
+This strategy SIMPLIFIES for 4h timeframe with adaptive trend detection:
+1. 1w HMA for major macro trend (highest timeframe filter)
+2. 1d HMA for intermediate trend direction
+3. KAMA (Kaufman Adaptive) for local trend - adapts to volatility regimes
+4. RSI(14) pullback entries with WIDE bands (30-70) to ensure trades
+5. ATR(14) trailing stop at 2.5x for risk management
+6. NO Choppiness Index (failed 6+ experiments)
+7. NO complex regime detection (simpler = more trades)
 
-Key insight from #1315 failure: adding filters REDUCED trades to near-zero.
-This uses MINIMAL filters to ensure trade generation while keeping HTF direction.
+Key insight: KAMA adapts ER (Efficiency Ratio) to market conditions.
+High ER = trending (KAMA follows price), Low ER = ranging (KAMA flattens).
+This gives automatic regime detection without extra filters.
 
-Target: 40-80 trades/year on 1h, Sharpe > 0.612, trades >= 40 train, >= 5 test
-Timeframe: 1h
-Size: 0.25 discrete levels (smaller for lower TF to reduce fee impact)
+Target: 20-50 trades/year on 4h, Sharpe > 0.612, trades >= 40 train, >= 5 test
+Timeframe: 4h
+Size: 0.25-0.30 discrete levels
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_pullback_4h12h_trend_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_kama_rsi_pullback_1d1w_hma_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -62,6 +63,38 @@ def calculate_hma(close, period=21):
                     hma[i] = np.sum(np.array(diff_window) * weights) / np.sum(weights)
     
     return hma
+
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Kaufman Adaptive Moving Average - adapts to volatility"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    kama = np.full(n, np.nan)
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(period, n):
+        signal = abs(close[i] - close[i - period])
+        noise = np.sum(np.abs(np.diff(close[i-period:i+1])))
+        if noise > 1e-10:
+            er[i] = signal / noise
+        else:
+            er[i] = 1.0
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
+    
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    for i in range(period + 1, n):
+        if not np.isnan(er[i]):
+            sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+            kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+    
+    return kama
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -115,30 +148,26 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 12h HMA for macro trend filter
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate and align 1w HMA for major macro trend
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate and align 4h HMA for intermediate trend
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align 1d HMA for intermediate trend
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 4h SMA50 for additional macro filter
-    sma_4h_raw = calculate_sma(df_4h['close'].values, period=50)
-    sma_4h_aligned = align_htf_to_ltf(prices, df_4h, sma_4h_raw)
-    
-    # Calculate primary (1h) indicators
-    hma_fast = calculate_hma(close, period=13)
-    hma_slow = calculate_hma(close, period=34)
+    # Calculate primary (4h) indicators
+    kama_fast = calculate_kama(close, period=10, fast=2, slow=30)
+    kama_slow = calculate_kama(close, period=20, fast=2, slow=30)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     sma_200 = calculate_sma(close, period=200)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.25
+    BASE_SIZE = 0.28
     
     # Position tracking for stoploss
     in_position = False
@@ -153,87 +182,69 @@ def generate_signals(prices):
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
+        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(rsi[i]) or np.isnan(hma_12h_aligned[i]):
-            signals[i] = 0.0
-            continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(sma_4h_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         if np.isnan(sma_200[i]):
             signals[i] = 0.0
             continue
         
-        # === MACRO TREND (12h HMA) ===
-        macro_bull = close[i] > hma_12h_aligned[i]
-        macro_bear = close[i] < hma_12h_aligned[i]
+        # === MACRO TREND (1w HMA vs 1d HMA) ===
+        # 1w > 1d = bull regime, 1w < 1d = bear regime
+        macro_bull = hma_1w_aligned[i] > hma_1d_aligned[i]
+        macro_bear = hma_1w_aligned[i] < hma_1d_aligned[i]
         
-        # === INTERMEDIATE TREND (4h HMA + SMA50) ===
-        # Need at least 1 of 2 bullish for long bias
-        h4_bull_count = 0
-        if close[i] > hma_4h_aligned[i]:
-            h4_bull_count += 1
-        if close[i] > sma_4h_aligned[i]:
-            h4_bull_count += 1
+        # === LOCAL TREND (KAMA crossover) ===
+        kama_bull = kama_fast[i] > kama_slow[i]
+        kama_bear = kama_fast[i] < kama_slow[i]
         
-        h4_bear_count = 0
-        if close[i] < hma_4h_aligned[i]:
-            h4_bear_count += 1
-        if close[i] < sma_4h_aligned[i]:
-            h4_bear_count += 1
-        
-        # === LOCAL TREND (1h HMA crossover) ===
-        hma_bull = hma_fast[i] > hma_slow[i]
-        hma_bear = hma_fast[i] < hma_slow[i]
-        
-        # === SMA200 FILTER ===
+        # === PRICE POSITION ===
         above_sma200 = close[i] > sma_200[i]
         below_sma200 = close[i] < sma_200[i]
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # LONG ENTRY: Macro bull + (4h bull OR local bull) + RSI pullback
-        # WIDE RSI bands to ensure trades happen
-        if macro_bull:
-            # Need at least 1 bullish signal from 4h or 1h
-            if h4_bull_count >= 1 or hma_bull:
-                # RSI pullback in uptrend (30-55 range - WIDE)
-                if 30.0 <= rsi[i] <= 55.0:
-                    desired_signal = BASE_SIZE
-                # RSI breaking above 45 with momentum
-                elif 45.0 < rsi[i] < 60.0 and hma_bull:
-                    desired_signal = BASE_SIZE
-                # RSI oversold bounce with SMA200 support
-                elif rsi[i] < 35.0 and above_sma200:
-                    desired_signal = BASE_SIZE
-        
-        # SHORT ENTRY: Macro bear + (4h bear OR local bear) + RSI bounce
-        elif macro_bear:
-            # Need at least 1 bearish signal from 4h or 1h
-            if h4_bear_count >= 1 or hma_bear:
-                # RSI bounce in downtrend (45-70 range - WIDE)
-                if 45.0 <= rsi[i] <= 70.0:
-                    desired_signal = -BASE_SIZE
-                # RSI breaking below 55 with momentum
-                elif 40.0 < rsi[i] < 55.0 and hma_bear:
-                    desired_signal = -BASE_SIZE
-                # RSI overbought rejection with SMA200 resistance
-                elif rsi[i] > 65.0 and below_sma200:
-                    desired_signal = -BASE_SIZE
-        
-        # === RANGE MARKET: Mean revert at extremes (when HTF unclear) ===
-        # Only if 12h HMA is flat (price within 2% of HMA)
-        hma_12h_flat = abs(close[i] - hma_12h_aligned[i]) / hma_12h_aligned[i] < 0.02
-        if hma_12h_flat and desired_signal == 0.0:
-            # Long at RSI oversold
-            if rsi[i] < 28.0:
+        # LONG ENTRY: Macro bull + KAMA bull + RSI pullback
+        # WIDE RSI bands to ensure trades (30-60 range)
+        if macro_bull and kama_bull:
+            # RSI pullback in uptrend (35-55 range)
+            if 35.0 <= rsi[i] <= 55.0:
                 desired_signal = BASE_SIZE
-            # Short at RSI overbought
-            elif rsi[i] > 72.0:
+            # RSI breaking above 50 with momentum
+            elif rsi[i] > 50.0 and rsi[i] < 65.0 and above_sma200:
+                desired_signal = BASE_SIZE
+            # RSI oversold bounce (below 35) with SMA200 support
+            elif rsi[i] < 35.0 and above_sma200:
+                desired_signal = BASE_SIZE
+        
+        # SHORT ENTRY: Macro bear + KAMA bear + RSI bounce
+        # WIDE RSI bands to ensure trades (45-70 range)
+        elif macro_bear and kama_bear:
+            # RSI bounce in downtrend (45-65 range)
+            if 45.0 <= rsi[i] <= 65.0:
                 desired_signal = -BASE_SIZE
+            # RSI breaking below 50 with momentum
+            elif rsi[i] < 50.0 and rsi[i] > 35.0 and below_sma200:
+                desired_signal = -BASE_SIZE
+            # RSI overbought rejection (above 65) with SMA200 resistance
+            elif rsi[i] > 65.0 and below_sma200:
+                desired_signal = -BASE_SIZE
+        
+        # === RANGE MARKET: Mean revert at extremes ===
+        # When macro signals conflict (1w ≈ 1d), use mean reversion
+        if desired_signal == 0.0:
+            hma_diff_pct = abs(hma_1w_aligned[i] - hma_1d_aligned[i]) / hma_1d_aligned[i]
+            if hma_diff_pct < 0.02:  # HMA within 2% = range market
+                # Long at RSI oversold with SMA200 support
+                if rsi[i] < 30.0 and above_sma200:
+                    desired_signal = BASE_SIZE * 0.5
+                # Short at RSI overbought with SMA200 resistance
+                elif rsi[i] > 70.0 and below_sma200:
+                    desired_signal = -BASE_SIZE * 0.5
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
