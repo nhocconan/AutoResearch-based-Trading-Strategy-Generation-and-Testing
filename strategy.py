@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #667: 1d Primary + 1w HTF — Regime-Adaptive Mean Reversion + Trend
+Experiment #668: 30m Primary + 4h/1d HTF — Trend-Follow with Volume + Session Filter
 
-Hypothesis: Daily timeframe with weekly HTF filter provides optimal signal quality
-for BTC/ETH which fail simple trend strategies. Key innovation: regime-adaptive
-logic that mean-reverts in choppy markets (ADX<20) and trend-follows in trending
-markets (ADX>25), with asymmetric sizing based on HTF bias.
+Hypothesis: 30m timeframe with 4h/1d HTF trend filter provides optimal balance for
+lower TF trading. Key innovation: use HTF (4h HMA) for SIGNAL DIRECTION, 30m only
+for ENTRY TIMING within HTF trend. This gives HTF trade frequency (~40-60/year)
+with 30m execution precision.
 
 Why this should work:
-1. 1d TF = ~20-40 trades/year (sweet spot for fee drag vs signal quality)
-2. 1w HMA for macro bias — prevents counter-trend trades in strong trends
-3. ADX(14) regime detection: <20 = mean revert, >25 = trend follow
-4. RSI(14) with LOOSE thresholds (25/75) to ensure trades trigger on all symbols
-5. ATR volatility filter — only trade when vol is elevated (avoid dead zones)
-6. Donchian(20) breakout confirmation for trend entries
-7. Trailing ATR stoploss (2.5x) to protect capital
+1. 4h HMA(21) for macro bias — prevents counter-trend trades (major failure cause)
+2. 1d HMA(21) for secondary confirmation — extra filter for quality
+3. 30m RSI(14) with MODERATE thresholds (35/65) — ensures trade generation
+4. Volume filter (>0.8x 20-bar avg) — confirms institutional participation
+5. Session filter (8-20 UTC) — avoids low-liquidity Asian session noise
+6. ATR(14) trailing stop (2.5x) — protects capital on reversals
+7. Position size 0.25 (lower for 30m TF to reduce fee drag)
 
-Key lessons from 441 failures:
-- CRSI strategies generate 0 trades (too strict) — use standard RSI instead
-- Choppiness Index alone doesn't work — use ADX for regime
-- ALL symbols must have positive Sharpe — asymmetric sizing helps
-- Need LOOSE thresholds to ensure trade generation on BTC/ETH
+Lessons from 442 failures:
+- CRSI is TOO STRICT — generates 0 trades on BTC/ETH
+- Choppiness Index alone doesn't work
+- Need LOOSER RSI thresholds (35/65 not 20/80)
+- ALL symbols must have positive Sharpe (no SOL-only)
+- Lower TF MUST have HTF direction filter + strict entry
 
 Target: Sharpe > 0.612, trades >= 30 train, >= 5 test, ALL symbols positive Sharpe
 """
@@ -28,8 +29,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_regime_adaptive_rsi_donchian_1w_v1"
-timeframe = "1d"
+name = "mtf_30m_hma_rsi_vol_session_4h1d_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -80,45 +81,6 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index — trend strength."""
-    n = len(close)
-    adx = np.full(n, np.nan)
-    
-    if n < period * 2:
-        return adx
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr1 = high[i] - low[i]
-        tr2 = np.abs(high[i] - close[i - 1])
-        tr3 = np.abs(low[i] - close[i - 1])
-        tr[i] = max(tr1, tr2, tr3)
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        up_move = high[i] - high[i - 1]
-        down_move = low[i - 1] - low[i]
-        
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10)
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx_raw = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-        adx[period*2-1:] = adx_raw[period*2-1:]
-    
-    return adx
-
 def calculate_atr(high, low, close, period=14):
     """Average True Range."""
     n = len(close)
@@ -134,81 +96,53 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel — breakout detection."""
-    n = len(high)
-    donchian_upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    donchian_lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
-    return donchian_upper, donchian_lower, donchian_mid
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Bollinger Bands with width and percentile."""
-    n = len(close)
-    bb_mid = np.full(n, np.nan)
-    bb_upper = np.full(n, np.nan)
-    bb_lower = np.full(n, np.nan)
-    bb_width = np.full(n, np.nan)
-    bb_pct = np.full(n, np.nan)
-    
-    if n < period:
-        return bb_mid, bb_upper, bb_lower, bb_width, bb_pct
-    
-    bb_mid = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    bb_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    bb_upper = bb_mid + std_mult * bb_std
-    bb_lower = bb_mid - std_mult * bb_std
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
-        bb_width = (bb_upper - bb_lower) / bb_mid
-        bb_pct = (close - bb_lower) / (bb_upper - bb_lower + 1e-10)
-    
-    return bb_mid, bb_upper, bb_lower, bb_width, bb_pct
-
-def calculate_vol_ratio(atr, period_short=7, period_long=30):
-    """ATR ratio for volatility spike detection."""
-    n = len(atr)
+def calculate_volume_ratio(volume, period=20):
+    """Volume ratio vs rolling average."""
+    n = len(volume)
     vol_ratio = np.full(n, np.nan)
     
-    if n < period_long:
+    if n < period:
         return vol_ratio
     
-    atr_short = pd.Series(atr).rolling(window=period_short, min_periods=period_short).mean().values
-    atr_long = pd.Series(atr).rolling(window=period_long, min_periods=period_long).mean().values
-    
+    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
     with np.errstate(divide='ignore', invalid='ignore'):
-        vol_ratio = atr_short / (atr_long + 1e-10)
+        vol_ratio = volume / (vol_avg + 1e-10)
     
     return vol_ratio
+
+def get_hour_from_open_time(open_time):
+    """Extract UTC hour from open_time (milliseconds timestamp)."""
+    # open_time is in milliseconds
+    hours = (open_time // (1000 * 60 * 60)) % 24
+    return hours
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d indicators (primary timeframe)
-    hma_1d = calculate_hma(close, period=21)
-    rsi_1d = calculate_rsi(close, period=14)
-    adx_1d = calculate_adx(high, low, close, period=14)
-    atr_1d = calculate_atr(high, low, close, period=14)
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=20)
-    bb_mid, bb_upper, bb_lower, bb_width, bb_pct = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    vol_ratio = calculate_vol_ratio(atr_1d, period_short=7, period_long=30)
+    # Calculate 30m indicators (primary timeframe)
+    rsi_30m = calculate_rsi(close, period=14)
+    atr_30m = calculate_atr(high, low, close, period=14)
+    vol_ratio_30m = calculate_volume_ratio(volume, period=20)
     
-    # Calculate and align HTF indicators (1w)
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align HTF indicators
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
     signals = np.zeros(n)
-    
-    # Asymmetric position sizing based on HTF bias
-    SIZE_LONG_BASE = 0.30
-    SIZE_SHORT_BASE = 0.25
+    SIZE_LONG = 0.25
+    SIZE_SHORT = 0.25
     
     # Position tracking
     in_position = False
@@ -218,87 +152,56 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(150, n):
+    for i in range(100, n):  # Start later to ensure all indicators ready
         # Skip if indicators not ready
-        if np.isnan(hma_1d[i]) or np.isnan(rsi_1d[i]):
+        if np.isnan(rsi_30m[i]) or np.isnan(atr_30m[i]):
             continue
-        if np.isnan(adx_1d[i]) or np.isnan(atr_1d[i]):
+        if atr_30m[i] <= 1e-10:
             continue
-        if np.isnan(hma_1w_aligned[i]) or atr_1d[i] <= 1e-10:
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             continue
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            continue
-        if np.isnan(bb_pct[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(vol_ratio_30m[i]):
             continue
         
-        # === REGIME DETECTION ===
-        adx_value = adx_1d[i]
-        is_trend_regime = adx_value > 25
-        is_chop_regime = adx_value < 20
+        # === SESSION FILTER (8-20 UTC) ===
+        hour = get_hour_from_open_time(open_time[i])
+        in_session = 8 <= hour <= 20
         
-        # Volatility filter — only trade when vol is elevated
-        vol_elevated = vol_ratio[i] > 1.3
+        # === HTF TREND BIAS (4h + 1d HMA) ===
+        htf_4h_bullish = close[i] > hma_4h_aligned[i]
+        htf_4h_bearish = close[i] < hma_4h_aligned[i]
         
-        # === HTF TREND BIAS (1w HMA) ===
-        htf_1w_bullish = close[i] > hma_1w_aligned[i]
-        htf_1w_bearish = close[i] < hma_1w_aligned[i]
+        htf_1d_bullish = close[i] > hma_1d_aligned[i]
+        htf_1d_bearish = close[i] < hma_1d_aligned[i]
         
-        # === 1d TREND (HMA) ===
-        hma_bullish = close[i] > hma_1d[i]
-        hma_bearish = close[i] < hma_1d[i]
+        # Strong HTF bias requires both 4h and 1d aligned
+        htf_strong_bullish = htf_4h_bullish and htf_1d_bullish
+        htf_strong_bearish = htf_4h_bearish and htf_1d_bearish
         
-        # === RSI SIGNALS (LOOSE thresholds for trade generation) ===
-        rsi_oversold = rsi_1d[i] < 30
-        rsi_overbought = rsi_1d[i] > 70
-        rsi_extreme_oversold = rsi_1d[i] < 25
-        rsi_extreme_overbought = rsi_1d[i] > 75
+        # === VOLUME FILTER ===
+        volume_confirmed = vol_ratio_30m[i] > 0.8
         
-        # === DONCHIAN BREAKOUT ===
-        donchian_breakout_long = close[i] > donchian_upper[i - 1] if not np.isnan(donchian_upper[i - 1]) else False
-        donchian_breakout_short = close[i] < donchian_lower[i - 1] if not np.isnan(donchian_lower[i - 1]) else False
+        # === RSI SIGNALS (MODERATE thresholds for trade generation) ===
+        rsi_oversold = rsi_30m[i] < 40
+        rsi_overbought = rsi_30m[i] > 60
+        rsi_neutral = 40 <= rsi_30m[i] <= 60
         
-        # === BB POSITION ===
-        bb_near_lower = bb_pct[i] < 0.15
-        bb_near_upper = bb_pct[i] > 0.85
-        
+        # === ENTRY CONDITIONS ===
         desired_signal = 0.0
         
-        # === REGIME 1: TRENDING (ADX > 25) — Trend Follow ===
-        if is_trend_regime and vol_elevated:
-            # Long: HTF bullish + 1d HMA bullish + RSI not overbought
-            if htf_1w_bullish and hma_bullish:
-                if donchian_breakout_long:
-                    desired_signal = SIZE_LONG_BASE
-                elif rsi_oversold and rsi_1d[i] > 20:
-                    # Pullback entry in uptrend
-                    desired_signal = SIZE_LONG_BASE
-            
-            # Short: HTF bearish + 1d HMA bearish + RSI not oversold
-            elif htf_1w_bearish and hma_bearish:
-                if donchian_breakout_short:
-                    desired_signal = -SIZE_SHORT_BASE
-                elif rsi_overbought and rsi_1d[i] < 80:
-                    # Pullback entry in downtrend
-                    desired_signal = -SIZE_SHORT_BASE
+        # LONG: HTF bullish + RSI pullback + volume + session
+        if htf_strong_bullish and rsi_oversold and volume_confirmed and in_session:
+            desired_signal = SIZE_LONG
+        # Also enter on RSI crossing up from oversold in bullish HTF
+        elif htf_strong_bullish and rsi_30m[i] > 35 and rsi_30m[i] < 50 and volume_confirmed and in_session:
+            desired_signal = SIZE_LONG
         
-        # === REGIME 2: CHOPPY (ADX < 20) — Mean Reversion ===
-        elif is_chop_regime:
-            # Long: RSI oversold + BB near lower + HTF not strongly bearish
-            if rsi_extreme_oversold and bb_near_lower:
-                if not htf_1w_bearish or rsi_1d[i] < 20:
-                    desired_signal = SIZE_LONG_BASE
-            # Short: RSI overbought + BB near upper + HTF not strongly bullish
-            elif rsi_extreme_overbought and bb_near_upper:
-                if not htf_1w_bullish or rsi_1d[i] > 80:
-                    desired_signal = -SIZE_SHORT_BASE
-        
-        # === REGIME 3: TRANSITION (20 <= ADX <= 25) — Mixed ===
-        else:
-            # Use HMA direction with RSI filter — looser conditions
-            if hma_bullish and rsi_1d[i] < 65 and vol_elevated:
-                desired_signal = SIZE_LONG_BASE
-            elif hma_bearish and rsi_1d[i] > 35 and vol_elevated:
-                desired_signal = -SIZE_SHORT_BASE
+        # SHORT: HTF bearish + RSI rally + volume + session
+        elif htf_strong_bearish and rsi_overbought and volume_confirmed and in_session:
+            desired_signal = -SIZE_SHORT
+        # Also enter on RSI crossing down from overbought in bearish HTF
+        elif htf_strong_bearish and rsi_30m[i] < 65 and rsi_30m[i] > 50 and volume_confirmed and in_session:
+            desired_signal = -SIZE_SHORT
         
         # === STOPLOSS CHECK (Trailing ATR) ===
         stoploss_triggered = False
@@ -318,22 +221,22 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === HOLD LOGIC — Maintain position if trend unchanged ===
+        # === HOLD LOGIC — Maintain position if HTF trend unchanged ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if HMA still bullish AND RSI not extremely overbought
-                if hma_bullish and rsi_1d[i] < 80:
-                    desired_signal = SIZE_LONG_BASE
+                # Hold long if 4h HMA still bullish AND RSI not extremely overbought
+                if htf_4h_bullish and rsi_30m[i] < 70:
+                    desired_signal = SIZE_LONG
             elif position_side < 0:
-                # Hold short if HMA still bearish AND RSI not extremely oversold
-                if hma_bearish and rsi_1d[i] > 20:
-                    desired_signal = -SIZE_SHORT_BASE
+                # Hold short if 4h HMA still bearish AND RSI not extremely oversold
+                if htf_4h_bearish and rsi_30m[i] > 30:
+                    desired_signal = -SIZE_SHORT
         
         # === DISCRETIZE SIGNAL VALUES ===
         if desired_signal > 0:
-            desired_signal = SIZE_LONG_BASE
+            desired_signal = SIZE_LONG
         elif desired_signal < 0:
-            desired_signal = -SIZE_SHORT_BASE
+            desired_signal = -SIZE_SHORT
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -341,16 +244,17 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_1d[i]
+                entry_atr = atr_30m[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(desired_signal) != position_side:
                 # Position flip
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_1d[i]
+                entry_atr = atr_30m[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
+            # If same side, update trailing stop levels
             elif position_side > 0:
                 highest_since_entry = max(highest_since_entry, close[i])
             elif position_side < 0:
