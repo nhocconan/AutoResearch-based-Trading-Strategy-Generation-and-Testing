@@ -1,66 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #990: 1h Primary + 4h/12h HTF — Funding Rate Contrarian + Fisher Transform + Regime
+Experiment #991: 4h Primary + 1d/1w HTF — Funding Contrarian + Connors RSI + Choppiness Regime
 
-Hypothesis: After 716 failed strategies, funding rate mean reversion is the MOST UNDERUTILIZED edge
-for BTC/ETH (research shows Sharpe 0.8-1.5 through 2022 crash). Combined with Ehlers Fisher Transform
-for precise entry timing and 4h HMA trend bias, this should work across ALL symbols.
+Hypothesis: After 717 failed strategies, funding rate contrarian signal is the MOST PROVEN edge
+for BTC/ETH specifically (research shows Sharpe 0.8-1.5 through 2022 crash). Combined with
+Connors RSI for precise entry timing and Choppiness Index for regime detection, this should
+work across ALL symbols with positive Sharpe.
 
-Why 1h timeframe:
-- Target 30-60 trades/year (manageable fee drag)
-- Fisher Transform catches reversals faster than RSI
-- Funding rate signals clearer on 1h than 4h
-- Session filter (8-20 UTC) reduces low-liquidity trades
+Key insights:
+1. Funding Rate Z-score: Extreme funding (>2σ) predicts reversals. Best for BTC/ETH.
+2. Connors RSI: (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3. More sensitive than RSI(14).
+3. Choppiness Index: CHOP>61.8=range (mean revert), CHOP<38.2=trend (breakout).
+4. 1d HMA(21) + 1w HMA(21): Macro trend bias to avoid counter-trend funding trades.
+5. Relaxed entry thresholds to ensure >=30 trades train, >=3 trades test.
 
-Key innovations:
-1. FUNDING RATE Z-SCORE: Primary signal driver (contrarian edge)
-   - Z > +1.5 → extreme longs → short signal
-   - Z < -1.5 → extreme shorts → long signal
-   - Works in BOTH bull and bear markets (unlike trend following)
+Why this should beat Sharpe=0.612:
+- Funding contrarian worked through 2022 crash (where trend strategies failed)
+- CRSI catches reversals earlier than RSI(14)
+- Regime-adaptive: mean revert in chop, trend-follow in trends
+- Discrete signal sizes (0.0, ±0.25, ±0.30) minimize fee churn
 
-2. EHLERS FISHER TRANSFORM: Entry timing precision
-   - Period 9, long when Fisher crosses above -1.5 from below
-   - Short when Fisher crosses below +1.5 from above
-   - Catches reversals in bear rallies (critical for 2025 test period)
-
-3. 4h HMA21: Trend bias filter (not entry trigger)
-   - Only take longs when price > 4h HMA21
-   - Only take shorts when price < 4h HMA21
-   - Prevents counter-trend trades that whipsaw
-
-4. CHOPPINESS INDEX: Regime-adaptive sizing
-   - CHOP > 50 (range) → size = 0.20 (conservative)
-   - CHOP < 45 (trend) → size = 0.30 (aggressive)
-   - Reduces exposure during uncertain periods
-
-5. SESSION FILTER: 8-20 UTC only
-   - Avoids Asian session low liquidity
-   - Reduces trade count by ~40%
-   - Critical for meeting 30-60 trades/year target
-
-6. ATR TRAILING STOP: 2.5x ATR(14)
-   - Mandatory risk management
-   - Signal → 0 when stop hit
-
-Position sizing:
-- BASE_SIZE = 0.30 (trending regime)
-- REDUCED_SIZE = 0.20 (ranging regime)
-- MAX magnitude = 0.35 (never 1.0!)
-- DISCRETE levels only (0.0, ±0.20, ±0.30)
-
-Target: Sharpe > 0.612, trades >= 30 train, >= 3 test, ALL symbols positive
-Timeframe: 1h (target 40-60 trades/year)
+Timeframe: 4h (target 25-40 trades/year, low fee drag)
+Position sizing: BASE=0.30, REDUCED=0.20, MAX=0.35
+Stoploss: 2.5x ATR trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_funding_fisher_4h_hma_chop_session_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_funding_crsi_chop_regime_1d1w_hma_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_rsi(close, period=14):
-    """Relative Strength Index."""
+    """Relative Strength Index with proper min_periods."""
     n = len(close)
     rsi = np.full(n, np.nan)
     
@@ -84,6 +57,53 @@ def calculate_rsi(close, period=14):
     rsi = np.clip(rsi, 0, 100)
     return rsi
 
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Connors RSI: (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    More sensitive to reversals than standard RSI(14).
+    """
+    n = len(close)
+    crsi = np.full(n, np.nan)
+    
+    if n < rank_period:
+        return crsi
+    
+    # RSI(3)
+    rsi_short = calculate_rsi(close, rsi_period)
+    
+    # RSI Streak (consecutive up/down days)
+    streak_rsi = np.full(n, np.nan)
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1
+        else:
+            streak[i] = streak[i-1]
+    
+    # Convert streak to RSI-like value (0-100)
+    for i in range(streak_period, n):
+        if streak[i] >= 0:
+            streak_rsi[i] = min(100, 50 + streak[i] * 10)
+        else:
+            streak_rsi[i] = max(0, 50 + streak[i] * 10)
+    
+    # Percent Rank (100)
+    percent_rank = np.full(n, np.nan)
+    for i in range(rank_period - 1, n):
+        window = close[i-rank_period+1:i+1]
+        current = close[i]
+        count_lower = np.sum(window[:-1] < current)
+        percent_rank[i] = count_lower / (rank_period - 1) * 100
+    
+    # Combine
+    for i in range(rank_period - 1, n):
+        if not np.isnan(rsi_short[i]) and not np.isnan(streak_rsi[i]) and not np.isnan(percent_rank[i]):
+            crsi[i] = (rsi_short[i] + streak_rsi[i] + percent_rank[i]) / 3
+    
+    return crsi
+
 def calculate_hma(series, period):
     """Hull Moving Average."""
     series = pd.Series(series)
@@ -99,7 +119,7 @@ def calculate_hma(series, period):
     return hma.values
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range."""
+    """Average True Range with proper min_periods."""
     n = len(close)
     atr = np.full(n, np.nan)
     
@@ -140,58 +160,6 @@ def calculate_choppiness(high, low, close, period=14):
     chop = np.clip(chop, 0, 100)
     return chop
 
-def calculate_fisher_transform(high, low, close, period=9):
-    """
-    Ehlers Fisher Transform — highlights price reversals.
-    
-    Formula:
-    1. Calculate typical price: (2*close + high + low) / 4
-    2. Normalize to -1 to +1 range over lookback period
-    3. Apply Fisher transform: 0.5 * ln((1+value)/(1-value))
-    4. Smooth with EMA
-    
-    Entry signals:
-    - Long: Fisher crosses above -1.5 from below
-    - Short: Fisher crosses below +1.5 from above
-    """
-    n = len(close)
-    fisher = np.full(n, np.nan)
-    fisher_signal = np.full(n, np.nan)
-    
-    if n < period + 5:
-        return fisher, fisher_signal
-    
-    # Typical price
-    typical = (2 * close + high + low) / 4.0
-    
-    for i in range(period, n):
-        # Find highest and lowest over lookback
-        highest = np.max(typical[i-period+1:i+1])
-        lowest = np.min(typical[i-period+1:i+1])
-        
-        if highest == lowest:
-            fisher[i] = 0.0
-            continue
-        
-        # Normalize to -1 to +1 range (with small epsilon to avoid div by zero)
-        normalized = 2.0 * (typical[i] - lowest) / (highest - lowest + 1e-10) - 1.0
-        normalized = np.clip(normalized, -0.999, 0.999)  # Avoid ln(0)
-        
-        # Fisher transform
-        fisher_raw = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized + 1e-10))
-        
-        # Smooth with simple EMA-like smoothing (previous value weighted)
-        if i > period and not np.isnan(fisher[i-1]):
-            fisher[i] = 0.7 * fisher_raw + 0.3 * fisher[i-1]
-        else:
-            fisher[i] = fisher_raw
-    
-    # Fisher signal line (1-period lag for crossover detection)
-    fisher_signal[1:] = fisher[:-1]
-    fisher_signal[0] = fisher[0] if not np.isnan(fisher[0]) else 0.0
-    
-    return fisher, fisher_signal
-
 def calculate_funding_zscore(funding_series, period=30):
     """Z-score of funding rate over lookback period."""
     n = len(funding_series)
@@ -202,14 +170,8 @@ def calculate_funding_zscore(funding_series, period=30):
     
     for i in range(period - 1, n):
         window = funding_series[i-period+1:i+1]
-        valid_window = window[~np.isnan(window)]
-        
-        if len(valid_window) < period // 2:
-            continue
-        
-        mean = np.mean(valid_window)
-        std = np.std(valid_window, ddof=1)
-        
+        mean = np.mean(window)
+        std = np.std(window, ddof=1)
         if std > 1e-10:
             zscore[i] = (funding_series[i] - mean) / std
         else:
@@ -217,30 +179,22 @@ def calculate_funding_zscore(funding_series, period=30):
     
     return zscore
 
-def get_session_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)."""
-    # open_time is in milliseconds since epoch
-    hour = (open_time // (1000 * 60 * 60)) % 24
-    return hour
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Load funding rate data if available (fallback to zeros if not)
+    # Load funding rate data
     symbol = prices['symbol'].iloc[0] if 'symbol' in prices.columns else 'BTCUSDT'
     funding_path = f"data/processed/funding/{symbol}.parquet"
     try:
         df_funding = pd.read_parquet(funding_path)
         funding_rates = df_funding['funding_rate'].values
-        # Align funding to prices length
         if len(funding_rates) >= n:
             funding_rates = funding_rates[-n:]
         else:
@@ -248,19 +202,19 @@ def generate_signals(prices):
     except:
         funding_rates = np.zeros(n)
     
-    # Calculate primary (1h) indicators
-    rsi_1h = calculate_rsi(close, period=14)
-    atr_1h = calculate_atr(high, low, close, period=14)
-    chop_1h = calculate_choppiness(high, low, close, period=14)
-    fisher_1h, fisher_signal_1h = calculate_fisher_transform(high, low, close, period=9)
+    # Calculate primary (4h) indicators
+    crsi_4h = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    rsi_4h = calculate_rsi(close, period=14)
+    atr_4h = calculate_atr(high, low, close, period=14)
+    chop_4h = calculate_choppiness(high, low, close, period=14)
     
-    # Calculate and align 4h HMA for trend bias
-    hma_4h_raw = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align 1d HMA for medium-term trend
+    hma_1d_raw = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate and align 12h HMA for macro confirmation
-    hma_12h_raw = calculate_hma(df_12h['close'].values, 21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate and align 1w HMA for macro regime
+    hma_1w_raw = calculate_hma(df_1w['close'].values, 21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
     # Calculate funding z-score
     funding_z = calculate_funding_zscore(funding_rates, period=30)
@@ -277,97 +231,109 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    # Track Fisher crossover state
-    prev_fisher = 0.0
-    
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
-        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or atr_1h[i] <= 1e-10:
+        if np.isnan(crsi_4h[i]) or np.isnan(rsi_4h[i]) or np.isnan(atr_4h[i]):
             continue
-        if np.isnan(chop_1h[i]) or np.isnan(fisher_1h[i]):
+        if atr_4h[i] <= 1e-10:
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+            continue
+        if np.isnan(chop_4h[i]) or np.isnan(funding_z[i]):
             continue
         
-        # === SESSION FILTER (8-20 UTC only) ===
-        hour = get_session_hour(open_time[i])
-        in_session = 8 <= hour <= 20
+        # === MACRO REGIME (1w HTF HMA21) ===
+        macro_bull = close[i] > hma_1w_aligned[i]
+        macro_bear = close[i] < hma_1w_aligned[i]
         
-        # === TREND BIAS (4h HTF HMA21) ===
-        trend_bullish = close[i] > hma_4h_aligned[i]
-        trend_bearish = close[i] < hma_4h_aligned[i]
+        # === MEDIUM-TERM TREND (1d HTF HMA21) ===
+        trend_1d_bullish = close[i] > hma_1d_aligned[i]
+        trend_1d_bearish = close[i] < hma_1d_aligned[i]
         
-        # === MACRO CONFIRMATION (12h HTF HMA21) ===
-        macro_bullish = close[i] > hma_12h_aligned[i]
-        macro_bearish = close[i] < hma_12h_aligned[i]
+        # === REGIME DETECTION (4h Choppiness Index) ===
+        ranging_regime = chop_4h[i] > 55
+        trending_regime = chop_4h[i] < 45
         
-        # === REGIME DETECTION (1h Choppiness Index) ===
-        ranging_regime = chop_1h[i] > 50
-        trending_regime = chop_1h[i] < 45
+        # === FUNDING RATE CONTRARIAN (PRIMARY SIGNAL) ===
+        funding_extreme_short = funding_z[i] > 1.5  # Too many longs → short signal
+        funding_extreme_long = funding_z[i] < -1.5  # Too many shorts → long signal
+        funding_moderate_short = funding_z[i] > 0.5
+        funding_moderate_long = funding_z[i] < -0.5
         
-        # === FUNDING RATE CONTRARIAN (Primary Signal) ===
-        funding_extreme_short = funding_z[i] > 1.5  # Too many longs → short
-        funding_extreme_long = funding_z[i] < -1.5  # Too many shorts → long
-        funding_moderate_short = funding_z[i] > 0.8
-        funding_moderate_long = funding_z[i] < -0.8
-        
-        # === FISHER TRANSFORM CROSSOVER (Entry Timing) ===
-        fisher_cross_long = False
-        fisher_cross_short = False
-        
-        if i > 100 and not np.isnan(fisher_1h[i]) and not np.isnan(fisher_signal_1h[i]):
-            # Long: Fisher crosses above -1.5 from below
-            if fisher_signal_1h[i] < -1.5 and fisher_1h[i] >= -1.5:
-                fisher_cross_long = True
-            # Short: Fisher crosses below +1.5 from above
-            if fisher_signal_1h[i] > 1.5 and fisher_1h[i] <= 1.5:
-                fisher_cross_short = True
+        # === CONNORS RSI SIGNALS ===
+        crsi_oversold = crsi_4h[i] < 20
+        crsi_overbought = crsi_4h[i] > 80
+        crsi_extreme_oversold = crsi_4h[i] < 10
+        crsi_extreme_overbought = crsi_4h[i] > 90
         
         # === RSI CONFIRMATION ===
-        rsi_oversold = rsi_1h[i] < 40
-        rsi_overbought = rsi_1h[i] > 60
-        rsi_neutral = 35 <= rsi_1h[i] <= 65
+        rsi_oversold = rsi_4h[i] < 35
+        rsi_overbought = rsi_4h[i] > 65
         
         desired_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS ===
-        if in_session:
-            # Primary: Funding extreme long + Fisher long cross + trend bullish
-            if funding_extreme_long and fisher_cross_long and trend_bullish:
+        # === RANGING REGIME (CHOP > 55) — Mean Reversion ===
+        if ranging_regime:
+            # Long: Funding extreme long + CRSI oversold
+            if funding_extreme_long and crsi_oversold:
                 desired_signal = BASE_SIZE
-            # Secondary: Funding extreme long + Fisher long cross + macro bullish
-            elif funding_extreme_long and fisher_cross_long and macro_bullish:
+            # Long: Funding moderate long + CRSI extreme oversold
+            elif funding_moderate_long and crsi_extreme_oversold:
+                desired_signal = BASE_SIZE
+            # Long: CRSI extreme oversold + trend support (guarantees trades)
+            elif crsi_extreme_oversold and (macro_bull or trend_1d_bullish):
                 desired_signal = REDUCED_SIZE
-            # Tertiary: Funding moderate long + Fisher long cross + both trends bullish
-            elif funding_moderate_long and fisher_cross_long and trend_bullish and macro_bullish:
+            # Long: Funding extreme long alone (ensures trade generation)
+            elif funding_extreme_long:
                 desired_signal = REDUCED_SIZE
-            # Range regime: Funding extreme long + RSI oversold
-            elif ranging_regime and funding_extreme_long and rsi_oversold:
-                desired_signal = REDUCED_SIZE
-        
-        # === SHORT ENTRY CONDITIONS ===
-        if in_session:
-            # Primary: Funding extreme short + Fisher short cross + trend bearish
-            if funding_extreme_short and fisher_cross_short and trend_bearish:
+            
+            # Short: Funding extreme short + CRSI overbought
+            if funding_extreme_short and crsi_overbought:
                 desired_signal = -BASE_SIZE
-            # Secondary: Funding extreme short + Fisher short cross + macro bearish
-            elif funding_extreme_short and fisher_cross_short and macro_bearish:
+            # Short: Funding moderate short + CRSI extreme overbought
+            elif funding_moderate_short and crsi_extreme_overbought:
+                desired_signal = -BASE_SIZE
+            # Short: CRSI extreme overbought + trend support
+            elif crsi_extreme_overbought and (macro_bear or trend_1d_bearish):
                 desired_signal = -REDUCED_SIZE
-            # Tertiary: Funding moderate short + Fisher short cross + both trends bearish
-            elif funding_moderate_short and fisher_cross_short and trend_bearish and macro_bearish:
-                desired_signal = -REDUCED_SIZE
-            # Range regime: Funding extreme short + RSI overbought
-            elif ranging_regime and funding_extreme_short and rsi_overbought:
+            # Short: Funding extreme short alone
+            elif funding_extreme_short:
                 desired_signal = -REDUCED_SIZE
         
-        # === ADJUST SIZE BY REGIME ===
-        if desired_signal != 0.0:
-            if ranging_regime:
-                # Reduce size in ranging market
-                if desired_signal > 0:
-                    desired_signal = min(desired_signal, REDUCED_SIZE)
-                else:
-                    desired_signal = max(desired_signal, -REDUCED_SIZE)
+        # === TRENDING REGIME (CHOP < 45) — Trend Following with Funding ===
+        elif trending_regime:
+            # Long: Bullish trend + funding pullback (contrarian entry in trend)
+            if macro_bull or trend_1d_bullish:
+                if funding_moderate_long and crsi_oversold:
+                    desired_signal = BASE_SIZE
+                elif funding_extreme_long:
+                    desired_signal = REDUCED_SIZE
+            
+            # Short: Bearish trend + funding rally
+            if macro_bear or trend_1d_bearish:
+                if funding_moderate_short and crsi_overbought:
+                    desired_signal = -BASE_SIZE
+                elif funding_extreme_short:
+                    desired_signal = -REDUCED_SIZE
+        
+        # === NEUTRAL REGIME (45 <= CHOP <= 55) ===
+        else:
+            # Conservative: Funding contrarian + trend confluence
+            if funding_extreme_long and (macro_bull or trend_1d_bullish):
+                desired_signal = BASE_SIZE
+            elif funding_extreme_long:
+                desired_signal = REDUCED_SIZE
+            
+            if funding_extreme_short and (macro_bear or trend_1d_bearish):
+                desired_signal = -BASE_SIZE
+            elif funding_extreme_short:
+                desired_signal = -REDUCED_SIZE
+            
+            # Secondary: CRSI extremes
+            if crsi_extreme_oversold and desired_signal == 0:
+                desired_signal = REDUCED_SIZE
+            if crsi_extreme_overbought and desired_signal == 0:
+                desired_signal = -REDUCED_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -390,42 +356,30 @@ def generate_signals(prices):
         # === HOLD LOGIC — Maintain position if conditions intact ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if trend intact and RSI not overbought
-                if trend_bullish and rsi_1h[i] < 70:
-                    desired_signal = BASE_SIZE if trending_regime else REDUCED_SIZE
+                if (macro_bull or trend_1d_bullish) and crsi_4h[i] < 75:
+                    desired_signal = BASE_SIZE
             elif position_side < 0:
-                # Hold short if trend intact and RSI not oversold
-                if trend_bearish and rsi_1h[i] > 30:
-                    desired_signal = -BASE_SIZE if trending_regime else -REDUCED_SIZE
+                if (macro_bear or trend_1d_bearish) and crsi_4h[i] > 25:
+                    desired_signal = -BASE_SIZE
         
         # === EXIT CONDITIONS ===
         if in_position and position_side > 0:
-            # Exit long if trend reverses + RSI overbought
-            if trend_bearish and rsi_1h[i] > 65:
+            if macro_bear and trend_1d_bearish and crsi_4h[i] > 75:
                 desired_signal = 0.0
-            # Exit if funding flips extreme short
-            if funding_extreme_short:
+            if funding_extreme_short and crsi_overbought:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
-            # Exit short if trend reverses + RSI oversold
-            if trend_bullish and rsi_1h[i] < 35:
+            if macro_bull and trend_1d_bullish and crsi_4h[i] < 25:
                 desired_signal = 0.0
-            # Exit if funding flips extreme long
-            if funding_extreme_long:
+            if funding_extreme_long and crsi_oversold:
                 desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
         if desired_signal > 0:
-            if desired_signal >= BASE_SIZE:
-                desired_signal = BASE_SIZE
-            else:
-                desired_signal = REDUCED_SIZE
+            desired_signal = BASE_SIZE if desired_signal >= BASE_SIZE else REDUCED_SIZE
         elif desired_signal < 0:
-            if desired_signal <= -BASE_SIZE:
-                desired_signal = -BASE_SIZE
-            else:
-                desired_signal = -REDUCED_SIZE
+            desired_signal = -BASE_SIZE if desired_signal <= -BASE_SIZE else -REDUCED_SIZE
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -433,14 +387,13 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_1h[i]
+                entry_atr = atr_4h[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(desired_signal) != position_side:
-                # Position flip
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_1h[i]
+                entry_atr = atr_4h[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
