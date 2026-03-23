@@ -1,39 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #740: 1h Primary + 4h/12h HTF — HMA Trend + RSI Pullback + Volume Confluence
+Experiment #741: 4h Primary + 1d HTF — Dual Regime (Trend/Mean-Revert) + ADX Switch
 
 Hypothesis: After analyzing 495+ failed strategies, clear patterns emerge:
-1. Complex regime (Chop+CRSI) = 0 trades (#727-735 all failed)
-2. Session filters caused 0 trades on 1h (#735)
-3. Simple HMA trend + RSI pullback on 4h got positive results (#739 template)
-4. 1h entries within 4h/12h trend should give HTF quality with better timing
+1. Complex regime (Chop+CRSI) = 0 trades or negative Sharpe (#729-735)
+2. Simple trend (KAMA+Donchian+ADX) on 1d got Sharpe=0.234 (#737) — works
+3. Current 4h attempt (#739) got Sharpe=0.012 — too many conflicting entry paths
+4. BEST overall uses 4h triple regime with Sharpe=0.612 — needs simpler logic
 
-Strategy design:
-1. 12h HMA(21) for macro trend bias (proven in best strategies)
-2. 4h HMA(21) for intermediate trend confirmation
-3. 1h RSI(14) pullback entries within HTF trend (loose: 35-65 range)
-4. 1h price vs 4h HMA aligned for entry timing precision
-5. Volume filter: volume > 0.7x 20-bar avg (loose to ensure trades)
-6. ATR(14) trailing stop 2.5x for risk management
-7. Discrete signals: 0.0, ±0.25 (conservative for 1h TF)
+NEW APPROACH:
+1. ADX regime switch: ADX>25 = trend follow, ADX<20 = mean revert (with hysteresis)
+2. Trend regime: 1d HMA(21) bias + 4h Donchian(20) breakout entries
+3. Mean-revert regime: 4h Bollinger(20,2.5) extremes + RSI(14) confirmation
+4. Single clear entry path per regime (not 8 conflicting paths like #739)
+5. Simple hold logic: stay in position while regime intact
+6. ATR(14) 2.5x trailing stop for risk management
+7. Discrete signals: 0.0, ±0.25, ±0.30 to minimize fee churn
 
-Key differences from failed experiments:
-- NO session filter (caused 0 trades in #735)
-- NO Choppiness Index (failed in 6+ experiments)
-- LOOSE RSI filters (35-65, not extreme values)
-- LOOSE volume filter (0.7x, not 1.5x)
-- Clear hold logic to maintain positions through trends
-- 1h timeframe with 4h/12h for direction (proven pattern)
+Key differences from #739:
+- Only 2 entry paths total (1 long, 1 short) instead of 8
+- ADX hysteresis (enter 25, exit 20) prevents regime flip-flop
+- Bollinger mean-revert for range markets (proven in bear/range)
+- Simpler hold logic reduces premature exits
+- Target: 25-45 trades/year on 4h timeframe
 
+Timeframe: 4h (primary) + 1d (HTF trend bias)
 Target: Sharpe > 0.612, trades >= 30 train, >= 3 test, ALL symbols positive
-Timeframe: 1h (target 30-60 trades/year with strict confluence)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_pullback_4h12h_vol_v1"
-timeframe = "1h"
+name = "mtf_4h_dual_regime_adx_donchian_bb_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(series, period):
@@ -89,42 +88,87 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(close, period):
-    """Simple Moving Average."""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+def calculate_bollinger(close, period=20, std_mult=2.5):
+    """Bollinger Bands for mean reversion detection."""
+    n = len(close)
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    
+    return upper, lower, sma
 
-def calculate_volume_ma(volume, period=20):
-    """Volume moving average."""
-    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index - measures trend strength."""
+    n = len(close)
+    adx = np.full(n, np.nan)
+    
+    if n < period * 2 + 1:
+        return adx
+    
+    tr = np.zeros(n)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], np.abs(high[i] - close[i-1]), np.abs(low[i] - close[i-1]))
+        
+        if high[i] - high[i-1] > low[i-1] - low[i]:
+            plus_dm[i] = max(0, high[i] - high[i-1])
+        else:
+            plus_dm[i] = 0
+            
+        if low[i-1] - low[i] > high[i] - high[i-1]:
+            minus_dm[i] = max(0, low[i-1] - low[i])
+        else:
+            minus_dm[i] = 0
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        plus_di = 100 * plus_di / (atr + 1e-10)
+        minus_di = 100 * minus_di / (atr + 1e-10)
+        di_sum = plus_di + minus_di
+        dx = 100 * np.abs(plus_di - minus_di) / (di_sum + 1e-10)
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel for breakout detection."""
+    n = len(high)
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate primary (1h) indicators
-    rsi_1h = calculate_rsi(close, period=14)
-    atr_1h = calculate_atr(high, low, close, period=14)
-    sma_50_1h = calculate_sma(close, period=50)
-    sma_200_1h = calculate_sma(close, period=200)
-    vol_ma_1h = calculate_volume_ma(volume, period=20)
+    # Calculate primary (4h) indicators
+    rsi_4h = calculate_rsi(close, period=14)
+    atr_4h = calculate_atr(high, low, close, period=14)
+    adx_4h = calculate_adx(high, low, close, period=14)
+    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, period=20, std_mult=2.5)
     
     # Calculate and align HTF HMA for trend bias
-    hma_4h_raw = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
-    hma_12h_raw = calculate_hma(df_12h['close'].values, 21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.25  # Conservative for 1h timeframe
-    REDUCED_SIZE = 0.15
+    BASE_SIZE = 0.30
+    REDUCED_SIZE = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -134,93 +178,57 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(300, n):  # Need buffer for all indicators + HTF alignment
+    # Regime tracking with hysteresis
+    in_trend_regime = False  # Track current regime state
+    prev_adx = 0.0
+    
+    for i in range(300, n):
         # Skip if indicators not ready
-        if np.isnan(rsi_1h[i]) or np.isnan(atr_1h[i]) or atr_1h[i] <= 1e-10:
+        if np.isnan(rsi_4h[i]) or np.isnan(atr_4h[i]) or atr_4h[i] <= 1e-10:
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(adx_4h[i]):
             continue
-        if np.isnan(sma_50_1h[i]) or np.isnan(sma_200_1h[i]):
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
             continue
-        if np.isnan(vol_ma_1h[i]) or vol_ma_1h[i] <= 1e-10:
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             continue
         
-        # === TREND BIAS (12h HTF HMA) - Macro direction ===
-        trend_12h_bullish = close[i] > hma_12h_aligned[i]
-        trend_12h_bearish = close[i] < hma_12h_aligned[i]
+        # === REGIME DETECTION with HYSTERESIS ===
+        # Enter trend regime when ADX > 25, exit when ADX < 20
+        current_adx = adx_4h[i]
         
-        # === TREND CONFIRMATION (4h HTF HMA) - Intermediate direction ===
-        trend_4h_bullish = close[i] > hma_4h_aligned[i]
-        trend_4h_bearish = close[i] < hma_4h_aligned[i]
+        if not in_trend_regime and current_adx > 25:
+            in_trend_regime = True
+        elif in_trend_regime and current_adx < 20:
+            in_trend_regime = False
         
-        # === VOLUME FILTER (loose to ensure trades) ===
-        volume_ok = volume[i] > 0.7 * vol_ma_1h[i]
+        prev_adx = current_adx
         
-        # === RSI FILTERS (loose range to ensure trades) ===
-        rsi_ok_long = 35 < rsi_1h[i] < 70  # Not overbought
-        rsi_ok_short = 30 < rsi_1h[i] < 65  # Not oversold
-        
-        # === SMA FILTERS ===
-        above_sma50 = close[i] > sma_50_1h[i]
-        above_sma200 = close[i] > sma_200_1h[i]
-        below_sma50 = close[i] < sma_50_1h[i]
-        below_sma200 = close[i] < sma_200_1h[i]
+        # === TREND BIAS (1d HTF HMA) ===
+        trend_1d_bullish = close[i] > hma_1d_aligned[i]
+        trend_1d_bearish = close[i] < hma_1d_aligned[i]
         
         desired_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS ===
-        long_signal = False
-        
-        # Path 1: 12h bullish + 4h bullish + RSI pullback (40-55) + volume ok
-        if trend_12h_bullish and trend_4h_bullish and 40 < rsi_1h[i] < 55 and volume_ok:
-            long_signal = True
-        
-        # Path 2: 12h bullish + price > SMA50 + RSI ok + 4h bullish
-        if trend_12h_bullish and above_sma50 and rsi_ok_long and trend_4h_bullish:
-            long_signal = True
-        
-        # Path 3: Strong uptrend (above SMA50/200) + 12h bullish + RSI momentum
-        if above_sma50 and above_sma200 and trend_12h_bullish and 45 < rsi_1h[i] < 65:
-            long_signal = True
-        
-        # Path 4: 4h HMA cross above + 12h bullish + volume spike
-        if trend_4h_bullish and trend_12h_bullish and volume[i] > 1.2 * vol_ma_1h[i]:
-            long_signal = True
-        
-        if long_signal:
-            desired_signal = BASE_SIZE
-        
-        # === SHORT ENTRY CONDITIONS ===
-        short_signal = False
-        
-        # Path 1: 12h bearish + 4h bearish + RSI rally (45-60) + volume ok
-        if trend_12h_bearish and trend_4h_bearish and 45 < rsi_1h[i] < 60 and volume_ok:
-            short_signal = True
-        
-        # Path 2: 12h bearish + price < SMA50 + RSI ok + 4h bearish
-        if trend_12h_bearish and below_sma50 and rsi_ok_short and trend_4h_bearish:
-            short_signal = True
-        
-        # Path 3: Strong downtrend (below SMA50/200) + 12h bearish + RSI momentum
-        if below_sma50 and below_sma200 and trend_12h_bearish and 35 < rsi_1h[i] < 55:
-            short_signal = True
-        
-        # Path 4: 4h HMA cross below + 12h bearish + volume spike
-        if trend_4h_bearish and trend_12h_bearish and volume[i] > 1.2 * vol_ma_1h[i]:
-            short_signal = True
-        
-        if short_signal:
-            desired_signal = -BASE_SIZE
-        
-        # === CONFLICT RESOLUTION ===
-        # If both long and short signals, go with 12h HMA trend (higher TF wins)
-        if long_signal and short_signal:
-            if trend_12h_bullish:
+        # === TREND REGIME (ADX > 20-25) ===
+        if in_trend_regime:
+            # LONG: Donchian breakout + 1d bullish trend
+            if close[i] > donch_upper[i-1] and trend_1d_bullish:
                 desired_signal = BASE_SIZE
-            elif trend_12h_bearish:
+            
+            # SHORT: Donchian breakdown + 1d bearish trend
+            elif close[i] < donch_lower[i-1] and trend_1d_bearish:
                 desired_signal = -BASE_SIZE
-            else:
-                desired_signal = 0.0
+        
+        # === MEAN REVERT REGIME (ADX < 20) ===
+        else:
+            # LONG: Price at BB lower + RSI oversold + 1d bullish bias
+            if close[i] <= bb_lower[i] and rsi_4h[i] < 35 and trend_1d_bullish:
+                desired_signal = BASE_SIZE
+            
+            # SHORT: Price at BB upper + RSI overbought + 1d bearish bias
+            elif close[i] >= bb_upper[i] and rsi_4h[i] > 65 and trend_1d_bearish:
+                desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -240,26 +248,26 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === HOLD LOGIC — Maintain position if trend intact ===
+        # === HOLD LOGIC — Maintain position if regime intact ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if 12h HMA still bullish and 4h HMA still bullish
-                if trend_12h_bullish and trend_4h_bullish:
+                # Hold long if regime supports long or neutral
+                if (in_trend_regime and trend_1d_bullish) or (not in_trend_regime and trend_1d_bullish):
                     desired_signal = BASE_SIZE
             elif position_side < 0:
-                # Hold short if 12h HMA still bearish and 4h HMA still bearish
-                if trend_12h_bearish and trend_4h_bearish:
+                # Hold short if regime supports short or neutral
+                if (in_trend_regime and trend_1d_bearish) or (not in_trend_regime and trend_1d_bearish):
                     desired_signal = -BASE_SIZE
         
-        # === EXIT CONDITIONS ===
+        # === EXIT CONDITIONS — Regime reversal ===
         if in_position and position_side > 0:
-            # Exit long if 12h trend reverses or 4h trend reverses
-            if trend_12h_bearish or trend_4h_bearish:
+            # Exit long if 1d trend reverses against position
+            if trend_1d_bearish and in_trend_regime:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
-            # Exit short if 12h trend reverses or 4h trend reverses
-            if trend_12h_bullish or trend_4h_bullish:
+            # Exit short if 1d trend reverses against position
+            if trend_1d_bullish and in_trend_regime:
                 desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
@@ -274,14 +282,14 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_1h[i]
+                entry_atr = atr_4h[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(desired_signal) != position_side:
                 # Position flip
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_1h[i]
+                entry_atr = atr_4h[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
