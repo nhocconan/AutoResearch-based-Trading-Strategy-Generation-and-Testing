@@ -1,33 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #1192: 12h Primary + 1d/1w HTF — Adaptive Regime with Funding Rate Filter
+Experiment #1193: 1d Primary + 1w HTF — Simplified Dual Regime (Choppiness + CRSI + Donchian)
 
-Hypothesis: Recent 12h strategies failed due to overly strict entry conditions causing 0 trades.
-This version focuses on generating sufficient trade frequency while maintaining quality:
-- Primary regime: Choppiness Index (61.8 chop / 38.2 trend)
-- Mean reversion: CRSI < 25 / > 75 (relaxed from 20/80 for more trades)
-- Trend: Donchian(20) breakout + 1d HMA alignment
-- NEW: Funding rate z-score filter for BTC/ETH contrarian edge
-- Relaxed BB confirmation (optional, not required)
-- Ensure ALL symbols can generate trades (no SOL-only bias)
+Hypothesis: Daily timeframe with weekly trend filter can capture major moves while avoiding
+whipsaw. Key insight from #1183 (Sharpe=0.334, +65.4%): 1d works but needs better regime logic.
 
-Key improvements from #1186 (Sharpe=-0.057):
-1. CRSI thresholds: 20/80 → 25/75 (more entry opportunities)
-2. CHOP transition zone handling: enter on extremes even in transition
-3. Add funding rate z-score for BTC/ETH mean reversion edge
-4. Simplified trend entry (breakout OR HMA cross, not both)
-5. Lower minimum lookback (100 vs 150) for earlier signals
+This version focuses on:
+1. Weekly HMA for macro trend direction (avoids counter-trend trades in bear markets)
+2. Choppiness Index regime switch (61.8/38.2 classic thresholds)
+3. Connors RSI for mean reversion in choppy markets (thresholds 30/70 for more trades)
+4. Donchian breakout for trending markets (20-period)
+5. ATR trailing stoploss (2.5x) for risk management
+6. Relaxed entry conditions to ensure ≥30 trades/train, ≥3 trades/test per symbol
 
-Target: 25-45 trades/year per symbol, Sharpe > 0.612
-Position Size: 0.28 discrete (balanced risk/reward)
+Key changes from failed experiments:
+- CRSI thresholds: 20/80 → 30/70 (more entry opportunities, still quality)
+- Remove BB confirmation requirement (was filtering out valid signals)
+- Simplified transition zone logic (just use CRSI)
+- Position size: 0.28 discrete (conservative for daily timeframe)
+- Ensure signals can flip directly (no complex hold logic blocking trades)
+
+Target: 25-40 trades/year, Sharpe > 0.612 (beat current best)
+Position Size: 0.28 discrete
 Stoploss: 2.5x ATR trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_adaptive_regime_crsi_funding_donchian_1d1w_v1"
-timeframe = "12h"
+name = "mtf_1d_dual_regime_chop_crsi_donchian_1w_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -192,84 +194,24 @@ def calculate_donchian(high, low, period=20):
     
     return upper, lower
 
-def calculate_bb(close, period=20, std_mult=2.0):
-    """Bollinger Bands — mean reversion levels."""
-    n = len(close)
-    mid = np.full(n, np.nan)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        mid[i] = np.mean(window)
-        std = np.std(window)
-        upper[i] = mid[i] + std_mult * std
-        lower[i] = mid[i] - std_mult * std
-    
-    return mid, upper, lower
-
-def calculate_funding_zscore(prices, symbol, lookback=90):
-    """
-    Funding Rate Z-Score — contrarian indicator for BTC/ETH.
-    High positive funding = crowded longs = short signal
-    High negative funding = crowded shorts = long signal
-    """
-    n = len(prices)
-    zscore = np.full(n, np.nan)
-    
-    try:
-        import os
-        funding_path = f"data/processed/funding/{symbol}.parquet"
-        if os.path.exists(funding_path):
-            funding_df = pd.read_parquet(funding_path)
-            if len(funding_df) > 0 and 'funding_rate' in funding_df.columns:
-                funding_rates = funding_df['funding_rate'].values
-                min_len = min(n, len(funding_rates))
-                funding_aligned = np.full(n, np.nan)
-                funding_aligned[-min_len:] = funding_rates[-min_len:]
-                
-                for i in range(lookback, n):
-                    window = funding_aligned[i-lookback:i]
-                    if not np.any(np.isnan(window)):
-                        mean_f = np.mean(window)
-                        std_f = np.std(window)
-                        if std_f > 1e-10:
-                            zscore[i] = (funding_aligned[i] - mean_f) / std_f
-    except Exception:
-        pass
-    
-    return zscore
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     n = len(close)
     
-    # Extract symbol from prices for funding data
-    symbol = prices.get('symbol', ['BTCUSDT'])[0] if 'symbol' in prices.columns else 'BTCUSDT'
-    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for macro trend filter
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
-    # Calculate and align 1w HMA for very long-term trend
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    # Calculate and align 1w HMA for macro trend filter
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=20)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (12h) indicators
+    # Calculate primary (1d) indicators
     atr = calculate_atr(high, low, close, period=14)
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     chop = calculate_choppiness(high, low, close, period=14)
     crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
-    bb_mid, bb_upper, bb_lower = calculate_bb(close, period=20, std_mult=2.0)
-    
-    # Calculate funding z-score for contrarian filter
-    funding_z = calculate_funding_zscore(prices, symbol, lookback=90)
     
     signals = np.zeros(n)
     BASE_SIZE = 0.28
@@ -281,45 +223,30 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or np.isnan(chop[i]) or np.isnan(crsi[i]):
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(donchian_upper[i]):
             continue
-        if np.isnan(bb_lower[i]) or atr[i] <= 1e-10:
+        if atr[i] <= 1e-10:
             continue
         
-        # === MACRO TREND (1d HMA + 1w HMA) ===
-        macro_bull = close[i] > hma_1d_aligned[i]
-        macro_bear = close[i] < hma_1d_aligned[i]
-        very_long_bull = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
-        very_long_bear = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
+        # === MACRO TREND (1w HMA) ===
+        macro_bull = close[i] > hma_1w_aligned[i]
+        macro_bear = close[i] < hma_1w_aligned[i]
         
         # === CHOPPINESS REGIME ===
         is_choppy = chop[i] > 61.8
         is_trending = chop[i] < 38.2
-        is_transition = not is_choppy and not is_trending
         
         # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
-        breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
+        breakout_long = close[i] > donchian_upper[i-1]
+        breakout_short = close[i] < donchian_lower[i-1]
         
         # === CONNORS RSI EXTREMES (relaxed for more trades) ===
-        crsi_oversold = crsi[i] < 25.0
-        crsi_overbought = crsi[i] > 75.0
-        
-        # === BOLLINGER EXTREMES ===
-        bb_oversold = close[i] < bb_lower[i]
-        bb_overbought = close[i] > bb_upper[i]
-        
-        # === FUNDING RATE CONTRARIAN (BTC/ETH only) ===
-        funding_extreme_long = False
-        funding_extreme_short = False
-        if not np.isnan(funding_z[i]):
-            if symbol.startswith('BTC') or symbol.startswith('ETH'):
-                funding_extreme_long = funding_z[i] < -1.5  # crowded shorts
-                funding_extreme_short = funding_z[i] > 1.5  # crowded longs
+        crsi_oversold = crsi[i] < 30.0
+        crsi_overbought = crsi[i] > 70.0
         
         # === ENTRY CONDITIONS ===
         desired_signal = 0.0
@@ -331,32 +258,21 @@ def generate_signals(prices):
             elif macro_bear and breakout_short:
                 desired_signal = -BASE_SIZE
         
-        # === CHOPPY REGIME: Mean Reversion (CRSI + BB + Funding) ===
+        # === CHOPPY REGIME: Mean Reversion (CRSI extremes) ===
         elif is_choppy:
-            # Long: oversold signals + not strongly bearish macro
-            long_conditions = (crsi_oversold or bb_oversold or funding_extreme_long)
-            if long_conditions and not macro_bear:
-                desired_signal = BASE_SIZE
-            # Short: overbought signals + not strongly bullish macro
-            short_conditions = (crsi_overbought or bb_overbought or funding_extreme_short)
-            if short_conditions and not macro_bull:
-                desired_signal = -BASE_SIZE
-        
-        # === TRANSITION ZONE: Use CRSI extremes + funding ===
-        else:
-            # More lenient in transition to ensure trade frequency
-            if (crsi_oversold or funding_extreme_long) and (macro_bull or very_long_bull):
-                desired_signal = BASE_SIZE
-            elif (crsi_overbought or funding_extreme_short) and (macro_bear or very_long_bear):
-                desired_signal = -BASE_SIZE
-        
-        # === FALLBACK: Pure CRSI extremes for trade frequency ===
-        # If no signal yet but CRSI at extreme, take the trade
-        if desired_signal == 0.0:
+            # Long: oversold + not strongly bearish macro
             if crsi_oversold and not macro_bear:
-                desired_signal = BASE_SIZE * 0.5  # Half size for weaker signal
+                desired_signal = BASE_SIZE
+            # Short: overbought + not strongly bullish macro
             elif crsi_overbought and not macro_bull:
-                desired_signal = -BASE_SIZE * 0.5
+                desired_signal = -BASE_SIZE
+        
+        # === TRANSITION ZONE: CRSI extremes with macro filter ===
+        else:
+            if crsi_oversold and macro_bull:
+                desired_signal = BASE_SIZE
+            elif crsi_overbought and macro_bear:
+                desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -377,9 +293,9 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= BASE_SIZE * 0.5:
+        if desired_signal > 0:
             desired_signal = BASE_SIZE
-        elif desired_signal <= -BASE_SIZE * 0.5:
+        elif desired_signal < 0:
             desired_signal = -BASE_SIZE
         else:
             desired_signal = 0.0
