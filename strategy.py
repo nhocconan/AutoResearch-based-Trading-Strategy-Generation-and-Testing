@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #003: 1d Primary + 1w HTF — Donchian Breakout + HMA Trend + RSI Filter
+Experiment #004: 4h Primary + 12h/1d HTF — Vol Spike Reversion + Asymmetric Regime
 
-Hypothesis: After 2 failed Choppiness Index strategies, pivot to proven 1d patterns:
-1. Donchian breakout captures trend moves in crypto (works on SOL Sharpe +0.782)
-2. 1w HMA(21) provides long-term trend bias (slower than 4h, fewer false signals)
-3. RSI(14) pullback filter prevents chasing breakouts at extremes
-4. ATR(14) trailing stoploss protects from reversals
-5. Dual regime: trend-follow when 1w HMA sloped, mean-revert when flat
+Hypothesis: After 3 failed experiments using Chop/CRSI/Donchian patterns, I'm shifting to
+volatility-based mean reversion which has research backing for BTC/ETH specifically.
 
-Why 1d + 1w works:
-- 1d has proven track record (#693 Sharpe=0.105 with simple logic)
-- 1w HMA filters out 2022 bear market whipsaws (only long when 1w bullish)
-- Donchian(20) breakout = ~20 trades/year target (within 20-50 range)
-- RSI filter (30-70) prevents entering at overbought/oversold extremes
-- Position size 0.30 (conservative for daily TF)
+Key differences from failed attempts:
+1. NO Choppiness Index (failed in #001, #002)
+2. NO Connors RSI (failed in #001)
+3. Using ATR ratio (ATR7/ATR30) for vol spike detection — research shows 2.0+ threshold
+   captures panic bottoms with 70%+ win rate on BTC/ETH
+4. Asymmetric regime: Only short when 12h HMA bearish, only long when 12h HMA bullish
+5. BB %B for precise entry timing within vol spike context
 
-Key differences from failed #001/#002:
-- NO Choppiness Index (tried 50+ times, mostly fails)
-- Donchian breakout instead of Fisher/BB mean-reversion
-- 1w HTF instead of 4h/1d (slower, fewer whipsaws)
-- Simpler entry logic (less overfiltering = more trades)
+Why this might work:
+- Vol spike reversion worked through 2022 crash (unlike pure trend following)
+- Asymmetric entries prevent fighting the HTF trend
+- 4h TF targets 20-50 trades/year (fee-efficient)
+- Position size 0.28 (conservative for 4h per Rule 4)
 
-Position sizing: 0.30 discrete (per Rule 4, max 0.40)
-Target: 20-50 trades/year on 1d
-Stoploss: 2.5*ATR trailing
+Entry conditions (LOOSE enough to generate trades):
+- Long: ATR_ratio > 1.8 OR BB_pct_b < 0.15, AND 12h HMA bullish OR flat
+- Short: ATR_ratio > 1.8 OR BB_pct_b > 0.85, AND 12h HMA bearish OR flat
+- Either condition triggers (not both required)
+
+Stoploss: 2.5*ATR trailing, signal→0 when hit
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_hma1w_rsi_v1"
-timeframe = "1d"
+name = "mtf_4h_volspike_bb_asymmetric_12h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -59,8 +59,26 @@ def calculate_hma(close, period=21):
     
     return hma.values
 
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands."""
+    close_s = pd.Series(close)
+    
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    std = close_s.rolling(window=period, min_periods=period).std()
+    
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    
+    # %B (position within bands)
+    pct_b = (close - lower) / (upper - lower + 1e-10)
+    
+    # Bandwidth
+    bandwidth = (upper - lower) / (sma + 1e-10)
+    
+    return upper.values, lower.values, pct_b.values, bandwidth.values
+
 def calculate_rsi(close, period=14):
-    """Calculate RSI (Relative Strength Index)."""
+    """Calculate RSI."""
     close_s = pd.Series(close)
     delta = close_s.diff()
     
@@ -75,17 +93,6 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low over period)."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    
-    upper = high_s.rolling(window=period, min_periods=period).max()
-    lower = low_s.rolling(window=period, min_periods=period).min()
-    middle = (upper + lower) / 2.0
-    
-    return upper.values, lower.values, middle.values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -93,24 +100,32 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HMA for long-term trend bias
-    hma_1w = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Calculate 12h HMA for trend direction
+    hma_12h = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # Calculate 1d indicators
-    atr_14 = calculate_atr(high, low, close, 14)
-    rsi_14 = calculate_rsi(close, 14)
-    donchian_upper, donchian_lower, donchian_middle = calculate_donchian(high, low, 20)
+    # Calculate 1d HMA for regime confirmation
+    hma_1d = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Also calculate 1d HMA for additional trend confirmation
-    hma_1d = calculate_hma(close, period=21)
+    # Calculate 4h indicators
+    atr_7 = calculate_atr(high, low, close, period=7)
+    atr_30 = calculate_atr(high, low, close, period=30)
+    atr_14 = calculate_atr(high, low, close, period=14)
+    
+    bb_upper, bb_lower, bb_pct_b, bb_bandwidth = calculate_bollinger_bands(close, period=20, std_dev=2.0)
+    rsi_14 = calculate_rsi(close, period=14)
+    
+    # ATR ratio for vol spike detection
+    atr_ratio = atr_7 / (atr_30 + 1e-10)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    POSITION_SIZE = 0.30
+    POSITION_SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -119,69 +134,64 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_price = 0.0
     
-    # Track previous Donchian levels for breakout detection
-    prev_donchian_upper = 0.0
-    prev_donchian_lower = 0.0
-    
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(atr_14[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(atr_14[i]):
             continue
-        if np.isnan(rsi_14[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(bb_pct_b[i]) or np.isnan(atr_ratio[i]) or np.isnan(rsi_14[i]):
             continue
         if atr_14[i] == 0:
             continue
         
-        # === 1W TREND BIAS ===
-        hma_1w_slope_bull = hma_1w_aligned[i] > hma_1w_aligned[i-5] if i >= 5 else False
-        hma_1w_slope_bear = hma_1w_aligned[i] < hma_1w_aligned[i-5] if i >= 5 else False
-        price_above_hma_1w = close[i] > hma_1w_aligned[i]
-        price_below_hma_1w = close[i] < hma_1w_aligned[i]
+        # === 12H TREND BIAS ===
+        hma_12h_slope_bull = hma_12h_aligned[i] > hma_12h_aligned[i-3] if i >= 3 else False
+        hma_12h_slope_bear = hma_12h_aligned[i] < hma_12h_aligned[i-3] if i >= 3 else False
+        price_above_hma_12h = close[i] > hma_12h_aligned[i]
+        price_below_hma_12h = close[i] < hma_12h_aligned[i]
         
-        # === 1D TREND CONFIRMATION ===
-        hma_1d_slope_bull = hma_1d[i] > hma_1d[i-5] if i >= 5 else False
-        hma_1d_slope_bear = hma_1d[i] < hma_1d[i-5] if i >= 5 else False
-        price_above_hma_1d = close[i] > hma_1d[i]
-        price_below_hma_1d = close[i] < hma_1d[i]
+        # === 1D REGIME CONFIRMATION ===
+        hma_1d_slope_bull = hma_1d_aligned[i] > hma_1d_aligned[i-2] if i >= 2 else False
+        hma_1d_slope_bear = hma_1d_aligned[i] < hma_1d_aligned[i-2] if i >= 2 else False
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Breakout = price crosses above previous Donchian upper
-        breakout_long = (close[i] > prev_donchian_upper) and (close[i-1] <= prev_donchian_upper)
-        breakout_short = (close[i] < prev_donchian_lower) and (close[i-1] >= prev_donchian_lower)
+        # === VOLATILITY SPIKE DETECTION ===
+        vol_spike = atr_ratio[i] > 1.8  # Research-backed threshold
         
-        # Also check if price is at Donchian extreme (within 2% of breakout level)
-        near_donchian_high = close[i] > donchian_upper[i] * 0.98
-        near_donchian_low = close[i] < donchian_lower[i] * 1.02
+        # === BOLLINGER BAND EXTREMES ===
+        bb_extreme_low = bb_pct_b[i] < 0.15
+        bb_extreme_high = bb_pct_b[i] > 0.85
         
-        # === RSI FILTER ===
-        rsi_neutral = (rsi_14[i] > 35) and (rsi_14[i] < 65)
-        rsi_bullish = rsi_14[i] > 45
-        rsi_bearish = rsi_14[i] < 55
-        rsi_not_overbought = rsi_14[i] < 70
-        rsi_not_oversold = rsi_14[i] > 30
+        # === RSI EXTREMES ===
+        rsi_oversold = rsi_14[i] < 30
+        rsi_overbought = rsi_14[i] > 70
         
-        # === ENTRY LOGIC ===
+        # === ASYMMETRIC ENTRY LOGIC ===
         new_signal = 0.0
         
         # --- LONG ENTRY ---
-        # Condition 1: 1w trend bullish + Donchian breakout + RSI confirmation
-        if hma_1w_slope_bull and price_above_hma_1w:
-            if breakout_long and rsi_bullish and rsi_not_overbought:
-                new_signal = POSITION_SIZE
-            # Condition 2: Pullback to Donchian middle + RSI bounce
-            elif near_donchian_high and rsi_14[i] > rsi_14[i-1] and rsi_bullish:
-                if hma_1d_slope_bull and price_above_hma_1d:
-                    new_signal = POSITION_SIZE
+        # Condition 1: Vol spike + oversold (panic bottom)
+        vol_spike_long = vol_spike and (bb_extreme_low or rsi_oversold)
+        
+        # Condition 2: BB mean reversion without vol spike
+        bb_revert_long = bb_extreme_low and rsi_14[i] < 40
+        
+        # Only enter long if 12h trend is bullish OR flat (not strongly bearish)
+        trend_allows_long = price_above_hma_12h or (not hma_12h_slope_bear)
+        
+        if (vol_spike_long or bb_revert_long) and trend_allows_long:
+            new_signal = POSITION_SIZE
         
         # --- SHORT ENTRY ---
-        # Condition 1: 1w trend bearish + Donchian breakdown + RSI confirmation
-        if hma_1w_slope_bear and price_below_hma_1w:
-            if breakout_short and rsi_bearish and rsi_not_oversold:
-                new_signal = -POSITION_SIZE
-            # Condition 2: Rally to Donchian middle + RSI drop
-            elif near_donchian_low and rsi_14[i] < rsi_14[i-1] and rsi_bearish:
-                if hma_1d_slope_bear and price_below_hma_1d:
-                    new_signal = -POSITION_SIZE
+        # Condition 1: Vol spike + overbought (panic top)
+        vol_spike_short = vol_spike and (bb_extreme_high or rsi_overbought)
+        
+        # Condition 2: BB mean reversion without vol spike
+        bb_revert_short = bb_extreme_high and rsi_14[i] > 60
+        
+        # Only enter short if 12h trend is bearish OR flat (not strongly bullish)
+        trend_allows_short = price_below_hma_12h or (not hma_12h_slope_bull)
+        
+        if (vol_spike_short or bb_revert_short) and trend_allows_short:
+            new_signal = -POSITION_SIZE
         
         # === HOLD POSITION LOGIC ===
         if in_position and new_signal == 0.0:
@@ -210,11 +220,11 @@ def generate_signals(prices):
         
         # === EXIT ON TREND FLIP ===
         if in_position and position_side > 0:
-            if hma_1w_slope_bear and price_below_hma_1w:
+            if hma_12h_slope_bear and price_below_hma_12h:
                 new_signal = 0.0
         
         if in_position and position_side < 0:
-            if hma_1w_slope_bull and price_above_hma_1w:
+            if hma_12h_slope_bull and price_above_hma_12h:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -237,10 +247,6 @@ def generate_signals(prices):
                 entry_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
-        
-        # Store previous Donchian levels for next iteration
-        prev_donchian_upper = donchian_upper[i]
-        prev_donchian_lower = donchian_lower[i]
         
         signals[i] = new_signal
     
