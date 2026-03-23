@@ -1,38 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #696: 12h Primary + 1d HTF — Dual Regime (Trend/Mean-Revert) + Fisher + HMA
+Experiment #697: 1d Primary + 1w HTF — Vol Spike Mean Reversion + Regime Filter
 
-Hypothesis: After 607+ failed strategies, the pattern is clear:
-1. 12h timeframe has struggled (#686, #689, #692 all negative Sharpe)
-2. 1d works best (#693 Sharpe=0.105) but experiment requires 12h primary
-3. CHOP+CRSI overused and mostly fails - need different signal combination
-4. Fisher Transform underutilized - catches reversals better than RSI in bear/range
-5. Dual regime (mean-revert in chop, trend-follow otherwise) proven in literature
+Hypothesis: After 608 failed strategies, the clearest pattern is:
+1. 1d timeframe consistently outperforms lower TFs (#693 Sharpe=0.105, #696 Sharpe=-0.071)
+2. CHOP+CRSI combinations tried 50+ times with mostly negative results
+3. Vol spike mean reversion is UNDERUTILIZED in our experiments
+4. Research shows: "ATR(7)/ATR(30) > 2.0 + price < BB(20,2.5) → long. Captures vol crush after panic."
 
 This strategy uses:
-- 1d HMA(21) for major trend direction (slower than 4h, better for 12h)
-- 12h Fisher Transform (period=9) for precise reversal entries
-- 1d ADX(14) for regime filter (trend vs range)
-- 12h Bollinger Bands (20, 2.0) for mean-reversion context
-- Dual regime logic: different entries for chop vs trend
+- ATR Ratio (7/30) for volatility spike detection (>2.0 = panic)
+- Bollinger Bands (20, 2.5) for extreme oversold/overbought
+- 1w HMA(21) for macro trend bias (only long above, only short below)
+- Asymmetric sizing: 0.30 long, 0.20 short (crypto bias upward)
+- Regime filter: ADX(14) < 25 = mean revert, ADX > 30 = trend follow
 
 Why this might beat Sharpe=0.520:
-- 12h has fewer trades = less fee drag (target 20-50 trades/year)
-- Fisher Transform superior reversal detection vs RSI
-- 1d HMA gives cleaner trend signal than 4h for 12h primary
-- Asymmetric entries prevent whipsaw in 2022 crash
-- Conservative sizing (0.28) limits drawdown
+- Vol spike reversion worked through 2022 crash (77% drop then rebound)
+- BB 2.5 std dev catches true extremes (not just normal pullbacks)
+- 1w HMA prevents counter-trend trades in strong trends
+- Fewer but higher quality trades (target 25-40/year on 1d)
+- Asymmetric sizing matches crypto's upward bias
 
-Position sizing: 0.28 discrete (conservative for 12h TF)
-Target: 25-45 trades/year on 12h
-Stoploss: 2.5*ATR trailing
+Position sizing: 0.30 long / 0.20 short (discrete levels)
+Target: 25-40 trades/year on 1d
+Stoploss: 3.0*ATR trailing (wider for 1d noise)
+
+CRITICAL: Entry conditions loosened to ensure >=10 trades/symbol
+- ATR ratio > 1.8 (not 2.0) for more signals
+- BB %B < 0.10 or > 0.90 (not just band touch)
+- Either vol spike OR BB extreme = entry (not both required)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_fisher_hma1d_adx_regime_v1"
-timeframe = "12h"
+name = "mtf_1d_volspike_bb_hma1w_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -88,43 +92,8 @@ def calculate_hma(close, period=21):
     
     return hma.values
 
-def calculate_fisher_transform(high, low, close, period=9):
-    """
-    Calculate Ehlers Fisher Transform.
-    
-    Fisher = 0.5 * ln((1 + X) / (1 - X))
-    where X = 0.67 * (price - LL) / (HH - LL) - 0.67
-    
-    Signals:
-    - Long: Fisher crosses above -1.0 from below
-    - Short: Fisher crosses below +1.0 from above
-    """
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    
-    # Median price
-    median = (high_s + low_s) / 2.0
-    
-    # Highest high and lowest low over period
-    hh = median.rolling(window=period, min_periods=period).max()
-    ll = median.rolling(window=period, min_periods=period).min()
-    
-    # Normalize price to range [-1, 1]
-    range_hl = hh - ll
-    x = 0.67 * (median - ll) / (range_hl + 1e-10) - 0.67
-    x = np.clip(x, -0.99, 0.99)  # Prevent log domain errors
-    
-    # Fisher transform
-    fisher = 0.5 * np.log((1.0 + x) / (1.0 - x + 1e-10))
-    
-    # Signal line (1-bar lag of Fisher)
-    fisher_signal = fisher.shift(1)
-    
-    return fisher.values, fisher_signal.values
-
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_bollinger_bands(close, period=20, std_dev=2.5):
+    """Calculate Bollinger Bands with wider std dev for extremes."""
     close_s = pd.Series(close)
     
     sma = close_s.rolling(window=period, min_periods=period).mean()
@@ -133,88 +102,49 @@ def calculate_bollinger_bands(close, period=20, std_dev=2.0):
     upper = sma + std_dev * std
     lower = sma - std_dev * std
     
-    # Bandwidth (for squeeze detection)
-    bandwidth = (upper - lower) / (sma + 1e-10)
-    
     # %B (position within bands)
     pct_b = (close - lower) / (upper - lower + 1e-10)
     
-    return upper.values, lower.values, bandwidth.values, pct_b.values
+    # Bandwidth for squeeze detection
+    bandwidth = (upper - lower) / (sma + 1e-10)
+    
+    return upper.values, lower.values, pct_b.values, bandwidth.values
 
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Calculate Choppiness Index (CHOP).
+def calculate_atr_ratio(high, low, close, short_period=7, long_period=30):
+    """Calculate ATR ratio for vol spike detection."""
+    atr_short = calculate_atr(high, low, close, short_period)
+    atr_long = calculate_atr(high, low, close, long_period)
     
-    CHOP = 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
-    
-    Interpretation:
-    - CHOP > 61.8 = Choppy/Range market
-    - CHOP < 38.2 = Trending market
-    """
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    
-    # ATR calculation
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    # Sum of ATR over period
-    atr_sum = atr.rolling(window=period, min_periods=period).sum()
-    
-    # Highest high and lowest low over period
-    hh = high_s.rolling(window=period, min_periods=period).max()
-    ll = low_s.rolling(window=period, min_periods=period).min()
-    
-    # Choppiness Index
-    chop = 100.0 * np.log10(atr_sum / (hh - ll + 1e-10)) / np.log10(period)
-    
-    return chop.values
+    ratio = atr_short / (atr_long + 1e-10)
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d HMA for major trend direction
-    hma_1d = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Calculate 1w HMA for macro trend bias
+    hma_1w = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 1d ADX for regime filter
-    adx_1d_high = df_1d['high'].values
-    adx_1d_low = df_1d['low'].values
-    adx_1d_close = df_1d['close'].values
-    adx_1d = calculate_adx(adx_1d_high, adx_1d_low, adx_1d_close, period=14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 1d Choppiness Index for additional regime filter
-    chop_1d_high = df_1d['high'].values
-    chop_1d_low = df_1d['low'].values
-    chop_1d_close = df_1d['close'].values
-    chop_1d = calculate_choppiness_index(chop_1d_high, chop_1d_low, chop_1d_close, period=14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    fisher, fisher_signal = calculate_fisher_transform(high, low, close, period=9)
-    bb_upper, bb_lower, bb_bandwidth, bb_pct_b = calculate_bollinger_bands(close, period=20, std_dev=2.0)
+    atr_ratio = calculate_atr_ratio(high, low, close, 7, 30)
+    bb_upper, bb_lower, bb_pct_b, bb_bandwidth = calculate_bollinger_bands(close, period=20, std_dev=2.5)
+    adx_14 = calculate_adx(high, low, close, 14)
     
-    # Volume SMA for confirmation (loose filter)
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1d SMA for additional filter
+    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
     
     signals = np.zeros(n)
     
-    # Position sizing (Rule 4 - discrete, max 0.40)
-    POSITION_SIZE = 0.28
+    # Position sizing (Rule 4 - discrete, asymmetric for crypto bias)
+    POSITION_SIZE_LONG = 0.30
+    POSITION_SIZE_SHORT = 0.20
     
     # Track position state for stoploss
     in_position = False
@@ -223,33 +153,35 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_price = 0.0
     
-    # ADX hysteresis tracking
+    # ADX regime tracking with hysteresis
     prev_adx_regime = 0  # 0=neutral, 1=trend, 2=range
     
-    for i in range(100, n):
+    for i in range(250, n):
         # Skip if indicators not ready
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(atr_14[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(atr_14[i]):
             continue
-        if np.isnan(fisher[i]) or np.isnan(bb_pct_b[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(bb_pct_b[i]) or np.isnan(atr_ratio[i]) or np.isnan(adx_14[i]):
             continue
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]):
+        if np.isnan(sma_200[i]):
             continue
-        if atr_14[i] == 0 or vol_sma[i] == 0:
+        if atr_14[i] == 0:
             continue
         
-        # === 1D TREND BIAS ===
-        hma_1d_slope_bull = hma_1d_aligned[i] > hma_1d_aligned[i-3] if i >= 3 else False
-        hma_1d_slope_bear = hma_1d_aligned[i] < hma_1d_aligned[i-3] if i >= 3 else False
-        price_above_hma_1d = close[i] > hma_1d_aligned[i]
-        price_below_hma_1d = close[i] < hma_1d_aligned[i]
+        # === 1W MACRO TREND BIAS ===
+        hma_1w_slope_bull = hma_1w_aligned[i] > hma_1w_aligned[i-5] if i >= 5 else False
+        hma_1w_slope_bear = hma_1w_aligned[i] < hma_1w_aligned[i-5] if i >= 5 else False
+        price_above_hma_1w = close[i] > hma_1w_aligned[i]
+        price_below_hma_1w = close[i] < hma_1w_aligned[i]
+        price_above_sma200 = close[i] > sma_200[i]
+        price_below_sma200 = close[i] < sma_200[i]
         
-        # === 1D ADX REGIME (with hysteresis) ===
-        adx_val = adx_1d_aligned[i]
+        # === ADX REGIME (with hysteresis) ===
+        adx_val = adx_14[i]
         
-        # Hysteresis: trend regime needs ADX>25 to enter, <18 to exit
-        if adx_val > 25.0:
+        # Hysteresis: trend regime needs ADX>30 to enter, <22 to exit
+        if adx_val > 30.0:
             adx_regime = 1  # Trending
-        elif adx_val < 18.0:
+        elif adx_val < 22.0:
             adx_regime = 2  # Range
         else:
             adx_regime = prev_adx_regime  # Keep previous regime
@@ -258,67 +190,61 @@ def generate_signals(prices):
         is_trend_regime = (adx_regime == 1)
         is_range_regime = (adx_regime == 2)
         
-        # === CHOPPINESS INDEX CONFIRMATION ===
-        chop_val = chop_1d_aligned[i]
-        is_choppy = chop_val > 55.0  # Slightly lower threshold for more trades
-        is_trending_chop = chop_val < 45.0
+        # === VOLATILITY SPIKE DETECTION ===
+        vol_spike_high = atr_ratio[i] > 1.8  # Vol spike (panic)
+        vol_spike_low = atr_ratio[i] < 1.0   # Vol crush (calm)
         
-        # === FISHER TRANSFORM SIGNALS (LOOSE thresholds for trades) ===
-        fisher_cross_up = (fisher[i] > -1.0) and (fisher_signal[i] <= -1.0)
-        fisher_cross_down = (fisher[i] < 1.0) and (fisher_signal[i] >= 1.0)
-        fisher_extreme_low = fisher[i] < -0.8  # Looser than -1.2
-        fisher_extreme_high = fisher[i] > 0.8  # Looser than +1.2
-        
-        # === BOLLINGER BAND SIGNALS ===
-        bb_touch_lower = bb_pct_b[i] < 0.20  # Near or below lower band
-        bb_touch_upper = bb_pct_b[i] > 0.80  # Near or above upper band
-        
-        # === VOLUME CONFIRMATION (very loose) ===
-        volume_confirmed = volume[i] > 0.6 * vol_sma[i]  # 60% of avg is enough
+        # === BOLLINGER BAND EXTREMES ===
+        bb_extreme_low = bb_pct_b[i] < 0.10  # Near/below lower band
+        bb_extreme_high = bb_pct_b[i] > 0.90  # Near/above upper band
+        bb_below_lower = close[i] < bb_lower[i]
+        bb_above_upper = close[i] > bb_upper[i]
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # --- LONG ENTRY ---
-        # Regime 1: Range/Choppy market - Mean Reversion
-        if is_range_regime or is_choppy:
-            if (fisher_extreme_low or bb_touch_lower) and volume_confirmed:
-                # Only enter long if not in strong downtrend
-                if price_above_hma_1d or (not hma_1d_slope_bear):
-                    new_signal = POSITION_SIZE
+        # --- LONG ENTRY (Mean Reversion after Vol Spike) ---
+        # Condition 1: Vol spike + BB extreme low + not in strong downtrend
+        if vol_spike_high and (bb_extreme_low or bb_below_lower):
+            if price_above_hma_1w or (price_above_sma200 and not hma_1w_slope_bear):
+                new_signal = POSITION_SIZE_LONG
         
-        # Regime 2: Trending market - Trend Pullback
-        elif is_trend_regime and is_trending_chop:
-            if hma_1d_slope_bull and price_above_hma_1d:
-                # Enter on Fisher pullback in uptrend
-                if fisher_cross_up or fisher[i] < -0.3:
-                    new_signal = POSITION_SIZE
+        # Condition 2: Range regime + BB extreme (pure mean reversion)
+        elif is_range_regime and bb_extreme_low:
+            if not hma_1w_slope_bear:  # Not strongly bearish on 1w
+                new_signal = POSITION_SIZE_LONG
         
-        # --- SHORT ENTRY ---
-        # Regime 1: Range/Choppy market - Mean Reversion
-        if is_range_regime or is_choppy:
-            if (fisher_extreme_high or bb_touch_upper) and volume_confirmed:
-                # Only enter short if not in strong uptrend
-                if price_below_hma_1d or (not hma_1d_slope_bull):
-                    new_signal = -POSITION_SIZE
+        # Condition 3: Trend regime + pullback to support (trend follow)
+        elif is_trend_regime and hma_1w_slope_bull and price_above_hma_1w:
+            if bb_pct_b[i] < 0.30 and not vol_spike_high:  # Pullback, not panic
+                new_signal = POSITION_SIZE_LONG
         
-        # Regime 2: Trending market - Trend Pullback
-        elif is_trend_regime and is_trending_chop:
-            if hma_1d_slope_bear and price_below_hma_1d:
-                # Enter on Fisher pullback in downtrend
-                if fisher_cross_down or fisher[i] > 0.3:
-                    new_signal = -POSITION_SIZE
+        # --- SHORT ENTRY (Mean Reversion after Vol Spike) ---
+        # Condition 1: Vol spike + BB extreme high + not in strong uptrend
+        if vol_spike_high and (bb_extreme_high or bb_above_upper):
+            if price_below_hma_1w or (price_below_sma200 and not hma_1w_slope_bull):
+                new_signal = -POSITION_SIZE_SHORT
+        
+        # Condition 2: Range regime + BB extreme (pure mean reversion)
+        elif is_range_regime and bb_extreme_high:
+            if not hma_1w_slope_bull:  # Not strongly bullish on 1w
+                new_signal = -POSITION_SIZE_SHORT
+        
+        # Condition 3: Trend regime + pullback to resistance (trend follow)
+        elif is_trend_regime and hma_1w_slope_bear and price_below_hma_1w:
+            if bb_pct_b[i] > 0.70 and not vol_spike_high:  # Rally, not panic
+                new_signal = -POSITION_SIZE_SHORT
         
         # === HOLD POSITION LOGIC ===
         if in_position and new_signal == 0.0:
             new_signal = signals[i-1] if i > 0 else 0.0
         
-        # === STOPLOSS CHECK (2.5 * ATR trailing) ===
+        # === STOPLOSS CHECK (3.0 * ATR trailing for 1d noise) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.5 * atr_14[i]
+            stop_price = highest_since_entry - 3.0 * atr_14[i]
             if close[i] < stop_price:
                 stoploss_triggered = True
         
@@ -327,21 +253,29 @@ def generate_signals(prices):
                 lowest_since_entry = close[i]
             else:
                 lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.5 * atr_14[i]
+            stop_price = lowest_since_entry + 3.0 * atr_14[i]
             if close[i] > stop_price:
                 stoploss_triggered = True
         
         if stoploss_triggered:
             new_signal = 0.0
         
-        # === EXIT ON TREND FLIP ===
+        # === EXIT ON MACRO TREND FLIP ===
         if in_position and position_side > 0:
-            if hma_1d_slope_bear and price_below_hma_1d and is_trend_regime:
+            if hma_1w_slope_bear and price_below_hma_1w and adx_val > 25:
                 new_signal = 0.0
         
         if in_position and position_side < 0:
-            if hma_1d_slope_bull and price_above_hma_1d and is_trend_regime:
+            if hma_1w_slope_bull and price_above_hma_1w and adx_val > 25:
                 new_signal = 0.0
+        
+        # === EXIT ON VOL CRUSH (take profit) ===
+        if in_position and vol_spike_low:
+            # Vol has normalized, take partial profit
+            if position_side > 0 and bb_pct_b[i] > 0.50:
+                new_signal = POSITION_SIZE_LONG / 2  # Reduce to half
+            elif position_side < 0 and bb_pct_b[i] < 0.50:
+                new_signal = -POSITION_SIZE_SHORT / 2  # Reduce to half
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
