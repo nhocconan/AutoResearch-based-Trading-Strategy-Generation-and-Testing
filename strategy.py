@@ -1,32 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #123: 1d Primary + 1w HTF — Simplified Donchian Breakout with Macro Trend
+Experiment #124: 4h Primary + 12h/1d HTF — Keltner Breakout with ADX Trend Filter
 
-Hypothesis: Previous strategies (#117, #121, #122) failed due to over-complication with
-regime switching and too many exit conditions. This simplifies to core proven elements:
+Hypothesis: Recent Donchian-based strategies (#114, #117, #123) failed because Donchian
+channels are too wide and slow to react. Keltner Channels (ATR-based) adapt to volatility
+and provide cleaner breakout signals. Combined with ADX trend filter and HTF bias:
 
-1) 1w HMA(21) for macro trend bias — only trade breakouts in trend direction
-2) 1d Donchian(20) breakout — clean trend-following entry
-3) 1d HMA(21/50) crossover for intermediate trend confirmation
-4) Volume confirmation — breakout volume > 1.5x 20-day avg
-5) ATR(14) trailing stop at 2.5x — simple, effective risk management
-6) Exit on opposite Donchian break OR 1w trend reversal
+1) 12h HMA(21) for macro trend bias — only trade breakouts in trend direction
+2) 1d HMA(50) for secondary confirmation — adds robustness
+3) Keltner Channel(20, 2.0*ATR) breakout — volatility-adaptive entry
+4) ADX(14) > 25 filter — ensures we only trade in trending conditions (not chop)
+5) ATR(14) trailing stop at 2.5x — locks profits, limits drawdown
+6) Exit on opposite Keltner break OR HTF trend reversal
 
-Key improvements over #122:
-- Pre-calculate ALL indicators before loop (RSI was calculated inside loop = bug)
-- Simpler hold logic (just maintain signal, don't over-check conditions)
-- Fewer exit conditions (remove RSI extreme exits that cut winners early)
-- Cleaner position tracking
+Why this should beat Donchian:
+- Keltner uses ATR, adapts to volatility regime changes
+- ADX filter prevents entries during chop (where Donchian whipsaws)
+- Dual HTF (12h + 1d) provides stronger trend confirmation than single HTF
+- 4h naturally produces 30-50 trades/year (optimal fee/trade ratio)
 
-Position size: 0.25 base, 0.30 with volume confluence
-Target: 25-40 trades/year, Sharpe > 0.5 on ALL symbols
+Position size: 0.25 base, 0.30 with strong confluence
+Stoploss: 2.5*ATR trailing
+Target: 30-50 trades/year, Sharpe > 0.5 on ALL symbols
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_hma_simple_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_keltner_adx_hma_12h1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -48,12 +50,49 @@ def calculate_hma(close, period=21):
     hma = wma_diff.ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
     return hma.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (20-day high/low)."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    mid = (upper + lower) / 2.0
-    return upper, lower, mid
+def calculate_keltner(high, low, close, period=20, atr_mult=2.0):
+    """Calculate Keltner Channel (EMA + ATR bands)."""
+    close_s = pd.Series(close)
+    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+    atr = calculate_atr(high, low, close, period=14)
+    upper = ema + atr_mult * atr
+    lower = ema - atr_mult * atr
+    return upper, lower, ema
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)."""
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    # True Range
+    tr1 = high_s - low_s
+    tr2 = (high_s - close_s.shift(1)).abs()
+    tr3 = (low_s - close_s.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm < 0] = 0
+    
+    # Where both are positive, keep the larger one
+    both_positive = (plus_dm > 0) & (minus_dm > 0)
+    plus_dm[both_positive & (plus_dm < minus_dm)] = 0
+    minus_dm[both_positive & (minus_dm < plus_dm)] = 0
+    
+    # Smooth with Wilder's method (EMA with span=period)
+    atr_smooth = tr.ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / (atr_smooth + 1e-10))
+    minus_di = 100 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / (atr_smooth + 1e-10))
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    return adx.values, plus_di.values, minus_di.values
 
 def calculate_rsi(close, period=14):
     """Calculate RSI."""
@@ -67,40 +106,31 @@ def calculate_rsi(close, period=14):
     rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi
 
-def calculate_volume_avg(volume, period=20):
-    """Calculate rolling average volume."""
-    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_avg
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HMA for macro trend
-    hma_1w = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Calculate 12h HMA for macro trend
+    hma_12h_21 = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_21)
     
-    # Calculate 1w HMA slope (trend strength) - pre-calculated
-    hma_1w_slope = np.zeros(n)
-    for i in range(1, n):
-        if not np.isnan(hma_1w_aligned[i]) and not np.isnan(hma_1w_aligned[i-1]) and hma_1w_aligned[i-1] != 0:
-            hma_1w_slope[i] = (hma_1w_aligned[i] - hma_1w_aligned[i-1]) / hma_1w_aligned[i-1] * 100
-        else:
-            hma_1w_slope[i] = 0.0
+    # Calculate 1d HMA for secondary confirmation
+    hma_1d_50 = calculate_hma(df_1d['close'].values, period=50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_50)
     
-    # Calculate ALL 1d indicators BEFORE loop (Rule 8 - Performance)
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=20)
-    vol_avg_20 = calculate_volume_avg(volume, period=20)
-    hma_1d_21 = calculate_hma(close, period=21)
-    hma_1d_50 = calculate_hma(close, period=50)
+    keltner_upper, keltner_lower, keltner_mid = calculate_keltner(high, low, close, period=20, atr_mult=2.0)
+    adx_14, plus_di, minus_di = calculate_adx(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
+    hma_4h_21 = calculate_hma(close, period=21)
+    hma_4h_50 = calculate_hma(close, period=50)
     
     signals = np.zeros(n)
     POSITION_SIZE_BASE = 0.25
@@ -110,69 +140,81 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     highest_since_entry = 0.0
-    lowest_since_entry = np.inf
+    lowest_since_entry = 0.0
     entry_price = 0.0
     
-    for i in range(250, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(atr_14[i]) or atr_14[i] == 0:
-            signals[i] = signals[i-1] if i > 0 else 0.0
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             continue
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            signals[i] = signals[i-1] if i > 0 else 0.0
+        if np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(vol_avg_20[i]) or vol_avg_20[i] == 0:
-            signals[i] = signals[i-1] if i > 0 else 0.0
+        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]):
             continue
-        if np.isnan(hma_1d_21[i]) or np.isnan(hma_1d_50[i]):
-            signals[i] = signals[i-1] if i > 0 else 0.0
+        if np.isnan(adx_14[i]):
+            continue
+        if np.isnan(hma_4h_21[i]) or np.isnan(hma_4h_50[i]):
             continue
         
-        # === HTF TREND BIAS (1w HMA) ===
-        price_above_hma_1w = close[i] > hma_1w_aligned[i]
-        price_below_hma_1w = close[i] < hma_1w_aligned[i]
-        hma_slope_positive = hma_1w_slope[i] > 0.3
-        hma_slope_negative = hma_1w_slope[i] < -0.3
+        # === HTF TREND BIAS (12h + 1d HMA) ===
+        price_above_hma_12h = close[i] > hma_12h_aligned[i]
+        price_below_hma_12h = close[i] < hma_12h_aligned[i]
+        price_above_hma_1d = close[i] > hma_1d_aligned[i]
+        price_below_hma_1d = close[i] < hma_1d_aligned[i]
         
-        # === 1d TREND FILTER ===
-        hma_1d_bullish = hma_1d_21[i] > hma_1d_50[i]
-        hma_1d_bearish = hma_1d_21[i] < hma_1d_50[i]
+        # Strong bias: both 12h and 1d agree
+        strong_bullish = price_above_hma_12h and price_above_hma_1d
+        strong_bearish = price_below_hma_12h and price_below_hma_1d
         
-        # === DONCHIAN BREAKOUT ===
-        prev_high = donchian_upper[i-1]
-        prev_low = donchian_lower[i-1]
+        # === 4h TREND FILTER ===
+        hma_4h_bullish = hma_4h_21[i] > hma_4h_50[i]
+        hma_4h_bearish = hma_4h_21[i] < hma_4h_50[i]
         
-        breakout_long = close[i] > prev_high
-        breakout_short = close[i] < prev_low
+        # === ADX TREND STRENGTH ===
+        adx_trending = adx_14[i] > 25.0
+        adx_strong = adx_14[i] > 30.0
         
-        # === VOLUME CONFIRMATION ===
-        volume_ratio = volume[i] / (vol_avg_20[i] + 1e-10)
-        volume_confirmed = volume_ratio > 1.3
-        volume_strong = volume_ratio > 1.8
+        # === KELTNER BREAKOUT ===
+        prev_upper = keltner_upper[i-1] if i > 0 else keltner_upper[i]
+        prev_lower = keltner_lower[i-1] if i > 0 else keltner_lower[i]
+        
+        breakout_long = close[i] > prev_upper
+        breakout_short = close[i] < prev_lower
+        
+        # === RSI CONFIRMATION (avoid extreme overbought/oversold entries) ===
+        rsi_ok_long = rsi_14[i] < 70.0  # Not overbought
+        rsi_ok_short = rsi_14[i] > 30.0  # Not oversold
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
         # --- LONG ENTRY ---
-        # Require: 1w trend up + 1d trend up + Donchian breakout + volume
-        if price_above_hma_1w and hma_1d_bullish and breakout_long:
-            if volume_confirmed:
-                new_signal = POSITION_SIZE_BASE
-                if volume_strong and hma_slope_positive:
+        # Require: HTF bullish + 4h trend up + ADX trending + Keltner breakout + RSI ok
+        if strong_bullish or (price_above_hma_12h and hma_4h_bullish):
+            if hma_4h_bullish and adx_trending and breakout_long and rsi_ok_long:
+                if adx_strong and strong_bullish:
                     new_signal = POSITION_SIZE_MAX
+                else:
+                    new_signal = POSITION_SIZE_BASE
         
         # --- SHORT ENTRY ---
-        # Require: 1w trend down + 1d trend down + Donchian breakout + volume
-        if price_below_hma_1w and hma_1d_bearish and breakout_short:
-            if volume_confirmed:
-                new_signal = -POSITION_SIZE_BASE
-                if volume_strong and hma_slope_negative:
+        # Require: HTF bearish + 4h trend down + ADX trending + Keltner breakout + RSI ok
+        if strong_bearish or (price_below_hma_12h and hma_4h_bearish):
+            if hma_4h_bearish and adx_trending and breakout_short and rsi_ok_short:
+                if adx_strong and strong_bearish:
                     new_signal = -POSITION_SIZE_MAX
+                else:
+                    new_signal = -POSITION_SIZE_BASE
         
         # === HOLD POSITION LOGIC ===
-        # If already in position, maintain signal unless exit conditions met
+        # Hold long if still above Keltner mid and HTF trend intact
         if in_position and new_signal == 0.0:
-            new_signal = signals[i-1] if i > 0 else 0.0
+            if position_side > 0:
+                if close[i] > keltner_mid[i] and price_above_hma_12h:
+                    new_signal = signals[i-1] if i > 0 else 0.0
+            elif position_side < 0:
+                if close[i] < keltner_mid[i] and price_below_hma_12h:
+                    new_signal = signals[i-1] if i > 0 else 0.0
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
         stoploss_triggered = False
@@ -184,7 +226,10 @@ def generate_signals(prices):
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
-            lowest_since_entry = min(lowest_since_entry, close[i])
+            if lowest_since_entry == 0.0:
+                lowest_since_entry = close[i]
+            else:
+                lowest_since_entry = min(lowest_since_entry, close[i])
             stop_price = lowest_since_entry + 2.5 * atr_14[i]
             if close[i] > stop_price:
                 stoploss_triggered = True
@@ -194,20 +239,25 @@ def generate_signals(prices):
         
         # === EXIT ON TREND REVERSAL ===
         if in_position and position_side > 0:
-            # Exit if 1w trend reverses strongly negative
-            if price_below_hma_1w and hma_slope_negative:
+            if price_below_hma_12h or (hma_4h_bearish and adx_trending):
                 new_signal = 0.0
-            # Exit on opposite Donchian break
+            # Exit on opposite Keltner break
             if breakout_short:
                 new_signal = 0.0
         
         if in_position and position_side < 0:
-            # Exit if 1w trend reverses strongly positive
-            if price_above_hma_1w and hma_slope_positive:
+            if price_above_hma_12h or (hma_4h_bullish and adx_trending):
                 new_signal = 0.0
-            # Exit on opposite Donchian break
+            # Exit on opposite Keltner break
             if breakout_long:
                 new_signal = 0.0
+        
+        # === EXIT ON RSI EXTREME (take profit) ===
+        if in_position and position_side > 0 and rsi_14[i] > 75.0:
+            new_signal = 0.0
+        
+        if in_position and position_side < 0 and rsi_14[i] < 25.0:
+            new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
@@ -216,20 +266,20 @@ def generate_signals(prices):
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
-                lowest_since_entry = close[i] if position_side < 0 else np.inf
+                lowest_since_entry = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
                 # Position flip
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
-                lowest_since_entry = close[i] if position_side < 0 else np.inf
+                lowest_since_entry = close[i] if position_side < 0 else 0.0
         else:
             if in_position:
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
                 highest_since_entry = 0.0
-                lowest_since_entry = np.inf
+                lowest_since_entry = 0.0
         
         signals[i] = new_signal
     
