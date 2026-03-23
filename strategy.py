@@ -1,39 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #269: 4h Primary + 1d HTF — Volatility Compression Breakout
+Experiment #270: 1h Primary + 4h/12h HTF — Simplified Trend Pullback
 
-Hypothesis: After 12 consecutive failures with complex regime-switching, return to 
-proven volatility-based entries. Bollinger Band squeezes precede major moves 70%+ 
-of the time. Combined with 1d HMA trend filter, this captures breakouts with 
-favorable risk/reward.
+Hypothesis: Previous 1h strategies failed from over-filtering (#260: 0 trades, #265: Sharpe=-2.156).
+This version uses SIMPLER entry logic:
+- 4h HMA(16/48) for PRIMARY trend direction (most important)
+- 12h HMA(21) for MACRO bias (soft filter only)
+- 1h RSI(14) pullback entries (40-60 zone - triggers frequently)
+- ATR(14) 2.5x trailing stoploss
+- Position size: 0.25 (conservative for 1h volatility)
 
-KEY CHANGES FROM #251 (which failed with Sharpe=-0.194):
-1. BB Width percentile instead of RSI pullback (more reliable breakout signal)
-2. Donchian breakout confirmation (price must actually break, not just pullback)
-3. Simpler exit logic (only stoploss + trend reversal, no RSI extreme exits)
-4. Wider RSI thresholds (30/70 instead of 35/65) for more trade frequency
-5. Remove POSITION_SIZE_HALF hold logic (reduces churn, clearer signals)
+KEY CHANGES from failed #260:
+- REMOVED session filter (was killing trades)
+- REMOVED volume filter (was too strict)
+- Only 2 HTF filters instead of 3+
+- RSI 40-60 triggers ~25% of bars vs 35-50 at ~15%
+- 12h HMA is soft bias, not hard requirement
 
-INDICATORS:
-- 1d HMA(21): Macro trend bias (load ONCE before loop via mtf_data)
-- 4h BB(20, 2.0) + BB Width percentile(30): Volatility compression detection
-- 4h Donchian(20): Breakout confirmation
-- 4h RSI(7): Momentum filter (faster than RSI(14))
-- 4h ATR(14) 3.0x: Trailing stoploss
-
-ENTRY LOGIC:
-- Long: 1d HMA bullish + BB Width < 30th percentile + price > Donchian upper + RSI > 50
-- Short: 1d HMA bearish + BB Width < 30th percentile + price < Donchian lower + RSI < 50
-
-TARGET: 25-45 trades/year on 4h, Sharpe > 0.5 on ALL symbols
-POSITION SIZE: 0.25 (conservative for 4h volatility)
+TARGET: 50-100 trades/year on 1h, Sharpe > 0.5 on ALL symbols (BTC, ETH, SOL)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_bb_squeeze_donchian_1d_hma_atr_v1"
-timeframe = "4h"
+name = "mtf_1h_hma_rsi_pullback_4h12h_atr_v2"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -77,33 +68,6 @@ def calculate_rsi(close, period=14):
         rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi.fillna(50.0).values
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Band Width."""
-    close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean()
-    std = close_s.rolling(window=period, min_periods=period).std()
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bb_width = (upper - lower) / sma * 100.0
-    return upper.values, lower.values, bb_width.values
-
-def calculate_bb_width_percentile(bb_width, lookback=30):
-    """Calculate percentile rank of BB Width over lookback period."""
-    bb_width_s = pd.Series(bb_width)
-    # Percentile rank: where current value sits in recent distribution
-    bb_pct = bb_width_s.rolling(window=lookback, min_periods=lookback).apply(
-        lambda x: (x.iloc[-1] < x).mean() * 100, raw=False
-    )
-    return bb_pct.values
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high / lowest low over period)."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    upper = high_s.rolling(window=period, min_periods=period).max()
-    lower = low_s.rolling(window=period, min_periods=period).min()
-    return upper.values, lower.values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -111,24 +75,27 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 4h indicators (primary timeframe)
-    hma_9 = calculate_hma(close, 9)
-    hma_21 = calculate_hma(close, 21)
+    # Calculate 1h indicators (primary timeframe)
+    hma_16 = calculate_hma(close, 16)
+    hma_48 = calculate_hma(close, 48)
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)
+    rsi_14 = calculate_rsi(close, period=14)
     
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    bb_width_pct = calculate_bb_width_percentile(bb_width, lookback=30)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    # Calculate and align 12h HMA for macro bias
+    hma_12h_raw = calculate_hma(df_12h['close'].values, 21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate 1d HMA for macro trend (aligned properly with shift(1))
-    hma_1d_raw = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 4h HMA for medium-term trend
+    hma_4h_16_raw = calculate_hma(df_4h['close'].values, 16)
+    hma_4h_48_raw = calculate_hma(df_4h['close'].values, 48)
+    hma_4h_16_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_16_raw)
+    hma_4h_48_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_48_raw)
     
     signals = np.zeros(n)
-    POSITION_SIZE = 0.28
+    POSITION_SIZE = 0.25  # Conservative for 1h
     
     # Position tracking for stoploss
     in_position = False
@@ -142,59 +109,55 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(hma_9[i]) or np.isnan(hma_21[i]):
+        if np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(rsi_7[i]) or np.isnan(bb_width_pct[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_4h_16_aligned[i]) or np.isnan(hma_4h_48_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === MACRO BIAS (1d HMA) ===
-        price_above_hma_1d = close[i] > hma_1d_aligned[i]
-        price_below_hma_1d = close[i] < hma_1d_aligned[i]
+        # === MACRO BIAS (12h HMA) - SOFT FILTER ===
+        price_above_hma_12h = close[i] > hma_12h_aligned[i]
+        price_below_hma_12h = close[i] < hma_12h_aligned[i]
         
-        # === 4h TREND (HMA crossover) ===
-        hma_bullish = hma_9[i] > hma_21[i]
-        hma_bearish = hma_9[i] < hma_21[i]
+        # === 4h TREND (HMA crossover) - PRIMARY FILTER ===
+        hma_4h_bullish = hma_4h_16_aligned[i] > hma_4h_48_aligned[i]
+        hma_4h_bearish = hma_4h_16_aligned[i] < hma_4h_48_aligned[i]
         
-        # === VOLATILITY COMPRESSION (BB Squeeze) ===
-        # BB Width in bottom 30% of recent 30 bars = compression
-        bb_squeeze = bb_width_pct[i] < 30.0
+        # === 1h TREND (HMA crossover) - ENTRY TIMING ===
+        hma_1h_bullish = hma_16[i] > hma_48[i]
+        hma_1h_bearish = hma_16[i] < hma_48[i]
         
-        # === BREAKOUT CONFIRMATION (Donchian) ===
-        breakout_long = close[i] > donchian_upper[i]
-        breakout_short = close[i] < donchian_lower[i]
-        
-        # === MOMENTUM FILTER (RSI) ===
-        rsi_bullish = rsi_7[i] > 50.0
-        rsi_bearish = rsi_7[i] < 50.0
+        # === RSI PULLBACK SIGNALS (40-60 zone triggers frequently) ===
+        rsi_pullback_long = (rsi_14[i] >= 40.0) and (rsi_14[i] <= 60.0)
+        rsi_pullback_short = (rsi_14[i] >= 40.0) and (rsi_14[i] <= 60.0)
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # LONG ENTRY: 1d bullish + 4h bullish + BB squeeze + Donchian breakout + RSI > 50
-        if price_above_hma_1d and hma_bullish and bb_squeeze and breakout_long and rsi_bullish:
+        # LONG ENTRY: 4h bullish + 1h bullish + RSI pullback + 12h bias (soft)
+        if hma_4h_bullish and hma_1h_bullish and rsi_pullback_long:
             desired_signal = POSITION_SIZE
         
-        # SHORT ENTRY: 1d bearish + 4h bearish + BB squeeze + Donchian breakout + RSI < 50
-        elif price_below_hma_1d and hma_bearish and bb_squeeze and breakout_short and rsi_bearish:
+        # SHORT ENTRY: 4h bearish + 1h bearish + RSI pullback + 12h bias (soft)
+        elif hma_4h_bearish and hma_1h_bearish and rsi_pullback_short:
             desired_signal = -POSITION_SIZE
         
-        # === STOPLOSS CHECK (3.0 * ATR trailing) ===
+        # === STOPLOSS CHECK (2.5 * ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 3.0 * atr_14[i]
+            stop_price = highest_since_entry - 2.5 * atr_14[i]
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 3.0 * atr_14[i]
+            stop_price = lowest_since_entry + 2.5 * atr_14[i]
             if close[i] > stop_price:
                 stoploss_triggered = True
         
@@ -202,28 +165,24 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === TREND REVERSAL EXIT ===
-        # Exit long if 4h trend turns bearish
-        if in_position and position_side > 0 and hma_bearish:
+        if in_position and position_side > 0 and hma_4h_bearish:
             desired_signal = 0.0
         
-        # Exit short if 4h trend turns bullish
-        if in_position and position_side < 0 and hma_bullish:
+        if in_position and position_side < 0 and hma_4h_bullish:
             desired_signal = 0.0
         
-        # === MACRO TREND REVERSAL EXIT ===
-        # Exit long if 1d trend turns bearish
-        if in_position and position_side > 0 and price_below_hma_1d:
+        # === RSI EXTREME EXIT (take profit) ===
+        if in_position and position_side > 0 and rsi_14[i] > 70.0:
             desired_signal = 0.0
         
-        # Exit short if 1d trend turns bullish
-        if in_position and position_side < 0 and price_above_hma_1d:
+        if in_position and position_side < 0 and rsi_14[i] < 30.0:
             desired_signal = 0.0
         
-        # === HOLD LOGIC - maintain position if no exit triggered ===
+        # === HOLD LOGIC ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
-            if position_side > 0 and hma_bullish and price_above_hma_1d:
+            if position_side > 0 and hma_4h_bullish:
                 desired_signal = POSITION_SIZE
-            elif position_side < 0 and hma_bearish and price_below_hma_1d:
+            elif position_side < 0 and hma_4h_bearish:
                 desired_signal = -POSITION_SIZE
         
         # === UPDATE POSITION TRACKING ===
@@ -232,22 +191,13 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                if position_side > 0:
-                    highest_since_entry = close[i]
-                    lowest_since_entry = float('inf')
-                else:
-                    highest_since_entry = 0.0
-                    lowest_since_entry = close[i]
+                highest_since_entry = close[i] if position_side > 0 else float('inf')
+                lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(desired_signal) != position_side:
-                # Position flip
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                if position_side > 0:
-                    highest_since_entry = close[i]
-                    lowest_since_entry = float('inf')
-                else:
-                    highest_since_entry = 0.0
-                    lowest_since_entry = close[i]
+                highest_since_entry = close[i] if position_side > 0 else float('inf')
+                lowest_since_entry = close[i] if position_side < 0 else float('inf')
         else:
             if in_position:
                 in_position = False
