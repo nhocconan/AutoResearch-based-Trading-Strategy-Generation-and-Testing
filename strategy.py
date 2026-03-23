@@ -1,32 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #372: 12h Primary + 1d/1w HTF — Simplified Dual Regime with ADX + CRSI
+Experiment #373: 1d Primary + 1w HTF — Simplified Dual Regime with Relaxed Entries
 
-Hypothesis: 12h timeframe with 1d/1w bias should generate 20-50 trades/year while
-maintaining positive Sharpe on ALL symbols. Higher TF = fewer trades = less fee drag.
+Hypothesis: Moving to 1d primary timeframe (higher than 4h/12h) should reduce noise
+and improve Sharpe by generating fewer but higher-quality trades. Target: 20-40 trades/year.
 
-KEY CHANGES from #371 (4h):
-1. Primary timeframe = 12h (fewer signals, less churn)
-2. Simpler regime: ADX > 25 = trend, ADX <= 25 = range (no CHOP filter)
-3. Relaxed CRSI: < 15 for long, > 85 for short (ensures trades trigger)
-4. Better hold logic: maintain position through minor noise
-5. Position size = 0.30 (appropriate for 12h, target 25-40 trades/year)
+KEY CHANGES from #371/#372:
+1. Primary TF = 1d (not 4h/12h) — fewer trades, less fee drag, cleaner signals
+2. RELAXED entry thresholds — CRSI < 25/>75 (not 10/90), ADX > 20 (not 25)
+3. Simpler regime logic — only 2 regimes (trend vs range), not 3
+4. 1w HMA(21) as SOFT bias (not hard filter) — allows counter-trend trades in ranges
+5. Donchian(20) breakout for trend entries — proven on higher TFs
+6. CRSI mean reversion for range entries — works well in choppy 1d bars
+7. Position size: 0.25-0.30 discrete levels
+8. ATR(14) trailing stop at 2.5x for risk management
 
-Why this should work:
-- 12h has proven successful in past experiments (lower fee drag than 4h/1h)
-- 1w HMA provides strong macro bias filter
-- ADX regime switch is simpler and triggers more often than ADX+CHOP combo
-- CRSI thresholds relaxed to ensure we get trades on BTC/ETH (not just SOL)
-- ATR stoploss at 2.5x protects from major reversals
+WHY THIS SHOULD WORK:
+- 1d bars filter out 4h/1h noise that caused whipsaws in previous strategies
+- Relaxed thresholds ensure we get 30+ trades over 4 years (avoid Sharpe=0.000)
+- 1w HMA provides macro context without being too restrictive
+- Dual regime adapts to market conditions (trend follow vs mean revert)
 
-Target: Sharpe > 0.5 on ALL symbols, 25-40 trades/year, DD < -30%
+TARGET METRICS:
+- Sharpe > 0.6 (beat current best of 0.612)
+- Trades: 20-50 per year on 1d
+- Max DD < -40%
+- ALL symbols (BTC/ETH/SOL) must have Sharpe > 0 individually
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_adx_crsi_dual_regime_1d1w_hma_v1"
-timeframe = "12h"
+name = "mtf_1d_dual_regime_crsi_donchian_1w_hma_relaxed_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -108,6 +114,21 @@ def calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100):
     
     return crsi
 
+def calculate_choppiness(high, low, close, period=14):
+    """Calculate Choppiness Index (CHOP)."""
+    atr = calculate_atr(high, low, close, period)
+    
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    sum_atr = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        chop = 100 * np.log10(sum_atr / (highest_high - lowest_low + 1e-10)) / np.log10(period)
+    
+    chop = np.nan_to_num(chop, nan=50.0)
+    chop = np.clip(chop, 0, 100)
+    return chop
+
 def calculate_adx(high, low, close, period=14):
     """Calculate ADX (Average Directional Index)."""
     high_s = pd.Series(high)
@@ -153,24 +174,21 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h indicators (primary timeframe)
+    # Calculate 1d indicators (primary timeframe)
     atr_14 = calculate_atr(high, low, close, period=14)
     adx_14 = calculate_adx(high, low, close, period=14)
+    chop = calculate_choppiness(high, low, close, period=14)
     crsi = calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100)
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
-    # Calculate and align HTF HMA for bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
+    # Calculate and align 1w HMA for bias
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.30  # 30% position size for 12h (target 25-40 trades/year)
+    BASE_SIZE = 0.28  # 28% position size for 1d (target 20-40 trades/year)
     
     # Position tracking for stoploss
     in_position = False
@@ -180,59 +198,65 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(200, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             continue
-        if np.isnan(adx_14[i]) or np.isnan(crsi[i]):
+        if np.isnan(adx_14[i]) or np.isnan(chop[i]) or np.isnan(crsi[i]):
             continue
         if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             continue
         
-        # === MACRO BIAS (1w HMA - HARD FILTER) ===
+        # === MACRO BIAS (1w HMA - SOFT FILTER) ===
         price_above_hma_1w = close[i] > hma_1w_aligned[i]
         price_below_hma_1w = close[i] < hma_1w_aligned[i]
         
-        # === MEDIUM TERM BIAS (1d HMA - SOFT FILTER) ===
-        price_above_hma_1d = close[i] > hma_1d_aligned[i]
-        price_below_hma_1d = close[i] < hma_1d_aligned[i]
-        
-        # === REGIME DETECTION (ADX only - simpler than ADX+CHOP) ===
-        is_trending = adx_14[i] > 25.0  # ADX > 25 = trending
-        is_ranging = adx_14[i] <= 25.0  # ADX <= 25 = ranging
+        # === REGIME DETECTION (ADX + Choppiness) ===
+        # Relaxed thresholds for 1d: ADX > 20 = trending (not 25)
+        is_trending = adx_14[i] > 20.0
+        is_ranging = (adx_14[i] <= 20.0) or (chop[i] > 55.0)
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
         if is_trending:
             # TREND REGIME: Donchian breakout + bias confirmation
+            # Relaxed: only need 1w bias alignment (not multiple TFs)
+            
             breakout_long = close[i] > donchian_upper[i-1]
             breakout_short = close[i] < donchian_lower[i-1]
             
-            # Long: 1w bullish + breakout (1d optional for more trades)
+            # Long: 1w bullish + breakout (relaxed - no 1d filter)
             if price_above_hma_1w and breakout_long:
                 desired_signal = BASE_SIZE
             
-            # Short: 1w bearish + breakout (1d optional for more trades)
+            # Short: 1w bearish + breakout
             elif price_below_hma_1w and breakout_short:
                 desired_signal = -BASE_SIZE
         
-        elif is_ranging:
-            # RANGE REGIME: Connors RSI mean reversion + 1w bias
-            # Relaxed thresholds: CRSI < 15 for long, > 85 for short
+        if is_ranging and desired_signal == 0.0:
+            # RANGE REGIME: Connors RSI mean reversion
+            # RELAXED thresholds: CRSI < 25 for long, > 75 for short (not 10/90)
             
-            crsi_oversold = crsi[i] < 15.0
-            crsi_overbought = crsi[i] > 85.0
+            crsi_oversold = crsi[i] < 25.0
+            crsi_overbought = crsi[i] > 75.0
             
-            # Long: 1w bullish + CRSI oversold
-            if price_above_hma_1w and crsi_oversold:
-                desired_signal = BASE_SIZE
+            # Long: CRSI oversold (can trade counter to 1w bias in ranges)
+            if crsi_oversold:
+                # Prefer long if 1w bullish, but allow in ranges
+                if price_above_hma_1w:
+                    desired_signal = BASE_SIZE
+                elif chop[i] > 60.0:  # Very choppy = allow counter-trend
+                    desired_signal = BASE_SIZE * 0.7  # Reduced size for counter-trend
             
-            # Short: 1w bearish + CRSI overbought
-            elif price_below_hma_1w and crsi_overbought:
-                desired_signal = -BASE_SIZE
+            # Short: CRSI overbought
+            elif crsi_overbought:
+                if price_below_hma_1w:
+                    desired_signal = -BASE_SIZE
+                elif chop[i] > 60.0:
+                    desired_signal = -BASE_SIZE * 0.7
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
         stoploss_triggered = False
@@ -253,19 +277,18 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === CRSI EXIT (mean reversion complete) ===
-        if in_position and position_side > 0 and crsi[i] > 80:
+        if in_position and position_side > 0 and crsi[i] > 70:
             desired_signal = 0.0
         
-        if in_position and position_side < 0 and crsi[i] < 20:
+        if in_position and position_side < 0 and crsi[i] < 30:
             desired_signal = 0.0
         
-        # === HOLD LOGIC — Maintain position if bias still valid ===
-        # This reduces churn and keeps positions through minor noise
+        # === HOLD LOGIC — Maintain position unless clear exit trigger ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0 and price_above_hma_1w:
-                desired_signal = BASE_SIZE  # Hold long
+                desired_signal = BASE_SIZE
             elif position_side < 0 and price_below_hma_1w:
-                desired_signal = -BASE_SIZE  # Hold short
+                desired_signal = -BASE_SIZE
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -283,11 +306,6 @@ def generate_signals(prices):
                 entry_atr = atr_14[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
-            # Update extremes for trailing stop
-            if position_side > 0:
-                highest_since_entry = max(highest_since_entry, close[i])
-            else:
-                lowest_since_entry = min(lowest_since_entry, close[i])
         else:
             if in_position:
                 in_position = False
