@@ -23,13 +23,13 @@ from datetime import datetime
 from pathlib import Path
 
 from llm_client import LLMClient
-from evaluate import TSV_HEADER, compute_metrics, metrics_to_tsv_row
+from evaluate import compute_metrics
 from backtest import run_strategy_backtest
 from prepare import load_config
+from results_db import append_results, load_results as _load_results_db  # noqa: F401
 
 
 STRATEGY_FILE = Path("strategy.py")
-RESULTS_FILE = Path("results.tsv")
 STRATEGIES_DIR = Path("strategies")
 DOCS_DIR = Path("docs/strategies")
 
@@ -157,49 +157,10 @@ def git_revert_strategy():
 
 
 def append_results(results: list[dict], status: str, description: str, period: str = "train"):
-    """Append experiment results to results.tsv with FILE LOCKING to prevent duplicates.
-    Uses fcntl.flock to ensure only one process writes at a time."""
-    import fcntl
-
-    if not RESULTS_FILE.exists():
-        RESULTS_FILE.write_text(TSV_HEADER + "\n")
-
-    commit = get_git_commit()
-
-    # ATOMIC read-check-write with file lock
-    with open(RESULTS_FILE, "r+") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)  # exclusive lock — blocks other writers
-        try:
-            # Read existing keys while holding lock
-            existing = set()
-            f.seek(0)
-            for line in f:
-                parts = line.strip().split("\t")
-                if len(parts) >= 15 and parts[1] != "strategy":  # skip header
-                    existing.add((parts[1], parts[2], parts[14]))
-
-            # Append only new rows
-            f.seek(0, 2)  # seek to end
-            for m in results:
-                strategy_name = m.get("strategy", "unknown")
-                symbol = m["symbol"]
-                key = (strategy_name, symbol, period)
-                if key in existing:
-                    continue
-                existing.add(key)
-                row = metrics_to_tsv_row(
-                    metrics=m,
-                    strategy_name=strategy_name,
-                    symbol=symbol,
-                    commit=commit,
-                    status=status,
-                    description=description[:80],
-                    period=period,
-                )
-                f.write(row + "\n")
-            f.flush()
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)  # release lock
+    """Append experiment results to results.db (SQLite). Deduplicates on (strategy, symbol, period).
+    SQLite WAL mode handles concurrent writers without explicit file locking."""
+    from results_db import append_results as _db_append
+    _db_append(results, status, description, period)
 
 
 def save_strategy(strategy_name: str):
@@ -581,18 +542,16 @@ def main():
 
     # Initialize best_sharpe from existing results (don't start from -999)
     best_sharpe = 0.0  # Minimum bar: must beat Sharpe=0 (better than doing nothing)
-    if RESULTS_FILE.exists():
-        try:
-            import pandas as _pd
-            df = _pd.read_csv(RESULTS_FILE, sep="\t")
-            kept = df[df["status"] == "keep"]
-            if len(kept) > 0 and "sharpe" in kept.columns:
-                prev_best = kept.groupby("strategy")["sharpe"].mean().max()
-                if prev_best > best_sharpe:
-                    best_sharpe = float(prev_best)
-                    print(f"  Resuming from previous best Sharpe: {best_sharpe:.3f}")
-        except Exception:
-            pass
+    try:
+        df = _load_results_db()
+        kept = df[df["status"] == "keep"]
+        if len(kept) > 0 and "sharpe" in kept.columns:
+            prev_best = kept.groupby("strategy")["sharpe"].mean().max()
+            if prev_best > best_sharpe:
+                best_sharpe = float(prev_best)
+                print(f"  Resuming from previous best Sharpe: {best_sharpe:.3f}")
+    except Exception:
+        pass
 
     print("=" * 60)
     print("AUTONOMOUS RESEARCH LOOP STARTED")

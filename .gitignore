@@ -38,3 +38,7 @@ reports/*.png
 
 # Jupyter
 .ipynb_checkpoints/
+
+# SQLite WAL temp files (results.db itself IS tracked)
+results.db-wal
+results.db-shm

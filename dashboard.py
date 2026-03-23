@@ -20,21 +20,13 @@ import pandas as pd
 
 from validator import validate_strategy, ValidationResult
 
-RESULTS_FILE = Path("results.tsv")
 STRATEGIES_DIR = Path("strategies")
 STRATEGY_FILE = Path("strategy.py")
 
 
 def load_results() -> pd.DataFrame:
-    if not RESULTS_FILE.exists():
-        return pd.DataFrame()
-    try:
-        df = pd.read_csv(RESULTS_FILE, sep="\t")
-        if "period" not in df.columns:
-            df["period"] = "train"
-        return df
-    except Exception:
-        return pd.DataFrame()
+    from results_db import load_results as _db_load
+    return _db_load()
 
 
 def get_git_log(n: int = 20) -> str:
@@ -255,6 +247,34 @@ def render_html() -> str:
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Pre-compute test section (avoid nested f""" triple-quote issue in Python 3.11)
+    if test_total > 0:
+        test_section = (
+            '<div class="filter-bar" id="test-filter-bar">\n'
+            '  <label>Symbol:</label>\n'
+            '  <button class="filter-btn active" onclick="filterTable(\'test\', \'ALL\')">All</button>\n'
+            + ''.join(f'  <button class="filter-btn" onclick="filterTable(\'test\', \'{s}\')">{s}</button>\n' for s in symbols)
+            + '  <button class="filter-btn" onclick="filterTable(\'test\', \'AVG\')" style="border-color:#f0883e;color:#f0883e">Avg All</button>\n'
+            '  <span style="margin:0 8px;color:#30363d">|</span>\n'
+            '  <label>TF:</label>\n'
+            '  <button class="filter-btn active" onclick="filterTF(\'test\', \'ALL\')">All</button>\n'
+            + ''.join(f'  <button class="filter-btn" onclick="filterTF(\'test\', \'{tf}\')">{tf}</button>\n' for tf in timeframes)
+            + '  <span style="margin:0 8px;color:#30363d">|</span>\n'
+            '  <label>Status:</label>\n'
+            '  <button class="filter-btn active" onclick="filterStatus(\'test\', \'ALL\')">All</button>\n'
+            '  <button class="filter-btn" onclick="filterStatus(\'test\', \'keep\')" style="border-color:#2ecc71;color:#2ecc71">Keep</button>\n'
+            '  <button class="filter-btn" onclick="filterStatus(\'test\', \'discard\')" style="border-color:#e74c3c;color:#e74c3c">Discard</button>\n'
+            '  <span class="filter-info" id="test-filter-info"></span>\n'
+            '</div>\n'
+            '<table id="test-table">\n'
+            '  <thead><tr><th>Strategy</th><th>Symbol</th><th>TF</th><th>Sharpe</th><th>Return</th><th>Max DD</th><th>Win Rate</th><th>Trades</th><th>Status</th></tr></thead>\n'
+            f'  <tbody id="test-tbody-rows">{test_rows}</tbody>\n'
+            f'  <tbody id="test-tbody-avg" style="display:none">{test_avg_rows}</tbody>\n'
+            '</table>'
+        )
+    else:
+        test_section = '<p class="no-data">No test results yet — kept strategies are automatically evaluated on 2025+ data.</p>'
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -412,27 +432,7 @@ def render_html() -> str:
 </table>
 
 <h2>Test Results (2025+) <span style="font-size:0.7em;color:#8b949e">(click row for details)</span></h2>
-{f"""<div class="filter-bar" id="test-filter-bar">
-  <label>Symbol:</label>
-  <button class="filter-btn active" onclick="filterTable('test', 'ALL')">All</button>
-  {''.join(f'<button class="filter-btn" onclick="filterTable(&#39;test&#39;, &#39;{s}&#39;)">{s}</button>' for s in symbols)}
-  <button class="filter-btn" onclick="filterTable('test', 'AVG')" style="border-color:#f0883e;color:#f0883e">Avg All</button>
-  <span style="margin:0 8px;color:#30363d">|</span>
-  <label>TF:</label>
-  <button class="filter-btn active" onclick="filterTF('test', 'ALL')">All</button>
-  {''.join(f'<button class="filter-btn" onclick="filterTF(&#39;test&#39;, &#39;{tf}&#39;)">{tf}</button>' for tf in timeframes)}
-  <span style="margin:0 8px;color:#30363d">|</span>
-  <label>Status:</label>
-  <button class="filter-btn active" onclick="filterStatus('test', 'ALL')">All</button>
-  <button class="filter-btn" onclick="filterStatus('test', 'keep')" style="border-color:#2ecc71;color:#2ecc71">Keep</button>
-  <button class="filter-btn" onclick="filterStatus('test', 'discard')" style="border-color:#e74c3c;color:#e74c3c">Discard</button>
-  <span class="filter-info" id="test-filter-info"></span>
-</div>
-<table id="test-table">
-  <thead><tr><th>Strategy</th><th>Symbol</th><th>TF</th><th>Sharpe</th><th>Return</th><th>Max DD</th><th>Win Rate</th><th>Trades</th><th>Status</th></tr></thead>
-  <tbody id="test-tbody-rows">{test_rows}</tbody>
-  <tbody id="test-tbody-avg" style="display:none">{test_avg_rows}</tbody>
-</table>""" if test_total > 0 else '<p class="no-data">No test results yet — kept strategies are automatically evaluated on 2025+ data.</p>'}
+{test_section}
 
 <h2>Current Strategy Compliance</h2>
 <div class="compliance-box">
@@ -1242,7 +1242,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8888)
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     args = parser.parse_args()
 
     server = HTTPServer((args.host, args.port), DashboardHandler)
