@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #163: 1d Primary + 1w HTF — Simplified Donchian Breakout Strategy
+Experiment #164: 4h Primary + 12h/1d HTF — Multi-HMA Trend Following with ADX Filter
 
-Hypothesis: Previous strategies failed due to over-filtering (CRSI + CHOP + multiple HTF).
-This strategy simplifies to proven components:
+Hypothesis: Previous CRSI mean-reversion strategies failed because 2025 bear/range market
+punishes counter-trend entries. This strategy switches to PURE trend-following:
 
-1) 1w HMA(21) for macro trend — trade WITH weekly trend only
-2) Donchian(20) breakout for entries — clean price action signal
-3) ATR(14) stoploss at 2.5x — mandatory risk management
-4) Volume filter — volume > 0.8x 20-bar avg (light filter)
-5) NO CRSI, NO Choppiness — these have failed consistently on BTC/ETH
+1) 4h HMA(21) - primary trend direction
+2) 12h HMA(48) - intermediate trend confirmation (slower than 4h)
+3) 1d HMA(21) - macro bias (only trade WITH 1d trend)
+4) ADX(14) > 20 - filter out choppy markets (no trades when ADX < 20)
+5) Donchian(20) breakout - entry trigger in trend direction
+6) ATR(14) trailing stop - 2.5x ATR for risk management
+7) Volume filter - volume > 0.8x 20-bar avg
 
-Key insight: 1d timeframe naturally limits trades to 20-50/year (low fee drag).
-Simpler logic = more reliable signals across all symbols (BTC/ETH/SOL).
+Key differences from failed strategies:
+- NO mean reversion (CRSI) - pure trend following
+- ADX filter prevents trades in chop (major cause of whipsaw losses)
+- All 3 HTF HMAs must align for full position size
+- Donchian breakout provides clear entry timing (not RSI extremes)
 
-Why this might work:
-- Donchian breakouts catch sustained moves (not whipsaws)
-- 1w HMA filters counter-trend trades (major cause of losses in 2022)
-- 1d timeframe = fewer trades = less fee drag
-- No mean reversion (CRSI) which fails in strong trends
-
-Target: 20-50 trades/year per symbol, Sharpe > 0.5 on ALL symbols
-Position size: 0.30 base (conservative for daily timeframe)
+Target: 20-50 trades/year on 4h, Sharpe > 0.5 on ALL symbols
+Position size: 0.25 base, 0.30 with full HTF confluence
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_hma_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_hma_adx_donchian_12h1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -50,8 +49,45 @@ def calculate_hma(close, period=21):
     hma = wma_diff.ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
     return hma.values
 
+def calculate_adx(high, low, close, period=14):
+    """
+    Calculate ADX (Average Directional Index).
+    ADX > 25 = trending, ADX < 20 = ranging/choppy
+    """
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    # True Range
+    tr1 = high_s - low_s
+    tr2 = (high_s - close_s.shift(1)).abs()
+    tr3 = (low_s - close_s.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    plus_dm = high_s.diff()
+    minus_dm = -low_s.diff()
+    
+    plus_dm = plus_dm.clip(lower=0)
+    minus_dm = minus_dm.clip(lower=0)
+    
+    # Filter: +DM only if > -DM, -DM only if > +DM
+    plus_dm = plus_dm.where(plus_dm > minus_dm, 0)
+    minus_dm = minus_dm.where(minus_dm > plus_dm, 0)
+    
+    # Smoothed values (Wilder's smoothing = EMA with span=period)
+    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
+    plus_di = 100.0 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / (atr + 1e-10))
+    minus_di = 100.0 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / (atr + 1e-10))
+    
+    # DX and ADX
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    return adx.values, plus_di.values, minus_di.values
+
 def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel upper and lower bands."""
+    """Calculate Donchian Channel (highest high / lowest low over period)."""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -64,27 +100,29 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HMA for macro trend direction
-    hma_1w = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
-    
-    # Calculate 1d indicators
+    # Calculate 4h indicators (primary timeframe)
     atr_14 = calculate_atr(high, low, close, period=14)
+    adx_14, plus_di, minus_di = calculate_adx(high, low, close, period=14)
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    hma_4h = calculate_hma(close, period=21)
+    
+    # Calculate 12h HMA for intermediate trend
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=48)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    
+    # Calculate 1d HMA for macro bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
     # Volume average (20-bar)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Price momentum (ROC 10)
-    roc_10 = np.zeros(n)
-    for i in range(10, n):
-        if close[i-10] != 0:
-            roc_10[i] = (close[i] - close[i-10]) / close[i-10] * 100
-    
     signals = np.zeros(n)
-    POSITION_SIZE = 0.30
+    POSITION_SIZE_BASE = 0.25
+    POSITION_SIZE_MAX = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -95,11 +133,11 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(hma_1w_aligned[i]) or hma_1w_aligned[i] == 0:
+        if np.isnan(hma_4h[i]) or np.isnan(atr_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(atr_14[i]) or atr_14[i] == 0:
+        if np.isnan(adx_14[i]) or np.isnan(donchian_upper[i]):
             continue
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             continue
         if np.isnan(vol_avg[i]) or vol_avg[i] == 0:
             continue
@@ -107,41 +145,64 @@ def generate_signals(prices):
         # === VOLUME FILTER ===
         volume_ok = volume[i] > 0.8 * vol_avg[i]
         
-        # === HTF TREND BIAS (1w HMA) ===
-        price_above_hma_1w = close[i] > hma_1w_aligned[i]
-        price_below_hma_1w = close[i] < hma_1w_aligned[i]
+        # === ADX TREND STRENGTH FILTER ===
+        # Only trade when ADX > 20 (trending market)
+        trend_strength_ok = adx_14[i] > 20.0
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Breakout above upper band
-        breakout_long = close[i] > donchian_upper[i-1] and close[i-1] <= donchian_upper[i-1]
-        # Breakout below lower band
-        breakout_short = close[i] < donchian_lower[i-1] and close[i-1] >= donchian_lower[i-1]
+        # === HTF TREND ALIGNMENT ===
+        # 4h trend
+        price_above_hma_4h = close[i] > hma_4h[i]
+        price_below_hma_4h = close[i] < hma_4h[i]
         
-        # === MOMENTUM CONFIRMATION ===
-        momentum_positive = roc_10[i] > 0
-        momentum_negative = roc_10[i] < 0
+        # 12h trend
+        price_above_hma_12h = close[i] > hma_12h_aligned[i]
+        price_below_hma_12h = close[i] < hma_12h_aligned[i]
+        
+        # 1d macro bias
+        price_above_hma_1d = close[i] > hma_1d_aligned[i]
+        price_below_hma_1d = close[i] < hma_1d_aligned[i]
+        
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
+        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # Long: Donchian breakout + price above 1w HMA + volume + momentum
-        if breakout_long and price_above_hma_1w and volume_ok and momentum_positive:
-            new_signal = POSITION_SIZE
+        # --- LONG ENTRY ---
+        # All HTF trends bullish + ADX strong + Donchian breakout + volume
+        if (price_above_hma_4h and price_above_hma_12h and price_above_hma_1d and
+            trend_strength_ok and breakout_long and volume_ok):
+            # Full size if all 3 HTF aligned
+            new_signal = POSITION_SIZE_MAX
         
-        # Short: Donchian breakout + price below 1w HMA + volume + momentum
-        if breakout_short and price_below_hma_1w and volume_ok and momentum_negative:
-            new_signal = -POSITION_SIZE
+        # Partial long if 4h + 12h aligned (1d neutral or bullish)
+        elif (price_above_hma_4h and price_above_hma_12h and
+              trend_strength_ok and breakout_long and volume_ok):
+            new_signal = POSITION_SIZE_BASE
+        
+        # --- SHORT ENTRY ---
+        # All HTF trends bearish + ADX strong + Donchian breakout + volume
+        if (price_below_hma_4h and price_below_hma_12h and price_below_hma_1d and
+            trend_strength_ok and breakout_short and volume_ok):
+            # Full size if all 3 HTF aligned
+            new_signal = -POSITION_SIZE_MAX
+        
+        # Partial short if 4h + 12h aligned (1d neutral or bearish)
+        elif (price_below_hma_4h and price_below_hma_12h and
+              trend_strength_ok and breakout_short and volume_ok):
+            new_signal = -POSITION_SIZE_BASE
         
         # === HOLD POSITION LOGIC ===
-        # Hold if in position and no exit signal
+        # Hold if in position and trend still valid (no exit signal yet)
         if in_position and new_signal == 0.0:
             if position_side > 0:
-                # Hold long if price still above 1w HMA
-                if price_above_hma_1w:
+                # Hold long if price still above 4h HMA and ADX still strong
+                if price_above_hma_4h and adx_14[i] > 18.0:
                     new_signal = signals[i-1] if i > 0 else 0.0
             elif position_side < 0:
-                # Hold short if price still below 1w HMA
-                if price_below_hma_1w:
+                # Hold short if price still below 4h HMA and ADX still strong
+                if price_below_hma_4h and adx_14[i] > 18.0:
                     new_signal = signals[i-1] if i > 0 else 0.0
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
@@ -165,13 +226,13 @@ def generate_signals(prices):
         if stoploss_triggered:
             new_signal = 0.0
         
-        # === EXIT ON TREND REVERSAL ===
-        # Exit long if price crosses below 1w HMA
-        if in_position and position_side > 0 and price_below_hma_1w:
+        # === TREND REVERSAL EXIT ===
+        # Exit long if price crosses below 4h HMA
+        if in_position and position_side > 0 and price_below_hma_4h:
             new_signal = 0.0
         
-        # Exit short if price crosses above 1w HMA
-        if in_position and position_side < 0 and price_above_hma_1w:
+        # Exit short if price crosses above 4h HMA
+        if in_position and position_side < 0 and price_above_hma_4h:
             new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
