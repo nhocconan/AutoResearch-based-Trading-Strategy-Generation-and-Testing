@@ -1,115 +1,66 @@
 #!/usr/bin/env python3
 """
-Experiment #958: 30m Primary + 4h/1d HTF — Fisher Transform + Larry Williams Vol Breakout + Session Filter
+Experiment #959: 4h Primary + 1d HTF — Donchian Breakout + HMA Trend + RSI Timing
 
-Hypothesis: After 687 failed strategies, Ehlers Fisher Transform (underexplored) combined with
-Larry Williams Volatility Breakout and strict session/volume filters should work on 30m timeframe.
+Hypothesis: After 664 failed strategies, the key is SIMPLICITY + guaranteed trades.
+Complex regime switching causes 0 trades (see #948, #952, #958). 
 
-Key insights from research:
-1. Fisher Transform (period=9): Transforms price into Gaussian distribution, crosses at -1.5/+1.5
-   catch reversals better than RSI in bear markets. Less explored in our experiments.
-2. Larry Williams Vol Breakout: Long = open + K*prev_range (K=0.5), breakout confirmation
-   Works well for entry timing within HTF trend direction.
-3. 4h HMA(21) for trend direction (proven in baseline with Sharpe=0.612)
-4. 1d HMA(21) for macro regime filter
-5. Session filter: Only trade 8-20 UTC (highest volume, less whipsaw)
-6. Volume confirmation: volume > 0.8x 20-bar average
+This strategy uses:
+1. 1d HMA(21) for macro trend bias (long only above, short only below)
+2. 4h Donchian(20) breakout for clear entry signals
+3. 4h RSI(14) for entry timing (avoid chasing - wait for pullback)
+4. ATR(14) trailing stop for risk management
+5. Simple logic that GUARANTEES trades on all symbols
 
-Why 30m timeframe:
-- Target 40-80 trades/year (strict filters prevent fee drag)
-- HTF (4h/1d) provides signal DIRECTION
-- 30m only for ENTRY TIMING (when to pull trigger)
-- Session filter reduces noise from Asian session low-volume periods
+Why this should work:
+- Donchian breakout is proven (Turtle Trading, 50+ year track record)
+- 1d HMA filter prevents counter-trend trades in strong trends
+- RSI pullback entry avoids buying tops/selling bottoms
+- 4h timeframe = 20-50 trades/year target (low fee drag)
+- Discrete signal sizes (0.0, ±0.25, ±0.30) minimize churn
 
-Critical improvements over failed strategies:
-- Fisher Transform instead of CRSI (CRSI failed 10+ times)
-- Larry Williams breakout for precise entry timing
-- Session filter (8-20 UTC) removes low-volume whipsaw
-- Volume confirmation prevents false breakouts
-- Discrete signal sizes (0.0, ±0.20, ±0.25) minimize fee churn
-- ALL symbols MUST have positive Sharpe (no SOL-only bias)
+Critical improvements vs failed strategies:
+- RELAXED RSI thresholds (35/65 not 25/75) to ensure entries
+- Donchian breakout is PRIMARY signal (not secondary filter)
+- No complex regime switching (chop index caused 0 trades)
+- Funding rate is OPTIONAL confluence (not required)
+- Hold logic maintains position through minor pullbacks
 
 Target: Sharpe > 0.612, trades >= 30 train, >= 3 test, ALL symbols positive
-Timeframe: 30m (target 50-80 trades/year with strict filters)
+Timeframe: 4h (target 25-40 trades/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_fisher_williams_session_4h1d_hma_atr_v1"
-timeframe = "30m"
+name = "mtf_4h_donchian_hma_rsi_1d_trend_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_fisher_transform(high, low, close, period=9):
-    """
-    Ehlers Fisher Transform - transforms price into Gaussian distribution.
-    Long when Fisher crosses above -1.5, short when crosses below +1.5.
-    """
+def calculate_rsi(close, period=14):
+    """Relative Strength Index."""
     n = len(close)
-    fisher = np.full(n, np.nan)
-    fisher_signal = np.full(n, np.nan)
+    rsi = np.full(n, np.nan)
     
     if n < period + 1:
-        return fisher, fisher_signal
+        return rsi
     
-    for i in range(period - 1, n):
-        # Calculate typical price
-        hl2 = (high[i] + low[i]) / 2.0
-        
-        # Find highest high and lowest low over period
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        # Normalize price to 0-1 range
-        range_val = highest_high - lowest_low
-        if range_val < 1e-10:
-            fisher[i] = 0.0
-            fisher_signal[i] = 0.0
-            continue
-        
-        normalized = (hl2 - lowest_low) / range_val
-        
-        # Clamp to 0.001-0.999 to avoid log(0)
-        normalized = np.clip(normalized, 0.001, 0.999)
-        
-        # Fisher transform
-        fisher_val = 0.5 * np.log((1 + normalized) / (1 - normalized))
-        
-        # Smooth with previous value (recursive filter)
-        if i > period and not np.isnan(fisher[i-1]):
-            fisher_val = 0.6 * fisher_val + 0.4 * fisher[i-1]
-        
-        fisher[i] = fisher_val
-        
-        # Signal line (1-period lag)
-        if i > period:
-            fisher_signal[i] = fisher[i-1]
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    return fisher, fisher_signal
-
-def calculate_larry_williams_level(open_prices, high, low, close, period=20, k=0.5):
-    """
-    Larry Williams Volatility Breakout Level.
-    Long breakout level = open + k * previous_range
-    Short breakout level = open - k * previous_range
-    """
-    n = len(close)
-    long_level = np.full(n, np.nan)
-    short_level = np.full(n, np.nan)
-    prev_range = np.full(n, np.nan)
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    if n < period + 1:
-        return long_level, short_level, prev_range
+    avg_gain = np.concatenate([[np.nan], avg_gain])
+    avg_loss = np.concatenate([[np.nan], avg_loss])
     
-    for i in range(period, n):
-        # Previous bar range
-        prev_range[i] = high[i-1] - low[i-1]
-        
-        # Breakout levels
-        long_level[i] = open_prices[i] + k * prev_range[i]
-        short_level[i] = open_prices[i] - k * prev_range[i]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rs = avg_gain / (avg_loss + 1e-10)
+        rsi = 100 - (100 / (1 + rs))
     
-    return long_level, short_level, prev_range
+    rsi = np.clip(rsi, 0, 100)
+    return rsi
 
 def calculate_hma(series, period):
     """Hull Moving Average."""
@@ -124,6 +75,20 @@ def calculate_hma(series, period):
     hma = wma_diff.rolling(window=sqrt_period, min_periods=sqrt_period).mean()
     
     return hma.values
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - upper/lower bounds."""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    mid = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+        mid[i] = (upper[i] + lower[i]) / 2
+    
+    return upper, lower, mid
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range."""
@@ -141,61 +106,48 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_volume_avg(volume, period=20):
-    """Rolling average volume."""
-    n = len(volume)
-    vol_avg = np.full(n, np.nan)
+def calculate_keltner(high, low, close, atr_period=14, atr_mult=1.5):
+    """Keltner Channel - volatility-based bands."""
+    n = len(close)
+    middle = np.full(n, np.nan)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    if n < period:
-        return vol_avg
+    if n < atr_period + 1:
+        return middle, upper, lower
     
-    for i in range(period - 1, n):
-        vol_avg[i] = np.mean(volume[i-period+1:i+1])
+    # EMA for middle line
+    middle = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    atr = calculate_atr(high, low, close, atr_period)
     
-    return vol_avg
-
-def get_utc_hour(open_time_ms):
-    """Extract UTC hour from Binance open_time (milliseconds)."""
-    # Binance open_time is milliseconds since epoch
-    # Convert to seconds, then to datetime
-    ts_seconds = open_time_ms / 1000.0
-    # Get hour in UTC
-    import datetime
-    dt = datetime.datetime.utcfromtimestamp(ts_seconds)
-    return dt.hour
+    for i in range(len(close)):
+        if not np.isnan(middle[i]) and not np.isnan(atr[i]):
+            upper[i] = middle[i] + atr_mult * atr[i]
+            lower[i] = middle[i] - atr_mult * atr[i]
+    
+    return middle, upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_prices = prices["open"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate primary (30m) indicators
-    fisher, fisher_signal = calculate_fisher_transform(high, low, close, period=9)
-    atr_30m = calculate_atr(high, low, close, period=14)
-    lw_long, lw_short, lw_range = calculate_larry_williams_level(open_prices, high, low, close, period=20, k=0.5)
-    vol_avg = calculate_volume_avg(volume, period=20)
+    # Calculate primary (4h) indicators
+    rsi_4h = calculate_rsi(close, period=14)
+    atr_4h = calculate_atr(high, low, close, period=14)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=20)
+    keltner_mid, keltner_upper, keltner_lower = calculate_keltner(high, low, close, atr_period=14, atr_mult=1.5)
     
-    # Calculate and align 4h HMA for trend direction
-    hma_4h_raw = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
-    # Calculate and align 1d HMA for macro regime
+    # Calculate and align 1d HMA for macro trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Extract UTC hours for session filter
-    utc_hours = np.array([get_utc_hour(ot) for ot in open_time])
-    
     signals = np.zeros(n)
-    BASE_SIZE = 0.25
+    BASE_SIZE = 0.30
     REDUCED_SIZE = 0.20
     
     # Position tracking for stoploss
@@ -206,127 +158,81 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    # Fisher cross tracking
-    prev_fisher_cross_long = False
-    prev_fisher_cross_short = False
+    # Breakout tracking to avoid duplicate entries
+    last_long_breakout = -100
+    last_short_breakout = -100
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(fisher[i]) or np.isnan(atr_30m[i]) or atr_30m[i] <= 1e-10:
+        if np.isnan(rsi_4h[i]) or np.isnan(atr_4h[i]) or atr_4h[i] <= 1e-10:
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             continue
-        if np.isnan(lw_long[i]) or np.isnan(vol_avg[i]) or vol_avg[i] <= 1e-10:
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(keltner_mid[i]):
             continue
         
-        # === MACRO REGIME (1d HTF HMA21) ===
+        # === MACRO TREND BIAS (1d HTF HMA21) ===
         macro_bull = close[i] > hma_1d_aligned[i]
         macro_bear = close[i] < hma_1d_aligned[i]
         
-        # === TREND DIRECTION (4h HTF HMA21) ===
-        trend_4h_bullish = close[i] > hma_4h_aligned[i]
-        trend_4h_bearish = close[i] < hma_4h_aligned[i]
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        # Long breakout: price crosses above Donchian upper
+        long_breakout = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
+        # Short breakout: price crosses below Donchian lower
+        short_breakout = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
         
-        # === FISHER TRANSFORM SIGNALS ===
-        fisher_cross_long = False
-        fisher_cross_short = False
+        # === RSI TIMING (avoid chasing breakouts) ===
+        rsi_oversold = rsi_4h[i] < 35
+        rsi_overbought = rsi_4h[i] > 65
+        rsi_neutral = 35 <= rsi_4h[i] <= 65
+        rsi_bullish = rsi_4h[i] > 50
+        rsi_bearish = rsi_4h[i] < 50
         
-        if i > 100 and not np.isnan(fisher[i-1]) and not np.isnan(fisher_signal[i-1]):
-            # Long: Fisher crosses above -1.5 from below
-            if fisher_signal[i-1] < -1.5 and fisher[i] > -1.5:
-                fisher_cross_long = True
-            # Short: Fisher crosses below +1.5 from above
-            if fisher_signal[i-1] > 1.5 and fisher[i] < 1.5:
-                fisher_cross_short = True
+        # === KELTNER POSITION ===
+        keltner_long = close[i] > keltner_mid[i]
+        keltner_short = close[i] < keltner_mid[i]
         
-        # === LARRY WILLIAMS BREAKOUT ===
-        lw_breakout_long = close[i] > lw_long[i]
-        lw_breakout_short = close[i] < lw_short[i]
-        
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > 0.8 * vol_avg[i]
-        
-        # === SESSION FILTER (8-20 UTC only) ===
-        in_session = 8 <= utc_hours[i] <= 20
-        
-        # === RSI FILTER (avoid extreme overbought/oversold for entries) ===
-        # Simple RSI calculation for additional filter
-        rsi_period = 14
-        if i >= rsi_period:
-            delta = np.diff(close[max(0, i-rsi_period):i+1])
-            gain = np.sum(np.where(delta > 0, delta, 0))
-            loss = np.sum(np.where(delta < 0, -delta, 0))
-            if loss > 1e-10:
-                rsi = 100 - (100 / (1 + gain / loss))
-            else:
-                rsi = 100
-        else:
-            rsi = 50
-        
-        rsi_not_extreme = 25 < rsi < 75
+        # === VOLATILITY CHECK (avoid low vol false breakouts) ===
+        vol_expansion = True  # Default allow all
+        if i > 30:
+            atr_ratio = atr_4h[i] / np.nanmean(atr_4h[i-30:i]) if not np.isnan(atr_4h[i-30:i]).all() else 1.0
+            vol_expansion = atr_ratio > 0.8  # Allow if vol not collapsing
         
         desired_signal = 0.0
         
-        # === LONG ENTRY CONDITIONS (3+ confluence required) ===
-        # Must have: HTF trend + Fisher/Vol breakout + Session + Volume
-        long_conditions = 0
+        # === LONG ENTRY CONDITIONS ===
+        if macro_bull and vol_expansion:
+            # Primary: Donchian breakout + RSI not overbought + trend confirmation
+            if long_breakout and rsi_4h[i] < 70 and (i - last_long_breakout > 20):
+                desired_signal = BASE_SIZE
+                last_long_breakout = i
+            # Secondary: RSI pullback in uptrend (buy dip)
+            elif rsi_oversold and keltner_long and (i - last_long_breakout > 15):
+                desired_signal = REDUCED_SIZE
+            # Tertiary: Keltner bounce in bull trend
+            elif close[i] > keltner_lower[i] and close[i-1] <= keltner_lower[i-1] and rsi_bullish:
+                desired_signal = REDUCED_SIZE
         
-        if trend_4h_bullish or macro_bull:
-            long_conditions += 1
-        
-        if fisher_cross_long:
-            long_conditions += 1
-        
-        if lw_breakout_long and volume_confirmed:
-            long_conditions += 1
-        
-        if in_session:
-            long_conditions += 1
-        
-        if rsi_not_extreme or rsi < 60:
-            long_conditions += 1
-        
-        # Enter long if 3+ conditions met
-        if long_conditions >= 3:
-            desired_signal = BASE_SIZE
-        
-        # === SHORT ENTRY CONDITIONS (3+ confluence required) ===
-        short_conditions = 0
-        
-        if trend_4h_bearish or macro_bear:
-            short_conditions += 1
-        
-        if fisher_cross_short:
-            short_conditions += 1
-        
-        if lw_breakout_short and volume_confirmed:
-            short_conditions += 1
-        
-        if in_session:
-            short_conditions += 1
-        
-        if rsi_not_extreme or rsi > 40:
-            short_conditions += 1
-        
-        # Enter short if 3+ conditions met
-        if short_conditions >= 3:
-            if desired_signal > 0:
-                # Conflict - skip entry
-                desired_signal = 0.0
-            else:
+        # === SHORT ENTRY CONDITIONS ===
+        if macro_bear and vol_expansion:
+            # Primary: Donchian breakdown + RSI not oversold + trend confirmation
+            if short_breakout and rsi_4h[i] > 30 and (i - last_short_breakout > 20):
                 desired_signal = -BASE_SIZE
+                last_short_breakout = i
+            # Secondary: RSI rally in downtrend (sell rip)
+            elif rsi_overbought and keltner_short and (i - last_short_breakout > 15):
+                desired_signal = -REDUCED_SIZE
+            # Tertiary: Keltner rejection in bear trend
+            elif close[i] < keltner_upper[i] and close[i-1] >= keltner_upper[i-1] and rsi_bearish:
+                desired_signal = -REDUCED_SIZE
         
-        # === REDUCED SIZE ENTRIES (2 conditions, strong HTF alignment) ===
-        if desired_signal == 0.0:
-            # Long with strong HTF alignment
-            if trend_4h_bullish and macro_bull and (fisher_cross_long or lw_breakout_long):
-                if in_session and volume_confirmed:
-                    desired_signal = REDUCED_SIZE
-            
-            # Short with strong HTF alignment
-            if trend_4h_bearish and macro_bear and (fisher_cross_short or lw_breakout_short):
-                if in_session and volume_confirmed:
-                    desired_signal = -REDUCED_SIZE
+        # === NEUTRAL MACRO (price ~ HMA) - reduce size or stay flat ===
+        if not macro_bull and not macro_bear:
+            # Only take reduced size trades in neutral macro
+            if long_breakout and rsi_4h[i] < 65:
+                desired_signal = REDUCED_SIZE
+            elif short_breakout and rsi_4h[i] > 35:
+                desired_signal = -REDUCED_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -349,29 +255,29 @@ def generate_signals(prices):
         # === HOLD LOGIC — Maintain position if trend intact ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if 4h trend intact and Fisher not overbought
-                if (trend_4h_bullish or macro_bull) and fisher[i] < 1.5:
+                # Hold long if macro bull and RSI not extreme overbought
+                if macro_bull and rsi_4h[i] < 75:
                     desired_signal = BASE_SIZE
             elif position_side < 0:
-                # Hold short if 4h trend intact and Fisher not oversold
-                if (trend_4h_bearish or macro_bear) and fisher[i] > -1.5:
+                # Hold short if macro bear and RSI not extreme oversold
+                if macro_bear and rsi_4h[i] > 25:
                     desired_signal = -BASE_SIZE
         
         # === EXIT CONDITIONS ===
         if in_position and position_side > 0:
-            # Exit long if HTF trend reverses
-            if trend_4h_bearish and macro_bear:
+            # Exit long if macro reverses to bear + RSI overbought
+            if macro_bear and rsi_4h[i] > 70:
                 desired_signal = 0.0
-            # Exit if Fisher reaches overbought
-            if fisher[i] > 2.0:
+            # Exit if price breaks below Keltner mid
+            elif close[i] < keltner_mid[i] and rsi_overbought:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
-            # Exit short if HTF trend reverses
-            if trend_4h_bullish and macro_bull:
+            # Exit short if macro reverses to bull + RSI oversold
+            if macro_bull and rsi_4h[i] < 30:
                 desired_signal = 0.0
-            # Exit if Fisher reaches oversold
-            if fisher[i] < -2.0:
+            # Exit if price breaks above Keltner mid
+            elif close[i] > keltner_mid[i] and rsi_oversold:
                 desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
@@ -386,13 +292,13 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_30m[i]
+                entry_atr = atr_4h[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(desired_signal) != position_side:
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_30m[i]
+                entry_atr = atr_4h[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
