@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
 run_systematic.py - Systematic combinatorial strategy search
-=============================================================
-Tests ALL indicator combinations instead of relying on LLM creativity.
-Much more efficient: 960 combinations tested systematically.
+Tests ALL indicator combinations. Results ALWAYS match saved files.
 """
 import random
-import sys
 import time
 from pathlib import Path
 
@@ -15,105 +12,98 @@ from strategy_generator import (
     generate_strategy, get_all_combos
 )
 from backtest import run_strategy_backtest
-from evaluate import compute_metrics, metrics_to_tsv_row, TSV_HEADER
+from evaluate import compute_metrics
+from agent_research import append_results
 
-RESULTS_FILE = Path("results.tsv")
 STRATEGIES_DIR = Path("strategies")
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 
-def test_strategy(code, symbols=SYMBOLS):
-    """Test a strategy on all symbols, train+test, per-symbol."""
-    tmp = Path("/tmp/_sys_strategy.py")
-    tmp.write_text(code)
-
-    results = {"train": {}, "test": {}}
-    kept_symbols = []
-
-    for sym in symbols:
-        # Train
-        try:
-            r = run_strategy_backtest(str(tmp), sym, "train")
-            m = compute_metrics(r)
-            results["train"][sym] = m
-            if m["sharpe_ratio"] > 0 and m["num_trades"] >= 5:
-                # Test
-                try:
-                    rt = run_strategy_backtest(str(tmp), sym, "test")
-                    mt = compute_metrics(rt)
-                    results["test"][sym] = mt
-                    if mt["sharpe_ratio"] > 0 and mt["num_trades"] >= 3:
-                        kept_symbols.append(sym)
-                except:
-                    pass
-        except:
-            pass
-
-    return results, kept_symbols
-
-
 def main():
     combos = get_all_combos()
-    random.shuffle(combos)  # randomize order for diversity
-
-    if not RESULTS_FILE.exists():
-        RESULTS_FILE.write_text(TSV_HEADER + "\n")
-
+    random.shuffle(combos)
     STRATEGIES_DIR.mkdir(exist_ok=True)
+
     tested = 0
     kept = 0
 
     print(f"Systematic search: {len(combos)} combinations")
-    print(f"{'='*60}")
 
     for trend_name, entry_name, regime_name, tf in combos:
         trend_info = TREND_INDICATORS[trend_name]
         entry_info = ENTRY_FILTERS[entry_name]
         regime_info = REGIME_FILTERS[regime_name]
-
-        # Pick default params (first value of each)
         trend_params = {k: v[0] for k, v in trend_info["params"].items()}
         entry_params = {k: v[0] for k, v in entry_info["params"].items()}
         regime_params = {k: v[0] for k, v in regime_info["params"].items()}
 
         name = f"gen_{trend_name}_{entry_name}_{regime_name}_{tf}_v1"
-        size = 0.25
+        
+        # Skip if already saved and tested
+        saved_path = STRATEGIES_DIR / f"{name}.py"
+        if saved_path.exists():
+            continue
 
         try:
             code = generate_strategy(
-                trend_name, entry_name, regime_name, tf, size,
+                trend_name, entry_name, regime_name, tf, 0.25,
                 trend_params, entry_params, regime_params
             )
-        except Exception as e:
+        except Exception:
             continue
 
+        # SAVE FIRST, then test from saved file — guarantees consistency
+        saved_path.write_text(code)
+        
         tested += 1
         t0 = time.time()
-        results, kept_symbols = test_strategy(code)
+        any_kept = False
+
+        for sym in SYMBOLS:
+            try:
+                # Train from SAVED file
+                r = run_strategy_backtest(str(saved_path), sym, "train")
+                m = compute_metrics(r)
+                sharpe = m["sharpe_ratio"]
+                trades = m["num_trades"]
+                
+                m["strategy"] = name
+                m["symbol"] = sym
+                train_pass = sharpe > 0 and trades >= 5 and m["max_drawdown_pct"] > -50
+                append_results([m], "keep" if train_pass else "discard", name, "train")
+
+                if not train_pass:
+                    continue
+
+                # Test from SAME saved file
+                rt = run_strategy_backtest(str(saved_path), sym, "test")
+                mt = compute_metrics(rt)
+                mt["strategy"] = name
+                mt["symbol"] = sym
+                test_pass = mt["sharpe_ratio"] > 0 and mt["num_trades"] >= 3
+                append_results([mt], "keep" if test_pass else "discard", name, "test")
+
+                if test_pass:
+                    any_kept = True
+
+            except Exception:
+                continue
+
         dt = time.time() - t0
-
-        # Log results
-        for period in ["train", "test"]:
-            for sym, m in results.get(period, {}).items():
-                status = "keep" if sym in kept_symbols else "discard"
-                row = metrics_to_tsv_row(m, name, sym, "systematic", status, name, period)
-                with open(RESULTS_FILE, "a") as f:
-                    f.write(row + "\n")
-
-        if kept_symbols:
+        if any_kept:
             kept += 1
-            # Save strategy
-            (STRATEGIES_DIR / f"{name}.py").write_text(code)
-            print(f"✓ #{tested:>4d} {name}: KEPT for {kept_symbols} ({dt:.1f}s)")
+            print(f"✓ #{tested:>4d} {name} ({dt:.1f}s)")
         else:
-            train_sharpes = {s: f"{m['sharpe_ratio']:+.3f}" for s, m in results.get("train", {}).items()}
-            print(f"  #{tested:>4d} {trend_name}+{entry_name}+{regime_name} {tf}: {train_sharpes} ({dt:.1f}s)")
+            # Remove strategy file if nothing kept
+            if not any_kept and saved_path.exists():
+                saved_path.unlink()
+            if tested % 20 == 0:
+                print(f"  #{tested:>4d} {trend_name}+{entry_name}+{regime_name} {tf} ({dt:.1f}s)")
 
-        if tested % 50 == 0:
-            print(f"\n  ── Progress: {tested}/{len(combos)} tested, {kept} kept ──\n")
+        if tested % 100 == 0:
+            print(f"\n  ── Progress: {tested}/{len(combos)}, {kept} kept ──\n")
 
-    print(f"\n{'='*60}")
-    print(f"DONE: {tested} tested, {kept} kept")
+    print(f"\nDONE: {tested} tested, {kept} kept")
 
 
 if __name__ == "__main__":

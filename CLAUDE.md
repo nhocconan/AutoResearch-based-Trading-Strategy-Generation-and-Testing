@@ -28,6 +28,13 @@ But ALWAYS try all 3 symbols — don't stop at first failure.
 
 **0-trade strategies are ALWAYS discarded.** Sharpe=0.000 with 0 trades is NOT a pass.
 
+### Results File Integrity
+- `results.tsv` MUST have no duplicate (strategy, symbol, period) rows
+- ALL writes to results.tsv MUST use `append_results()` with file locking (fcntl.flock)
+- NEVER write to results.tsv directly with `open(f, "a")`
+- Multiple processes (LLM loop + systematic search) run simultaneously → file lock is mandatory
+- Git push ONLY on significant changes or when user requests, NOT on every experiment
+
 ## Data
 
 - Source: Binance Public Data (futures/um), downloaded via `prepare.py` + `update_data.py`

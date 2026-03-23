@@ -213,6 +213,85 @@ TREND_INDICATORS = {
         else: trend[i] = trend[i-1]""",
         "params": {},
     },
+    "camarilla_pivot": {
+        "code": """
+    # Camarilla Pivot Points (Pivot Boss method)
+    _prev_h = pd.Series(high).shift(1).values
+    _prev_l = pd.Series(low).shift(1).values
+    _prev_c = pd.Series(close).shift(1).values
+    _range = _prev_h - _prev_l
+    _r3 = _prev_c + _range * 1.1 / 4
+    _r4 = _prev_c + _range * 1.1 / 2
+    _s3 = _prev_c - _range * 1.1 / 4
+    _s4 = _prev_c - _range * 1.1 / 2
+    trend = np.zeros(n)
+    for i in range(2, n):
+        if np.isnan(_r4[i]): continue
+        if close[i] > _r4[i]: trend[i] = 1.0  # breakout above R4
+        elif close[i] < _s4[i]: trend[i] = -1.0  # breakdown below S4
+        elif _s3[i] < close[i] < _r3[i]: trend[i] = 0.0  # inside range = flat
+        else: trend[i] = trend[i-1]""",
+        "params": {},
+    },
+    "cpr_trend": {
+        "code": """
+    # Central Pivot Range (Pivot Boss) — narrow CPR = trending day, wide = range
+    _prev_h = pd.Series(high).shift(1).values
+    _prev_l = pd.Series(low).shift(1).values
+    _prev_c = pd.Series(close).shift(1).values
+    _pivot = (_prev_h + _prev_l + _prev_c) / 3
+    _bc = (_prev_h + _prev_l) / 2  # bottom central
+    _tc = 2 * _pivot - _bc  # top central
+    _cpr_width = np.abs(_tc - _bc)
+    _cpr_width_pct = np.where(_pivot > 0, _cpr_width / _pivot * 100, 0)
+    _cpr_median = pd.Series(_cpr_width_pct).rolling(20, min_periods=10).median().values
+    trend = np.zeros(n)
+    for i in range(20, n):
+        if np.isnan(_cpr_median[i]): continue
+        # Narrow CPR (< median) = expect trending → follow breakout direction
+        # Wide CPR (> median) = expect range → fade extremes
+        narrow = _cpr_width_pct[i] < _cpr_median[i]
+        if narrow:
+            if close[i] > _tc[i]: trend[i] = 1.0
+            elif close[i] < _bc[i]: trend[i] = -1.0
+            else: trend[i] = 0.0
+        else:
+            if close[i] > _tc[i]: trend[i] = -1.0  # fade
+            elif close[i] < _bc[i]: trend[i] = 1.0  # fade
+            else: trend[i] = 0.0""",
+        "params": {},
+    },
+    "cross_momentum": {
+        "code": """
+    # Cross-sectional momentum: rank BTC/ETH/SOL by 7d return, long strongest
+    _ret7 = pd.Series(close).pct_change(7*{bars_per_day}).values
+    _ret_ma = pd.Series(_ret7).rolling(3, min_periods=1).mean().values
+    trend = np.where(_ret_ma > 0, 1.0, np.where(_ret_ma < 0, -1.0, 0.0))""",
+        "params": {"bars_per_day": [1, 2, 6]},
+    },
+    "vol_regime_har": {
+        "code": """
+    # HAR volatility regime: realized vol predicts strategy mode
+    _ret2 = pd.Series(close).pct_change().values ** 2
+    _rv1d = pd.Series(_ret2).rolling({bars_1d}, min_periods={bars_1d}).sum().values
+    _rv5d = pd.Series(_ret2).rolling({bars_5d}, min_periods={bars_5d}).sum().values
+    _rv22d = pd.Series(_ret2).rolling({bars_22d}, min_periods={bars_22d}).sum().values
+    _rv_pred = np.zeros(n)
+    for i in range({bars_22d}+1, n):
+        _rv_pred[i] = 0.4*_rv1d[i-1] + 0.3*_rv5d[i-1] + 0.3*_rv22d[i-1]
+    _rv_median = pd.Series(_rv_pred).rolling(100, min_periods=50).median().values
+    # Low vol predicted = mean revert (long dips), high vol = trend follow
+    _ema_f = close_s.ewm(span=21, min_periods=21, adjust=False).mean().values
+    _ema_s = close_s.ewm(span=55, min_periods=55, adjust=False).mean().values
+    trend = np.zeros(n)
+    for i in range(100, n):
+        if np.isnan(_rv_median[i]) or _rv_median[i]==0: continue
+        if _rv_pred[i] < _rv_median[i]:  # low vol regime
+            trend[i] = 1.0 if close[i] < _ema_f[i] else (-1.0 if close[i] > _ema_s[i] else 0.0)
+        else:  # high vol regime
+            trend[i] = 1.0 if _ema_f[i] > _ema_s[i] else (-1.0 if _ema_f[i] < _ema_s[i] else 0.0)""",
+        "params": {"bars_1d": [6, 24], "bars_5d": [30, 120], "bars_22d": [132, 528]},
+    },
 }
 
 ENTRY_FILTERS = {
@@ -378,6 +457,41 @@ ENTRY_FILTERS = {
         if close[i-1]>_open[i-1] and _open[i]>close[i] and _open[i]>close[i-1] and close[i]<_open[i-1]:
             entry_ok_short[i] = True""",
         "params": {},
+    },
+    "vpin_proxy": {
+        "code": """
+    # VPIN proxy via close location value — order flow imbalance
+    _clv = np.where(high-low>0, (2*close-low-high)/(high-low), 0)
+    _buy_vol = np.where(_clv > 0, volume * _clv, 0)
+    _sell_vol = np.where(_clv < 0, volume * abs(_clv), 0)
+    _buy_sum = pd.Series(_buy_vol).rolling(20, min_periods=20).sum().values
+    _sell_sum = pd.Series(_sell_vol).rolling(20, min_periods=20).sum().values
+    _total = _buy_sum + _sell_sum
+    _imbalance = np.where(_total > 0, (_buy_sum - _sell_sum) / _total, 0)
+    entry_ok_long = np.array([_imbalance[i] > {long_thresh} for i in range(n)])
+    entry_ok_short = np.array([_imbalance[i] < {short_thresh} for i in range(n)])""",
+        "params": {"long_thresh": [0.2, 0.3], "short_thresh": [-0.2, -0.3]},
+    },
+    "session_filter": {
+        "code": """
+    # Time-of-day seasonality: best crypto returns 20:00-00:00 UTC
+    _hours = np.zeros(n)
+    if 'open_time' in prices.columns:
+        _hours = pd.to_datetime(prices['open_time']).dt.hour.values
+    entry_ok_long = np.array([{start_hour} <= int(_hours[i]) <= {end_hour} or int(_hours[i]) < {morning_end} for i in range(n)])
+    entry_ok_short = entry_ok_long.copy()""",
+        "params": {"start_hour": [18, 20], "end_hour": [23, 23], "morning_end": [2, 4]},
+    },
+    "vol_target_size": {
+        "code": """
+    # Volatility-targeted entry: only enter when vol is favorable
+    _ret = pd.Series(close).pct_change().values
+    _rv = pd.Series(_ret**2).rolling(20, min_periods=20).sum().values
+    _rv_annual = _rv * 365
+    _rv_median = pd.Series(_rv_annual).rolling(100, min_periods=50).median().values
+    entry_ok_long = np.array([not np.isnan(_rv_median[i]) and _rv_annual[i] < _rv_median[i] * {max_ratio} for i in range(n)])
+    entry_ok_short = entry_ok_long.copy()""",
+        "params": {"max_ratio": [1.5, 2.0]},
     },
 }
 
