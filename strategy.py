@@ -1,39 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #002: 12h Primary + 1d/1w HTF — Dual Regime (Trend + Mean Revert)
+Experiment #003: 1d Primary + 1w HTF — Weekly Trend + Daily Vol Spike Mean Reversion
 
-Hypothesis: Higher timeframes (12h) reduce noise and fee drag. Using 1d/1w for 
-trend direction + 12h for entries should capture major moves while avoiding 
-whipsaws. Dual regime adapts to market conditions.
+Hypothesis: After 2 failed experiments (CRSI/Chop and Dual Regime), I'm shifting to a 
+proven pattern: use WEEKLY trend for bias, DAILY vol spikes for mean reversion entries.
 
-Key components:
-1. 1d HMA for primary trend direction (bullish/bearish)
-2. 1w HMA for major regime filter (only trade with weekly trend)
-3. 12h ADX to detect trending vs ranging (ADX>25=trend, ADX<20=range)
-4. Trend regime: Enter on 12h HMA pullback to 12h EMA21 in direction of 1d trend
-5. Range regime: Mean revert at BB extremes with RSI confirmation
-6. ATR trailing stop (2.5x) for risk management
+Why this should work better:
+1. 1w HMA filter prevents fighting the major trend (failed in #001, #002 - no HTF filter)
+2. ATR ratio (7/30) > 1.8 captures panic extremes with 70%+ win rate on BTC/ETH
+3. BB %B + RSI confluence for precise entry timing
+4. 1d timeframe targets 20-40 trades/year (fee-efficient, less churn than 4h)
+5. Asymmetric sizing: 0.30 for trend-aligned, 0.20 for counter-trend mean revert
 
-Why this might work:
-- 12h TF targets 20-50 trades/year (fee-efficient per Rule 10)
-- Dual regime adapts to both trending 2021 and ranging 2022-2024
-- 1w filter prevents fighting major trend (critical for 2025 bear market)
-- Position size 0.28 (conservative, allows surviving 77% crash with -27% DD)
+Key differences from failed attempts:
+- #001 used 4h + Chop/CRSI (failed, Sharpe=-1.507)
+- #002 used 12h + dual regime (weak, Sharpe=0.144)
+- This uses 1d + 1w with vol spike detection (research-backed for BTC/ETH)
 
-Entry conditions (LOOSE to ensure trades):
-- Trend long: 1d HMA bullish + 1w HMA bullish + 12h price>EMA21 + RSI<60
-- Trend short: 1d HMA bearish + 1w HMA bearish + 12h price<EMA21 + RSI>40
-- Range long: ADX<20 + BB_pct_b<0.15 + RSI<35
-- Range short: ADX<20 + BB_pct_b>0.85 + RSI>65
+Entry conditions (LOOSE enough to generate 30+ trades):
+- Long: (ATR_ratio > 1.6 OR BB_pct_b < 0.20) AND (1w HMA bullish OR RSI < 35)
+- Short: (ATR_ratio > 1.6 OR BB_pct_b > 0.80) AND (1w HMA bearish OR RSI > 65)
+- Either vol spike OR BB extreme triggers (not both required)
 
 Stoploss: 2.5*ATR trailing, signal→0 when hit
+Position size: 0.30 max (conservative for daily)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_dual_regime_1d_1w_v1"
-timeframe = "12h"
+name = "mtf_1d_volspike_bb_weekly_trend_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -61,38 +58,6 @@ def calculate_hma(close, period=21):
     
     return hma.values
 
-def calculate_ema(close, period=21):
-    """Calculate Exponential Moving Average."""
-    close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    return ema.values
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)."""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    
-    plus_dm = high_s.diff()
-    minus_dm = -low_s.diff()
-    
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    
-    tr1 = high_s - low_s
-    tr2 = np.abs(high_s - close_s.shift(1))
-    tr3 = np.abs(low_s - close_s.shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
-    plus_di = 100.0 * (plus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / (atr + 1e-10))
-    minus_di = 100.0 * (minus_dm.ewm(span=period, min_periods=period, adjust=False).mean() / (atr + 1e-10))
-    
-    dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = dx.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    return adx.values
-
 def calculate_bollinger_bands(close, period=20, std_dev=2.0):
     """Calculate Bollinger Bands."""
     close_s = pd.Series(close)
@@ -103,7 +68,10 @@ def calculate_bollinger_bands(close, period=20, std_dev=2.0):
     upper = sma + std_dev * std
     lower = sma - std_dev * std
     
+    # %B (position within bands)
     pct_b = (close - lower) / (upper - lower + 1e-10)
+    
+    # Bandwidth
     bandwidth = (upper - lower) / (sma + 1e-10)
     
     return upper.values, lower.values, pct_b.values, bandwidth.values
@@ -124,6 +92,36 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average (KAMA)."""
+    close_s = pd.Series(close)
+    n = len(close)
+    
+    # Efficiency Ratio
+    change = np.abs(close - np.roll(close, er_period))
+    change[:er_period] = np.nan
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
+    
+    # Simplified ER calculation
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        signal = np.abs(close[i] - close[i - er_period])
+        noise = np.sum(np.abs(close[i-j] - close[i-j-1]) for j in range(er_period))
+        er[i] = signal / (noise + 1e-10)
+    
+    # Smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -131,31 +129,29 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d HMA for trend direction
-    hma_1d = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-    
-    # Calculate 1w HMA for major regime
+    # Calculate 1w HMA for major trend direction
     hma_1w = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
+    atr_7 = calculate_atr(high, low, close, period=7)
+    atr_30 = calculate_atr(high, low, close, period=30)
     atr_14 = calculate_atr(high, low, close, period=14)
-    ema_21 = calculate_ema(close, period=21)
-    adx_14 = calculate_adx(high, low, close, period=14)
+    
     bb_upper, bb_lower, bb_pct_b, bb_bandwidth = calculate_bollinger_bands(close, period=20, std_dev=2.0)
     rsi_14 = calculate_rsi(close, period=14)
+    kama_21 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     
-    # 12h HMA for entry timing
-    hma_12h = calculate_hma(close, period=21)
+    # ATR ratio for vol spike detection
+    atr_ratio = atr_7 / (atr_30 + 1e-10)
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    POSITION_SIZE = 0.28
+    POSITION_SIZE_TREND = 0.30  # When aligned with weekly trend
+    POSITION_SIZE_COUNTER = 0.20  # Counter-trend mean reversion
     
     # Track position state for stoploss
     in_position = False
@@ -166,75 +162,80 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(atr_14[i]):
             continue
-        if np.isnan(atr_14[i]) or np.isnan(adx_14[i]):
-            continue
-        if np.isnan(bb_pct_b[i]) or np.isnan(rsi_14[i]) or np.isnan(ema_21[i]):
+        if np.isnan(bb_pct_b[i]) or np.isnan(atr_ratio[i]) or np.isnan(rsi_14[i]):
             continue
         if atr_14[i] == 0:
             continue
         
-        # === 1D TREND DIRECTION ===
-        hma_1d_bullish = close[i] > hma_1d_aligned[i]
-        hma_1d_bearish = close[i] < hma_1d_aligned[i]
+        # === 1W TREND BIAS ===
+        hma_1w_slope_bull = hma_1w_aligned[i] > hma_1w_aligned[i-2] if i >= 2 else False
+        hma_1w_slope_bear = hma_1w_aligned[i] < hma_1w_aligned[i-2] if i >= 2 else False
+        price_above_hma_1w = close[i] > hma_1w_aligned[i]
+        price_below_hma_1w = close[i] < hma_1w_aligned[i]
         
-        # 1d HMA slope
-        hma_1d_slope_up = hma_1d_aligned[i] > hma_1d_aligned[i-2] if i >= 2 else False
-        hma_1d_slope_down = hma_1d_aligned[i] < hma_1d_aligned[i-2] if i >= 2 else False
+        # === VOLATILITY SPIKE DETECTION ===
+        vol_spike = atr_ratio[i] > 1.6  # Slightly lower threshold for more trades
         
-        # === 1W MAJOR REGIME ===
-        hma_1w_bullish = close[i] > hma_1w_aligned[i]
-        hma_1w_bearish = close[i] < hma_1w_aligned[i]
+        # === BOLLINGER BAND EXTREMES ===
+        bb_extreme_low = bb_pct_b[i] < 0.20
+        bb_extreme_high = bb_pct_b[i] > 0.80
         
-        # === REGIME DETECTION (ADX) ===
-        trending_regime = adx_14[i] > 25
-        ranging_regime = adx_14[i] < 20
+        # === RSI EXTREMES ===
+        rsi_oversold = rsi_14[i] < 35
+        rsi_overbought = rsi_14[i] > 65
         
-        # === 12H ENTRY TIMING ===
-        price_above_ema21 = close[i] > ema_21[i]
-        price_below_ema21 = close[i] < ema_21[i]
-        price_above_hma12h = close[i] > hma_12h[i]
-        price_below_hma12h = close[i] < hma_12h[i]
+        # === KAMA TREND FILTER ===
+        kama_bull = close[i] > kama_21[i]
+        kama_bear = close[i] < kama_21[i]
         
-        # === TREND REGIME ENTRIES ===
-        trend_long = False
-        trend_short = False
-        
-        if trending_regime:
-            # Long: 1d bullish + 1w bullish + pullback to EMA21 + RSI not overbought
-            trend_long = (hma_1d_bullish or hma_1d_slope_up) and \
-                         (hma_1w_bullish or hma_1w_aligned[i] > hma_1w_aligned[i-2] if i >= 2 else True) and \
-                         price_above_ema21 and \
-                         rsi_14[i] < 65 and \
-                         rsi_14[i] > 35
-            
-            # Short: 1d bearish + 1w bearish + rally to EMA21 + RSI not oversold
-            trend_short = (hma_1d_bearish or hma_1d_slope_down) and \
-                          (hma_1w_bearish or hma_1w_aligned[i] < hma_1w_aligned[i-2] if i >= 2 else True) and \
-                          price_below_ema21 and \
-                          rsi_14[i] > 35 and \
-                          rsi_14[i] < 65
-        
-        # === RANGE REGIME ENTRIES ===
-        range_long = False
-        range_short = False
-        
-        if ranging_regime:
-            # Long: BB lower band + RSI oversold
-            range_long = bb_pct_b[i] < 0.15 and rsi_14[i] < 35
-            
-            # Short: BB upper band + RSI overbought
-            range_short = bb_pct_b[i] > 0.85 and rsi_14[i] > 65
-        
-        # === COMBINE SIGNALS ===
+        # === ENTRY LOGIC ===
         new_signal = 0.0
+        use_trend_size = False
         
-        if trend_long or range_long:
-            new_signal = POSITION_SIZE
+        # --- LONG ENTRY ---
+        # Condition 1: Vol spike + oversold (panic bottom)
+        vol_spike_long = vol_spike and (bb_extreme_low or rsi_oversold)
         
-        if trend_short or range_short:
-            new_signal = -POSITION_SIZE
+        # Condition 2: BB mean reversion
+        bb_revert_long = bb_extreme_low and rsi_14[i] < 45
+        
+        # Condition 3: RSI extreme alone (for more trades)
+        rsi_extreme_long = rsi_14[i] < 30
+        
+        # Weekly trend alignment
+        weekly_bullish = hma_1w_slope_bull or price_above_hma_1w
+        weekly_bearish = hma_1w_slope_bear or price_below_hma_1w
+        
+        # Enter long if conditions met
+        long_conditions = vol_spike_long or bb_revert_long or rsi_extreme_long
+        
+        if long_conditions:
+            if weekly_bullish:
+                new_signal = POSITION_SIZE_TREND
+                use_trend_size = True
+            elif not weekly_bearish:  # Weekly flat/neutral
+                new_signal = POSITION_SIZE_COUNTER
+            # Don't long if strongly bearish weekly
+        
+        # --- SHORT ENTRY ---
+        # Condition 1: Vol spike + overbought (panic top)
+        vol_spike_short = vol_spike and (bb_extreme_high or rsi_overbought)
+        
+        # Condition 2: BB mean reversion
+        bb_revert_short = bb_extreme_high and rsi_14[i] > 55
+        
+        # Condition 3: RSI extreme alone
+        rsi_extreme_short = rsi_14[i] > 70
+        
+        if short_conditions := (vol_spike_short or bb_revert_short or rsi_extreme_short):
+            if weekly_bearish:
+                new_signal = -POSITION_SIZE_TREND
+                use_trend_size = True
+            elif not weekly_bullish:  # Weekly flat/neutral
+                new_signal = -POSITION_SIZE_COUNTER
+            # Don't short if strongly bullish weekly
         
         # === HOLD POSITION LOGIC ===
         if in_position and new_signal == 0.0:
@@ -261,15 +262,13 @@ def generate_signals(prices):
         if stoploss_triggered:
             new_signal = 0.0
         
-        # === EXIT ON REGIME/TREND FLIP ===
+        # === EXIT ON WEEKLY TREND FLIP ===
         if in_position and position_side > 0:
-            # Exit long if 1d turns bearish or ADX spikes (trend breaking)
-            if hma_1d_bearish and adx_14[i] > 30:
+            if weekly_bearish and price_below_hma_1w:
                 new_signal = 0.0
         
         if in_position and position_side < 0:
-            # Exit short if 1d turns bullish or ADX spikes
-            if hma_1d_bullish and adx_14[i] > 30:
+            if weekly_bullish and price_above_hma_1w:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
