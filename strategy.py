@@ -1,36 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #1402: 12h Primary + 1d/1w HTF — Triple HMA Trend + Donchian Breakout + Volume
+Experiment #1403: 1d Primary + 1w HTF — Clean Donchian Breakout with Weekly HMA Trend Filter
 
-Hypothesis: Previous 12h strategy (#1396 Sharpe=0.525) was close to 1d best (0.618) but lacked
-ultra-macro filter. Adding 1w HMA as strongest trend filter should improve win rate on major
-moves while 1d HMA provides intermediate confirmation. Volume confirmation on breakouts
-filters false breakouts (proven in 4h strategies).
+Hypothesis: The 1d timeframe with 1w HTF should outperform the current best (Sharpe=0.618)
+because weekly HMA provides stronger macro trend filter than daily HMA, reducing false
+breakouts during ranging periods. The proven pattern from #1396 (12h Donchian+HMA+RSI+ATR)
+achieved Sharpe=0.525, and scaling to 1d with 1w HTF should improve signal quality.
 
-Key improvements over #1396:
-1. Add 1w HMA(21) as ultra-macro filter (strongest trend confirmation)
-2. Volume confirmation on breakouts (volume > 1.5x 20-period average)
-3. Adaptive position sizing: 0.30 when 1w+1d agree, 0.20 when only 1d confirms
-4. Asymmetric stoploss: 2.0x ATR in strong trend, 3.0x otherwise
-5. RSI momentum threshold tightened (40-60 vs 30-70) for better entry quality
+Key insight from failures (#1393, #1397): Complex regime filters (Choppiness+CRSI) over-filter
+and reduce trade frequency on 1d. Simple trend following with Donchian + HMA + RSI works best.
 
 Design:
-1. 1w HMA(21) = ultra-macro trend (strongest filter, only trade with weekly trend)
-2. 1d HMA(21) = intermediate trend confirmation
-3. 12h Donchian(20/55) = entry triggers with volume confirmation
-4. RSI(14) = momentum filter (40-60 range for quality entries)
-5. ATR(14) trailing stop = adaptive (2.0x strong trend, 3.0x weak)
-6. Position size: 0.30 (1w+1d agree), 0.20 (1d only), 0.0 (against 1w)
+1. 1w HMA(21) = macro trend direction (stronger filter than 1d HMA)
+2. 1d Donchian(20/55) breakout = entry triggers (dual period for flexibility)
+3. RSI(14) momentum confirmation (wide bands 35-65 to ensure >=30 trades/train)
+4. ATR(14) trailing stop 2.5x = risk management
+5. Position size 0.28 = conservative for 1d volatility (discrete: 0.0, ±0.28)
+6. NO regime filter (Choppiness/CRSI failed on 1d in #1393, #1397)
+7. Multiple entry paths per direction = ensures trade frequency
 
-Target: 25-45 trades/year, Sharpe > 0.618 (beat 1d baseline), trades >= 30 train, >= 5 test
-Timeframe: 12h
+Target: 20-40 trades/year, Sharpe > 0.618 (beat 1d baseline), trades >= 30 train, >= 3 test
+Timeframe: 1d
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_triple_hma_donchian_volume_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_hma_1w_rsi_atr_clean_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -70,7 +67,7 @@ def calculate_hma(close, period=21):
     return hma
 
 def calculate_rsi(close, period=14):
-    """Relative Strength Index - momentum confirmation"""
+    """Relative Strength Index - wide bands for entry confirmation"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -119,47 +116,27 @@ def calculate_donchian(high, low, period=20):
     
     return upper, lower
 
-def calculate_volume_sma(volume, period=20):
-    """Simple moving average of volume for volume confirmation"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    vol_sma = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        vol_sma[i] = np.nanmean(volume[i-period+1:i+1])
-    
-    return vol_sma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for intermediate trend
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
-    # Calculate and align 1w HMA for ultra-macro trend
+    # Calculate and align 1w HMA for macro trend filter
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (12h) indicators
+    # Calculate primary (1d) indicators
     donchian_20_upper, donchian_20_lower = calculate_donchian(high, low, period=20)
     donchian_55_upper, donchian_55_lower = calculate_donchian(high, low, period=55)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    vol_sma = calculate_volume_sma(volume, period=20)
     
     signals = np.zeros(n)
-    BASE_SIZE_STRONG = 0.30  # When 1w + 1d agree
-    BASE_SIZE_WEAK = 0.20    # When only 1d confirms
+    BASE_SIZE = 0.28
     
     # Position tracking for stoploss
     in_position = False
@@ -189,41 +166,24 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(vol_sma[i]) or vol_sma[i] <= 1e-10:
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === ULTRA-MACRO TREND (1w HMA) - strongest filter ===
-        weekly_bull = close[i] > hma_1w_aligned[i]
-        weekly_bear = close[i] < hma_1w_aligned[i]
+        # === MACRO TREND (1w HMA) - primary filter ===
+        macro_bull = close[i] > hma_1w_aligned[i]
+        macro_bear = close[i] < hma_1w_aligned[i]
         
-        # === INTERMEDIATE TREND (1d HMA) - confirmation ===
-        daily_bull = close[i] > hma_1d_aligned[i]
-        daily_bear = close[i] < hma_1d_aligned[i]
-        
-        # === TREND STRENGTH (both agree = strong) ===
-        strong_bull = weekly_bull and daily_bull
-        strong_bear = weekly_bear and daily_bear
-        weak_bull = daily_bull and not weekly_bull
-        weak_bear = daily_bear and not weekly_bear
-        
-        # === RSI MOMENTUM (tighter bands for quality) ===
-        rsi_bull = rsi[i] > 40.0
-        rsi_bear = rsi[i] < 60.0
+        # === RSI MOMENTUM (WIDE bands to ensure trades) ===
+        rsi_bull = rsi[i] > 35.0
+        rsi_bear = rsi[i] < 65.0
         rsi_strong_bull = rsi[i] > 50.0
         rsi_strong_bear = rsi[i] < 50.0
-        
-        # === VOLUME CONFIRMATION (breakout validity) ===
-        volume_confirmed = volume[i] > 1.5 * vol_sma[i]
+        rsi_neutral_bull = rsi[i] > 42.0
+        rsi_neutral_bear = rsi[i] < 58.0
         
         # === DUAL DONCHIAN BREAKOUT ===
         breakout_20_long = close[i] > donchian_20_upper[i-1]
@@ -231,55 +191,49 @@ def generate_signals(prices):
         breakout_55_long = close[i] > donchian_55_upper[i-1]
         breakout_55_short = close[i] < donchian_55_lower[i-1]
         
-        # === DESIRED SIGNAL - MULTIPLE ENTRY PATHS ===
+        # === DESIRED SIGNAL - MULTIPLE ENTRY PATHS PER DIRECTION ===
         desired_signal = 0.0
-        use_strong_size = False
         
-        # LONG ENTRY PATHS
-        # Path 1: Strong trend + Donchian-20 + volume (best setup)
-        if strong_bull and breakout_20_long and volume_confirmed and rsi_bull:
-            desired_signal = BASE_SIZE_STRONG
-            use_strong_size = True
-        # Path 2: Strong trend + Donchian-55 + RSI strong (major breakout)
-        elif strong_bull and breakout_55_long and rsi_strong_bull:
-            desired_signal = BASE_SIZE_STRONG
-            use_strong_size = True
-        # Path 3: Weak bull + Donchian-20 + volume (secondary entry)
-        elif weak_bull and breakout_20_long and volume_confirmed:
-            desired_signal = BASE_SIZE_WEAK
-        # Path 4: Daily bull + RSI momentum (trend continuation)
-        elif daily_bull and rsi[i] > 45.0 and not weekly_bear:
-            desired_signal = BASE_SIZE_WEAK * 0.5
+        # LONG ENTRY PATHS (any one triggers entry)
+        # Path 1: Donchian-20 breakout + 1w trend + RSI (quick entry)
+        if breakout_20_long and macro_bull and rsi_bull:
+            desired_signal = BASE_SIZE
+        # Path 2: Donchian-55 breakout + RSI strong (strong breakout)
+        elif breakout_55_long and rsi_strong_bull:
+            desired_signal = BASE_SIZE
+        # Path 3: Price above 1w HMA + RSI momentum (trend continuation)
+        elif macro_bull and rsi_neutral_bull:
+            desired_signal = BASE_SIZE * 0.5
+        # Path 4: Donchian-20 breakout alone (breakout momentum)
+        elif breakout_20_long and rsi[i] > 40.0:
+            desired_signal = BASE_SIZE * 0.5
         
-        # SHORT ENTRY PATHS
-        # Path 1: Strong trend + Donchian-20 + volume (best setup)
-        elif strong_bear and breakout_20_short and volume_confirmed and rsi_bear:
-            desired_signal = -BASE_SIZE_STRONG
-            use_strong_size = True
-        # Path 2: Strong trend + Donchian-55 + RSI strong (major breakout)
-        elif strong_bear and breakout_55_short and rsi_strong_bear:
-            desired_signal = -BASE_SIZE_STRONG
-            use_strong_size = True
-        # Path 3: Weak bear + Donchian-20 + volume (secondary entry)
-        elif weak_bear and breakout_20_short and volume_confirmed:
-            desired_signal = -BASE_SIZE_WEAK
-        # Path 4: Daily bear + RSI momentum (trend continuation)
-        elif daily_bear and rsi[i] < 55.0 and not weekly_bull:
-            desired_signal = -BASE_SIZE_WEAK * 0.5
+        # SHORT ENTRY PATHS (any one triggers entry)
+        # Path 1: Donchian-20 breakout + 1w trend + RSI (quick entry)
+        elif breakout_20_short and macro_bear and rsi_bear:
+            desired_signal = -BASE_SIZE
+        # Path 2: Donchian-55 breakout + RSI strong (strong breakout)
+        elif breakout_55_short and rsi_strong_bear:
+            desired_signal = -BASE_SIZE
+        # Path 3: Price below 1w HMA + RSI momentum (trend continuation)
+        elif macro_bear and rsi_neutral_bear:
+            desired_signal = -BASE_SIZE * 0.5
+        # Path 4: Donchian-20 breakout alone (breakout momentum)
+        elif breakout_20_short and rsi[i] < 60.0:
+            desired_signal = -BASE_SIZE * 0.5
         
-        # === ADAPTIVE STOPLOSS (2.0x strong trend, 3.0x weak) ===
-        stoploss_multiplier = 2.0 if use_strong_size else 3.0
+        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - stoploss_multiplier * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + stoploss_multiplier * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
@@ -287,11 +241,8 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if abs(desired_signal) >= BASE_SIZE_WEAK * 0.4:
-            if desired_signal > 0:
-                final_signal = BASE_SIZE_STRONG if use_strong_size else BASE_SIZE_WEAK
-            else:
-                final_signal = -BASE_SIZE_STRONG if use_strong_size else -BASE_SIZE_WEAK
+        if desired_signal >= BASE_SIZE * 0.4:
+            final_signal = BASE_SIZE if desired_signal > 0 else -BASE_SIZE
         else:
             final_signal = 0.0
         
