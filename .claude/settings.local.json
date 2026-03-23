@@ -2,7 +2,40 @@
   "permissions": {
     "allow": [
       "Bash(git clone:*)",
-      "Bash(git remote:*)"
+      "Bash(git remote:*)",
+      "Bash(mkdir -p ~/.claude/channels/telegram)",
+      "Read(//root/.claude/channels/**)",
+      "Bash(chmod:*)",
+      "Skill(telegram:configure)",
+      "Bash(mkdir -p ~/.claude/channels/telegram/approved)",
+      "Bash(~/.claude/channels/telegram/approved/7169787219)",
+      "Bash(claude --version)",
+      "Bash(gh api:*)",
+      "Bash(npm show:*)",
+      "Bash(bun --version)",
+      "Bash(python3 -m json.tool)",
+      "Bash(npm view:*)",
+      "Bash(python3 -c \"import json,sys; v=json.load\\(sys.stdin\\); print\\(''''\\\\n''''.join\\(v[-10:]\\)\\)\")",
+      "Bash(grep -o \"\"[^\"\"]*[Cc]hannels[^\"\"]*not[^\"\"]*\"\")",
+      "Bash(grep -o \"\"[^\"\"]*not[^\"\"]*[Cc]hannel[^\"\"]*\"\")",
+      "Bash(tmux ls:*)",
+      "Bash(tmux capture-pane:*)",
+      "Bash(python3 -m venv .venv)",
+      "Bash(apt install:*)",
+      "Bash(source .venv/bin/activate)",
+      "Bash(pip install:*)",
+      "Bash(tmux new-session:*)",
+      "Bash(tmux send-keys:*)",
+      "Bash(tmux list-sessions:*)",
+      "Bash(tmux list-panes:*)",
+      "Bash(python3 -c \"import dashboard; print\\(''OK''\\)\")",
+      "Bash(curl -s http://127.0.0.1:8888)",
+      "Bash(kill 3329825 3339946 3342467)",
+      "Bash(python3 migrate_to_sqlite.py)",
+      "Bash(python3 -c \":*)",
+      "Bash(printf '\\\\n# SQLite WAL temp files \\(results.db itself IS tracked\\)\\\\nresults.db-wal\\\\nresults.db-shm\\\\n')",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ]
   }
 }
