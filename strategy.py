@@ -1,39 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #039: 4h Primary + 1d HTF — Simplified HMA Trend + RSI Pullback + Donchian
+Experiment #040: 1h Primary + 4h/12h HTF — Simplified HMA Trend + RSI Pullback
 
-Hypothesis: Previous strategies failed due to OVERLY STRICT entry conditions (0 trades).
-This strategy SIMPLIFIES the logic to ensure trade generation while maintaining edge:
+Hypothesis: Previous 1h strategies failed (Sharpe=0.000) because entry conditions were
+TOO STRICT (CRSI<15, session filters, volume filters all together = no trades).
 
-1. 1d HMA(21) for macro trend bias — simple, proven, no complex regime switching
-2. 4h RSI(14) pullback entries — RSI<40 for long, >60 for short (LOOSE thresholds)
-3. Donchian(20) breakout confirmation — price must break recent high/low
-4. ATR(14) trailing stoploss at 2.5*ATR
-5. Position size: 0.30 (discrete, within safe 0.20-0.35 range)
+This strategy uses the PROVEN pattern from current best (mtf_hma_rsi_zscore_v1 Sharpe=5.4):
+1. 4h/12h HMA for TREND DIRECTION (only trade with HTF trend)
+2. 1h RSI for ENTRY TIMING (pullback within trend, not extreme values)
+3. Minimal additional filters (volume > 0.7x avg, not 1.5x)
+4. NO session filter (was killing trades in #038)
+5. LOOSE RSI thresholds: <40 for long, >60 for short (not <15/>85)
 
-Why this works:
-- Fewer filters = more trades (addresses #1 failure mode: 0 trades)
-- 4h targets 20-50 trades/year (fee-efficient per Rule 10)
-- HMA trend filter prevents counter-trend trades in strong moves
-- RSI pullback entries catch retracements in trending markets
-- Donchian breakout confirms momentum before entry
+Why this should work:
+- 4h HMA bullish + 1h RSI<40 = buy the dip in uptrend (common, generates trades)
+- 4h HMA bearish + 1h RSI>60 = sell the rally in downtrend (common, generates trades)
+- Targets 40-80 trades/year on 1h (Rule 10 compliant)
+- Position size 0.25 (conservative for lower TF)
 
-Key difference from failed strategies:
-- NO complex regime switching (CHOP, multiple HMA slopes, etc.)
-- LOOSE RSI thresholds (40/60 not 15/85) to ensure trade generation
-- Single HTF (1d) not multiple (12h+1d+1w) to reduce conflicting signals
-- Entry requires only 2-3 confluences, not 5-6
-
-Position sizing: 0.30 (30% of capital per position)
-Stoploss: 2.5*ATR trailing stop
-Leverage: 1.0 (no leverage)
+Key difference from failed #030, #035, #038:
+- RSI(14) instead of CRSI (CRSI extremes too rare)
+- RSI<40/>60 instead of <15/>85 (much more frequent signals)
+- No session filter (8-20 UTC was filtering out 60% of bars)
+- Volume filter: >0.7x 20-bar avg (not >1.5x)
+- HTF: 4h HMA only (not 4h+12h+1d confluence = too strict)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_rsi_donchian_simple_1d_v1"
-timeframe = "4h"
+name = "mtf_1h_hma_rsi_pullback_4h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -77,37 +74,41 @@ def calculate_rsi(close, period=14):
     
     return rsi.values
 
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high, lowest low over period)."""
-    highest = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    mid = (highest + lowest) / 2.0
-    return highest, lowest, mid
+def calculate_sma(close, period=20):
+    """Calculate Simple Moving Average."""
+    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d HMA for macro trend bias
-    hma_1d = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Calculate 4h HMA for trend bias
+    hma_4h = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Calculate 4h indicators
+    # Calculate 12h HMA for macro bias (secondary filter)
+    hma_12h = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
+    vol_sma_20 = calculate_sma(volume, period=20)
     
-    donchian_high, donchian_low, donchian_mid = calculate_donchian(high, low, period=20)
-    hma_4h = calculate_hma(close, period=21)
+    # 1h HMA for local trend confirmation
+    hma_1h = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
     
-    # Position sizing (Rule 4 - discrete, max 0.40)
-    POSITION_SIZE = 0.30
+    # Position sizing (Rule 4 - discrete, conservative for 1h)
+    POSITION_SIZE = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -118,77 +119,71 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
             continue
-        if np.isnan(atr_14[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(atr_14[i]) or np.isnan(rsi_14[i]) or np.isnan(vol_sma_20[i]):
             continue
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(hma_1h[i]):
             continue
-        if atr_14[i] == 0:
+        if atr_14[i] == 0 or vol_sma_20[i] == 0:
             continue
         
-        # === 1D MACRO TREND BIAS ===
-        price_above_hma_1d = close[i] > hma_1d_aligned[i]
-        price_below_hma_1d = close[i] < hma_1d_aligned[i]
+        # === HTF TREND DIRECTION (4h HMA) ===
+        # 4h HMA slope (compare to 3 bars ago)
+        hma_4h_slope_bull = hma_4h_aligned[i] > hma_4h_aligned[i-3] if i >= 3 else False
+        hma_4h_slope_bear = hma_4h_aligned[i] < hma_4h_aligned[i-3] if i >= 3 else False
         
-        # === 4H HMA TREND ===
-        hma_4h_slope_bull = hma_4h[i] > hma_4h[i-5] if i >= 5 else False
-        hma_4h_slope_bear = hma_4h[i] < hma_4h[i-5] if i >= 5 else False
+        # Price relative to 4h HMA
+        price_above_hma_4h = close[i] > hma_4h_aligned[i]
+        price_below_hma_4h = close[i] < hma_4h_aligned[i]
         
-        # === RSI PULLBACK (LOOSE THRESHOLDS FOR TRADE GENERATION) ===
-        rsi_oversold = rsi_14[i] < 40  # Much looser than 15-20
-        rsi_overbought = rsi_14[i] > 60  # Much looser than 80-85
-        rsi_neutral_long = rsi_14[i] < 50
-        rsi_neutral_short = rsi_14[i] > 50
+        # === 12H MACRO BIAS (secondary confirmation) ===
+        price_above_hma_12h = close[i] > hma_12h_aligned[i] if not np.isnan(hma_12h_aligned[i]) else True
+        price_below_hma_12h = close[i] < hma_12h_aligned[i] if not np.isnan(hma_12h_aligned[i]) else True
         
-        # === DONCHIAN BREAKOUT CONFIRMATION ===
-        # Price breaking above recent high = bullish momentum
-        price_breakout_high = close[i] > donchian_high[i-1] if i >= 1 else False
-        # Price breaking below recent low = bearish momentum
-        price_breakout_low = close[i] < donchian_low[i-1] if i >= 1 else False
+        # === 1H RSI PULLBACK (entry timing) ===
+        # LOOSE thresholds to ensure trades generate
+        rsi_oversold = rsi_14[i] < 40  # Was <15 in failed strategies
+        rsi_overbought = rsi_14[i] > 60  # Was >85 in failed strategies
+        rsi_neutral_low = rsi_14[i] < 45
+        rsi_neutral_high = rsi_14[i] > 55
         
-        # === ENTRY LOGIC (SIMPLE, LOOSE CONDITIONS) ===
+        # === VOLUME FILTER (light, not strict) ===
+        volume_ok = volume[i] > 0.7 * vol_sma_20[i]  # Was >1.5x in failed strategies
+        
+        # === 1H HMA LOCAL TREND ===
+        hma_1h_slope_bull = hma_1h[i] > hma_1h[i-5] if i >= 5 else False
+        hma_1h_slope_bear = hma_1h[i] < hma_1h[i-5] if i >= 5 else False
+        
+        # === ENTRY LOGIC (LOOSE enough to generate 40-80 trades/year) ===
         new_signal = 0.0
         
-        # --- LONG ENTRY ---
-        # Condition 1: Pullback long in uptrend (RSI oversold + price above 1d HMA)
-        long_pullback = rsi_oversold and price_above_hma_1d
+        # LONG: 4h bullish trend + 1h RSI pullback + volume OK
+        # Only require 4h HMA slope OR price above 4h HMA (not both = too strict)
+        if (hma_4h_slope_bull or price_above_hma_4h):
+            if rsi_oversold and volume_ok:
+                # Bonus: 12h confirmation makes it stronger but not required
+                if price_above_hma_12h or hma_1h_slope_bull:
+                    new_signal = POSITION_SIZE
         
-        # Condition 2: Breakout long with trend (breakout high + 4h HMA bullish)
-        long_breakout = price_breakout_high and hma_4h_slope_bull
-        
-        # Condition 3: Simple trend follow (price above both HMA + RSI neutral)
-        long_trend = price_above_hma_1d and hma_4h_slope_bull and rsi_neutral_long
-        
-        if long_pullback or long_breakout or long_trend:
-            new_signal = POSITION_SIZE
-        
-        # --- SHORT ENTRY ---
-        # Condition 1: Pullback short in downtrend (RSI overbought + price below 1d HMA)
-        short_pullback = rsi_overbought and price_below_hma_1d
-        
-        # Condition 2: Breakout short with trend (breakout low + 4h HMA bearish)
-        short_breakout = price_breakout_low and hma_4h_slope_bear
-        
-        # Condition 3: Simple trend follow (price below both HMA + RSI neutral)
-        short_trend = price_below_hma_1d and hma_4h_slope_bear and rsi_neutral_short
-        
-        if short_pullback or short_breakout or short_trend:
-            # Only short if not already long signal
-            if new_signal <= 0:
-                new_signal = -POSITION_SIZE
+        # SHORT: 4h bearish trend + 1h RSI rally + volume OK
+        if (hma_4h_slope_bear or price_below_hma_4h):
+            if rsi_overbought and volume_ok:
+                # Bonus: 12h confirmation makes it stronger but not required
+                if price_below_hma_12h or hma_1h_slope_bear:
+                    new_signal = -POSITION_SIZE
         
         # === HOLD POSITION LOGIC ===
-        # If we're in a position and no new signal, hold the position
+        # If already in position and no new signal, hold (don't flip-flop)
         if in_position and new_signal == 0.0:
             new_signal = signals[i-1] if i > 0 else 0.0
         
-        # === STOPLOSS CHECK (2.5 * ATR trailing) ===
+        # === STOPLOSS CHECK (2.0 * ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.5 * atr_14[i]
+            stop_price = highest_since_entry - 2.0 * atr_14[i]
             if close[i] < stop_price:
                 stoploss_triggered = True
         
@@ -197,7 +192,7 @@ def generate_signals(prices):
                 lowest_since_entry = close[i]
             else:
                 lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.5 * atr_14[i]
+            stop_price = lowest_since_entry + 2.0 * atr_14[i]
             if close[i] > stop_price:
                 stoploss_triggered = True
         
@@ -205,14 +200,14 @@ def generate_signals(prices):
             new_signal = 0.0
         
         # === EXIT ON TREND REVERSAL ===
-        # Exit long if macro trend turns bearish
+        # Exit long if 4h trend turns bearish
         if in_position and position_side > 0:
-            if price_below_hma_1d and hma_4h_slope_bear:
+            if hma_4h_slope_bear and price_below_hma_4h:
                 new_signal = 0.0
         
-        # Exit short if macro trend turns bullish
+        # Exit short if 4h trend turns bullish
         if in_position and position_side < 0:
-            if price_above_hma_1d and hma_4h_slope_bull:
+            if hma_4h_slope_bull and price_above_hma_4h:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
