@@ -35,7 +35,11 @@
       "Bash(python3 -c \":*)",
       "Bash(printf '\\\\n# SQLite WAL temp files \\(results.db itself IS tracked\\)\\\\nresults.db-wal\\\\nresults.db-shm\\\\n')",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(for i:*)",
+      "Bash(do time:*)",
+      "Bash(done)"
     ]
   }
 }

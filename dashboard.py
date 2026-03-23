@@ -12,6 +12,8 @@ Usage:
 import argparse
 import json
 import subprocess
+import threading
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -22,6 +24,13 @@ from validator import validate_strategy, ValidationResult
 
 STRATEGIES_DIR = Path("strategies")
 STRATEGY_FILE = Path("strategy.py")
+
+# --- Page cache: rendered every 30s in background, served instantly ---
+_cache_lock = threading.Lock()
+_page_cache: dict = {"html": "<html><body>Loading dashboard…</body></html>", "ts": 0.0}
+
+# --- Timeframe cache: persists across renders ---
+_tf_cache: dict = {}
 
 
 def load_results() -> pd.DataFrame:
@@ -56,14 +65,18 @@ def get_strategy_code(strategy_name: str) -> str:
 
 
 def get_strategy_timeframe(strategy_name: str) -> str:
-    """Extract timeframe from strategy code."""
+    """Extract timeframe from strategy code (cached in memory)."""
     import re
+    if strategy_name in _tf_cache:
+        return _tf_cache[strategy_name]
     code = get_strategy_code(strategy_name)
+    tf = "?"
     if code:
         m = re.search(r'timeframe\s*=\s*["\'](\w+)["\']', code)
         if m:
-            return m.group(1)
-    return "?"
+            tf = m.group(1)
+    _tf_cache[strategy_name] = tf
+    return tf
 
 
 def run_validation(code: str) -> ValidationResult:
@@ -241,9 +254,6 @@ def render_html() -> str:
             chart_data = json.dumps([round(s, 4) for s in sharpes])
             chart_labels = json.dumps(labels)
             running_best_data = json.dumps(running_best)
-
-    # Strategy modal data
-    strategy_json = build_strategy_data(df)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -463,7 +473,7 @@ def render_html() -> str:
 </div>
 
 <script>
-const STRATEGIES = {strategy_json};
+const STRATEGIES = {{}};  // lazy-loaded per strategy via /api/strategy
 
 const ctx = document.getElementById('sharpeChart').getContext('2d');
 new Chart(ctx, {{
@@ -503,7 +513,29 @@ new Chart(ctx, {{
 }});
 
 function openModal(strategyName) {{
-  const s = STRATEGIES[strategyName];
+  if (STRATEGIES[strategyName]) {{
+    _renderModal(strategyName, STRATEGIES[strategyName]);
+    return;
+  }}
+  // Lazy-load strategy data from server
+  document.getElementById('modalTitle').textContent = strategyName + ' (loading…)';
+  document.getElementById('tab-metrics').innerHTML = '<p style="color:#8b949e;padding:10px">Loading…</p>';
+  document.getElementById('tab-compliance').innerHTML = '';
+  document.getElementById('tab-code').innerHTML = '';
+  document.getElementById('modalOverlay').style.display = 'block';
+  switchTab('metrics');
+  fetch('/api/strategy?name=' + encodeURIComponent(strategyName))
+    .then(r => r.json())
+    .then(data => {{
+      STRATEGIES[strategyName] = data;
+      _renderModal(strategyName, data);
+    }})
+    .catch(err => {{
+      document.getElementById('tab-metrics').innerHTML = '<p style="color:#e74c3c">Error: ' + err + '</p>';
+    }});
+}}
+
+function _renderModal(strategyName, s) {{
   if (!s) return;
 
   document.getElementById('modalTitle').textContent = strategyName;
@@ -1209,6 +1241,66 @@ def run_detail_backtest(strategy_name: str, symbol: str, period: str) -> dict:
         return {"error": str(e), "traceback": traceback.format_exc()}
 
 
+def get_strategy_data(strategy_name: str) -> dict:
+    """Build modal data for a single strategy (used by /api/strategy endpoint)."""
+    from results_db import load_results as _db_load
+    df = _db_load()
+    group = df[df["strategy"] == strategy_name]
+    code = get_strategy_code(strategy_name)
+    val = run_validation(code)
+    rows_by_period: dict = {}
+    for _, row in group.iterrows():
+        period = row.get("period", "train")
+        if period not in rows_by_period:
+            rows_by_period[period] = []
+        rows_by_period[period].append({
+            "symbol": row.get("symbol", ""),
+            "sharpe": round(float(row.get("sharpe", 0) or 0), 4),
+            "return_pct": round(float(row.get("return_pct", 0) or 0), 2),
+            "cagr_pct": round(float(row.get("cagr_pct", 0) or 0), 2),
+            "max_dd_pct": round(float(row.get("max_dd_pct", 0) or 0), 2),
+            "win_rate": round(float(row.get("win_rate", 0) or 0), 1),
+            "profit_factor": round(float(row.get("profit_factor", 0) or 0), 2),
+            "trades": int(row.get("trades", 0) or 0),
+            "sortino": round(float(row.get("sortino", 0) or 0), 4),
+            "calmar": round(float(row.get("calmar", 0) or 0), 4),
+            "status": row.get("status", ""),
+            "period": period,
+        })
+    train_rows = rows_by_period.get("train", [])
+    avg_sharpe = sum(r["sharpe"] for r in train_rows) / len(train_rows) if train_rows else 0
+    avg_dd = sum(r["max_dd_pct"] for r in train_rows) / len(train_rows) if train_rows else 0
+    avg_return = sum(r["return_pct"] for r in train_rows) / len(train_rows) if train_rows else 0
+    return {
+        "name": strategy_name,
+        "code": code,
+        "valid": val.valid,
+        "validation_html": build_validation_html(val),
+        "rows_by_period": rows_by_period,
+        "avg_sharpe": round(avg_sharpe, 4),
+        "avg_dd": round(avg_dd, 2),
+        "avg_return": round(avg_return, 2),
+    }
+
+
+def _refresh_cache():
+    """Render the dashboard HTML and store in cache."""
+    try:
+        html = render_html()
+        with _cache_lock:
+            _page_cache["html"] = html
+            _page_cache["ts"] = time.time()
+    except Exception as e:
+        print(f"[cache] render error: {e}")
+
+
+def _cache_worker(interval: int = 30):
+    """Background thread: refresh cache every `interval` seconds."""
+    while True:
+        _refresh_cache()
+        time.sleep(interval)
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
@@ -1228,8 +1320,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(data.encode("utf-8"))
+
+        elif parsed.path == "/api/strategy":
+            params = parse_qs(parsed.query)
+            name = params.get("name", [""])[0]
+            result = get_strategy_data(name) if name else {"error": "missing name"}
+            data = json.dumps(result, ensure_ascii=False)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data.encode("utf-8"))
+
         else:
-            html = render_html()
+            with _cache_lock:
+                html = _page_cache["html"]
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
@@ -1243,7 +1349,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8888)
     parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--cache-interval", type=int, default=30,
+                        help="Seconds between background cache refreshes (default: 30)")
     args = parser.parse_args()
+
+    # Warm up cache before accepting requests
+    print("Building initial cache…")
+    _refresh_cache()
+
+    # Background refresh thread
+    t = threading.Thread(target=_cache_worker, args=(args.cache_interval,), daemon=True)
+    t.start()
+    print(f"Cache refresh every {args.cache_interval}s (background thread)")
 
     server = HTTPServer((args.host, args.port), DashboardHandler)
     print(f"Dashboard running at http://{args.host}:{args.port}")
