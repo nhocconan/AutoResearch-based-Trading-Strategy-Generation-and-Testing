@@ -1,28 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #1191: 4h Primary + 1d HTF — Funding Rate Mean Reversion + Vol Spike
+Experiment #1192: 12h Primary + 1d/1w HTF — Adaptive Regime with Funding Rate Filter
 
-Hypothesis: Research shows funding rate mean reversion has Sharpe 0.8-1.5 through 2022 crash
-for BTC/ETH. This is the BEST EDGE mentioned in research. Combined with vol spike
-confirmation and asymmetric regime filtering, this should beat the current best (Sharpe=0.612).
+Hypothesis: Recent 12h strategies failed due to overly strict entry conditions causing 0 trades.
+This version focuses on generating sufficient trade frequency while maintaining quality:
+- Primary regime: Choppiness Index (61.8 chop / 38.2 trend)
+- Mean reversion: CRSI < 25 / > 75 (relaxed from 20/80 for more trades)
+- Trend: Donchian(20) breakout + 1d HMA alignment
+- NEW: Funding rate z-score filter for BTC/ETH contrarian edge
+- Relaxed BB confirmation (optional, not required)
+- Ensure ALL symbols can generate trades (no SOL-only bias)
 
-Key components:
-1. Funding Rate Z-score (30-day): Z > +2 = crowded longs → short, Z < -2 = crowded shorts → long
-2. Vol Spike Confirmation: ATR(7)/ATR(30) > 1.8 confirms panic/extreme conditions
-3. Asymmetric Regime: 1d HMA(50) filters direction (only long above, only short below)
-4. BB Extreme: Price must touch BB(20,2.5) bands for mean reversion entries
-5. Conservative sizing: 0.25-0.30 discrete, 2.5x ATR trailing stop
+Key improvements from #1186 (Sharpe=-0.057):
+1. CRSI thresholds: 20/80 → 25/75 (more entry opportunities)
+2. CHOP transition zone handling: enter on extremes even in transition
+3. Add funding rate z-score for BTC/ETH mean reversion edge
+4. Simplified trend entry (breakout OR HMA cross, not both)
+5. Lower minimum lookback (100 vs 150) for earlier signals
 
-Target: 30-50 trades/year, Sharpe > 0.612
-Position Size: 0.28 discrete
+Target: 25-45 trades/year per symbol, Sharpe > 0.612
+Position Size: 0.28 discrete (balanced risk/reward)
 Stoploss: 2.5x ATR trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_funding_zscore_vol_spike_1d_hma_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_adaptive_regime_crsi_funding_donchian_1d1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -61,8 +66,106 @@ def calculate_hma(close, period=21):
     
     return hma
 
+def calculate_rsi(close, period=14):
+    """Relative Strength Index — momentum oscillator."""
+    n = len(close)
+    rsi = np.full(n, np.nan)
+    
+    if n < period + 1:
+        return rsi
+    
+    delta = np.diff(close)
+    gain = np.zeros(n)
+    loss = np.zeros(n)
+    
+    gain[1:] = np.where(delta > 0, delta, 0)
+    loss[1:] = np.where(delta < 0, -delta, 0)
+    
+    gain_smooth = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    loss_smooth = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    mask = loss_smooth > 1e-10
+    rs = np.zeros(n)
+    rs[mask] = gain_smooth[mask] / loss_smooth[mask]
+    
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi[:period] = np.nan
+    
+    return rsi
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Connors RSI — composite mean reversion indicator.
+    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    """
+    n = len(close)
+    crsi = np.full(n, np.nan)
+    
+    if n < rank_period + 1:
+        return crsi
+    
+    rsi_short = calculate_rsi(close, period=rsi_period)
+    
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = streak[i-1]
+    
+    streak_rsi = np.full(n, np.nan)
+    for i in range(streak_period, n):
+        up_streaks = np.sum(streak[i-streak_period+1:i+1] > 0)
+        streak_rsi[i] = (up_streaks / streak_period) * 100.0
+    
+    pct_rank = np.full(n, np.nan)
+    returns = np.diff(close) / close[:-1]
+    returns = np.concatenate([[0], returns])
+    
+    for i in range(rank_period, n):
+        window = returns[i-rank_period+1:i+1]
+        current = returns[i]
+        rank = np.sum(window <= current) / rank_period
+        pct_rank[i] = rank * 100.0
+    
+    for i in range(rank_period, n):
+        if not np.isnan(rsi_short[i]) and not np.isnan(streak_rsi[i]) and not np.isnan(pct_rank[i]):
+            crsi[i] = (rsi_short[i] + streak_rsi[i] + pct_rank[i]) / 3.0
+    
+    return crsi
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index — measures market choppiness vs trending.
+    CHOP > 61.8 = choppy/range (mean revert)
+    CHOP < 38.2 = trending (trend follow)
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    if n < period + 1:
+        return chop
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 1e-10:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
+
 def calculate_atr(high, low, close, period=14):
-    """Average True Range for volatility measurement."""
+    """Average True Range for volatility measurement and stoploss."""
     n = len(close)
     atr = np.full(n, np.nan)
     
@@ -76,6 +179,18 @@ def calculate_atr(high, low, close, period=14):
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel — breakout indicator."""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
 
 def calculate_bb(close, period=20, std_mult=2.0):
     """Bollinger Bands — mean reversion levels."""
@@ -93,39 +208,37 @@ def calculate_bb(close, period=20, std_mult=2.0):
     
     return mid, upper, lower
 
-def calculate_zscore(series, period=30):
-    """Z-score for mean reversion detection."""
-    n = len(series)
+def calculate_funding_zscore(prices, symbol, lookback=90):
+    """
+    Funding Rate Z-Score — contrarian indicator for BTC/ETH.
+    High positive funding = crowded longs = short signal
+    High negative funding = crowded shorts = long signal
+    """
+    n = len(prices)
     zscore = np.full(n, np.nan)
     
-    for i in range(period - 1, n):
-        window = series[i - period + 1:i + 1]
-        mean = np.mean(window)
-        std = np.std(window)
-        if std > 1e-10:
-            zscore[i] = (series[i] - mean) / std
+    try:
+        import os
+        funding_path = f"data/processed/funding/{symbol}.parquet"
+        if os.path.exists(funding_path):
+            funding_df = pd.read_parquet(funding_path)
+            if len(funding_df) > 0 and 'funding_rate' in funding_df.columns:
+                funding_rates = funding_df['funding_rate'].values
+                min_len = min(n, len(funding_rates))
+                funding_aligned = np.full(n, np.nan)
+                funding_aligned[-min_len:] = funding_rates[-min_len:]
+                
+                for i in range(lookback, n):
+                    window = funding_aligned[i-lookback:i]
+                    if not np.any(np.isnan(window)):
+                        mean_f = np.mean(window)
+                        std_f = np.std(window)
+                        if std_f > 1e-10:
+                            zscore[i] = (funding_aligned[i] - mean_f) / std_f
+    except Exception:
+        pass
     
     return zscore
-
-def load_funding_data(symbol):
-    """
-    Load funding rate data from processed parquet files.
-    Returns array aligned with prices length, or None if unavailable.
-    """
-    try:
-        # Map symbol to funding file
-        symbol_map = {
-            'BTCUSDT': 'BTCUSDT',
-            'ETHUSDT': 'ETHUSDT',
-            'SOLUSDT': 'SOLUSDT'
-        }
-        funding_symbol = symbol_map.get(symbol, symbol)
-        funding_path = f"data/processed/funding/{funding_symbol}.parquet"
-        
-        df_funding = pd.read_parquet(funding_path)
-        return df_funding['funding_rate'].values
-    except Exception:
-        return None
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -133,35 +246,30 @@ def generate_signals(prices):
     low = prices["low"].values
     n = len(close)
     
+    # Extract symbol from prices for funding data
+    symbol = prices.get('symbol', ['BTCUSDT'])[0] if 'symbol' in prices.columns else 'BTCUSDT'
+    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align 1d HMA for macro trend filter
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (4h) indicators
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_30 = calculate_atr(high, low, close, period=30)
-    bb_mid, bb_upper, bb_lower = calculate_bb(close, period=20, std_mult=2.5)
+    # Calculate and align 1w HMA for very long-term trend
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Vol spike ratio: ATR(7)/ATR(30)
-    vol_ratio = np.full(n, np.nan)
-    for i in range(30, n):
-        if atr_30[i] > 1e-10:
-            vol_ratio[i] = atr_7[i] / atr_30[i]
+    # Calculate primary (12h) indicators
+    atr = calculate_atr(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    chop = calculate_choppiness(high, low, close, period=14)
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    bb_mid, bb_upper, bb_lower = calculate_bb(close, period=20, std_mult=2.0)
     
-    # Try to load funding rate data
-    symbol = prices.get('symbol', 'BTCUSDT') if isinstance(prices, pd.DataFrame) else 'BTCUSDT'
-    funding_rates = load_funding_data(symbol)
-    
-    # If funding data available, calculate Z-score
-    if funding_rates is not None and len(funding_rates) >= n:
-        funding_zscore = calculate_zscore(funding_rates[:n], period=30)
-        has_funding = True
-    else:
-        funding_zscore = np.full(n, np.nan)
-        has_funding = False
+    # Calculate funding z-score for contrarian filter
+    funding_z = calculate_funding_zscore(prices, symbol, lookback=90)
     
     signals = np.zeros(n)
     BASE_SIZE = 0.28
@@ -175,61 +283,80 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr_7[i]) or np.isnan(atr_30[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(atr[i]) or np.isnan(chop[i]) or np.isnan(crsi[i]):
             continue
-        if np.isnan(bb_lower[i]) or np.isnan(bb_upper[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(donchian_upper[i]):
             continue
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(bb_lower[i]) or atr[i] <= 1e-10:
             continue
         
-        # === MACRO TREND (1d HMA) ===
+        # === MACRO TREND (1d HMA + 1w HMA) ===
         macro_bull = close[i] > hma_1d_aligned[i]
         macro_bear = close[i] < hma_1d_aligned[i]
+        very_long_bull = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
+        very_long_bear = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
         
-        # === VOL SPIKE DETECTION ===
-        vol_spike = vol_ratio[i] > 1.8
+        # === CHOPPINESS REGIME ===
+        is_choppy = chop[i] > 61.8
+        is_trending = chop[i] < 38.2
+        is_transition = not is_choppy and not is_trending
+        
+        # === DONCHIAN BREAKOUT ===
+        breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
+        breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
+        
+        # === CONNORS RSI EXTREMES (relaxed for more trades) ===
+        crsi_oversold = crsi[i] < 25.0
+        crsi_overbought = crsi[i] > 75.0
         
         # === BOLLINGER EXTREMES ===
         bb_oversold = close[i] < bb_lower[i]
         bb_overbought = close[i] > bb_upper[i]
         
-        # === FUNDING RATE SIGNALS (if available) ===
-        funding_short_signal = False
-        funding_long_signal = False
-        
-        if has_funding and not np.isnan(funding_zscore[i]):
-            # Z > +2 = crowded longs → short signal
-            if funding_zscore[i] > 2.0:
-                funding_short_signal = True
-            # Z < -2 = crowded shorts → long signal
-            elif funding_zscore[i] < -2.0:
-                funding_long_signal = True
+        # === FUNDING RATE CONTRARIAN (BTC/ETH only) ===
+        funding_extreme_long = False
+        funding_extreme_short = False
+        if not np.isnan(funding_z[i]):
+            if symbol.startswith('BTC') or symbol.startswith('ETH'):
+                funding_extreme_long = funding_z[i] < -1.5  # crowded shorts
+                funding_extreme_short = funding_z[i] > 1.5  # crowded longs
         
         # === ENTRY CONDITIONS ===
         desired_signal = 0.0
         
-        # === FUNDING MEAN REVERSION (primary signal if available) ===
-        if has_funding:
-            # Long: funding Z < -2 + vol spike + BB oversold + macro bull
-            if funding_long_signal and vol_spike and bb_oversold and macro_bull:
+        # === TRENDING REGIME: Donchian Breakout + Macro Alignment ===
+        if is_trending:
+            if macro_bull and breakout_long:
                 desired_signal = BASE_SIZE
-            # Short: funding Z > +2 + vol spike + BB overbought + macro bear
-            elif funding_short_signal and vol_spike and bb_overbought and macro_bear:
+            elif macro_bear and breakout_short:
                 desired_signal = -BASE_SIZE
-            # Fallback: just funding extreme + macro alignment (more trades)
-            elif funding_long_signal and macro_bull and bb_oversold:
-                desired_signal = BASE_SIZE * 0.5
-            elif funding_short_signal and macro_bear and bb_overbought:
-                desired_signal = -BASE_SIZE * 0.5
         
-        # === VOL SPIKE REVERSION (fallback if no funding data) ===
-        else:
-            # Long: vol spike + BB oversold + macro bull
-            if vol_spike and bb_oversold and macro_bull:
+        # === CHOPPY REGIME: Mean Reversion (CRSI + BB + Funding) ===
+        elif is_choppy:
+            # Long: oversold signals + not strongly bearish macro
+            long_conditions = (crsi_oversold or bb_oversold or funding_extreme_long)
+            if long_conditions and not macro_bear:
                 desired_signal = BASE_SIZE
-            # Short: vol spike + BB overbought + macro bear
-            elif vol_spike and bb_overbought and macro_bear:
+            # Short: overbought signals + not strongly bullish macro
+            short_conditions = (crsi_overbought or bb_overbought or funding_extreme_short)
+            if short_conditions and not macro_bull:
                 desired_signal = -BASE_SIZE
+        
+        # === TRANSITION ZONE: Use CRSI extremes + funding ===
+        else:
+            # More lenient in transition to ensure trade frequency
+            if (crsi_oversold or funding_extreme_long) and (macro_bull or very_long_bull):
+                desired_signal = BASE_SIZE
+            elif (crsi_overbought or funding_extreme_short) and (macro_bear or very_long_bear):
+                desired_signal = -BASE_SIZE
+        
+        # === FALLBACK: Pure CRSI extremes for trade frequency ===
+        # If no signal yet but CRSI at extreme, take the trade
+        if desired_signal == 0.0:
+            if crsi_oversold and not macro_bear:
+                desired_signal = BASE_SIZE * 0.5  # Half size for weaker signal
+            elif crsi_overbought and not macro_bull:
+                desired_signal = -BASE_SIZE * 0.5
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -250,14 +377,10 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= BASE_SIZE * 0.9:
+        if desired_signal >= BASE_SIZE * 0.5:
             desired_signal = BASE_SIZE
-        elif desired_signal <= -BASE_SIZE * 0.9:
+        elif desired_signal <= -BASE_SIZE * 0.5:
             desired_signal = -BASE_SIZE
-        elif desired_signal > 0:
-            desired_signal = BASE_SIZE * 0.5
-        elif desired_signal < 0:
-            desired_signal = -BASE_SIZE * 0.5
         else:
             desired_signal = 0.0
         
@@ -266,12 +389,12 @@ def generate_signals(prices):
             if not in_position:
                 in_position = True
                 position_side = int(np.sign(desired_signal))
-                entry_atr = atr_7[i] if not np.isnan(atr_7[i]) else atr_30[i]
+                entry_atr = atr[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(desired_signal) != position_side:
                 position_side = int(np.sign(desired_signal))
-                entry_atr = atr_7[i] if not np.isnan(atr_7[i]) else atr_30[i]
+                entry_atr = atr[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
