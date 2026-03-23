@@ -743,7 +743,7 @@ async function loadDetail(strategy, symbol, period) {{
     // Trade list
     html += `<h4 style="margin-top:12px">Trade History (${{data.trades.length}} trades)</h4>`;
     html += `<div class="trade-list"><table class="metrics-table">`;
-    html += `<thead><tr><th>#</th><th>Entry</th><th>Exit</th><th>Dir</th><th>Entry$</th><th>Exit$</th><th>Size</th><th>PnL</th><th>PnL%</th><th>Fees</th><th>Funding</th></tr></thead><tbody>`;
+    html += `<thead><tr><th>#</th><th>Entry</th><th>Exit</th><th>Dir</th><th>Entry$</th><th>Exit$</th><th>Size</th><th>PnL</th><th>PnL%</th><th>Balance</th><th>Fees</th><th>Funding</th></tr></thead><tbody>`;
 
     const trades = data.trades;
     const maxShow = 200;
@@ -764,6 +764,7 @@ async function loadDetail(strategy, symbol, period) {{
         <td>${{t.size.toFixed(3)}}</td>
         <td class="${{pnlClass}}">${{t.pnl >= 0 ? '+' : ''}}${{t.pnl.toFixed(2)}}</td>
         <td class="${{pnlClass}}">${{t.pnl_pct >= 0 ? '+' : ''}}${{t.pnl_pct.toFixed(2)}}%</td>
+        <td>${{t.balance ? '$' + t.balance.toLocaleString() : ''}}</td>
         <td>${{t.fee_cost.toFixed(2)}}</td>
         <td>${{t.funding_cost.toFixed(2)}}</td>
       </tr>`;
@@ -1160,7 +1161,9 @@ def run_detail_backtest(strategy_name: str, symbol: str, period: str) -> dict:
 
         # Full trades list
         trades = []
+        running_balance = float(result.equity_curve[0])
         for t in result.trades:
+            running_balance += t.pnl
             trades.append({
                 "entry_time": str(t.entry_time),
                 "exit_time": str(t.exit_time),
@@ -1171,6 +1174,7 @@ def run_detail_backtest(strategy_name: str, symbol: str, period: str) -> dict:
                 "leverage": round(t.leverage, 1),
                 "pnl": round(t.pnl, 2),
                 "pnl_pct": round(t.pnl_pct * 100, 3),
+                "balance": round(running_balance, 2),
                 "fee_cost": round(t.fee_cost, 2),
                 "funding_cost": round(t.funding_cost, 2),
             })
