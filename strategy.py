@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #1208: 30m Primary + 4h/1d HTF — Funding-Inspired Mean Reversion with HTF Trend
+Experiment #1209: 4h Primary + 1d HTF — Simplified Dual Regime (Choppiness + CRSI + Donchian)
 
-Hypothesis: Recent failures show pure trend-following doesn't work on BTC/ETH in bear/range markets.
-Research indicates funding rate mean reversion has Sharpe 0.8-1.5 through 2022 crash.
-Since we can't access funding data directly, we'll proxy it with:
-- Price Z-score (30-period) as funding proxy (extreme positioning = mean reversion opportunity)
-- 4h HMA for macro trend bias (only take mean reversion WITH the HTF trend)
-- Choppiness Index to confirm range regime (CHOP > 55 = mean revert, < 45 = trend follow)
-- Session filter (8-20 UTC) for liquidity
-- Volume confirmation (> 0.7x avg)
+Hypothesis: Current #1184 has overly complex entry logic causing low trade frequency.
+This version SIMPLIFIES entries while keeping proven regime-switching framework:
+- Classic Choppiness thresholds: 61.8 (chop), 38.2 (trend)
+- CRSI thresholds: 30/70 (not 20/80) — MORE trades while keeping quality
+- Remove BB confirmation (redundant with CRSI for mean reversion)
+- Simpler trend entry: Donchian breakout + 1d HMA bias (not strict alignment)
+- Loosen macro filter: just bias, not hard requirement
 
-Key design for 30m:
-- HTF (4h/1d) determines DIRECTION
-- 30m determines ENTRY TIMING within HTF trend
-- Very strict confluence to keep trades < 80/year
-- Position size: 0.22 (smaller for lower TF fee sensitivity)
-- Stoploss: 2.5x ATR trailing
+Key changes from #1184:
+1. CRSI thresholds: 20/80 → 30/70 (significantly more entry opportunities)
+2. Remove BB confirmation for chop regime (CRSI alone is sufficient)
+3. Macro filter: bias only, not hard requirement (allows more trades)
+4. Simplified transition zone logic
+5. Ensure minimum trade frequency by loosening confluence
 
-Target: 40-70 trades/year, Sharpe > 0.612
+Target: 40-60 trades/year, Sharpe > 0.612 (beat current best)
+Position Size: 0.30 discrete
+Stoploss: 2.5x ATR trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_zscore_mean_reversion_4h1d_hma_chop_session_v1"
-timeframe = "30m"
+name = "mtf_4h_simplified_dual_regime_chop_crsi_donchian_1d_looser_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -119,7 +120,7 @@ def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
         streak_rsi[i] = (up_streaks / streak_period) * 100.0
     
     pct_rank = np.full(n, np.nan)
-    returns = np.diff(close) / np.where(close[:-1] > 1e-10, close[:-1], 1e-10)
+    returns = np.diff(close) / close[:-1]
     returns = np.concatenate([[0], returns])
     
     for i in range(rank_period, n):
@@ -178,51 +179,39 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_zscore(close, period=30):
-    """Z-score of price for mean reversion signals (funding rate proxy)."""
-    n = len(close)
-    zscore = np.full(n, np.nan)
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel — breakout indicator."""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
     for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        mean = np.mean(window)
-        std = np.std(window)
-        if std > 1e-10:
-            zscore[i] = (close[i] - mean) / std
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    return zscore
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 4h HMA for trend filter
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
-    # Calculate and align 1d HMA for macro bias
+    # Calculate and align 1d HMA for macro trend filter
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (30m) indicators
+    # Calculate primary (4h) indicators
     atr = calculate_atr(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     chop = calculate_choppiness(high, low, close, period=14)
     crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
-    zscore = calculate_zscore(close, period=30)
-    
-    # Volume SMA for filter
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.22  # Smaller for 30m to reduce fee drag
+    BASE_SIZE = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -235,74 +224,61 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or np.isnan(chop[i]) or np.isnan(crsi[i]):
             continue
-        if np.isnan(zscore[i]) or np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(donchian_upper[i]):
             continue
-        if np.isnan(vol_sma[i]) or atr[i] <= 1e-10 or vol_sma[i] <= 1e-10:
+        if atr[i] <= 1e-10:
             continue
         
-        # === SESSION FILTER (8-20 UTC) ===
-        # Convert open_time (ms) to hour
-        hour_utc = (open_time[i] // 3600000) % 24
-        in_session = 8 <= hour_utc <= 20
-        
-        # === VOLUME FILTER ===
-        volume_ok = volume[i] > 0.7 * vol_sma[i]
-        
-        # === MACRO TREND (4h HMA + 1d HMA) ===
-        trend_bull_4h = close[i] > hma_4h_aligned[i]
-        trend_bear_4h = close[i] < hma_4h_aligned[i]
-        trend_bull_1d = close[i] > hma_1d_aligned[i]
-        trend_bear_1d = close[i] < hma_1d_aligned[i]
-        
-        # Strong trend alignment (both 4h and 1d agree)
-        strong_bull = trend_bull_4h and trend_bull_1d
-        strong_bear = trend_bear_4h and trend_bear_1d
+        # === MACRO TREND BIAS (1d HMA) — BIAS ONLY, NOT HARD FILTER ===
+        macro_bull = close[i] > hma_1d_aligned[i]
+        macro_bear = close[i] < hma_1d_aligned[i]
         
         # === CHOPPINESS REGIME ===
-        is_choppy = chop[i] > 55.0  # Range market
-        is_trending = chop[i] < 45.0  # Trending market
+        is_choppy = chop[i] > 61.8
+        is_trending = chop[i] < 38.2
         
-        # === Z-SCORE EXTREMES (funding rate proxy) ===
-        zscore_extreme_long = zscore[i] < -1.5  # Oversold
-        zscore_extreme_short = zscore[i] > 1.5  # Overbought
+        # === DONCHIAN BREAKOUT ===
+        breakout_long = close[i] > donchian_upper[i-1]
+        breakout_short = close[i] < donchian_lower[i-1]
         
-        # === CONNORS RSI EXTREMES ===
-        crsi_oversold = crsi[i] < 25.0
-        crsi_overbought = crsi[i] > 75.0
+        # === CONNORS RSI EXTREMES (LOOSENED: 30/70 instead of 20/80) ===
+        crsi_oversold = crsi[i] < 30.0
+        crsi_overbought = crsi[i] > 70.0
         
-        # === ENTRY CONDITIONS ===
+        # === ENTRY CONDITIONS (SIMPLIFIED) ===
         desired_signal = 0.0
         
-        # === CHOPPY REGIME: Mean Reversion (Z-score + CRSI + HTF bias) ===
-        if is_choppy:
-            # Long: oversold + HTF not strongly bearish
-            if zscore_extreme_long and crsi_oversold and not strong_bear:
-                if in_session and volume_ok:
+        # === TRENDING REGIME: Donchian Breakout ===
+        if is_trending:
+            if breakout_long:
+                # Long breakout — prefer bull macro but allow either
+                desired_signal = BASE_SIZE
+            elif breakout_short:
+                # Short breakout — prefer bear macro but allow either
+                desired_signal = -BASE_SIZE
+        
+        # === CHOPPY REGIME: Mean Reversion (CRSI extremes) ===
+        elif is_choppy:
+            if crsi_oversold:
+                # Long on oversold — avoid if strongly bearish macro
+                if not macro_bear or crsi[i] < 20.0:  # Very oversold overrides macro
                     desired_signal = BASE_SIZE
-            # Short: overbought + HTF not strongly bullish
-            elif zscore_extreme_short and crsi_overbought and not strong_bull:
-                if in_session and volume_ok:
+            elif crsi_overbought:
+                # Short on overbought — avoid if strongly bullish macro
+                if not macro_bull or crsi[i] > 80.0:  # Very overbought overrides macro
                     desired_signal = -BASE_SIZE
         
-        # === TRENDING REGIME: Pullback entries (WITH trend) ===
-        elif is_trending:
-            # Long pullback in bull trend
-            if strong_bull and zscore_extreme_long and crsi_oversold:
-                if in_session and volume_ok:
-                    desired_signal = BASE_SIZE
-            # Short pullback in bear trend
-            elif strong_bear and zscore_extreme_short and crsi_overbought:
-                if in_session and volume_ok:
-                    desired_signal = -BASE_SIZE
-        
-        # === TRANSITION ZONE: Use HTF trend only with moderate extremes ===
+        # === TRANSITION ZONE: Use CRSI extremes with macro bias ===
         else:
-            if strong_bull and (zscore_extreme_long or crsi_oversold):
-                if in_session and volume_ok:
-                    desired_signal = BASE_SIZE
-            elif strong_bear and (zscore_extreme_short or crsi_overbought):
-                if in_session and volume_ok:
-                    desired_signal = -BASE_SIZE
+            if crsi_oversold and macro_bull:
+                desired_signal = BASE_SIZE
+            elif crsi_overbought and macro_bear:
+                desired_signal = -BASE_SIZE
+            # Also allow breakouts in transition zone
+            elif breakout_long and macro_bull:
+                desired_signal = BASE_SIZE
+            elif breakout_short and macro_bear:
+                desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
