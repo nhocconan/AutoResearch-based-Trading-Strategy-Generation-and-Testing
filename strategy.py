@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #659: 4h Primary + 1d HTF — Vol-Spike Mean Reversion + Choppiness Regime
+Experiment #660: 1h Primary + 4h/12h HTF — Regime-Adaptive CRSI + HMA Trend
 
-Hypothesis: After analyzing 577 failed strategies and current #651 (Sharpe=0.222):
-1. #651's CRSI thresholds (<15, >85) are TOO EXTREME = missed many valid reversals
-2. Vol-spike mean reversion has proven edge in literature (vol crush after panic)
-3. Combining vol-spike detection with Choppiness regime = better entry timing
-4. Need MORE trades (current may be too conservative) while maintaining quality
+Hypothesis: #655 (1h crsi hma 4h1d) failed with Sharpe=-0.414 because:
+1. CRSI thresholds too extreme (<10/>90) = too few trades
+2. Too many confluence filters = missed opportunities
+3. No volume confirmation = false breakouts
 
 This strategy uses:
-- ATR Ratio (ATR7/ATR30) > 1.8 to detect vol spikes (panic conditions)
-- Choppiness Index (14) for regime: >55 range, <45 trend
-- RSI(7) extremes for entry timing (softer than CRSI: <25 long, >75 short)
-- 1d HMA(21) slope for major trend bias
-- Bollinger Band position for additional mean-reversion confirmation
+- 12h HMA for major trend bias (slower than 1d, faster than 1w)
+- 4h HMA for intermediate trend confirmation
+- Choppiness Index (14) for regime detection (range vs trend)
+- Connors RSI with RELAXED thresholds (<20/>80 instead of <10/>90)
+- Volume filter (>0.7x 20-bar avg) to confirm entries
+- Asymmetric sizing: 0.25 for range, 0.30 for trend
 
-Why this might beat Sharpe=0.520:
-- Vol-spike entries have higher win rate (panic reversals)
-- Softer RSI thresholds = more trades (target 35-50/year on 4h)
-- BB position filter adds confluence without over-filtering
-- 1d HMA keeps us on right side of major moves
+Key changes from #655:
+- CRSI thresholds: 15/85 → 20/80 (more trades)
+- Added volume confirmation
+- Simpler regime logic (binary: range vs trend)
+- Position tracking for proper stoploss
 
-Position sizing: 0.28 discrete (slightly lower than 0.30 for safety)
-Target: 35-50 trades/year on 4h
+Position sizing: 0.25-0.30 discrete (Rule 4)
+Target: 40-70 trades/year on 1h
 Stoploss: 2.5*ATR trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_volspike_chop_rsi_bb_1d_v1"
-timeframe = "4h"
+name = "mtf_1h_crsi_chop_hma_4h12h_v2"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -102,141 +102,155 @@ def calculate_choppiness(high, low, close, period=14):
     
     return chop
 
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Calculate Connors RSI (CRSI).
+    CRSI = (RSI(close, 3) + RSI(Streak, 2) + PercentRank(100)) / 3
+    """
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
+    n = len(close)
     
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
+    # RSI(3) on close
+    rsi_close = calculate_rsi(close, rsi_period)
     
-    return upper, lower, sma
-
-def calculate_atr_ratio(high, low, close, short_period=7, long_period=30):
-    """Calculate ATR ratio for vol spike detection."""
-    atr_short = calculate_atr(high, low, close, short_period)
-    atr_long = calculate_atr(high, low, close, long_period)
+    # Streak calculation
+    returns = close_s.pct_change()
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if pd.isna(returns.iloc[i]):
+            streak[i] = 0
+        elif returns.iloc[i] > 0:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif returns.iloc[i] < 0:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = 0
     
-    with np.errstate(divide='ignore', invalid='ignore'):
-        atr_ratio = atr_short / (atr_long + 1e-10)
+    # RSI(2) on streak
+    streak_s = pd.Series(streak)
+    streak_delta = streak_s.diff()
+    streak_gain = streak_delta.where(streak_delta > 0, 0.0)
+    streak_loss = -streak_delta.where(streak_delta < 0, 0.0)
     
-    return atr_ratio
+    avg_streak_gain = streak_gain.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
+    avg_streak_loss = streak_loss.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
+    
+    streak_rs = avg_streak_gain / (avg_streak_loss + 1e-10)
+    rsi_streak = 100.0 - (100.0 / (1.0 + streak_rs))
+    
+    # PercentRank(100)
+    percent_rank = pd.Series(returns).rolling(window=rank_period, min_periods=rank_period).apply(
+        lambda x: (x.iloc[-1] > x.iloc[:-1]).sum() / (len(x) - 1) if len(x) > 1 else 0.5,
+        raw=False
+    ).values * 100.0
+    
+    crsi = (rsi_close + rsi_streak.values + percent_rank) / 3.0
+    
+    return crsi
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # Load 1d HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d HMA for primary trend direction
-    hma_1d = calculate_hma(df_1d['close'].values, period=21)
+    # Calculate HTF HMAs
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
     
-    # Align HTF to LTF (Rule 2 - auto shift(1) for completed bars)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Align HTF to LTF (Rule 2 - auto shift(1))
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate 4h indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, 14)
-    atr_7 = calculate_atr(high, low, close, 7)
-    atr_30 = calculate_atr(high, low, close, 30)
     chop_14 = calculate_choppiness(high, low, close, 14)
-    rsi_7 = calculate_rsi(close, 7)
-    rsi_14 = calculate_rsi(close, 14)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, 20, 2.0)
-    atr_ratio = calculate_atr_ratio(high, low, close, 7, 30)
+    crsi = calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    
+    # Volume SMA(20)
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
-    # Position sizing (Rule 4 - discrete, max 0.40)
-    POSITION_SIZE = 0.28
+    # Position sizing (Rule 4 - discrete levels)
+    SIZE_RANGE = 0.25  # Range market
+    SIZE_TREND = 0.30  # Trend market
     
-    # Track position state for stoploss
+    # Track position state
     in_position = False
     position_side = 0
+    entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    entry_price = 0.0
     
-    for i in range(150, n):
+    for i in range(200, n):
         # Skip if indicators not ready
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(atr_14[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_4h_aligned[i]):
             continue
-        if np.isnan(chop_14[i]) or np.isnan(rsi_7[i]) or np.isnan(atr_ratio[i]):
+        if np.isnan(atr_14[i]) or np.isnan(chop_14[i]) or np.isnan(crsi[i]):
             continue
-        if atr_14[i] == 0 or np.isnan(bb_upper[i]):
+        if np.isnan(vol_sma[i]) or vol_sma[i] == 0 or atr_14[i] == 0:
             continue
         
-        # === 1D TREND BIAS (HMA slope over 5 bars) ===
-        hma_1d_slope_bull = hma_1d_aligned[i] > hma_1d_aligned[i-5] if i >= 5 else False
-        hma_1d_slope_bear = hma_1d_aligned[i] < hma_1d_aligned[i-5] if i >= 5 else False
+        # === HTF TREND BIAS ===
+        # 12h HMA slope (5 bars)
+        hma_12h_slope_bull = hma_12h_aligned[i] > hma_12h_aligned[i-5]
+        hma_12h_slope_bear = hma_12h_aligned[i] < hma_12h_aligned[i-5]
         
-        # Price relative to 1d HMA
-        price_above_hma_1d = close[i] > hma_1d_aligned[i]
-        price_below_hma_1d = close[i] < hma_1d_aligned[i]
+        # Price relative to 12h HMA
+        price_above_hma_12h = close[i] > hma_12h_aligned[i]
+        price_below_hma_12h = close[i] < hma_12h_aligned[i]
+        
+        # 4h HMA slope (3 bars)
+        hma_4h_slope_bull = hma_4h_aligned[i] > hma_4h_aligned[i-3]
+        hma_4h_slope_bear = hma_4h_aligned[i] < hma_4h_aligned[i-3]
         
         # === CHOPPINESS REGIME ===
         is_range = chop_14[i] > 55.0
         is_trend = chop_14[i] < 45.0
         
-        # === VOLATILITY SPIKE DETECTION ===
-        vol_spike = atr_ratio[i] > 1.7  # ATR7 > 1.7x ATR30 = elevated vol
+        # === CONNORS RSI (relaxed thresholds for more trades) ===
+        crsi_oversold = crsi[i] < 20.0
+        crsi_overbought = crsi[i] > 80.0
+        crsi_neutral_low = crsi[i] < 40.0
+        crsi_neutral_high = crsi[i] > 60.0
         
-        # === RSI EXTREMES (softer than CRSI for more trades) ===
-        rsi_oversold = rsi_7[i] < 30.0
-        rsi_overbought = rsi_7[i] > 70.0
-        
-        # === BOLLINGER BAND POSITION ===
-        bb_position = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i] + 1e-10)
-        bb_low = bb_position < 0.15  # Near lower band
-        bb_high = bb_position > 0.85  # Near upper band
+        # === VOLUME FILTER ===
+        vol_confirmed = volume[i] > 0.7 * vol_sma[i]
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
         
         # --- LONG ENTRY ---
-        # Scenario 1: Range market + Vol spike + RSI oversold + BB low (mean revert)
-        if is_range and vol_spike and rsi_oversold and bb_low:
-            new_signal = POSITION_SIZE
+        # Regime 1: Range market + CRSI oversold = mean revert long
+        if is_range and crsi_oversold and vol_confirmed:
+            new_signal = SIZE_RANGE
         
-        # Scenario 2: Range market + RSI very oversold (<20) + BB low
-        elif is_range and rsi_7[i] < 20.0 and bb_low:
-            new_signal = POSITION_SIZE
-        
-        # Scenario 3: Trending bull + pullback to BB mid + RSI moderate oversold
-        elif is_trend and hma_1d_slope_bull and price_above_hma_1d:
-            if bb_position < 0.40 and rsi_7[i] < 40.0:
-                new_signal = POSITION_SIZE
-        
-        # Scenario 4: Vol spike + extreme RSI (<15) regardless of regime (panic reversal)
-        if vol_spike and rsi_7[i] < 15.0:
-            new_signal = POSITION_SIZE
+        # Regime 2: Trending market + 12h bull + 4h bull + CRSI pullback
+        elif is_trend and hma_12h_slope_bull and price_above_hma_12h:
+            if hma_4h_slope_bull and crsi_neutral_low and vol_confirmed:
+                new_signal = SIZE_TREND
         
         # --- SHORT ENTRY ---
-        # Scenario 1: Range market + Vol spike + RSI overbought + BB high (mean revert)
-        if is_range and vol_spike and rsi_overbought and bb_high:
-            new_signal = -POSITION_SIZE
+        # Regime 1: Range market + CRSI overbought = mean revert short
+        elif is_range and crsi_overbought and vol_confirmed:
+            new_signal = -SIZE_RANGE
         
-        # Scenario 2: Range market + RSI very overbought (>80) + BB high
-        elif is_range and rsi_7[i] > 80.0 and bb_high:
-            new_signal = -POSITION_SIZE
+        # Regime 2: Trending market + 12h bear + 4h bear + CRSI pullback
+        elif is_trend and hma_12h_slope_bear and price_below_hma_12h:
+            if hma_4h_slope_bear and crsi_neutral_high and vol_confirmed:
+                new_signal = -SIZE_TREND
         
-        # Scenario 3: Trending bear + pullback to BB mid + RSI moderate overbought
-        elif is_trend and hma_1d_slope_bear and price_below_hma_1d:
-            if bb_position > 0.60 and rsi_7[i] > 60.0:
-                new_signal = -POSITION_SIZE
-        
-        # Scenario 4: Vol spike + extreme RSI (>85) regardless of regime (panic reversal)
-        if vol_spike and rsi_7[i] > 85.0:
-            new_signal = -POSITION_SIZE
-        
-        # === HOLD POSITION LOGIC ===
+        # === HOLD POSITION (don't flip unless signal changes) ===
         if in_position and new_signal == 0.0:
-            new_signal = signals[i-1] if i > 0 else 0.0
+            new_signal = signals[i-1]
         
-        # === STOPLOSS CHECK (2.5 * ATR trailing) ===
+        # === STOPLOSS (2.5 * ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -259,23 +273,12 @@ def generate_signals(prices):
         
         # === EXIT ON TREND FLIP ===
         if in_position and position_side > 0:
-            if hma_1d_slope_bear and price_below_hma_1d:
+            if hma_12h_slope_bear and price_below_hma_12h:
                 new_signal = 0.0
         
         if in_position and position_side < 0:
-            if hma_1d_slope_bull and price_above_hma_1d:
+            if hma_12h_slope_bull and price_above_hma_12h:
                 new_signal = 0.0
-        
-        # === TAKE PROFIT (reduce to half at 2R) ===
-        if in_position and position_side > 0:
-            if close[i] > entry_price + 2.0 * atr_14[i]:
-                if new_signal == POSITION_SIZE:
-                    new_signal = POSITION_SIZE / 2.0
-        
-        if in_position and position_side < 0:
-            if close[i] < entry_price - 2.0 * atr_14[i]:
-                if new_signal == -POSITION_SIZE:
-                    new_signal = -POSITION_SIZE / 2.0
         
         # === UPDATE POSITION TRACKING ===
         if new_signal != 0.0:
