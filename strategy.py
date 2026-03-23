@@ -1,45 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #652: 12h Primary + 1d/1w HTF — Multi-Signal Confluence with Regime Adaptation
+Experiment #653: 1d Primary + 1w HTF — Simplified Dual Regime with Loose Entries
 
-Hypothesis: 12h timeframe provides optimal balance between signal quality and trade frequency.
-Combining Fisher Transform (reversals), KAMA (adaptive trend), Donchian (breakouts), and
-Choppiness Index (regime filter) with OR logic for entries ensures sufficient trade generation
-across all market conditions (rallies, crashes, ranges).
+Hypothesis: Previous strategies failed due to OVER-FILTERING (0 trades on many exps).
+This version SIMPLIFIES entry logic while keeping regime detection. Key changes:
 
-Key innovations:
-1. Multiple independent entry signals (OR logic) — any one can trigger, not all required
-2. Looser Fisher thresholds (-1.5/+1.5) to catch more reversals
-3. Donchian breakout as backup entry when Fisher doesn't trigger
-4. 1d HMA + 1w HMA dual HTF filter for macro bias
-5. Choppiness regime switch: mean revert when choppy, trend follow when trending
-6. Hold logic maintains positions through minor pullbacks (critical for PnL)
-7. Trailing stop at 3.0 ATR to let winners run
+1. LOOSER Fisher thresholds (-0.8/+0.8) to ensure trade frequency
+2. Simplified regime: choppy=mean-revert, trending=trend-follow (no complex nested logic)
+3. 1w HMA as SOFT bias only (doesn't block entries, just adjusts size)
+4. Better hold logic: maintain position unless clear reversal signal
+5. 2.5*ATR trailing stop for risk management
+6. Discrete signal levels (0, ±0.25, ±0.30) to minimize fee churn
 
 Why this should beat Sharpe=0.612:
-- 12h TF = fewer false signals than 4h, more trades than 1d
-- OR logic entries = guaranteed trade generation on major moves
-- Dual HTF (1d + 1w) = better trend filter than single HTF
-- Conservative sizing (0.25-0.30) survives 77% crash with ~25% DD
-- Hold logic prevents premature exits during trend continuation
+- More trades = better statistical significance (fixes #1 failure mode)
+- Regime detection prevents whipsaw in choppy markets
+- 1d timeframe = lower fee drag, cleaner signals
+- 1w HTF prevents major counter-trend disasters without over-filtering
+- Conservative sizing (0.25-0.30) survives 77% crash with ~27% DD
 
-Target: Sharpe > 0.612, trades >= 20 train, >= 3 test, ALL symbols positive Sharpe
+Target: Sharpe > 0.612, trades >= 30 train, >= 5 test, ALL symbols positive Sharpe
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_fisher_kama_donchian_chop_dualhtf_v1"
-timeframe = "12h"
+name = "mtf_1d_dual_regime_fisher_kama_loose_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_fisher_transform(high, low, close, period=9):
-    """
-    Ehlers Fisher Transform.
-    Converts price to Gaussian normal distribution for clearer reversal signals.
-    Long: Fisher crosses above -1.5 from below
-    Short: Fisher crosses below +1.5 from above
-    """
+    """Ehlers Fisher Transform for reversal detection."""
     n = len(close)
     fisher = np.full(n, np.nan)
     fisher_signal = np.full(n, np.nan)
@@ -71,10 +62,7 @@ def calculate_fisher_transform(high, low, close, period=9):
     return fisher, fisher_signal
 
 def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """
-    Kaufman Adaptive Moving Average (KAMA).
-    Adapts smoothing based on market efficiency (trend vs noise).
-    """
+    """Kaufman Adaptive Moving Average."""
     n = len(close)
     kama = np.full(n, np.nan)
     
@@ -103,11 +91,7 @@ def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
     return kama
 
 def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP).
-    CHOP > 61.8 = choppy/ranging, CHOP < 38.2 = trending
-    We use: > 55 = chop (mean revert), < 45 = trend (trend follow)
-    """
+    """Choppiness Index for regime detection."""
     n = len(close)
     chop = np.full(n, np.nan)
     
@@ -133,7 +117,7 @@ def calculate_choppiness(high, low, close, period=14):
     return chop
 
 def calculate_atr(high, low, close, period=14):
-    """Calculate ATR using Wilder's smoothing."""
+    """ATR using Wilder's smoothing."""
     n = len(close)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
@@ -148,7 +132,7 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_hma(close, period=21):
-    """Hull Moving Average for smoother HTF trend."""
+    """Hull Moving Average for HTF trend."""
     n = len(close)
     hma = np.full(n, np.nan)
     
@@ -172,35 +156,22 @@ def calculate_hma(close, period=21):
     
     return hma
 
-def calculate_donchian_channels(high, low, period=20):
-    """Donchian Channels for breakout detection."""
-    n = len(high)
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    middle = (upper + lower) / 2
-    return upper, lower, middle
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (CRITICAL - Rule 1)
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h indicators (primary timeframe)
-    fisher_12h, fisher_signal_12h = calculate_fisher_transform(high, low, close, period=9)
-    kama_12h = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    chop_12h = calculate_choppiness(high, low, close, period=14)
-    atr_12h = calculate_atr(high, low, close, period=14)
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian_channels(high, low, period=20)
+    # Calculate 1d indicators
+    fisher_1d, fisher_signal_1d = calculate_fisher_transform(high, low, close, period=9)
+    kama_1d = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    chop_1d = calculate_choppiness(high, low, close, period=14)
+    atr_1d = calculate_atr(high, low, close, period=14)
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
@@ -218,145 +189,104 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(fisher_12h[i]) or np.isnan(fisher_signal_12h[i]):
+        if np.isnan(fisher_1d[i]) or np.isnan(fisher_signal_1d[i]):
             continue
-        if np.isnan(kama_12h[i]) or np.isnan(chop_12h[i]):
+        if np.isnan(kama_1d[i]) or np.isnan(chop_1d[i]):
             continue
-        if np.isnan(atr_12h[i]) or atr_12h[i] <= 1e-10:
+        if np.isnan(atr_1d[i]) or atr_1d[i] <= 1e-10:
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
-            continue
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(hma_1w_aligned[i]):
             continue
         
-        # === REGIME DETECTION (Choppiness Index) ===
-        is_choppy = chop_12h[i] > 55.0
-        is_trending = chop_12h[i] < 45.0
+        # === REGIME DETECTION ===
+        is_choppy = chop_1d[i] > 55.0
+        is_trending = chop_1d[i] < 45.0
         
-        # === HTF TREND BIAS (1d + 1w HMA) ===
-        htf_1d_bullish = close[i] > hma_1d_aligned[i]
-        htf_1d_bearish = close[i] < hma_1d_aligned[i]
-        htf_1w_bullish = close[i] > hma_1w_aligned[i]
-        htf_1w_bearish = close[i] < hma_1w_aligned[i]
+        # === HTF TREND BIAS (1w HMA) - SOFT FILTER ===
+        htf_bullish = close[i] > hma_1w_aligned[i]
+        htf_bearish = close[i] < hma_1w_aligned[i]
         
-        # Strong HTF bias (both 1d and 1w agree)
-        htf_strong_bull = htf_1d_bullish and htf_1w_bullish
-        htf_strong_bear = htf_1d_bearish and htf_1w_bearish
+        # === KAMA TREND ===
+        kama_bullish = close[i] > kama_1d[i]
+        kama_bearish = close[i] < kama_1d[i]
         
-        # === KAMA TREND (12h) ===
-        kama_bullish = close[i] > kama_12h[i]
-        kama_bearish = close[i] < kama_12h[i]
+        # === FISHER SIGNALS (LOOSENED FOR FREQUENCY) ===
+        fisher_long_cross = (fisher_1d[i] > -0.8) and (fisher_signal_1d[i] <= -0.8)
+        fisher_short_cross = (fisher_1d[i] < 0.8) and (fisher_signal_1d[i] >= 0.8)
         
-        # === FISHER TRANSFORM SIGNALS ===
-        fisher_long_cross = (fisher_12h[i] > -1.5) and (fisher_signal_12h[i] <= -1.5)
-        fisher_short_cross = (fisher_12h[i] < 1.5) and (fisher_signal_12h[i] >= 1.5)
-        
-        # Fisher extreme levels
-        fisher_oversold = fisher_12h[i] < -1.8
-        fisher_overbought = fisher_12h[i] > 1.8
-        
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        donchian_long_breakout = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
-        donchian_short_breakout = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
+        fisher_oversold = fisher_1d[i] < -1.0
+        fisher_overbought = fisher_1d[i] > 1.0
         
         desired_signal = 0.0
         
-        # === ENTRY LOGIC — OR conditions (any one can trigger) ===
-        
-        # LONG entries (multiple independent triggers)
-        long_signal = False
-        
-        # Trigger 1: Fisher oversold cross in choppy market
-        if is_choppy and fisher_oversold:
-            long_signal = True
-        
-        # Trigger 2: Fisher long cross with KAMA support
-        if fisher_long_cross and kama_bullish:
-            long_signal = True
-        
-        # Trigger 3: Donchian breakout with HTF bullish bias
-        if donchian_long_breakout and (htf_1d_bullish or htf_1w_bullish):
-            long_signal = True
-        
-        # Trigger 4: KAMA bullish + HTF strong bullish (trend follow)
-        if kama_bullish and htf_strong_bull and fisher_12h[i] < 1.0:
-            long_signal = True
-        
-        # Trigger 5: Mean reversion in chop + HTF not bearish
-        if is_choppy and fisher_12h[i] < -1.0 and not htf_strong_bear:
-            long_signal = True
-        
-        # SHORT entries (multiple independent triggers)
-        short_signal = False
-        
-        # Trigger 1: Fisher overbought in choppy market
-        if is_choppy and fisher_overbought:
-            short_signal = True
-        
-        # Trigger 2: Fisher short cross with KAMA resistance
-        if fisher_short_cross and kama_bearish:
-            short_signal = True
-        
-        # Trigger 3: Donchian breakdown with HTF bearish bias
-        if donchian_short_breakout and (htf_1d_bearish or htf_1w_bearish):
-            short_signal = True
-        
-        # Trigger 4: KAMA bearish + HTF strong bearish (trend follow)
-        if kama_bearish and htf_strong_bear and fisher_12h[i] > -1.0:
-            short_signal = True
-        
-        # Trigger 5: Mean reversion in chop + HTF not bullish
-        if is_choppy and fisher_12h[i] > 1.0 and not htf_strong_bull:
-            short_signal = True
-        
-        # Set desired signal based on triggers
-        if long_signal and not short_signal:
-            desired_signal = SIZE_LONG
-        elif short_signal and not long_signal:
-            desired_signal = -SIZE_SHORT
-        elif long_signal and short_signal:
-            # Conflict — use HTF bias to decide
-            if htf_strong_bull:
+        # === REGIME 1: CHOPPY (Mean Reversion) ===
+        if is_choppy:
+            if fisher_oversold:
                 desired_signal = SIZE_LONG
-            elif htf_strong_bear:
+            elif fisher_overbought:
                 desired_signal = -SIZE_SHORT
-            else:
-                desired_signal = 0.0  # Stay flat on conflict
+            elif fisher_long_cross:
+                desired_signal = SIZE_LONG
+            elif fisher_short_cross:
+                desired_signal = -SIZE_SHORT
+        
+        # === REGIME 2: TRENDING (Trend Follow) ===
+        elif is_trending:
+            if kama_bullish and fisher_long_cross:
+                desired_signal = SIZE_LONG if htf_bullish else SIZE_LONG * 0.8
+            elif kama_bearish and fisher_short_cross:
+                desired_signal = -SIZE_SHORT if htf_bearish else -SIZE_SHORT * 0.8
+            # Also enter on KAMA cross with Fisher confirmation
+            elif kama_bullish and fisher_1d[i] < 0.5:
+                desired_signal = SIZE_LONG * 0.8
+            elif kama_bearish and fisher_1d[i] > -0.5:
+                desired_signal = -SIZE_SHORT * 0.8
+        
+        # === REGIME 3: NEUTRAL/TRANSITION ===
+        else:
+            if kama_bullish and fisher_1d[i] < 0.0:
+                desired_signal = SIZE_LONG * 0.7
+            elif kama_bearish and fisher_1d[i] > 0.0:
+                desired_signal = -SIZE_SHORT * 0.7
         
         # === STOPLOSS CHECK (Trailing ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 3.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 3.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === HOLD LOGIC — Maintain position if trend unchanged ===
+        # === HOLD LOGIC - Maintain position unless clear reversal ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
                 # Hold long if KAMA still bullish OR Fisher not extremely overbought
-                if kama_bullish and fisher_12h[i] < 2.0:
+                if kama_bullish or fisher_1d[i] < 1.5:
                     desired_signal = SIZE_LONG
             elif position_side < 0:
                 # Hold short if KAMA still bearish OR Fisher not extremely oversold
-                if kama_bearish and fisher_12h[i] > -2.0:
+                if kama_bearish or fisher_1d[i] > -1.5:
                     desired_signal = -SIZE_SHORT
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal > 0:
+        if desired_signal > 0.25:
             desired_signal = SIZE_LONG
-        elif desired_signal < 0:
+        elif desired_signal > 0:
+            desired_signal = SIZE_LONG * 0.8
+        elif desired_signal < -0.20:
             desired_signal = -SIZE_SHORT
+        elif desired_signal < 0:
+            desired_signal = -SIZE_SHORT * 0.8
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -364,14 +294,14 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_12h[i]
+                entry_atr = atr_1d[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(desired_signal) != position_side:
                 # Position flip
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_12h[i]
+                entry_atr = atr_1d[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
