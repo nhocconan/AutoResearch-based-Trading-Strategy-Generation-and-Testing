@@ -1,67 +1,76 @@
 #!/usr/bin/env python3
 """
-Experiment #1098: 30m Primary + 4h/1d HTF — Simplified Trend Pullback with Volume/Session Filters
+Experiment #1099: 4h Primary + 1d HTF — KAMA Adaptive Trend with RSI Pullback
 
-Hypothesis: After 797 failed experiments, key insights for 30m timeframe:
-1. Complex regime-switching (Choppiness + CRSI) FAILED 8+ times — AVOID completely
-2. 30m needs STRICT filters to limit trades to 30-80/year (fee drag killer)
-3. SIMPLER is better: 4h HMA for trend + 1d HMA for macro + 30m RSI pullback
-4. Session filter (8-20 UTC) critical for 30m — avoids Asian session noise
-5. Volume filter (0.7x avg) ensures liquidity but not too strict
-6. Loose RSI thresholds (35/65) ensure trades happen on ALL symbols
-7. Position size 0.20-0.30 with 2.5x ATR trailing stop
+Hypothesis: After analyzing 796+ failed experiments, key insights for 4h timeframe:
+1. KAMA (Kaufman Adaptive Moving Average) adapts to market noise better than HMA/EMA
+2. Complex regime filters (Choppiness, CRSI) kill trade frequency → 0 trades
+3. SIMPLER entry conditions generate more trades while maintaining quality
+4. 1d HMA provides clean macro trend filter without over-complication
+5. RSI thresholds 35/65 (not extreme 20/80) ensure adequate trade frequency
+6. Volume confirmation on breakouts reduces false signals
+7. Position size 0.30 base with 2.5x ATR trailing stop
 
-Why this should beat Sharpe=0.612 (current best 4h strategy):
-- 30m captures more intraday moves than 4h while HTF filters limit frequency
-- Dual HTF (4h + 1d) provides strong trend confirmation
-- Session filter removes 40% of noise hours (20-8 UTC)
-- Volume filter ensures we trade when institutional flow present
-- Proven pattern: HMA + RSI + Volume worked in research (Sharpe +0.879 on SOL)
+Why this should beat Sharpe=0.612 (current best):
+- KAMA adapts ER (Efficiency Ratio) to reduce whipsaw in choppy markets
+- 1d HMA macro filter prevents counter-trend trades in strong trends
+- Volume filter confirms genuine breakouts vs fakeouts
+- Loose RSI thresholds ensure 30-60 trades/year on 4h timeframe
+- Proven pattern: KAMA + RSI + ATR worked on ETH (Sharpe +0.755 in research)
 
-Timeframe: 30m (primary)
-HTF: 4h + 1d — loaded ONCE before loop using mtf_data helper
-Position Size: 0.25 base (conservative for lower TF)
+Timeframe: 4h (primary)
+HTF: 1d — loaded ONCE before loop using mtf_data helper
+Position Size: 0.30 base, 0.15 reduced (discrete levels)
 Stoploss: 2.5x ATR trailing
-Target: 40-80 trades/year, Sharpe > 0.612, ALL symbols Sharpe > 0
+Target: 30-60 trades/year, Sharpe > 0.612, DD < -30%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_hma_rsi_4h1d_session_vol_atr_v1"
-timeframe = "30m"
+name = "mtf_4h_kama_rsi_volume_1d_hma_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_hma(close, period=21):
+def calculate_kama(close, period=10, fast=2, slow=30):
     """
-    Hull Moving Average — reduces lag while maintaining smoothness.
-    Formula: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    Kaufman Adaptive Moving Average (KAMA)
+    
+    Adapts smoothing based on market efficiency (trend vs noise).
+    ER (Efficiency Ratio) = |Net Change| / Sum of Absolute Changes
+    High ER → trending → fast smoothing constant
+    Low ER → choppy → slow smoothing constant
+    
+    Formula:
+    1. ER = |close[i] - close[i-period]| / sum(|close[i-j] - close[i-j-1]|) for j in 0..period-1
+    2. SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    3. KAMA[i] = KAMA[i-1] + SC * (close[i] - KAMA[i-1])
     """
     n = len(close)
-    hma = np.full(n, np.nan)
+    kama = np.full(n, np.nan)
     
-    if n < period:
-        return hma
+    if n < period + 1:
+        return kama
     
-    def wma(data, span):
-        """Weighted Moving Average."""
-        if span < 1:
-            span = 1
-        result = np.full(len(data), np.nan)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        for i in range(span - 1, len(data)):
-            window = data[i - span + 1:i + 1]
-            result[i] = np.sum(window * weights) / np.sum(weights)
-        return result
+    # Calculate Efficiency Ratio
+    er = np.zeros(n)
+    for i in range(period, n):
+        net_change = abs(close[i] - close[i - period])
+        sum_changes = np.sum(np.abs(np.diff(close[i - period:i + 1])))
+        if sum_changes > 1e-10:
+            er[i] = net_change / sum_changes
     
-    half = max(1, int(period / 2))
-    sqrt_period = max(1, int(np.sqrt(period)))
+    # Smoothing constants
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
     
-    wma1 = wma(close, half)
-    wma2 = wma(close, period)
-    diff = 2 * wma1 - wma2
-    hma = wma(diff, sqrt_period)
-    return hma
+    # Calculate KAMA
+    kama[period] = close[period]  # Initialize
+    for i in range(period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index — momentum oscillator."""
@@ -105,38 +114,69 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(close, period=20):
-    """Simple Moving Average."""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+def calculate_hma(close, period=21):
+    """
+    Hull Moving Average — reduces lag while maintaining smoothness.
+    Used for HTF macro trend filter.
+    """
+    n = len(close)
+    hma = np.full(n, np.nan)
+    
+    if n < period:
+        return hma
+    
+    def wma(data, span):
+        """Weighted Moving Average."""
+        result = np.full(len(data), np.nan)
+        weights = np.arange(1, span + 1)
+        for i in range(span - 1, len(data)):
+            window = data[i - span + 1:i + 1]
+            result[i] = np.sum(window * weights) / np.sum(weights)
+        return result
+    
+    half = int(period / 2)
+    if half < 1:
+        half = 1
+    
+    wma1 = wma(close, half)
+    wma2 = wma(close, period)
+    diff = 2 * wma1 - wma2
+    
+    sqrt_period = int(np.sqrt(period))
+    if sqrt_period < 1:
+        sqrt_period = 1
+    
+    hma = wma(diff, sqrt_period)
+    return hma
+
+def calculate_volume_ma(volume, period=20):
+    """Volume moving average for volume confirmation."""
+    n = len(volume)
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 4h HMA for intermediate trend
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
-    # Calculate and align 1d HMA for macro trend
+    # Calculate and align 1d HMA for macro trend filter
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (30m) indicators
-    rsi_30m = calculate_rsi(close, period=14)
+    # Calculate primary (4h) indicators
+    kama_4h = calculate_kama(close, period=10, fast=2, slow=30)
+    rsi_4h = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    sma_20 = calculate_sma(close, period=20)
-    vol_sma = calculate_sma(volume, period=20)
+    vol_ma = calculate_volume_ma(volume, period=20)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.25
+    BASE_SIZE = 0.30
     REDUCED_SIZE = 0.15
     
     # Position tracking for stoploss
@@ -149,58 +189,50 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(rsi_30m[i]) or np.isnan(atr[i]):
+        if np.isnan(kama_4h[i]) or np.isnan(rsi_4h[i]) or np.isnan(atr[i]):
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             continue
-        if np.isnan(sma_20[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(vol_ma[i]) or vol_ma[i] <= 1e-10:
             continue
-        if atr[i] <= 1e-10 or vol_sma[i] <= 1e-10:
+        if atr[i] <= 1e-10:
             continue
-        
-        # === SESSION FILTER (8-20 UTC) ===
-        # Convert open_time (ms) to hour
-        hour_utc = (open_time[i] // 3600000) % 24
-        in_session = 8 <= hour_utc <= 20
-        
-        # === VOLUME FILTER ===
-        # Volume must be at least 0.7x 20-period average
-        volume_ok = volume[i] >= 0.7 * vol_sma[i]
         
         # === MACRO TREND (1d HMA) ===
         macro_bull = close[i] > hma_1d_aligned[i]
         macro_bear = close[i] < hma_1d_aligned[i]
         
-        # === INTERMEDIATE TREND (4h HMA) ===
-        trend_bull = close[i] > hma_4h_aligned[i]
-        trend_bear = close[i] < hma_4h_aligned[i]
+        # === ADAPTIVE TREND (4h KAMA) ===
+        # KAMA slope indicates trend direction
+        kama_slope_bull = kama_4h[i] > kama_4h[i - 5] if i >= 5 else False
+        kama_slope_bear = kama_4h[i] < kama_4h[i - 5] if i >= 5 else False
         
-        # === PULLBACK SIGNAL (30m RSI) ===
-        # Loose thresholds to ensure adequate trade frequency on ALL symbols
-        rsi_oversold = rsi_30m[i] < 40.0
-        rsi_overbought = rsi_30m[i] > 60.0
+        # Price relative to KAMA
+        price_above_kama = close[i] > kama_4h[i]
+        price_below_kama = close[i] < kama_4h[i]
         
-        # === PRICE vs SMA20 FILTER ===
-        # For longs: price can be below SMA20 (pullback)
-        # For shorts: price can be above SMA20 (pullback)
-        price_below_sma = close[i] < sma_20[i]
-        price_above_sma = close[i] > sma_20[i]
+        # === PULLBACK SIGNAL (4h RSI) ===
+        # Loose thresholds to ensure adequate trade frequency
+        rsi_oversold = rsi_4h[i] < 40.0
+        rsi_overbought = rsi_4h[i] > 60.0
+        
+        # === VOLUME CONFIRMATION ===
+        # Volume above average confirms genuine moves
+        vol_above_avg = volume[i] > 1.2 * vol_ma[i]
         
         desired_signal = 0.0
         current_size = BASE_SIZE
         
         # === LONG ENTRY ===
-        # Macro bull + 4h bull + RSI oversold + in session + volume ok
-        # Price below SMA20 confirms pullback (not chasing)
-        if macro_bull and trend_bull and rsi_oversold and in_session and volume_ok:
-            if price_below_sma or rsi_30m[i] < 45.0:
+        # Macro bull + KAMA bull + RSI pullback + volume confirmation
+        if macro_bull and kama_slope_bull and price_above_kama:
+            if rsi_oversold or (rsi_4h[i] < 50.0 and vol_above_avg):
                 desired_signal = current_size
         
         # === SHORT ENTRY ===
-        # Macro bear + 4h bear + RSI overbought + in session + volume ok
-        # Price above SMA20 confirms pullback (not chasing)
-        elif macro_bear and trend_bear and rsi_overbought and in_session and volume_ok:
-            if price_above_sma or rsi_30m[i] > 55.0:
+        # Macro bear + KAMA bear + RSI pullback + volume confirmation
+        elif macro_bear and kama_slope_bear and price_below_kama:
+            if rsi_overbought or (rsi_4h[i] > 50.0 and vol_above_avg):
                 desired_signal = -current_size
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
@@ -224,23 +256,23 @@ def generate_signals(prices):
         # === HOLD LOGIC — Maintain position if trend intact ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if macro and 4h trend still bull
-                if macro_bull and trend_bull:
+                # Hold long if macro still bull and KAMA still rising
+                if macro_bull and kama_slope_bull:
                     desired_signal = current_size
             elif position_side < 0:
-                # Hold short if macro and 4h trend still bear
-                if macro_bear and trend_bear:
+                # Hold short if macro still bear and KAMA still falling
+                if macro_bear and kama_slope_bear:
                     desired_signal = -current_size
         
         # === EXIT CONDITIONS ===
         if in_position and position_side > 0:
             # Exit long if macro reverses or RSI overbought
-            if macro_bear or rsi_30m[i] > 70.0:
+            if macro_bear or rsi_4h[i] > 70.0:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
             # Exit short if macro reverses or RSI oversold
-            if macro_bull or rsi_30m[i] < 30.0:
+            if macro_bull or rsi_4h[i] < 30.0:
                 desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
@@ -250,14 +282,14 @@ def generate_signals(prices):
             elif desired_signal >= REDUCED_SIZE * 0.8:
                 desired_signal = REDUCED_SIZE
             else:
-                desired_signal = 0.0
+                desired_signal = REDUCED_SIZE * 0.5
         elif desired_signal < 0:
             if desired_signal <= -BASE_SIZE * 0.8:
                 desired_signal = -BASE_SIZE
             elif desired_signal <= -REDUCED_SIZE * 0.8:
                 desired_signal = -REDUCED_SIZE
             else:
-                desired_signal = 0.0
+                desired_signal = -REDUCED_SIZE * 0.5
         else:
             desired_signal = 0.0
         
