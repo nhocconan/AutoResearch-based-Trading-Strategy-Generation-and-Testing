@@ -1,36 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #076: 12h Primary + 1d HTF — HMA Trend + RSI Pullback with Choppiness Filter
+Experiment #077: 1d Primary + 1w HTF — Simplified HMA Trend with RSI Pullback
 
-Hypothesis: 12h timeframe with 1d macro bias using HMA crossover for trend direction,
-RSI pullback entries in trending markets, and Choppiness Index to reduce whipsaw in
-ranging conditions. Simpler logic than previous attempts to ensure trade generation.
+Hypothesis: Daily timeframe with weekly HTF bias using HMA crossover for trend direction
+and RSI pullback for entry timing will generate 30-50 trades/year with Sharpe > 0.486.
 
 Key innovations:
-1) HMA(16/48) crossover on 12h for faster trend detection than single HMA
-2) 1d HMA(21) for macro bias - only trade in direction of daily trend
-3) RSI(14) pullback: enter when RSI dips to 40-50 in uptrend, 50-60 in downtrend
-4) Choppiness Index filter: reduce size (not block) when CHOP > 50
-5) ATR(14) trailing stoploss at 2.5x
-6) Relaxed entry thresholds to ensure 20-50 trades/year target
+1) 1d primary timeframe — proven higher TF works better (fewer fees, cleaner signals)
+2) 1w HMA for macro bias — only trade in direction of weekly trend
+3) HMA(21) crossover on 1d for entry timing — simpler than complex regime switching
+4) RSI(14) pullback filter — enter on dips in uptrend (RSI 35-55), rallies in downtrend (RSI 45-65)
+5) ATR(14) trailing stop — 2.5x ATR to give room for volatility
+6) Volume confirmation — volume > 0.8 * SMA(volume, 20) to avoid low-liquidity entries
 
 Why this should work:
-- 12h proven timeframe (exp #066 failed but had too strict entries)
-- HMA crossover reacts faster than single HMA for trend changes
-- RSI pullback entries catch continuations, not reversals
-- 1d filter prevents counter-trend trades in bear markets (2025 test period)
-- Simpler logic = more trades = better statistical significance
+- 1d timeframe reduces noise and fee drag (exp #067 was close with Sharpe=-0.004)
+- Simpler entry conditions = more trades (avoiding 0-trade problem)
+- Weekly HTF prevents counter-trend trades in bear markets
+- RSI pullback entries catch better risk/reward than breakouts
+- Discrete position sizing (0.30) controls drawdown
 
-Position size: 0.30 trend, 0.20 ranging (discrete)
+Position size: 0.30 (discrete)
 Stoploss: 2.5*ATR trailing
-Target: 20-50 trades/year, Sharpe > 0.486
+Target: 30-50 trades/year, Sharpe > 0.5
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_hma_crossover_rsi_pullback_1d_v1"
-timeframe = "12h"
+name = "mtf_1d_hma_rsi_pullback_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -65,47 +64,35 @@ def calculate_rsi(close, period=14):
     rsi = rsi.fillna(50.0).values
     return rsi
 
-def calculate_choppiness(high, low, close, period=14):
-    """Calculate Choppiness Index (CHOP)."""
-    n = period
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_sum = pd.Series(tr).rolling(window=n, min_periods=n).sum().values
-    highest_high = pd.Series(high).rolling(window=n, min_periods=n).max().values
-    lowest_low = pd.Series(low).rolling(window=n, min_periods=n).min().values
-    price_range = highest_high - lowest_low + 1e-10
-    chop = 100.0 * np.log10(atr_sum / price_range) / np.log10(n)
-    chop = np.nan_to_num(chop, nan=50.0)
-    return chop
+def calculate_volume_confirmation(volume, period=20, threshold=0.8):
+    """Confirm volume is adequate (volume > threshold * SMA(volume))."""
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    confirm = volume > (threshold * vol_sma)
+    return confirm
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d HMA for macro bias
-    hma_1d = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Calculate 1w HMA for macro bias
+    hma_1w = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
-    
-    # HMA crossover on 12h
-    hma_16 = calculate_hma(close, period=16)
+    hma_21 = calculate_hma(close, period=21)
     hma_48 = calculate_hma(close, period=48)
+    rsi_14 = calculate_rsi(close, period=14)
+    vol_confirm = calculate_volume_confirmation(volume, period=20, threshold=0.8)
     
     signals = np.zeros(n)
-    POSITION_SIZE_TREND = 0.30
-    POSITION_SIZE_RANGE = 0.20
+    POSITION_SIZE = 0.30
     
     # Track position state for stoploss
     in_position = False
@@ -116,76 +103,47 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(atr_14[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(hma_21[i]) or np.isnan(hma_48[i]):
             continue
-        if np.isnan(rsi_14[i]) or np.isnan(chop_14[i]):
-            continue
-        if np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
+        if np.isnan(atr_14[i]) or np.isnan(rsi_14[i]):
             continue
         if atr_14[i] == 0:
             continue
         
-        # === MACRO TREND BIAS (1d HMA) ===
-        price_above_hma_1d = close[i] > hma_1d_aligned[i]
-        price_below_hma_1d = close[i] < hma_1d_aligned[i]
+        # === HTF MACRO BIAS (1w) ===
+        price_above_hma_1w = close[i] > hma_1w_aligned[i]
+        price_below_hma_1w = close[i] < hma_1w_aligned[i]
         
-        # === INTERMEDIATE TREND (12h HMA crossover) ===
-        hma_bullish = hma_16[i] > hma_48[i]
-        hma_bearish = hma_16[i] < hma_48[i]
+        # === LTF TREND (1d HMA crossover) ===
+        hma_bullish = hma_21[i] > hma_48[i]
+        hma_bearish = hma_21[i] < hma_48[i]
         
-        # === CHOPPINESS REGIME ===
-        chop_value = chop_14[i]
-        is_ranging = chop_value > 50.0
-        is_trending = chop_value < 45.0
+        # === RSI PULLBACK ENTRY ===
+        # Long: RSI pulled back to 35-55 in uptrend
+        rsi_pullback_long = 35.0 <= rsi_14[i] <= 55.0
+        # Short: RSI rallied to 45-65 in downtrend
+        rsi_pullback_short = 45.0 <= rsi_14[i] <= 65.0
         
-        # === RSI PULLBACK SIGNALS ===
-        # In uptrend: buy pullback when RSI dips to 40-55
-        rsi_pullback_long = (rsi_14[i] >= 40.0) and (rsi_14[i] <= 55.0)
-        # In downtrend: sell pullback when RSI rallies to 45-60
-        rsi_pullback_short = (rsi_14[i] >= 45.0) and (rsi_14[i] <= 60.0)
-        
-        # === HMA CROSSOVER CONFIRMATION ===
-        hma_cross_long = hma_bullish and (hma_16[i-1] <= hma_48[i-1] if i > 0 else False)
-        hma_cross_short = hma_bearish and (hma_16[i-1] >= hma_48[i-1] if i > 0 else False)
+        # === VOLUME CONFIRMATION ===
+        vol_ok = vol_confirm[i]
         
         # === ENTRY SIGNALS ===
         new_signal = 0.0
         
-        # LONG entries
-        if hma_bullish and price_above_hma_1d:
-            if is_trending:
-                # Trending: enter on RSI pullback
-                if rsi_pullback_long:
-                    new_signal = POSITION_SIZE_TREND
-                # Or on fresh HMA crossover
-                elif hma_cross_long:
-                    new_signal = POSITION_SIZE_TREND
-            elif is_ranging:
-                # Ranging: smaller size on RSI extremes
-                if rsi_14[i] < 35.0:
-                    new_signal = POSITION_SIZE_RANGE
+        # Long entry: Weekly bullish + Daily HMA bullish + RSI pullback + Volume
+        if price_above_hma_1w and hma_bullish and rsi_pullback_long and vol_ok:
+            new_signal = POSITION_SIZE
         
-        # SHORT entries
-        elif hma_bearish and price_below_hma_1d:
-            if is_trending:
-                # Trending: enter on RSI pullback
-                if rsi_pullback_short:
-                    new_signal = -POSITION_SIZE_TREND
-                # Or on fresh HMA crossover
-                elif hma_cross_short:
-                    new_signal = -POSITION_SIZE_TREND
-            elif is_ranging:
-                # Ranging: smaller size on RSI extremes
-                if rsi_14[i] > 65.0:
-                    new_signal = -POSITION_SIZE_RANGE
+        # Short entry: Weekly bearish + Daily HMA bearish + RSI pullback + Volume
+        elif price_below_hma_1w and hma_bearish and rsi_pullback_short and vol_ok:
+            new_signal = -POSITION_SIZE
         
         # === HOLD POSITION LOGIC ===
+        # Keep position if trend still intact (relaxed RSI for holding)
         if in_position and new_signal == 0.0:
-            # Hold long if RSI not overbought and trend intact
-            if position_side > 0 and rsi_14[i] < 70.0 and hma_bullish:
+            if position_side > 0 and hma_bullish and price_above_hma_1w:
                 new_signal = signals[i-1] if i > 0 else 0.0
-            # Hold short if RSI not oversold and trend intact
-            elif position_side < 0 and rsi_14[i] > 30.0 and hma_bearish:
+            elif position_side < 0 and hma_bearish and price_below_hma_1w:
                 new_signal = signals[i-1] if i > 0 else 0.0
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
@@ -211,11 +169,11 @@ def generate_signals(prices):
         
         # === EXIT ON TREND CHANGE ===
         if in_position and position_side > 0:
-            if hma_bearish or price_below_hma_1d:
+            if hma_bearish or price_below_hma_1w:
                 new_signal = 0.0
         
         if in_position and position_side < 0:
-            if hma_bullish or price_above_hma_1d:
+            if hma_bullish or price_above_hma_1w:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
