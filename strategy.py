@@ -1,28 +1,71 @@
 #!/usr/bin/env python3
 """
-Experiment #1322: 12h Primary + 1d/1w HTF — Funding Rate Contrarian + HMA Trend
+Experiment #1323: 1d Primary + 1w HTF — KAMA Adaptive Trend + RSI Pullback
 
-Hypothesis: Research shows funding rate mean reversion has Sharpe 0.8-1.5 through 2022 crash.
-Combined with HTF trend filter, this should work in both bull and bear markets.
-Strategy combines:
-1. 1w HMA for ultra-macro trend (avoid counter-trend trades)
-2. 1d HMA for intermediate trend confirmation
-3. Funding rate z-score(30) for contrarian entry timing
-4. 12h RSI(14) for pullback entry precision
-5. ATR(14) 2.5x trailing stop for risk management
-6. LOOSE entry conditions to ensure >= 30 trades/train, >= 3 trades/test
+Hypothesis: Daily timeframe with weekly trend filter should produce 20-50 high-quality
+trades/year. Using KAMA (Kaufman Adaptive MA) instead of HMA for better noise filtering
+in crypto's volatile markets. KAMA adapts speed based on volatility - fast in trends,
+slow in chop. Combined with wide RSI bands (30-70) to ensure sufficient trades.
 
-Target: Sharpe > 0.612, trades >= 40 train, >= 5 test, DD > -50%
-Timeframe: 12h
-Size: 0.28 discrete levels
+Key changes from failed experiments:
+1. KAMA instead of HMA - adapts to market efficiency ratio
+2. Weekly HMA for macro trend (not daily) - cleaner signal
+3. RSI bands 30-70 (wide) - ensures trades trigger
+4. ADX threshold 18 (not 25+) - more trades
+5. ATR stop at 2.5x - proven from #1316
+6. Position size 0.28 - conservative for 1d timeframe
+
+Target: Sharpe > 0.612, trades >= 30 train, >= 5 test, DD > -40%
+Timeframe: 1d
+Size: 0.28 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_funding_zscore_hma_rsi_1d1w_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_rsi_pullback_1w_trend_atr_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average
+    Adapts speed based on market noise (Efficiency Ratio)
+    Fast in trends, slow in chop - perfect for crypto
+    """
+    n = len(close)
+    if n < period + slow_period:
+        return np.full(n, np.nan)
+    
+    kama = np.full(n, np.nan)
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(period, n):
+        signal = abs(close[i] - close[i - period])
+        noise = 0.0
+        for j in range(i - period + 1, i + 1):
+            noise += abs(close[j] - close[j - 1])
+        if noise > 1e-10:
+            er[i] = signal / noise
+        else:
+            er[i] = 0.0
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    for i in range(period + 1, n):
+        if not np.isnan(er[i]):
+            sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+        else:
+            kama[i] = kama[i - 1]
+    
+    return kama
 
 def calculate_hma(close, period=21):
     """Hull Moving Average - faster response than EMA"""
@@ -76,9 +119,46 @@ def calculate_rsi(close, period=14):
     rsi = np.full(n, np.nan)
     mask = loss_smooth > 1e-10
     rsi[mask] = 100.0 - (100.0 / (1.0 + gain_smooth[mask] / loss_smooth[mask]))
+    rsi[loss_smooth <= 1e-10] = 100.0
     rsi[:period] = np.nan
     
     return rsi
+
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index - trend strength"""
+    n = len(close)
+    if n < period * 2 + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        if high[i] - high[i-1] > low[i-1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+        if low[i-1] - low[i] > high[i] - high[i-1]:
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+    
+    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    mask = tr_smooth > 1e-10
+    plus_di[mask] = 100.0 * plus_dm_smooth[mask] / tr_smooth[mask]
+    minus_di[mask] = 100.0 * minus_dm_smooth[mask] / tr_smooth[mask]
+    
+    di_sum = plus_di + minus_di
+    dx = np.zeros(n)
+    mask2 = di_sum > 1e-10
+    dx[mask2] = 100.0 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return adx
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -105,23 +185,6 @@ def calculate_sma(close, period=200):
         sma[i] = np.mean(close[i-period+1:i+1])
     return sma
 
-def calculate_zscore(series, period=30):
-    """Z-score for mean reversion detection"""
-    n = len(series)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    zscore = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        window = series[i-period+1:i+1]
-        if not np.any(np.isnan(window)):
-            mean = np.mean(window)
-            std = np.std(window, ddof=0)
-            if std > 1e-10:
-                zscore[i] = (series[i] - mean) / std
-    
-    return zscore
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -129,43 +192,21 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1w HMA for ultra-macro trend
+    # Calculate and align 1w HMA for macro trend filter
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate and align 1d HMA for intermediate trend
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate 1w SMA50 for major trend confirmation
+    sma_1w_raw = calculate_sma(df_1w['close'].values, period=50)
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w_raw)
     
-    # Calculate and align 1d SMA50 for major trend
-    sma_1d_raw = calculate_sma(df_1d['close'].values, period=50)
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_raw)
-    
-    # Try to load funding rate data for contrarian signal
-    funding_zscore = None
-    try:
-        # Extract symbol from prices metadata if available
-        symbol = prices.attrs.get('symbol', 'BTCUSDT')
-        funding_path = f"data/processed/funding/{symbol}.parquet"
-        df_funding = pd.read_parquet(funding_path)
-        # Align funding data to prices timeframe
-        if 'funding_rate' in df_funding.columns:
-            funding_rates = df_funding['funding_rate'].values
-            # Calculate z-score on funding rate
-            funding_zscore_raw = calculate_zscore(funding_rates, period=30)
-            # Need to align funding to prices - simplify by using last available
-            # For now, skip if alignment is complex
-            funding_zscore = None
-    except Exception:
-        funding_zscore = None
-    
-    # Calculate primary (12h) indicators
-    hma_fast = calculate_hma(close, period=13)
-    hma_slow = calculate_hma(close, period=34)
+    # Calculate primary (1d) indicators
+    kama_fast = calculate_kama(close, period=10, fast_period=2, slow_period=30)
+    kama_slow = calculate_kama(close, period=30, fast_period=2, slow_period=30)
     rsi = calculate_rsi(close, period=14)
+    adx = calculate_adx(high, low, close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     sma_200 = calculate_sma(close, period=200)
     
@@ -182,83 +223,76 @@ def generate_signals(prices):
     
     for i in range(300, n):
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or atr[i] <= 1e-10:
+        if np.isnan(atr[i]) or np.isnan(adx[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
+        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(rsi[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(sma_1d_aligned[i]):
-            signals[i] = 0.0
-            continue
-        if np.isnan(sma_200[i]):
+        if np.isnan(sma_1w_aligned[i]) or np.isnan(sma_200[i]):
             signals[i] = 0.0
             continue
         
-        # === ULTRA-MACRO TREND (1w HMA) ===
-        # Only trade in direction of weekly trend
-        weekly_bull = close[i] > hma_1w_aligned[i]
-        weekly_bear = close[i] < hma_1w_aligned[i]
+        # === MACRO TREND (1w HMA + SMA50) ===
+        # Use OR logic for more trades
+        macro_bull = (close[i] > hma_1w_aligned[i]) or (close[i] > sma_1w_aligned[i])
+        macro_bear = (close[i] < hma_1w_aligned[i]) or (close[i] < sma_1w_aligned[i])
         
-        # === INTERMEDIATE TREND (1d HMA + SMA50) ===
-        daily_bull = (close[i] > hma_1d_aligned[i]) or (close[i] > sma_1d_aligned[i])
-        daily_bear = (close[i] < hma_1d_aligned[i]) or (close[i] < sma_1d_aligned[i])
+        # === LOCAL TREND (1d KAMA crossover) ===
+        kama_bull = kama_fast[i] > kama_slow[i]
+        kama_bear = kama_fast[i] < kama_slow[i]
         
-        # === LOCAL TREND (12h HMA crossover) ===
-        hma_bull = hma_fast[i] > hma_slow[i]
-        hma_bear = hma_fast[i] < hma_slow[i]
+        # === TREND STRENGTH (ADX) - LOW threshold for more trades ===
+        trend_strong = adx[i] > 18.0
         
         # === SMA200 FILTER ===
         above_sma200 = close[i] > sma_200[i]
         below_sma200 = close[i] < sma_200[i]
         
-        # === FUNDING RATE CONTRARIAN (if available) ===
-        # Extreme positive funding = crowded longs = potential short
-        # Extreme negative funding = crowded shorts = potential long
-        funding_extreme_long = False
-        funding_extreme_short = False
-        if funding_zscore is not None and i < len(funding_zscore):
-            if not np.isnan(funding_zscore[i]):
-                funding_extreme_long = funding_zscore[i] > 1.5  # crowded longs
-                funding_extreme_short = funding_zscore[i] < -1.5  # crowded shorts
-        
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # LONG ENTRY: Weekly bull + Daily bull + HMA bull + RSI pullback
-        # LOOSE conditions to ensure trades
-        if weekly_bull:
-            if daily_bull and hma_bull:
-                # RSI pullback in uptrend (wide bands)
-                if 30.0 <= rsi[i] <= 60.0:
-                    desired_signal = BASE_SIZE
-                # RSI oversold bounce
-                elif rsi[i] < 35.0 and above_sma200:
-                    desired_signal = BASE_SIZE
-            # Mean revert in range (weekly bull but daily mixed)
+        # LONG ENTRY: Macro bull + KAMA bull + RSI pullback
+        # WIDE RSI bands to ensure trades trigger
+        if macro_bull and kama_bull:
+            # RSI pullback in uptrend (30-55 range)
+            if 30.0 <= rsi[i] <= 55.0:
+                desired_signal = BASE_SIZE
+            # RSI breaking above 50 with trend strength
+            elif rsi[i] > 50.0 and rsi[i] < 65.0 and trend_strong:
+                desired_signal = BASE_SIZE
+            # RSI oversold bounce (even if below 30) with SMA200 support
             elif rsi[i] < 30.0 and above_sma200:
                 desired_signal = BASE_SIZE
-            # Funding contrarian long
-            elif funding_extreme_short and above_sma200:
+            # KAMA fast crosses above slow with momentum
+            elif kama_fast[i] > kama_slow[i] and kama_fast[i-1] <= kama_slow[i-1]:
                 desired_signal = BASE_SIZE
         
-        # SHORT ENTRY: Weekly bear + Daily bear + HMA bear + RSI bounce
-        elif weekly_bear:
-            if daily_bear and hma_bear:
-                # RSI bounce in downtrend (wide bands)
-                if 40.0 <= rsi[i] <= 70.0:
-                    desired_signal = -BASE_SIZE
-                # RSI overbought rejection
-                elif rsi[i] > 65.0 and below_sma200:
-                    desired_signal = -BASE_SIZE
-            # Mean revert in range (weekly bear but daily mixed)
+        # SHORT ENTRY: Macro bear + KAMA bear + RSI bounce
+        elif macro_bear and kama_bear:
+            # RSI bounce in downtrend (45-70 range)
+            if 45.0 <= rsi[i] <= 70.0:
+                desired_signal = -BASE_SIZE
+            # RSI breaking below 50 with trend strength
+            elif rsi[i] < 50.0 and rsi[i] > 35.0 and trend_strong:
+                desired_signal = -BASE_SIZE
+            # RSI overbought rejection (even if above 70) with SMA200 resistance
             elif rsi[i] > 70.0 and below_sma200:
                 desired_signal = -BASE_SIZE
-            # Funding contrarian short
-            elif funding_extreme_long and below_sma200:
+            # KAMA fast crosses below slow with momentum
+            elif kama_fast[i] < kama_slow[i] and kama_fast[i-1] >= kama_slow[i-1]:
+                desired_signal = -BASE_SIZE
+        
+        # === RANGE MARKET: Mean revert at extremes ===
+        if not trend_strong and desired_signal == 0.0:
+            # Long at RSI oversold with SMA200 support
+            if rsi[i] < 30.0 and above_sma200:
+                desired_signal = BASE_SIZE
+            # Short at RSI overbought with SMA200 resistance
+            elif rsi[i] > 70.0 and below_sma200:
                 desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
