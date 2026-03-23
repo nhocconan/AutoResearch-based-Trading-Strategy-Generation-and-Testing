@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #1326: 12h Primary + 1d HTF — Dual Regime (Chop + HMA Trend)
+Experiment #1327: 1d Primary + 1w HTF — Regime-Adaptive Mean Reversion + Trend
 
-Hypothesis: Previous 12h strategies failed due to:
-1. Too many conflicting filters = ZERO trades
-2. Pure trend-following destroyed in 2022 crash + 2025 bear
-3. Need regime-adaptive logic: mean-revert in chop, trend-follow otherwise
+Hypothesis: Daily timeframe with weekly trend filter can capture both:
+1. Mean reversion in ranging markets (RSI extremes + BB bands)
+2. Trend continuation in directional markets (HMA slope + pullback)
 
-This strategy uses:
-1. Choppiness Index (CHOP) for regime detection: CHOP>61.8=range, CHOP<38.2=trend
-2. 1d HMA for macro bias (align with mtf_data helper)
-3. 12h HMA crossover for local trend confirmation
-4. RSI(14) for entry timing with WIDE bands to ensure trades
-5. ATR(14) 2.5x trailing stop for risk management
-6. NO ADX filter (removes too many valid signals)
-7. LOOSE entry conditions to guarantee ≥30 trades/train, ≥3/test
+Key innovations vs failed experiments:
+1. Use 1w HMA for macro regime (bull/bear) — slower than 1d, more stable
+2. Adaptive RSI bands: wider in trends (25-75), tighter in ranges (30-70)
+3. Volatility expansion filter: ATR(7)/ATR(21) > 1.5 = breakout potential
+4. BB %B for entry timing: enter when %B < 0.1 (oversold) or > 0.9 (overbought)
+5. Ensure trade frequency: loose enough RSI bands to hit 20-50 trades/year
 
-Target: 30-50 trades/year, Sharpe > 0.612, ALL symbols positive Sharpe
-Timeframe: 12h
-Size: 0.28 discrete (0.0, ±0.28)
+Timeframe: 1d
+HTF: 1w (for macro trend direction)
+Size: 0.25-0.30 discrete
+Target: Sharpe > 0.612, trades >= 40 train, >= 5 test per symbol
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_chop_regime_hma_rsi_1d_bias_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_regime_adaptive_rsi_bb_1w_hma_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -80,38 +78,29 @@ def calculate_rsi(close, period=14):
     rsi = np.full(n, np.nan)
     mask = loss_smooth > 1e-10
     rsi[mask] = 100.0 - (100.0 / (1.0 + gain_smooth[mask] / loss_smooth[mask]))
+    rsi[~mask] = 100.0
     rsi[:period] = np.nan
     
     return rsi
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - measures market consolidation vs trending
-    CHOP > 61.8 = range/consolidation (mean revert)
-    CHOP < 38.2 = trending (trend follow)
-    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    """
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Bollinger Bands with %B indicator"""
     n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    # Calculate ATR
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     
-    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
     
-    # Calculate highest high and lowest low over period
-    hh = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    ll = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    # %B = (close - lower) / (upper - lower)
+    pct_b = np.full(n, np.nan)
+    mask = (upper - lower) > 1e-10
+    pct_b[mask] = (close[mask] - lower[mask]) / (upper[mask] - lower[mask])
     
-    chop = np.full(n, np.nan)
-    mask = (hh - ll) > 1e-10
-    chop[mask] = 100.0 * np.log10(atr_sum[mask] / (hh[mask] - ll[mask])) / np.log10(period)
-    
-    return chop
+    return upper, lower, pct_b
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -133,9 +122,7 @@ def calculate_sma(close, period=200):
     if n < period:
         return np.full(n, np.nan)
     
-    sma = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        sma[i] = np.mean(close[i-period+1:i+1])
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     return sma
 
 def generate_signals(prices):
@@ -145,19 +132,32 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for macro trend filter
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 1w HMA for macro trend filter
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (12h) indicators
-    hma_fast = calculate_hma(close, period=13)
-    hma_slow = calculate_hma(close, period=34)
+    # Calculate 1w HMA slope (trend direction)
+    hma_1w_slope = np.zeros(n)
+    for i in range(1, n):
+        if not np.isnan(hma_1w_aligned[i]) and not np.isnan(hma_1w_aligned[i-1]):
+            hma_1w_slope[i] = (hma_1w_aligned[i] - hma_1w_aligned[i-1]) / hma_1w_aligned[i-1]
+    
+    # Calculate primary (1d) indicators
+    hma_21 = calculate_hma(close, period=21)
+    hma_50 = calculate_hma(close, period=50)
     rsi = calculate_rsi(close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    atr_7 = calculate_atr(high, low, close, period=7)
+    atr_21 = calculate_atr(high, low, close, period=21)
     sma_200 = calculate_sma(close, period=200)
+    bb_upper, bb_lower, pct_b = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    
+    # ATR ratio for volatility expansion
+    atr_ratio = np.full(n, np.nan)
+    mask = atr_21 > 1e-10
+    atr_ratio[mask] = atr_7[mask] / atr_21[mask]
     
     signals = np.zeros(n)
     BASE_SIZE = 0.28
@@ -175,28 +175,31 @@ def generate_signals(prices):
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
+        if np.isnan(hma_21[i]) or np.isnan(hma_50[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(rsi[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(chop[i]) or np.isnan(sma_200[i]):
+        if np.isnan(sma_200[i]) or np.isnan(pct_b[i]):
+            signals[i] = 0.0
+            continue
+        if np.isnan(atr_ratio[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME DETECTION (Choppiness Index) ===
-        is_range = chop[i] > 55.0  # Slightly lower threshold for more range detection
-        is_trend = chop[i] < 45.0  # Slightly higher threshold for more trend detection
-        # Neutral zone (45-55): use trend logic as default
+        # === MACRO REGIME (1w HMA slope) ===
+        # Positive slope = bull regime, Negative slope = bear regime
+        bull_regime = hma_1w_slope[i] > 0.0
+        bear_regime = hma_1w_slope[i] < 0.0
         
-        # === MACRO TREND (1d HMA) ===
-        macro_bull = close[i] > hma_1d_aligned[i]
-        macro_bear = close[i] < hma_1d_aligned[i]
+        # === LOCAL TREND (1d HMA) ===
+        hma_bull = hma_21[i] > hma_50[i]
+        hma_bear = hma_21[i] < hma_50[i]
         
-        # === LOCAL TREND (12h HMA crossover) ===
-        hma_bull = hma_fast[i] > hma_slow[i]
-        hma_bear = hma_fast[i] < hma_slow[i]
+        # === VOLATILITY REGIME ===
+        vol_expansion = atr_ratio[i] > 1.5  # ATR(7) > 1.5 * ATR(21)
+        vol_compression = atr_ratio[i] < 0.8
         
         # === SMA200 FILTER ===
         above_sma200 = close[i] > sma_200[i]
@@ -205,44 +208,43 @@ def generate_signals(prices):
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # REGIME 1: RANGE MARKET (Mean Reversion)
-        if is_range:
-            # Long: RSI oversold + above SMA200 or macro bull
-            if rsi[i] < 35.0 and (above_sma200 or macro_bull):
+        # LONG ENTRY CONDITIONS
+        if bull_regime or hma_bull:
+            # Mean reversion: RSI oversold + BB %B low
+            if rsi[i] < 35.0 and pct_b[i] < 0.15:
                 desired_signal = BASE_SIZE
-            # Short: RSI overbought + below SMA200 or macro bear
-            elif rsi[i] > 65.0 and (below_sma200 or macro_bear):
+            # Pullback in uptrend: RSI 35-50 + above SMA200
+            elif 35.0 <= rsi[i] <= 50.0 and above_sma200 and hma_bull:
+                desired_signal = BASE_SIZE
+            # Volatility expansion breakout: RSI > 50 + vol expansion
+            elif rsi[i] > 50.0 and rsi[i] < 65.0 and vol_expansion and above_sma200:
+                desired_signal = BASE_SIZE
+            # Deep oversold bounce (even in bear regime)
+            elif rsi[i] < 25.0 and pct_b[i] < 0.05:
+                desired_signal = BASE_SIZE
+        
+        # SHORT ENTRY CONDITIONS
+        elif bear_regime or hma_bear:
+            # Mean reversion: RSI overbought + BB %B high
+            if rsi[i] > 65.0 and pct_b[i] > 0.85:
                 desired_signal = -BASE_SIZE
-            # Extreme mean reversion (very wide bands to ensure trades)
-            elif rsi[i] < 25.0:
-                desired_signal = BASE_SIZE
-            elif rsi[i] > 75.0:
+            # Pullback in downtrend: RSI 50-65 + below SMA200
+            elif 50.0 <= rsi[i] <= 65.0 and below_sma200 and hma_bear:
+                desired_signal = -BASE_SIZE
+            # Volatility expansion breakdown: RSI < 50 + vol expansion
+            elif rsi[i] < 50.0 and rsi[i] > 35.0 and vol_expansion and below_sma200:
+                desired_signal = -BASE_SIZE
+            # Deep overbought rejection (even in bull regime)
+            elif rsi[i] > 75.0 and pct_b[i] > 0.95:
                 desired_signal = -BASE_SIZE
         
-        # REGIME 2: TRENDING MARKET (Trend Following)
-        elif is_trend:
-            # Long: Macro bull + HMA bull + RSI not overbought
-            if macro_bull and hma_bull and rsi[i] < 70.0:
-                # Enter on pullback or continuation
-                if rsi[i] < 55.0 or (rsi[i] > 45.0 and hma_fast[i] > hma_slow[i]):
-                    desired_signal = BASE_SIZE
-            # Short: Macro bear + HMA bear + RSI not oversold
-            elif macro_bear and hma_bear and rsi[i] > 30.0:
-                # Enter on bounce or continuation
-                if rsi[i] > 45.0 or (rsi[i] < 55.0 and hma_fast[i] < hma_slow[i]):
-                    desired_signal = -BASE_SIZE
-        
-        # REGIME 3: NEUTRAL (45-55 CHOP) - Use hybrid approach
-        else:
-            #偏向 macro bias with RSI confirmation
-            if macro_bull and rsi[i] < 50.0:
+        # === RANGE MARKET: Pure mean reversion ===
+        if not bull_regime and not bear_regime:
+            # Long at extreme oversold
+            if rsi[i] < 30.0 and pct_b[i] < 0.1:
                 desired_signal = BASE_SIZE
-            elif macro_bear and rsi[i] > 50.0:
-                desired_signal = -BASE_SIZE
-            # Extreme RSI overrides
-            elif rsi[i] < 28.0:
-                desired_signal = BASE_SIZE
-            elif rsi[i] > 72.0:
+            # Short at extreme overbought
+            elif rsi[i] > 70.0 and pct_b[i] > 0.9:
                 desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
