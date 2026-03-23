@@ -1,34 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #003: 1d Primary + 1w HTF — Volatility Regime Adaptive with KAMA + RSI
+Experiment #004: 4h Primary + 12h HTF — Dual Regime with KAMA + RSI + Choppiness
 
-Hypothesis: Daily timeframe with weekly trend bias should generate 20-50 trades/year.
-Key insight from failures: Entry conditions were TOO STRICT (0 trades or negative Sharpe).
-This strategy uses LOOSE entry thresholds to guarantee trade generation while maintaining
-edge through regime adaptation.
-
-Key components:
-1. KAMA (Kaufman Adaptive MA): Adapts to market efficiency ratio, reduces whipsaw
-2. Choppiness Index: Regime detection (range vs trend)
-3. RSI(14): Momentum extremes for entry timing
-4. 1w HMA: Macro trend bias (only trade with weekly trend for higher win rate)
-5. ATR-based stoploss: 2.5*ATR trailing stop
+Hypothesis: 4h timeframe with 12h trend bias should generate 20-50 trades/year with
+positive Sharpe across all symbols. Key insight: Entry conditions must be LOOSE enough
+to guarantee trade generation while regime filtering maintains edge.
 
 Why this should work:
-- 1d primary = fewer trades, less fee drag (targets 20-50/year)
-- 1w HTF = strong trend filter, avoids counter-trend trades in strong moves
-- KAMA = adapts to volatility, better than fixed EMA in chop
-- LOOSE entries = ensures we get trades (RSI 25/75 instead of 15/85)
+- 4h primary = moderate trade frequency (targets 30-60/year)
+- 12h HMA = strong trend filter, avoids counter-trend in strong moves
+- Choppiness Index = regime detection (range vs trend) for adaptive logic
+- KAMA = adapts to volatility better than fixed EMA
+- LOOSE RSI thresholds (30/70) = ensures trade generation
+- ATR stoploss = limits drawdown on each position
 
-Position size: 0.30 (discrete, within 0.20-0.35 range)
+Key components:
+1. 12h HMA(21): Macro trend bias (only trade with HTF trend)
+2. 4h Choppiness(14): Regime detection (>55 = range, <45 = trend)
+3. 4h KAMA(10,2,30): Adaptive trend following
+4. 4h RSI(14): Entry timing with loose thresholds
+5. 4h ATR(14): 2.5*ATR trailing stoploss
+
+Position size: 0.28 (discrete, within 0.20-0.35 range)
 Stoploss: 2.5*ATR trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_kama_rsi_chop_regime_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_kama_rsi_chop_regime_12h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -142,31 +143,31 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1w HMA for macro bias
-    hma_1w = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Calculate 12h HMA for macro bias
+    hma_12h = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # Calculate 1d indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     atr_7 = calculate_atr(high, low, close, period=7)
     
-    kama_1d = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
+    kama_4h = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
     rsi_14 = calculate_rsi(close, period=14)
     chop_14 = calculate_choppiness(high, low, close, period=14)
     
     bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     
-    # Also calculate KAMA slope
+    # Calculate KAMA slope (5-bar lookback)
     kama_slope = np.zeros(n)
     for i in range(5, n):
-        kama_slope[i] = kama_1d[i] - kama_1d[i-5]
+        kama_slope[i] = kama_4h[i] - kama_4h[i-5]
     
     signals = np.zeros(n)
     
     # Position sizing (Rule 4 - discrete, max 0.40)
-    POSITION_SIZE = 0.30
+    POSITION_SIZE = 0.28
     
     # Track position state for stoploss
     in_position = False
@@ -177,77 +178,85 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(atr_14[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(atr_14[i]):
             continue
         if np.isnan(rsi_14[i]) or np.isnan(chop_14[i]) or np.isnan(bb_upper[i]):
             continue
-        if np.isnan(kama_1d[i]) or atr_14[i] == 0:
+        if np.isnan(kama_4h[i]) or atr_14[i] == 0:
             continue
         
-        # === 1W MACRO BIAS ===
-        price_above_hma_1w = close[i] > hma_1w_aligned[i]
-        price_below_hma_1w = close[i] < hma_1w_aligned[i]
+        # === 12H MACRO BIAS ===
+        price_above_hma_12h = close[i] > hma_12h_aligned[i]
+        price_below_hma_12h = close[i] < hma_12h_aligned[i]
         
-        # === CHOPPINESS REGIME ===
+        # === CHOPPINESS REGIME (LOOSE thresholds for more trades) ===
         chop_value = chop_14[i]
-        is_ranging = chop_value > 50.0  # LOOSE threshold for more trades
-        is_trending = chop_value < 45.0  # LOOSE threshold for more trades
+        is_ranging = chop_value > 50.0  # LOOSE: was 55, now 50
+        is_trending = chop_value < 50.0  # LOOSE: was 45, now 50
         
         # === RSI EXTREMES (LOOSE for trade generation) ===
-        rsi_oversold = rsi_14[i] < 35.0  # Was 25, now 35 for more longs
-        rsi_overbought = rsi_14[i] > 65.0  # Was 75, now 65 for more shorts
-        rsi_neutral_low = rsi_14[i] < 50.0
-        rsi_neutral_high = rsi_14[i] > 50.0
+        rsi_oversold = rsi_14[i] < 40.0  # LOOSE: was 30, now 40 for more longs
+        rsi_overbought = rsi_14[i] > 60.0  # LOOSE: was 70, now 60 for more shorts
+        rsi_neutral = rsi_14[i] > 45.0 and rsi_14[i] < 55.0
         
         # === KAMA TREND ===
-        kama_bullish = close[i] > kama_1d[i] and kama_slope[i] > 0
-        kama_bearish = close[i] < kama_1d[i] and kama_slope[i] < 0
+        kama_bullish = close[i] > kama_4h[i] and kama_slope[i] > 0
+        kama_bearish = close[i] < kama_4h[i] and kama_slope[i] < 0
         
         # === BOLLINGER BAND POSITION ===
-        price_near_bb_lower = close[i] < bb_lower[i] * 1.01  # Within 1% of lower band
-        price_near_bb_upper = close[i] > bb_upper[i] * 0.99  # Within 1% of upper band
+        price_near_bb_lower = close[i] < bb_lower[i] * 1.015  # Within 1.5% of lower band
+        price_near_bb_upper = close[i] > bb_upper[i] * 0.985  # Within 1.5% of upper band
         
         # === VOLATILITY FILTER ===
-        vol_elevated = atr_7[i] > atr_14[i] * 1.1  # Recent vol above average
+        vol_elevated = atr_7[i] > atr_14[i] * 1.05  # Recent vol slightly above average
         
         # === ADAPTIVE REGIME ENTRY LOGIC (LOOSE CONDITIONS) ===
         new_signal = 0.0
         
         # --- RANGING REGIME: Mean Reversion ---
         if is_ranging:
-            # Long: RSI oversold OR near BB lower + weekly bias helps
+            # Long: RSI oversold OR near BB lower + 12h bias helps
             if rsi_oversold or price_near_bb_lower:
-                if price_above_hma_1w or vol_elevated:  # Either weekly bullish OR high vol
+                if price_above_hma_12h or vol_elevated:  # Either 12h bullish OR high vol
                     new_signal = POSITION_SIZE
             
-            # Short: RSI overbought OR near BB upper + weekly bias helps
+            # Short: RSI overbought OR near BB upper + 12h bias helps
             elif rsi_overbought or price_near_bb_upper:
-                if price_below_hma_1w or vol_elevated:  # Either weekly bearish OR high vol
+                if price_below_hma_12h or vol_elevated:  # Either 12h bearish OR high vol
                     new_signal = -POSITION_SIZE
         
         # --- TRENDING REGIME: Trend Following ---
         elif is_trending:
-            # Long: KAMA bullish + RSI not overbought + weekly confirms
-            if kama_bullish and rsi_neutral_low:
-                if price_above_hma_1w:  # Weekly trend confirmation
+            # Long: KAMA bullish + RSI not overbought + 12h confirms
+            if kama_bullish and rsi_14[i] < 65.0:
+                if price_above_hma_12h:  # 12h trend confirmation
                     new_signal = POSITION_SIZE
             
-            # Short: KAMA bearish + RSI not oversold + weekly confirms
-            elif kama_bearish and rsi_neutral_high:
-                if price_below_hma_1w:  # Weekly trend confirmation
+            # Short: KAMA bearish + RSI not oversold + 12h confirms
+            elif kama_bearish and rsi_14[i] > 35.0:
+                if price_below_hma_12h:  # 12h trend confirmation
                     new_signal = -POSITION_SIZE
         
         # --- FALLBACK: Simple KAMA crossover if no regime signal ---
         if new_signal == 0.0:
             # Long: Price crosses above KAMA + RSI rising
-            if close[i] > kama_1d[i] and close[i-1] <= kama_1d[i-1]:
-                if rsi_14[i] > rsi_14[i-1] and rsi_14[i] > 45:
+            if close[i] > kama_4h[i] and close[i-1] <= kama_4h[i-1]:
+                if rsi_14[i] > rsi_14[i-1] and rsi_14[i] > 40:
                     new_signal = POSITION_SIZE
             
             # Short: Price crosses below KAMA + RSI falling
-            elif close[i] < kama_1d[i] and close[i-1] >= kama_1d[i-1]:
-                if rsi_14[i] < rsi_14[i-1] and rsi_14[i] < 55:
+            elif close[i] < kama_4h[i] and close[i-1] >= kama_4h[i-1]:
+                if rsi_14[i] < rsi_14[i-1] and rsi_14[i] < 60:
                     new_signal = -POSITION_SIZE
+        
+        # --- ADDITIONAL FALLBACK: BB Mean Reversion ---
+        if new_signal == 0.0:
+            # Long at BB lower with 12h support
+            if price_near_bb_lower and price_above_hma_12h:
+                new_signal = POSITION_SIZE
+            # Short at BB upper with 12h resistance
+            elif price_near_bb_upper and price_below_hma_12h:
+                new_signal = -POSITION_SIZE
         
         # === HOLD POSITION LOGIC ===
         if in_position and new_signal == 0.0:
@@ -275,14 +284,14 @@ def generate_signals(prices):
             new_signal = 0.0
         
         # === EXIT ON REGIME CHANGE ===
-        # Exit long if weekly trend turns strongly bearish
+        # Exit long if 12h trend turns strongly bearish
         if in_position and position_side > 0:
-            if price_below_hma_1w and kama_bearish:
+            if price_below_hma_12h and kama_bearish:
                 new_signal = 0.0
         
-        # Exit short if weekly trend turns strongly bullish
+        # Exit short if 12h trend turns strongly bullish
         if in_position and position_side < 0:
-            if price_above_hma_1w and kama_bullish:
+            if price_above_hma_12h and kama_bullish:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
