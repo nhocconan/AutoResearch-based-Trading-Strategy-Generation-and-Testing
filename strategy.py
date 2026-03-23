@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #1400: 1h Primary + 4h/12h HTF — Simplified Donchian Breakout with HMA Trend
+Experiment #1401: 4h Primary + 1d/1w HTF — Dual HMA Trend + Donchian Breakout
 
-Hypothesis: Previous 1h failures (#1390, #1395 Sharpe=0.000) had TOO MANY filters
-(session 8-20 UTC, volume > 0.8x, Choppiness regime) that killed all trades.
-The working 12h pattern (#1396 Sharpe=0.525) used SIMPLE Donchian + HMA + RSI.
+Hypothesis: 4h strategies failed due to over-complicated regime filters (Choppiness + CRSI)
+that over-filtered signals. The working patterns (#1391 4h Sharpe=0.305, #1396 12h Sharpe=0.525)
+used SIMPLE trend following: HTF HMA + Donchian breakout + RSI + ATR stop.
 
-Key insight for 1h: Use 4h HMA for trend direction (proven), 1h Donchian(20) for
-breakout trigger, 1h RSI(14) with WIDE bands (35-65) to ensure 30-80 trades/year.
-NO session filter, NO volume filter — these killed previous 1h attempts.
+Key insight: Use DUAL HTF confirmation (1w for macro bias, 1d for intermediate trend) to
+improve signal quality across ALL symbols (BTC/ETH/SOL). 1w HMA filters out counter-trend
+trades during major bear markets (2022 crash). 1d HMA provides intermediate confirmation.
+4h Donchian(20) breakout gives entry timing with adequate frequency.
 
 Design:
-1. 4h HMA(21) = trend direction (primary filter, proven on 4h/12h/1d)
-2. 12h HMA(21) = macro confirmation (secondary filter for stronger signals)
-3. 1h Donchian(20) breakout = entry trigger (single period for simplicity)
-4. 1h RSI(14) momentum = wide bands 35-65 (ensure trades, not 45-55)
-5. 1h ATR(14) trailing stop 2.5x = risk management
-6. Position size 0.25 = conservative for 1h volatility
-7. NO session/volume filters (these caused 0 trades in #1390, #1395)
+1. 1w HMA(21) = ultra-long-term macro bias (only trade with 1w trend)
+2. 1d HMA(21) = intermediate trend confirmation (strengthens signal when aligned with 1w)
+3. 4h Donchian(20) breakout = entry trigger (proven on 12h/1d)
+4. RSI(14) momentum filter (wide bands 30-70 to ensure >=30 trades/train)
+5. ATR(14) trailing stop 2.5x = risk management
+6. Position size: 0.30 when 1w+1d aligned, 0.20 when only 1d aligned
+7. NO regime filter (Choppiness/CRSI failed on 4h in #1394, #1397)
 
-Target: 30-80 trades/year, Sharpe > 0.618 (beat 1d baseline), trades >= 30 train, >= 3 test
-Timeframe: 1h
+Target: 20-50 trades/year, Sharpe > 0.618 (beat 1d baseline), trades >= 30 train, >= 5 test
+Timeframe: 4h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_donchian_hma_4h12h_rsi_atr_simple_v1"
-timeframe = "1h"
+name = "mtf_4h_donchian_hma_1d1w_rsi_atr_dual_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -123,24 +124,25 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 4h HMA for trend filter
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align 1w HMA for ultra-long-term macro bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate and align 12h HMA for macro confirmation
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate and align 1d HMA for intermediate trend confirmation
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (1h) indicators
+    # Calculate primary (4h) indicators
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.25
+    BASE_SIZE_STRONG = 0.30  # When 1w + 1d aligned
+    BASE_SIZE_WEAK = 0.20    # When only 1d aligned
     
     # Position tracking for stoploss
     in_position = False
@@ -170,60 +172,66 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND FILTERS (4h + 12h HMA) ===
-        trend_4h_bull = close[i] > hma_4h_aligned[i]
-        trend_4h_bear = close[i] < hma_4h_aligned[i]
-        trend_12h_bull = close[i] > hma_12h_aligned[i]
-        trend_12h_bear = close[i] < hma_12h_aligned[i]
+        # === MACRO TREND (1w HMA) - ultra-long-term bias ===
+        macro_1w_bull = close[i] > hma_1w_aligned[i]
+        macro_1w_bear = close[i] < hma_1w_aligned[i]
+        
+        # === INTERMEDIATE TREND (1d HMA) - confirmation ===
+        macro_1d_bull = close[i] > hma_1d_aligned[i]
+        macro_1d_bear = close[i] < hma_1d_aligned[i]
+        
+        # === HTF CONFLUENCE ===
+        htf_aligned_bull = macro_1w_bull and macro_1d_bull
+        htf_aligned_bear = macro_1w_bear and macro_1d_bear
+        htf_mixed = (macro_1w_bull and macro_1d_bear) or (macro_1w_bear and macro_1d_bull)
         
         # === RSI MOMENTUM (WIDE bands to ensure trades) ===
-        # Wide bands: 35-65 instead of 45-55 to generate more signals
-        rsi_bull = rsi[i] > 35.0
-        rsi_bear = rsi[i] < 65.0
-        rsi_strong_bull = rsi[i] > 45.0
-        rsi_strong_bear = rsi[i] < 55.0
+        rsi_bull = rsi[i] > 30.0
+        rsi_bear = rsi[i] < 70.0
+        rsi_neutral = (rsi[i] > 35.0) and (rsi[i] < 65.0)
         
         # === DONCHIAN BREAKOUT ===
         breakout_long = close[i] > donchian_upper[i-1]
         breakout_short = close[i] < donchian_lower[i-1]
         
-        # === DESIRED SIGNAL - MULTIPLE ENTRY PATHS ===
+        # === DESIRED SIGNAL - DUAL HTF CONFIRMATION ===
         desired_signal = 0.0
+        position_size = 0.0
         
-        # LONG ENTRY PATHS (any one triggers entry)
-        # Path 1: Breakout + 4h trend + RSI (primary entry)
-        if breakout_long and trend_4h_bull and rsi_bull:
-            desired_signal = BASE_SIZE
-        # Path 2: Breakout + 12h trend + RSI strong (stronger confirmation)
-        elif breakout_long and trend_12h_bull and rsi_strong_bull:
-            desired_signal = BASE_SIZE
-        # Path 3: 4h trend + RSI strong (trend continuation without breakout)
-        elif trend_4h_bull and trend_12h_bull and rsi_strong_bull:
-            desired_signal = BASE_SIZE * 0.5
-        # Path 4: Breakout alone with RSI neutral (momentum entry)
-        elif breakout_long and rsi[i] > 40.0:
-            desired_signal = BASE_SIZE * 0.5
+        # LONG ENTRY PATHS
+        # Path 1: Breakout + 1w+1d aligned (strongest signal)
+        if breakout_long and htf_aligned_bull and rsi_bull:
+            desired_signal = 1.0
+            position_size = BASE_SIZE_STRONG
+        # Path 2: Breakout + 1d aligned only (moderate signal)
+        elif breakout_long and macro_1d_bull and rsi_bull and not htf_mixed:
+            desired_signal = 1.0
+            position_size = BASE_SIZE_WEAK
+        # Path 3: 1w+1d aligned + RSI momentum (trend continuation without breakout)
+        elif htf_aligned_bull and rsi[i] > 45.0 and not breakout_short:
+            desired_signal = 0.5
+            position_size = BASE_SIZE_WEAK
         
-        # SHORT ENTRY PATHS (any one triggers entry)
-        # Path 1: Breakout + 4h trend + RSI (primary entry)
-        elif breakout_short and trend_4h_bear and rsi_bear:
-            desired_signal = -BASE_SIZE
-        # Path 2: Breakout + 12h trend + RSI strong (stronger confirmation)
-        elif breakout_short and trend_12h_bear and rsi_strong_bear:
-            desired_signal = -BASE_SIZE
-        # Path 3: 4h trend + RSI strong (trend continuation without breakout)
-        elif trend_4h_bear and trend_12h_bear and rsi_strong_bear:
-            desired_signal = -BASE_SIZE * 0.5
-        # Path 4: Breakout alone with RSI neutral (momentum entry)
-        elif breakout_short and rsi[i] < 60.0:
-            desired_signal = -BASE_SIZE * 0.5
+        # SHORT ENTRY PATHS
+        # Path 1: Breakout + 1w+1d aligned (strongest signal)
+        elif breakout_short and htf_aligned_bear and rsi_bear:
+            desired_signal = -1.0
+            position_size = BASE_SIZE_STRONG
+        # Path 2: Breakout + 1d aligned only (moderate signal)
+        elif breakout_short and macro_1d_bear and rsi_bear and not htf_mixed:
+            desired_signal = -1.0
+            position_size = BASE_SIZE_WEAK
+        # Path 3: 1w+1d aligned + RSI momentum (trend continuation without breakout)
+        elif htf_aligned_bear and rsi[i] < 55.0 and not breakout_long:
+            desired_signal = -0.5
+            position_size = BASE_SIZE_WEAK
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -242,10 +250,11 @@ def generate_signals(prices):
         
         if stoploss_triggered:
             desired_signal = 0.0
+            position_size = 0.0
         
-        # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= BASE_SIZE * 0.4:
-            final_signal = BASE_SIZE if desired_signal > 0 else -BASE_SIZE
+        # === FINAL SIGNAL ===
+        if desired_signal != 0.0 and position_size > 0:
+            final_signal = position_size if desired_signal > 0 else -position_size
         else:
             final_signal = 0.0
         
