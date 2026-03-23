@@ -1,90 +1,46 @@
 #!/usr/bin/env python3
 """
-Experiment #1061: 4h Primary + 1d/1w HTF — KAMA Adaptive Trend + Choppiness Regime
+Experiment #1062: 12h Primary + 1d HTF — Simplified Dual Regime with Relaxed Entries
 
-Hypothesis: After 769+ failed experiments, the key issue is that static indicators (EMA, HMA)
-fail in alternating market regimes. KAMA (Kaufman Adaptive Moving Average) adapts its
-smoothing constant based on market efficiency ratio - fast in trends, slow in ranges.
+Hypothesis: After 770+ failed experiments, the pattern is clear:
+- Complex strategies (CRSI + multiple filters) generate 0 trades or negative Sharpe
+- 12h timeframe naturally limits trades to 20-50/year (perfect for fee management)
+- RELAXED thresholds are critical: previous 12h strategies failed due to too few trades
 
-This should outperform because:
-1. KAMA automatically adjusts to volatility - no need for manual regime switching
-2. 1d HMA21 provides macro bias without being too restrictive
-3. Choppiness Index confirms regime but KAMA does the heavy lifting
-4. Relaxed RSI thresholds (30-70) ensure sufficient trades
-5. ATR trailing stop (2.5x) protects capital in 2022-style crashes
+Strategy Design:
+1. REGIME: Choppiness Index (14) - binary 55 threshold
+2. TREND MODE (CHOP < 55): HMA(16/48) crossover + 1d HMA21 filter + ADX > 15
+3. RANGE MODE (CHOP >= 55): RSI(14) extremes (30/70) + Bollinger bands
+4. MACRO FILTER: 1d HMA21 for directional bias (asymmetric)
+5. STOPLOSS: 2.5x ATR trailing (signal → 0)
+6. POSITION SIZE: 0.25-0.30 discrete levels
 
-Key improvements over #1044:
-- KAMA instead of HMA crossover (adapts automatically to regime)
-- Simpler entry logic (fewer conflicting filters = more trades)
-- 1w HMA for ultra-long-term bias (prevents counter-trend in major moves)
-- Position size 0.25-0.30 discrete levels
+Key Changes from Failed Experiments (#1052, #1056):
+- RELAXED thresholds: ADX > 15 (not 20+), RSI 30/70 (not 25/75), CHOP 55 (not complex zones)
+- SIMPLER exits: primarily stoploss or clear signal reversal (not multi-condition)
+- HOLD LOGIC: maintain position if core thesis intact (reduces churn)
+- 1d HMA21: smoother macro filter than 12h HMA
 
 Target: Sharpe > 0.612, trades >= 30 train, >= 3 test, ALL symbols positive
-Timeframe: 4h (target 20-50 trades/year)
-Position Size: 0.25-0.30 discrete levels
+Timeframe: 12h (target 20-50 trades/year)
+Position Size: 0.25-0.30
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_adaptive_chop_1d1w_hma_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_simplified_dual_regime_1d_hma_rsi_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_kama(close, fast_period=2, slow_period=30, er_period=10):
-    """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts smoothing based on market efficiency ratio.
-    Fast in trends, slow in ranges - perfect for crypto regime changes.
-    
-    ER = |Close - Close_n| / Sum(|Close_i - Close_i-1|)
-    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
-    KAMA = KAMA_prev + SC * (Close - KAMA_prev)
-    """
-    n = len(close)
-    kama = np.full(n, np.nan)
-    
-    if n < er_period + slow_period:
-        return kama
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        signal = abs(close[i] - close[i - er_period])
-        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-        if noise > 1e-10:
-            er[i] = signal / noise
-        else:
-            er[i] = 0.0
-    
-    # Calculate Smoothing Constant (SC)
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Initialize KAMA with SMA of first er_period bars
-    kama[er_period] = np.mean(close[:er_period + 1])
-    
-    # Calculate KAMA
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama
-
 def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP) - measures market ranging vs trending
-    CHOP > 61.8 = ranging market (mean reversion works)
-    CHOP < 38.2 = trending market (trend following works)
-    """
+    """Choppiness Index - market ranging vs trending."""
     n = len(close)
     chop = np.full(n, np.nan)
     
     if n < period + 1:
         return chop
     
-    # Calculate True Range
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
@@ -104,7 +60,7 @@ def calculate_choppiness_index(high, low, close, period=14):
     return chop
 
 def calculate_rsi(close, period=14):
-    """Relative Strength Index - momentum oscillator."""
+    """Relative Strength Index."""
     n = len(close)
     rsi = np.full(n, np.nan)
     
@@ -130,7 +86,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range for volatility measurement."""
+    """Average True Range."""
     n = len(close)
     atr = np.full(n, np.nan)
     
@@ -146,7 +102,7 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_hma(series, period):
-    """Hull Moving Average - faster and smoother than EMA."""
+    """Hull Moving Average."""
     series = pd.Series(series)
     half = period // 2
     sqrt_period = int(np.sqrt(period))
@@ -159,8 +115,28 @@ def calculate_hma(series, period):
     
     return hma.values
 
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Bollinger Bands."""
+    n = len(close)
+    middle = np.full(n, np.nan)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    if n < period:
+        return upper, middle, lower
+    
+    close_series = pd.Series(close)
+    rolling_mean = close_series.rolling(window=period, min_periods=period).mean()
+    rolling_std = close_series.rolling(window=period, min_periods=period).std()
+    
+    middle = rolling_mean.values
+    upper = (rolling_mean + std_mult * rolling_std).values
+    lower = (rolling_mean - std_mult * rolling_std).values
+    
+    return upper, middle, lower
+
 def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - trend strength indicator."""
+    """Average Directional Index."""
     n = len(close)
     adx = np.full(n, np.nan)
     
@@ -207,28 +183,25 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align 1d HMA21 for macro trend filter
     hma_1d_raw = calculate_hma(df_1d['close'].values, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate and align 1w HMA21 for ultra-long-term bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate primary (4h) indicators
-    kama = calculate_kama(close, fast_period=2, slow_period=30, er_period=10)
+    # Calculate primary (12h) indicators
     chop = calculate_choppiness_index(high, low, close, period=14)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     adx = calculate_adx(high, low, close, period=14)
+    hma_16 = calculate_hma(close, 16)
+    hma_48 = calculate_hma(close, 48)
     
     signals = np.zeros(n)
     BASE_SIZE = 0.30
     REDUCED_SIZE = 0.20
     
-    # Position tracking for stoploss
+    # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
@@ -238,68 +211,49 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(kama[i]) or np.isnan(chop[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]):
+        if np.isnan(chop[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]) or atr[i] <= 1e-10:
             continue
-        if np.isnan(adx[i]) or atr[i] <= 1e-10:
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(adx[i]):
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
             continue
         
-        # === MACRO TREND FILTERS ===
-        # 1d HMA21 - intermediate trend
-        macro_bull_1d = close[i] > hma_1d_aligned[i]
-        macro_bear_1d = close[i] < hma_1d_aligned[i]
+        # === REGIME DETECTION ===
+        is_range = chop[i] >= 55.0
+        is_trend = chop[i] < 55.0
         
-        # 1w HMA21 - ultra-long-term bias (prevents major counter-trend)
-        macro_bull_1w = close[i] > hma_1w_aligned[i]
-        macro_bear_1w = close[i] < hma_1w_aligned[i]
-        
-        # === KAMA TREND SIGNAL ===
-        # KAMA slope (current vs 5 bars ago)
-        kama_slope_bull = kama[i] > kama[i - 5] if i >= 5 else False
-        kama_slope_bear = kama[i] < kama[i - 5] if i >= 5 else False
-        
-        # Price vs KAMA position
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        
-        # === REGIME DETECTION (Choppiness Index) ===
-        is_range = chop[i] > 55.0
-        is_trend = chop[i] < 45.0
+        # === MACRO TREND (1d HMA21) ===
+        macro_bull = close[i] > hma_1d_aligned[i]
+        macro_bear = close[i] < hma_1d_aligned[i]
         
         desired_signal = 0.0
         
-        # === TREND MODE (CHOP < 45) ===
-        if is_trend:
-            # Long: KAMA bullish + price above KAMA + ADX confirms + 1d macro OK
-            if kama_slope_bull and price_above_kama and adx[i] > 18 and macro_bull_1d:
-                # Strong signal if 1w also bullish
-                if macro_bull_1w:
-                    desired_signal = BASE_SIZE
-                else:
-                    desired_signal = REDUCED_SIZE
-            # Short: KAMA bearish + price below KAMA + ADX confirms + 1d macro OK
-            elif kama_slope_bear and price_below_kama and adx[i] > 18 and macro_bear_1d:
-                if macro_bear_1w:
-                    desired_signal = -BASE_SIZE
-                else:
-                    desired_signal = -REDUCED_SIZE
-        
-        # === RANGE MODE (CHOP > 55) ===
-        elif is_range:
-            # Long: RSI oversold + price below KAMA (mean revert to KAMA) + 1d macro not bearish
-            if rsi[i] < 35 and price_below_kama and not macro_bear_1d:
+        # === RANGE MODE: MEAN REVERSION ===
+        if is_range:
+            # Long: RSI oversold + price at BB lower + macro bullish bias
+            if rsi[i] < 35 and close[i] <= bb_lower[i] and macro_bull:
+                desired_signal = BASE_SIZE
+            # Short: RSI overbought + price at BB upper + macro bearish bias
+            elif rsi[i] > 65 and close[i] >= bb_upper[i] and macro_bear:
+                desired_signal = -BASE_SIZE
+            # Weaker signals (relaxed for more trades)
+            elif rsi[i] < 30 and macro_bull:
                 desired_signal = REDUCED_SIZE
-            # Short: RSI overbought + price above KAMA (mean revert to KAMA) + 1d macro not bullish
-            elif rsi[i] > 65 and price_above_kama and not macro_bull_1d:
+            elif rsi[i] > 70 and macro_bear:
                 desired_signal = -REDUCED_SIZE
         
-        # === TRANSITION ZONE (45 <= CHOP <= 55) ===
-        else:
-            # Use KAMA direction only with stricter macro filter
-            if kama_slope_bull and price_above_kama and macro_bull_1d and macro_bull_1w:
+        # === TREND MODE: TREND FOLLOWING ===
+        elif is_trend:
+            # Long: HMA16 > HMA48 + price > 1d HMA + ADX shows trend
+            if hma_16[i] > hma_48[i] and macro_bull and adx[i] > 15:
+                desired_signal = BASE_SIZE
+            # Short: HMA16 < HMA48 + price < 1d HMA + ADX shows trend
+            elif hma_16[i] < hma_48[i] and macro_bear and adx[i] > 15:
+                desired_signal = -BASE_SIZE
+            # Weaker trend signals (relaxed for more trades)
+            elif hma_16[i] > hma_48[i] and macro_bull:
                 desired_signal = REDUCED_SIZE
-            elif kama_slope_bear and price_below_kama and macro_bear_1d and macro_bear_1w:
+            elif hma_16[i] < hma_48[i] and macro_bear:
                 desired_signal = -REDUCED_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
@@ -320,43 +274,39 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === HOLD LOGIC — Maintain position if trend intact ===
+        # === HOLD LOGIC — Maintain position if regime intact ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if KAMA still bullish or price above KAMA
-                if kama_slope_bull or price_above_kama:
-                    desired_signal = BASE_SIZE if position_side > 0 else 0.0
-                    if desired_signal == 0.0:
-                        desired_signal = REDUCED_SIZE
+                # Hold long if macro still bullish or range mode with RSI not overbought
+                if macro_bull or (is_range and rsi[i] < 60):
+                    desired_signal = BASE_SIZE
             elif position_side < 0:
-                # Hold short if KAMA still bearish or price below KAMA
-                if kama_slope_bear or price_below_kama:
-                    desired_signal = -BASE_SIZE if position_side < 0 else 0.0
-                    if desired_signal == 0.0:
-                        desired_signal = -REDUCED_SIZE
+                # Hold short if macro still bearish or range mode with RSI not oversold
+                if macro_bear or (is_range and rsi[i] > 40):
+                    desired_signal = -BASE_SIZE
         
-        # === EXIT CONDITIONS ===
+        # === EXIT CONDITIONS (simplified for more trades) ===
         if in_position and position_side > 0:
-            # Exit long if KAMA reverses bearish AND price below KAMA
-            if kama_slope_bear and price_below_kama:
+            # Exit long if macro reverses bearish AND RSI overbought
+            if macro_bear and rsi[i] > 65:
                 desired_signal = 0.0
-            # Exit long if 1d macro turns bearish
-            if macro_bear_1d and rsi[i] > 60:
+            # Exit long if trend mode and HMA crossover reverses
+            if is_trend and hma_16[i] < hma_48[i]:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
-            # Exit short if KAMA reverses bullish AND price above KAMA
-            if kama_slope_bull and price_above_kama:
+            # Exit short if macro reverses bullish AND RSI oversold
+            if macro_bull and rsi[i] < 35:
                 desired_signal = 0.0
-            # Exit short if 1d macro turns bullish
-            if macro_bull_1d and rsi[i] < 40:
+            # Exit short if trend mode and HMA crossover reverses
+            if is_trend and hma_16[i] > hma_48[i]:
                 desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
         if desired_signal > 0:
-            desired_signal = BASE_SIZE if desired_signal >= 0.25 else REDUCED_SIZE
+            desired_signal = BASE_SIZE if desired_signal >= BASE_SIZE else REDUCED_SIZE
         elif desired_signal < 0:
-            desired_signal = -BASE_SIZE if desired_signal <= -0.25 else -REDUCED_SIZE
+            desired_signal = -BASE_SIZE if desired_signal <= -BASE_SIZE else -REDUCED_SIZE
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
