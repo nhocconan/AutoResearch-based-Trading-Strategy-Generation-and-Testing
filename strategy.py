@@ -1,33 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #1403: 1d Primary + 1w HTF — Clean Donchian Breakout with Weekly HMA Trend Filter
+Experiment #1404: 4h Primary + 12h/1d HTF — Triple HMA Trend + Donchian Breakout
 
-Hypothesis: The 1d timeframe with 1w HTF should outperform the current best (Sharpe=0.618)
-because weekly HMA provides stronger macro trend filter than daily HMA, reducing false
-breakouts during ranging periods. The proven pattern from #1396 (12h Donchian+HMA+RSI+ATR)
-achieved Sharpe=0.525, and scaling to 1d with 1w HTF should improve signal quality.
-
-Key insight from failures (#1393, #1397): Complex regime filters (Choppiness+CRSI) over-filter
-and reduce trade frequency on 1d. Simple trend following with Donchian + HMA + RSI works best.
+Hypothesis: 4h timeframe with dual HTF confirmation (12h + 1d HMA) will provide
+better trend filtering than single HTF. The proven pattern from #1396 (Donchian + HMA + RSI + ATR)
+worked well on 12h (Sharpe=0.525). Applying to 4h with triple HMA confluence should:
+1. Reduce false breakouts in choppy markets (all 3 HMAs must align)
+2. Maintain trade frequency via multiple entry paths
+3. Capture trends earlier than 12h/1d strategies
 
 Design:
-1. 1w HMA(21) = macro trend direction (stronger filter than 1d HMA)
-2. 1d Donchian(20/55) breakout = entry triggers (dual period for flexibility)
-3. RSI(14) momentum confirmation (wide bands 35-65 to ensure >=30 trades/train)
-4. ATR(14) trailing stop 2.5x = risk management
-5. Position size 0.28 = conservative for 1d volatility (discrete: 0.0, ±0.28)
-6. NO regime filter (Choppiness/CRSI failed on 1d in #1393, #1397)
-7. Multiple entry paths per direction = ensures trade frequency
+1. 1d HMA(21) = macro trend (strongest filter)
+2. 12h HMA(21) = intermediate trend confirmation
+3. 4h Donchian(20/55) = entry triggers
+4. 4h RSI(14) = momentum filter (wide bands 35-65 for trade frequency)
+5. 4h KAMA(14) = adaptive trend filter (works well in crypto volatility)
+6. ATR(14) trailing stop 2.5x = risk management
+7. Position size 0.28 = conservative for 4h volatility
 
-Target: 20-40 trades/year, Sharpe > 0.618 (beat 1d baseline), trades >= 30 train, >= 3 test
-Timeframe: 1d
+Target: 30-60 trades/year, Sharpe > 0.618 (beat 1d baseline), trades >= 30 train, >= 5 test
+Timeframe: 4h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_hma_1w_rsi_atr_clean_v1"
-timeframe = "1d"
+name = "mtf_4h_triple_hma_donchian_kama_rsi_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -65,6 +64,44 @@ def calculate_hma(close, period=21):
                     hma[i] = np.sum(np.array(diff_vals) * weights) / np.sum(weights)
     
     return hma
+
+def calculate_kama(close, period=14, fast=2, slow=30):
+    """Kaufman Adaptive Moving Average - adapts to market noise"""
+    n = len(close)
+    if n < period + slow:
+        return np.full(n, np.nan)
+    
+    kama = np.full(n, np.nan)
+    
+    # Calculate Efficiency Ratio
+    er = np.full(n, np.nan)
+    for i in range(period, n):
+        signal = abs(close[i] - close[i - period])
+        noise = 0.0
+        for j in range(i - period + 1, i + 1):
+            noise += abs(close[j] - close[j - 1])
+        if noise > 1e-10:
+            er[i] = signal / noise
+        else:
+            er[i] = 1.0
+    
+    # Calculate smoothing constant
+    sc = np.full(n, np.nan)
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
+    for i in range(period, n):
+        if not np.isnan(er[i]):
+            sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama[period] = close[period]
+    for i in range(period + 1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+        else:
+            kama[i] = kama[i - 1]
+    
+    return kama
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index - wide bands for entry confirmation"""
@@ -123,17 +160,23 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 1w HMA for macro trend filter
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 12h HMA for intermediate trend
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate primary (1d) indicators
+    # Calculate and align 1d HMA for macro trend
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate primary (4h) indicators
     donchian_20_upper, donchian_20_lower = calculate_donchian(high, low, period=20)
     donchian_55_upper, donchian_55_lower = calculate_donchian(high, low, period=55)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    kama = calculate_kama(close, period=14, fast=2, slow=30)
     
     signals = np.zeros(n)
     BASE_SIZE = 0.28
@@ -166,24 +209,38 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        if np.isnan(kama[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === MACRO TREND (1w HMA) - primary filter ===
-        macro_bull = close[i] > hma_1w_aligned[i]
-        macro_bear = close[i] < hma_1w_aligned[i]
+        # === MACRO TREND (1d HMA) - strongest filter ===
+        macro_bull = close[i] > hma_1d_aligned[i]
+        macro_bear = close[i] < hma_1d_aligned[i]
+        
+        # === INTERMEDIATE TREND (12h HMA) - confirmation ===
+        inter_bull = close[i] > hma_12h_aligned[i]
+        inter_bear = close[i] < hma_12h_aligned[i]
+        
+        # === ADAPTIVE TREND (KAMA) - dynamic support/resistance ===
+        kama_bull = close[i] > kama[i]
+        kama_bear = close[i] < kama[i]
         
         # === RSI MOMENTUM (WIDE bands to ensure trades) ===
         rsi_bull = rsi[i] > 35.0
         rsi_bear = rsi[i] < 65.0
-        rsi_strong_bull = rsi[i] > 50.0
-        rsi_strong_bear = rsi[i] < 50.0
-        rsi_neutral_bull = rsi[i] > 42.0
-        rsi_neutral_bear = rsi[i] < 58.0
+        rsi_strong_bull = rsi[i] > 45.0
+        rsi_strong_bear = rsi[i] < 55.0
+        rsi_neutral_bull = rsi[i] > 40.0
+        rsi_neutral_bear = rsi[i] < 60.0
         
         # === DUAL DONCHIAN BREAKOUT ===
         breakout_20_long = close[i] > donchian_20_upper[i-1]
@@ -195,31 +252,31 @@ def generate_signals(prices):
         desired_signal = 0.0
         
         # LONG ENTRY PATHS (any one triggers entry)
-        # Path 1: Donchian-20 breakout + 1w trend + RSI (quick entry)
-        if breakout_20_long and macro_bull and rsi_bull:
+        # Path 1: Donchian-20 breakout + all 3 trend filters + RSI (strongest signal)
+        if breakout_20_long and macro_bull and inter_bull and kama_bull and rsi_bull:
             desired_signal = BASE_SIZE
-        # Path 2: Donchian-55 breakout + RSI strong (strong breakout)
-        elif breakout_55_long and rsi_strong_bull:
+        # Path 2: Donchian-55 breakout + macro + inter trend + RSI strong
+        elif breakout_55_long and macro_bull and inter_bull and rsi_strong_bull:
             desired_signal = BASE_SIZE
-        # Path 3: Price above 1w HMA + RSI momentum (trend continuation)
-        elif macro_bull and rsi_neutral_bull:
+        # Path 3: All 3 HMAs aligned + RSI momentum (trend continuation)
+        elif macro_bull and inter_bull and kama_bull and rsi_neutral_bull:
             desired_signal = BASE_SIZE * 0.5
-        # Path 4: Donchian-20 breakout alone (breakout momentum)
-        elif breakout_20_long and rsi[i] > 40.0:
+        # Path 4: Donchian-20 breakout + macro trend + RSI (moderate signal)
+        elif breakout_20_long and macro_bull and rsi[i] > 40.0:
             desired_signal = BASE_SIZE * 0.5
         
         # SHORT ENTRY PATHS (any one triggers entry)
-        # Path 1: Donchian-20 breakout + 1w trend + RSI (quick entry)
-        elif breakout_20_short and macro_bear and rsi_bear:
+        # Path 1: Donchian-20 breakout + all 3 trend filters + RSI (strongest signal)
+        elif breakout_20_short and macro_bear and inter_bear and kama_bear and rsi_bear:
             desired_signal = -BASE_SIZE
-        # Path 2: Donchian-55 breakout + RSI strong (strong breakout)
-        elif breakout_55_short and rsi_strong_bear:
+        # Path 2: Donchian-55 breakout + macro + inter trend + RSI strong
+        elif breakout_55_short and macro_bear and inter_bear and rsi_strong_bear:
             desired_signal = -BASE_SIZE
-        # Path 3: Price below 1w HMA + RSI momentum (trend continuation)
-        elif macro_bear and rsi_neutral_bear:
+        # Path 3: All 3 HMAs aligned + RSI momentum (trend continuation)
+        elif macro_bear and inter_bear and kama_bear and rsi_neutral_bear:
             desired_signal = -BASE_SIZE * 0.5
-        # Path 4: Donchian-20 breakout alone (breakout momentum)
-        elif breakout_20_short and rsi[i] < 60.0:
+        # Path 4: Donchian-20 breakout + macro trend + RSI (moderate signal)
+        elif breakout_20_short and macro_bear and rsi[i] < 60.0:
             desired_signal = -BASE_SIZE * 0.5
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
