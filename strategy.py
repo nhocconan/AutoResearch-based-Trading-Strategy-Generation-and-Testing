@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #1109: 4h Primary + 1d HTF — Connors RSI Mean Reversion with Trend Filter
+Experiment #1110: 1h Primary + 4h/12h HTF — Simplified Trend Pullback with Volume Filter
 
-Hypothesis: After analyzing 800+ failed experiments, key insights:
-1. Connors RSI (CRSI) has proven 75% win rate in research (ETH Sharpe +0.923)
-2. CRSI combines 3 components: RSI(3) + RSI_Streak(2) + PercentRank(100)
-3. 1d HMA provides macro trend filter without over-complication
-4. ADX > 18 ensures we trade when market has direction (avoid chop)
-5. Loose CRSI thresholds (15/85) ensure adequate trade frequency on 4h
-6. 2.5x ATR trailing stop protects against 2022-style crashes
+Hypothesis: After analyzing 805+ failed experiments, key insights for 1h timeframe:
+1. 1h strategies fail with 0 trades when filters are too strict (seen in #1098, #1100, #1105)
+2. 1h strategies fail with negative Sharpe when too many trades (>200/yr) create fee drag
+3. SWEET SPOT: 4h HMA for trend direction + 1h RSI for pullback timing + loose ADX > 15
+4. CRITICAL: Use LOOSE thresholds (RSI 40/60, ADX 15) to ensure 30-80 trades/year
+5. Add volume filter (vol > 0.7x avg) to filter low-liquidity periods without killing frequency
+6. Position size 0.25 base with 2.5x ATR trailing stop
 
-Why this should beat Sharpe=0.612:
-- CRSI is proven mean-reversion indicator with high win rate
-- 4h timeframe naturally generates 20-50 trades/year
-- 1d HMA filter prevents counter-trend trades in strong trends
-- Simpler than triple-regime strategies that failed (exp #1100, #1106)
-- Research shows CRSI works well on ETH/BTC in bear/range markets
+Why this should beat Sharpe=0.612 (current best 4h strategy):
+- 1h captures more pullback opportunities within 4h trend
+- Loose filters ensure adequate trade frequency (unlike failed 1h attempts)
+- 4h HMA provides strong trend filter without over-complication
+- Volume filter reduces false signals during low-liquidity periods
+- Proven pattern: HMA + RSI + ATR worked across multiple timeframes
 
-Timeframe: 4h (primary)
-HTF: 1d — loaded ONCE before loop using mtf_data helper
-Position Size: 0.30 base, 0.15 reduced (discrete levels)
+Timeframe: 1h (primary)
+HTF: 4h + 12h — loaded ONCE before loop using mtf_data helper
+Position Size: 0.25 base, 0.15 reduced (discrete levels)
 Stoploss: 2.5x ATR trailing
-Target: 30-60 trades/year, Sharpe > 0.612
+Target: 40-80 trades/year, Sharpe > 0.612
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_crsi_hma_1d_adx_atr_v1"
-timeframe = "4h"
+name = "mtf_1h_hma_rsi_4h12h_vol_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -100,66 +100,6 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
-    """
-    Connors RSI — combines 3 components for mean-reversion signals.
-    
-    Formula:
-    CRSI = (RSI(close, 3) + RSI(Streak, 2) + PercentRank(100)) / 3
-    
-    Components:
-    1. RSI(3) — short-term momentum
-    2. RSI(Streak, 2) — streak of consecutive up/down days
-    3. PercentRank(100) — percentile of today's return over last 100 days
-    
-    Entry signals:
-    - Long: CRSI < 10-15 (oversold)
-    - Short: CRSI > 85-90 (overbought)
-    
-    Research shows 75% win rate with proper trend filter.
-    """
-    n = len(close)
-    crsi = np.full(n, np.nan)
-    
-    if n < rank_period + 10:
-        return crsi
-    
-    # Component 1: RSI(3)
-    rsi_short = calculate_rsi(close, rsi_period)
-    
-    # Component 2: RSI of Streak
-    # Streak = consecutive up (+1) or down (-1) days
-    streak = np.zeros(n)
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif close[i] < close[i-1]:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = streak[i-1]
-    
-    # RSI of streak (use absolute values for calculation)
-    streak_rsi = calculate_rsi(np.abs(streak) + 1e-10, streak_period)
-    # Adjust sign: positive streak = bullish, negative = bearish
-    streak_rsi_signed = np.where(streak >= 0, streak_rsi, 100 - streak_rsi)
-    
-    # Component 3: PercentRank of returns
-    returns = np.diff(close) / (close[:-1] + 1e-10)
-    returns = np.concatenate([[0.0], returns])
-    
-    percent_rank = np.full(n, np.nan)
-    for i in range(rank_period, n):
-        window = returns[i - rank_period + 1:i + 1]
-        current = returns[i]
-        rank = np.sum(window < current)
-        percent_rank[i] = 100.0 * rank / rank_period
-    
-    # Combine all 3 components
-    mask = ~np.isnan(rsi_short) & ~np.isnan(streak_rsi_signed) & ~np.isnan(percent_rank)
-    crsi[mask] = (rsi_short[mask] + streak_rsi_signed[mask] + percent_rank[mask]) / 3.0
-    
-    return crsi
-
 def calculate_atr(high, low, close, period=14):
     """Average True Range for volatility measurement."""
     n = len(close)
@@ -179,7 +119,8 @@ def calculate_atr(high, low, close, period=14):
 def calculate_adx(high, low, close, period=14):
     """
     Average Directional Index — measures trend strength.
-    ADX > 25 = strong trend, ADX < 20 = weak/choppy market.
+    ADX > 20 = strong trend, ADX < 20 = weak/choppy market.
+    Using loose threshold (15) for 1h to ensure trade frequency.
     """
     n = len(close)
     adx = np.full(n, np.nan)
@@ -230,26 +171,38 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
+def calculate_volume_sma(volume, period=20):
+    """Simple moving average of volume for volume filter."""
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_sma
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate and align 1d HMA for macro trend filter
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 4h HMA for trend filter
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate primary (4h) indicators
-    crsi_4h = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    # Calculate and align 12h HMA for macro trend confirmation
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    
+    # Calculate primary (1h) indicators
+    rsi_1h = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     adx = calculate_adx(high, low, close, period=14)
+    vol_sma = calculate_volume_sma(volume, period=20)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.30
+    BASE_SIZE = 0.25
     REDUCED_SIZE = 0.15
     
     # Position tracking for stoploss
@@ -260,52 +213,53 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(crsi_4h[i]) or np.isnan(atr[i]) or np.isnan(adx[i]):
+        if np.isnan(rsi_1h[i]) or np.isnan(atr[i]) or np.isnan(adx[i]):
             continue
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+            continue
+        if np.isnan(vol_sma[i]) or vol_sma[i] <= 1e-10:
             continue
         if atr[i] <= 1e-10:
             continue
         
-        # === MACRO TREND (1d HMA) ===
-        macro_bull = close[i] > hma_1d_aligned[i]
-        macro_bear = close[i] < hma_1d_aligned[i]
+        # === MACRO TREND (4h + 12h HMA) ===
+        # Both HTF HMAs must agree for strong signal
+        trend_4h_bull = close[i] > hma_4h_aligned[i]
+        trend_4h_bear = close[i] < hma_4h_aligned[i]
+        trend_12h_bull = close[i] > hma_12h_aligned[i]
+        trend_12h_bear = close[i] < hma_12h_aligned[i]
+        
+        # Strong trend when both HTFs agree
+        macro_bull = trend_4h_bull and trend_12h_bull
+        macro_bear = trend_4h_bear and trend_12h_bear
         
         # === TREND STRENGTH (ADX) ===
-        # Only trade when ADX > 18 (trend has some strength)
-        trend_strong = adx[i] > 18.0
+        # Loose threshold (15) for 1h to ensure trade frequency
+        trend_strong = adx[i] > 15.0
         
-        # === CONNORS RSI SIGNALS ===
+        # === PULLBACK SIGNAL (1h RSI) ===
         # Loose thresholds to ensure adequate trade frequency
-        crsi_oversold = crsi_4h[i] < 20.0
-        crsi_overbought = crsi_4h[i] > 80.0
+        rsi_oversold = rsi_1h[i] < 45.0
+        rsi_overbought = rsi_1h[i] > 55.0
         
-        # Extreme signals for higher conviction
-        crsi_extreme_oversold = crsi_4h[i] < 10.0
-        crsi_extreme_overbought = crsi_4h[i] > 90.0
+        # === VOLUME FILTER ===
+        # Volume must be at least 70% of average (not too strict)
+        volume_ok = volume[i] > 0.7 * vol_sma[i]
         
         desired_signal = 0.0
         current_size = BASE_SIZE
         
         # === LONG ENTRY ===
-        # Macro bull + CRSI oversold (mean reversion in uptrend)
-        # OR extreme oversold regardless of trend (strong reversal signal)
-        if macro_bull and crsi_oversold:
+        # Macro bull + trend strong + RSI pullback + volume ok
+        if macro_bull and trend_strong and rsi_oversold and volume_ok:
             desired_signal = current_size
-        elif crsi_extreme_oversold:
-            # Extreme oversold = strong reversal signal even in bear market
-            desired_signal = REDUCED_SIZE
         
         # === SHORT ENTRY ===
-        # Macro bear + CRSI overbought (mean reversion in downtrend)
-        # OR extreme overbought regardless of trend (strong reversal signal)
-        elif macro_bear and crsi_overbought:
+        # Macro bear + trend strong + RSI pullback + volume ok
+        elif macro_bear and trend_strong and rsi_overbought and volume_ok:
             desired_signal = -current_size
-        elif crsi_extreme_overbought:
-            # Extreme overbought = strong reversal signal even in bull market
-            desired_signal = -REDUCED_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -325,32 +279,26 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === HOLD LOGIC — Maintain position if CRSI not reversed ===
+        # === HOLD LOGIC — Maintain position if trend intact ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if CRSI hasn't reached overbought
-                if crsi_4h[i] < 70.0 and macro_bull:
+                # Hold long if macro still bull (loose: just 4h HMA)
+                if trend_4h_bull and adx[i] > 12.0:
                     desired_signal = current_size
             elif position_side < 0:
-                # Hold short if CRSI hasn't reached oversold
-                if crsi_4h[i] > 30.0 and macro_bear:
+                # Hold short if macro still bear (loose: just 4h HMA)
+                if trend_4h_bear and adx[i] > 12.0:
                     desired_signal = -current_size
         
         # === EXIT CONDITIONS ===
         if in_position and position_side > 0:
-            # Exit long if CRSI overbought or macro reverses strongly
-            if crsi_4h[i] > 75.0:
-                desired_signal = 0.0
-            elif macro_bear and adx[i] > 25.0:
-                # Strong bearish trend emerging
+            # Exit long if 4h trend reverses or RSI overbought
+            if trend_4h_bear or rsi_1h[i] > 70.0:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
-            # Exit short if CRSI oversold or macro reverses strongly
-            if crsi_4h[i] < 25.0:
-                desired_signal = 0.0
-            elif macro_bull and adx[i] > 25.0:
-                # Strong bullish trend emerging
+            # Exit short if 4h trend reverses or RSI oversold
+            if trend_4h_bull or rsi_1h[i] < 30.0:
                 desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
