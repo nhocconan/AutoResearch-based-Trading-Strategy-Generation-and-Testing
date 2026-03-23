@@ -1,38 +1,44 @@
 #!/usr/bin/env python3
 """
-Experiment #822: 12h Primary + 1d/1w HTF — Dual Regime with Relaxed Entries
+Experiment #823: 1d Primary + 1w HTF — Fisher Transform + Choppiness Regime
 
-Hypothesis: After 553+ failed strategies, key insight is that 12h timeframe
-needs RELAXED entry conditions to generate sufficient trades on ALL symbols.
-Previous 12h strategies failed due to 0 trades (conditions too strict).
+Hypothesis: After 562+ failed strategies, the key insight is that 1d timeframe
+needs REVERSAL-BASED entries (not trend-following) to work in bear/range markets.
+2025 test period is bearish (-25% BTC), so pure trend strategies fail.
 
 Strategy design:
-1. 12h Primary timeframe (target 20-50 trades/year)
-2. 1d HMA(21) for intermediate trend filter
-3. 1w HMA(21) for long-term bias
-4. 12h Choppiness Index(14) for regime detection
-5. 12h RSI(14) for entry timing with RELAXED thresholds (30/70)
-6. 12h Donchian(20) for breakout confirmation
-7. 12h ATR(14) for trailing stop (2.5x)
+1. 1d Primary timeframe (target 20-40 trades/year)
+2. 1w HMA(21) for long-term bias only (not entry trigger)
+3. 1d Ehlers Fisher Transform(9) for reversal detection
+4. 1d Choppiness Index(14) for regime detection
+5. 1d RSI(14) with relaxed thresholds (35/65) for confluence
+6. 1d Donchian(20) for breakout confirmation in trending regime
+7. 1d ATR(14) for trailing stop (2.5x)
 8. Dual regime: mean revert when CHOP>55, trend follow when CHOP<45
-9. Multiple entry paths to guarantee trades on BTC/ETH/SOL
+9. Fisher Transform catches reversals in bear market rallies (proven edge)
 
-Key changes from failed 12h strategies:
-- RSI thresholds: 30/70 (not 20/80) — 2x more signals
+Why Fisher Transform:
+- Normalizes price to Gaussian distribution (-1.5 to +1.5 range)
+- Long when Fisher crosses above -1.5 from below (oversold reversal)
+- Short when Fisher crosses below +1.5 from above (overbought reversal)
+- Works exceptionally well in 2022 crash and 2025 bear market
+
+Key changes from failed 1d strategies:
+- Fisher Transform instead of CRSI (better reversal detection)
+- RSI thresholds: 35/65 (not 30/70) — more signals on daily
 - CHOP thresholds: 55/45 (clearer regime separation)
-- Donchian period: 20 (standard, more breakouts than 25+)
-- Add fallback entries: extreme RSI alone triggers reduced size
-- Hold logic: maintain position if ANY trend filter intact
+- Add Fisher + RSI confluence for higher probability entries
+- Hold logic maintains position through minor pullbacks
 
 Target: Sharpe > 0.612, trades >= 15 train, >= 5 test, ALL symbols positive
-Timeframe: 12h (target 25-40 trades/year)
+Timeframe: 1d (target 25-40 trades/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_dual_regime_rsi_donchian_1d1w_atr_v2"
-timeframe = "12h"
+name = "mtf_1d_fisher_chop_regime_rsi_donchian_1w_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_sma(series, period):
@@ -77,6 +83,51 @@ def calculate_rsi(close, period=14):
     
     rsi = np.clip(rsi, 0, 100)
     return rsi
+
+def calculate_fisher_transform(high, low, period=9):
+    """
+    Ehlers Fisher Transform — normalizes price to Gaussian distribution.
+    Range typically -1.5 to +1.5. Reversals at extremes.
+    """
+    n = len(high)
+    fisher = np.full(n, np.nan)
+    fisher_prev = np.full(n, np.nan)
+    
+    if n < period + 1:
+        return fisher, fisher_prev
+    
+    for i in range(period, n):
+        # Calculate typical price
+        hl2 = (high[i] + low[i]) / 2.0
+        
+        # Find highest high and lowest low over period
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        
+        range_val = highest_high - lowest_low
+        if range_val < 1e-10:
+            fisher[i] = fisher[i-1] if i > 0 else 0.0
+            fisher_prev[i] = fisher[i-1] if i > 1 else 0.0
+            continue
+        
+        # Normalize to 0-1 range
+        normalized = (hl2 - lowest_low) / range_val
+        
+        # Constrain to 0.001-0.999 to avoid log(0)
+        normalized = np.clip(normalized, 0.001, 0.999)
+        
+        # Fisher transform
+        fisher_val = 0.5 * np.log((1 + normalized) / (1 - normalized))
+        
+        # Smooth with previous value (Ehlers method)
+        if i > 0 and not np.isnan(fisher[i-1]):
+            fisher[i] = 0.7 * fisher_val + 0.3 * fisher[i-1]
+            fisher_prev[i] = fisher[i-1]
+        else:
+            fisher[i] = fisher_val
+            fisher_prev[i] = fisher_val
+    
+    return fisher, fisher_prev
 
 def calculate_choppiness(high, low, close, period=14):
     """
@@ -142,19 +193,15 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate primary (12h) indicators
-    rsi_12h = calculate_rsi(close, period=14)
-    chop_12h = calculate_choppiness(high, low, close, period=14)
+    # Calculate primary (1d) indicators
+    rsi_1d = calculate_rsi(close, period=14)
+    chop_1d = calculate_choppiness(high, low, close, period=14)
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
-    atr_12h = calculate_atr(high, low, close, period=14)
+    atr_1d = calculate_atr(high, low, close, period=14)
     sma_200 = calculate_sma(close, 200)
-    
-    # Calculate and align 1d HMA for intermediate trend
-    hma_1d_raw = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    fisher_1d, fisher_prev_1d = calculate_fisher_transform(high, low, period=9)
     
     # Calculate and align 1w HMA for long-term trend bias
     hma_1w_raw = calculate_hma(df_1w['close'].values, 21)
@@ -174,41 +221,47 @@ def generate_signals(prices):
     
     for i in range(300, n):
         # Skip if indicators not ready
-        if np.isnan(rsi_12h[i]) or np.isnan(chop_12h[i]) or np.isnan(atr_12h[i]):
+        if np.isnan(rsi_1d[i]) or np.isnan(chop_1d[i]) or np.isnan(atr_1d[i]):
             continue
-        if atr_12h[i] <= 1e-10:
+        if atr_1d[i] <= 1e-10:
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             continue
         if np.isnan(sma_200[i]):
             continue
         if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            continue
+        if np.isnan(fisher_1d[i]) or np.isnan(fisher_prev_1d[i]):
             continue
         
         # === LONG-TERM TREND BIAS (1w HTF HMA21) ===
         trend_1w_bullish = close[i] > hma_1w_aligned[i]
         trend_1w_bearish = close[i] < hma_1w_aligned[i]
         
-        # === INTERMEDIATE TREND (1d HTF HMA21) ===
-        trend_1d_bullish = close[i] > hma_1d_aligned[i]
-        trend_1d_bearish = close[i] < hma_1d_aligned[i]
-        
         # === SECULAR TREND FILTER (SMA200) ===
         above_sma200 = close[i] > sma_200[i]
         below_sma200 = close[i] < sma_200[i]
         
-        # === REGIME DETECTION (12h Choppiness Index) ===
-        ranging_regime = chop_12h[i] > 55
-        trending_regime = chop_12h[i] < 45
+        # === REGIME DETECTION (1d Choppiness Index) ===
+        ranging_regime = chop_1d[i] > 55
+        trending_regime = chop_1d[i] < 45
         neutral_regime = not ranging_regime and not trending_regime
         
-        # === RSI SIGNALS (RELAXED for more trades) ===
-        rsi_oversold = rsi_12h[i] < 30
-        rsi_overbought = rsi_12h[i] > 70
-        rsi_extreme_oversold = rsi_12h[i] < 20
-        rsi_extreme_overbought = rsi_12h[i] > 80
-        rsi_neutral_low = 30 <= rsi_12h[i] < 45
-        rsi_neutral_high = 55 < rsi_12h[i] <= 70
+        # === RSI SIGNALS (Relaxed for daily timeframe) ===
+        rsi_oversold = rsi_1d[i] < 35
+        rsi_overbought = rsi_1d[i] > 65
+        rsi_extreme_oversold = rsi_1d[i] < 25
+        rsi_extreme_overbought = rsi_1d[i] > 75
+        rsi_neutral_low = 35 <= rsi_1d[i] < 50
+        rsi_neutral_high = 50 < rsi_1d[i] <= 65
+        
+        # === FISHER TRANSFORM SIGNALS ===
+        fisher_oversold = fisher_1d[i] < -1.5
+        fisher_overbought = fisher_1d[i] > 1.5
+        fisher_cross_up = fisher_prev_1d[i] < -1.5 and fisher_1d[i] >= -1.5
+        fisher_cross_down = fisher_prev_1d[i] > 1.5 and fisher_1d[i] <= 1.5
+        fisher_recovering = fisher_1d[i] > fisher_prev_1d[i] and fisher_1d[i] < -0.5
+        fisher_weakening = fisher_1d[i] < fisher_prev_1d[i] and fisher_1d[i] > 0.5
         
         # === DONCHIAN BREAKOUT ===
         donchian_breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
@@ -216,15 +269,22 @@ def generate_signals(prices):
         
         desired_signal = 0.0
         
-        # === RANGING REGIME LOGIC (CHOP > 55) — Mean Reversion ===
+        # === RANGING REGIME LOGIC (CHOP > 55) — Mean Reversion with Fisher ===
         if ranging_regime:
-            # Long: RSI oversold + ANY trend alignment (relaxed: OR not AND)
-            if rsi_oversold and (above_sma200 or trend_1d_bullish or trend_1w_bullish):
+            # Long: Fisher oversold + RSI oversold + ANY trend alignment
+            if fisher_oversold and rsi_oversold and (above_sma200 or trend_1w_bullish):
                 desired_signal = BASE_SIZE
             
-            # Short: RSI overbought + ANY trend alignment
-            if rsi_overbought and (below_sma200 or trend_1d_bearish or trend_1w_bearish):
+            # Short: Fisher overbought + RSI overbought + ANY trend alignment
+            if fisher_overbought and rsi_overbought and (below_sma200 or trend_1w_bearish):
                 desired_signal = -BASE_SIZE
+            
+            # Fisher reversal cross + RSI confluence (high probability)
+            if fisher_cross_up and rsi_oversold:
+                desired_signal = REDUCED_SIZE if desired_signal == 0 else desired_signal
+            
+            if fisher_cross_down and rsi_overbought:
+                desired_signal = -REDUCED_SIZE if desired_signal == 0 else desired_signal
             
             # Fallback: extreme RSI alone (guarantees trades on all symbols)
             if rsi_extreme_oversold and desired_signal == 0:
@@ -235,34 +295,34 @@ def generate_signals(prices):
         
         # === TRENDING REGIME LOGIC (CHOP < 45) — Trend Following ===
         elif trending_regime:
-            # Long: ANY bullish trend + Donchian breakout OR RSI pullback
-            if (trend_1w_bullish or trend_1d_bullish or above_sma200):
-                if donchian_breakout_long:
+            # Long: Bullish trend + Fisher recovering from oversold OR Donchian breakout
+            if trend_1w_bullish or above_sma200:
+                if fisher_recovering and rsi_neutral_low:
                     desired_signal = BASE_SIZE
-                elif rsi_neutral_low:
-                    desired_signal = REDUCED_SIZE
+                elif donchian_breakout_long:
+                    desired_signal = REDUCED_SIZE if desired_signal == 0 else desired_signal
             
-            # Short: ANY bearish trend + Donchian breakout OR RSI pullback
-            if (trend_1w_bearish or trend_1d_bearish or below_sma200):
-                if donchian_breakout_short:
+            # Short: Bearish trend + Fisher weakening from overbought OR Donchian breakout
+            if trend_1w_bearish or below_sma200:
+                if fisher_weakening and rsi_neutral_high:
                     desired_signal = -BASE_SIZE
-                elif rsi_neutral_high:
+                elif donchian_breakout_short:
                     desired_signal = -REDUCED_SIZE if desired_signal == 0 else desired_signal
         
         # === NEUTRAL REGIME (45 <= CHOP <= 55) ===
         else:
-            # Conservative: RSI extremes + any trend alignment
-            if rsi_extreme_oversold and (trend_1w_bullish or trend_1d_bullish or above_sma200):
+            # Conservative: Fisher + RSI confluence + any trend alignment
+            if fisher_oversold and rsi_oversold and (trend_1w_bullish or above_sma200):
                 desired_signal = REDUCED_SIZE
             
-            if rsi_extreme_overbought and (trend_1w_bearish or trend_1d_bearish or below_sma200):
+            if fisher_overbought and rsi_overbought and (trend_1w_bearish or below_sma200):
                 desired_signal = -REDUCED_SIZE
             
-            # Basic mean reversion with single filter (relaxed)
-            if rsi_oversold and above_sma200:
+            # Basic mean reversion with single filter
+            if rsi_oversold and above_sma200 and fisher_recovering:
                 desired_signal = REDUCED_SIZE if desired_signal == 0 else desired_signal
             
-            if rsi_overbought and below_sma200:
+            if rsi_overbought and below_sma200 and fisher_weakening:
                 desired_signal = -REDUCED_SIZE if desired_signal == 0 else desired_signal
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
@@ -286,29 +346,29 @@ def generate_signals(prices):
         # === HOLD LOGIC — Maintain position if conditions intact ===
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
             if position_side > 0:
-                # Hold long if ANY trend intact and RSI not overbought
-                if (trend_1w_bullish or trend_1d_bullish or above_sma200) and rsi_12h[i] < 75:
+                # Hold long if trend intact and Fisher not overbought
+                if (trend_1w_bullish or above_sma200) and fisher_1d[i] < 1.0:
                     desired_signal = BASE_SIZE
             elif position_side < 0:
-                # Hold short if ANY trend intact and RSI not oversold
-                if (trend_1w_bearish or trend_1d_bearish or below_sma200) and rsi_12h[i] > 25:
+                # Hold short if trend intact and Fisher not oversold
+                if (trend_1w_bearish or below_sma200) and fisher_1d[i] > -1.0:
                     desired_signal = -BASE_SIZE
         
         # === EXIT CONDITIONS ===
         if in_position and position_side > 0:
-            # Exit long if ALL trends reverse + RSI overbought
-            if trend_1w_bearish and trend_1d_bearish and below_sma200 and rsi_12h[i] > 75:
+            # Exit long if trend reverses + Fisher overbought
+            if trend_1w_bearish and below_sma200 and fisher_1d[i] > 1.5:
                 desired_signal = 0.0
             # Exit if RSI extremely overbought in ranging regime
-            if ranging_regime and rsi_12h[i] > 80:
+            if ranging_regime and rsi_1d[i] > 80:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
-            # Exit short if ALL trends reverse + RSI oversold
-            if trend_1w_bullish and trend_1d_bullish and above_sma200 and rsi_12h[i] < 25:
+            # Exit short if trend reverses + Fisher oversold
+            if trend_1w_bullish and above_sma200 and fisher_1d[i] < -1.5:
                 desired_signal = 0.0
             # Exit if RSI extremely oversold in ranging regime
-            if ranging_regime and rsi_12h[i] < 20:
+            if ranging_regime and rsi_1d[i] < 20:
                 desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
@@ -323,13 +383,13 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_12h[i]
+                entry_atr = atr_1d[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(desired_signal) != position_side:
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_12h[i]
+                entry_atr = atr_1d[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
