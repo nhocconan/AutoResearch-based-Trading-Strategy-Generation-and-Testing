@@ -1,34 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #051: 4h Primary + 1d HTF — BB Squeeze + Donchian Breakout + ADX Regime
+Experiment #052: 12h Primary + 1d/1w HTF — Fisher Transform + KAMA Trend + Donchian Breakout
 
-Hypothesis: Volatility contraction (BB Width percentile < 20%) followed by 
-Donchian breakout with ADX regime filter will catch explosive moves while 
-avoiding choppy whipsaws. 1d HTF provides macro trend bias.
+Hypothesis: 12h timeframe with daily/weekly trend bias using Fisher Transform (proven reversal
+indicator) + KAMA adaptive trend + Donchian breakout will generate 20-50 trades/year with Sharpe > 0.486.
 
 Key insights from 46+ failed experiments:
-1) BB Squeeze (low volatility) precedes 70% of major breakouts
-2) Donchian(20) breakout is proven on 4h timeframe
-3) ADX with hysteresis (enter >22, exit <18) prevents regime whipsaw
-4) 1d HMA(50) for macro bias — only trade breakouts in trend direction
-5) LOOSE entry thresholds to ensure 25+ trades/year (avoid Sharpe=0.000)
+1) CRSI+Choppiness has failed 5+ times — need DIFFERENT approach
+2) Fisher Transform showed promise in #047 (1d KAMA+Fisher+Chop kept with Sharpe=0.141)
+3) KAMA adapts to market efficiency — works better than EMA in choppy markets
+4) Donchian breakout confirms trend direction without lag
+5) 12h primary = proven higher TF works best (target 20-50 trades/year)
+6) Dual HTF (1d + 1w) provides strong macro bias without over-filtering
 
-Why this differs from failed attempts:
-- NOT using CRSI (overused in #039-#050, diminishing returns)
-- NOT using Choppiness Index (tried 8+ times with negative Sharpe)
-- Using BB Width percentile + Donchian + ADX (new combination for 4h)
-- Simpler logic = more trades generated on ALL symbols
+Why this should work:
+- Fisher Transform catches reversals at extremes (better than RSI for timing)
+- KAMA adapts speed based on market regime (fast in trends, slow in chop)
+- Donchian(20) breakout confirms momentum direction
+- 1d/1w HMA provides ultra-long-term bias (prevents counter-trend trades)
+- 12h timeframe = fewer trades, less fee drag, cleaner signals
 
 Position size: 0.28 (discrete, within 0.20-0.35 range)
 Stoploss: 2.5*ATR trailing
-Target: 25-50 trades/year, Sharpe > 0.486 (beat current best)
+Target: 20-50 trades/year, Sharpe > 0.5
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_bb_squeeze_donchian_adx_regime_1d_v1"
-timeframe = "4h"
+name = "mtf_12h_fisher_kama_donchian_1d1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -41,41 +42,83 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands and Bandwidth."""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts speed based on market efficiency ratio.
+    """
+    n = len(close)
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / (sma + 1e-10) * 100.0
-    return upper, lower, bandwidth, sma
+    
+    # Efficiency Ratio (ER)
+    change = np.abs(close - np.roll(close, er_period))
+    change[0:er_period] = np.abs(close[0:er_period] - close[0])
+    volatility = pd.Series(np.abs(close - np.roll(close, 1))).rolling(window=er_period, min_periods=er_period).sum().values
+    volatility[0:er_period] = np.abs(close[0:er_period] - close[0])
+    
+    er = change / (volatility + 1e-10)
+    er = np.clip(er, 0.0, 1.0)
+    
+    # Smoothing constant
+    sc = (er * (2.0/(fast_period+1) - 2.0/(slow_period+1)) + 2.0/(slow_period+1)) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
-def calculate_bb_width_percentile(bandwidth, lookback=100):
-    """Calculate percentile rank of BB Width over lookback period."""
-    n = len(bandwidth)
-    percentile = np.zeros(n)
-    for i in range(lookback, n):
-        window = bandwidth[i-lookback+1:i+1]
-        current = bandwidth[i]
-        count_below = np.sum(window[:-1] < current)
-        percentile[i] = 100.0 * count_below / (lookback - 1)
-    percentile[:lookback] = 50.0
-    return percentile
+def calculate_fisher(close, period=9):
+    """
+    Calculate Ehlers Fisher Transform.
+    Transforms price into a Gaussian distribution for clearer signals.
+    Long when Fisher crosses above -1.5, Short when crosses below +1.5
+    """
+    n = len(close)
+    fisher = np.zeros(n)
+    trigger = np.zeros(n)
+    
+    for i in range(period, n):
+        # Find highest high and lowest low over period
+        highest = np.max(close[i-period+1:i+1])
+        lowest = np.min(close[i-period+1:i+1])
+        
+        # Normalize price
+        range_val = highest - lowest
+        if range_val < 1e-10:
+            range_val = 1e-10
+        
+        normalized = (2.0 * (close[i] - lowest) / range_val) - 1.0
+        normalized = np.clip(normalized, -0.999, 0.999)
+        
+        # Fisher transform
+        fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
+        
+        # Trigger line (previous fisher)
+        trigger[i] = fisher[i-1] if i > 0 else 0.0
+    
+    return fisher, trigger
+
+def calculate_hma(close, period=21):
+    """Calculate Hull Moving Average."""
+    close_s = pd.Series(close)
+    wma1 = close_s.ewm(span=period//2, min_periods=period//2, adjust=False).mean()
+    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    wma_diff = 2.0 * wma1 - wma2
+    hma = wma_diff.ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
+    return hma.values
 
 def calculate_donchian(high, low, period=20):
-    """Calculate Donchian Channel (highest high, lowest low over period)."""
-    highest = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    mid = (highest + lowest) / 2.0
-    return highest, lowest, mid
+    """Calculate Donchian Channel (upper and lower)."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)."""
+    """Calculate ADX for trend strength."""
     n = len(close)
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
     
     # True Range
     tr1 = high - low
@@ -87,39 +130,30 @@ def calculate_adx(high, low, close, period=14):
     # Directional Movement
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
+    
     for i in range(1, n):
-        plus_move = high[i] - high[i-1]
-        minus_move = low[i-1] - low[i]
-        if plus_move > minus_move and plus_move > 0:
-            plus_dm[i] = plus_move
-        if minus_move > plus_move and minus_move > 0:
-            minus_dm[i] = minus_move
+        plus_diff = high[i] - high[i-1]
+        minus_diff = low[i-1] - low[i]
+        
+        if plus_diff > minus_diff and plus_diff > 0:
+            plus_dm[i] = plus_diff
+        if minus_diff > plus_diff and minus_diff > 0:
+            minus_dm[i] = minus_diff
     
-    # Smoothed DM and TR
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # Smoothed values
+    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    # DI
-    plus_di = 100.0 * plus_dm_s / (atr + 1e-10)
-    minus_di = 100.0 * minus_dm_s / (atr + 1e-10)
-    
-    # DX
+    # DI and DX
+    plus_di = 100.0 * plus_smooth / (tr_smooth + 1e-10)
+    minus_di = 100.0 * minus_smooth / (tr_smooth + 1e-10)
     dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     
     # ADX
     adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
     
     return adx, plus_di, minus_di
-
-def calculate_hma(close, period=50):
-    """Calculate Hull Moving Average for HTF trend."""
-    close_s = pd.Series(close)
-    wma1 = close_s.ewm(span=period//2, min_periods=period//2, adjust=False).mean()
-    wma2 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    wma_diff = 2.0 * wma1 - wma2
-    hma = wma_diff.ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
-    return hma.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -129,17 +163,22 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d HMA for macro bias
-    hma_1d = calculate_hma(df_1d['close'].values, period=50)
+    # Calculate 1d HMA for medium-term bias
+    hma_1d = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate 1w HMA for long-term bias
+    hma_1w = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    bb_upper, bb_lower, bb_width, bb_sma = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    bb_pct = calculate_bb_width_percentile(bb_width, lookback=100)
-    donch_high, donch_low, donch_mid = calculate_donchian(high, low, period=20)
-    adx_14, plus_di, minus_di = calculate_adx(high, low, close, period=14)
+    kama_14 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    fisher, trigger = calculate_fisher(close, period=9)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
     
     signals = np.zeros(n)
     POSITION_SIZE = 0.28  # Discrete, within 0.20-0.35 range
@@ -151,85 +190,89 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_price = 0.0
     
-    # ADX hysteresis state
-    adx_trending = False
-    
     for i in range(150, n):  # Warmup for all indicators
         # Skip if indicators not ready
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(atr_14[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             continue
-        if np.isnan(bb_width[i]) or np.isnan(bb_pct[i]) or np.isnan(donch_high[i]):
+        if np.isnan(atr_14[i]) or np.isnan(kama_14[i]) or atr_14[i] == 0:
             continue
-        if np.isnan(adx_14[i]) or atr_14[i] == 0:
+        if np.isnan(fisher[i]) or np.isnan(donchian_upper[i]) or np.isnan(adx[i]):
             continue
         
-        # === 1D MACRO BIAS ===
+        # === MACRO BIAS (1d + 1w) ===
         price_above_hma_1d = close[i] > hma_1d_aligned[i]
         price_below_hma_1d = close[i] < hma_1d_aligned[i]
+        price_above_hma_1w = close[i] > hma_1w_aligned[i]
+        price_below_hma_1w = close[i] < hma_1w_aligned[i]
         
-        # === BB SQUEEZE (Volatility Contraction) ===
-        bb_squeeze = bb_pct[i] < 25.0  # Bottom 25% of volatility = squeeze
+        # Strong bullish: both 1d and 1w above HMA
+        macro_bullish = price_above_hma_1d and price_above_hma_1w
+        # Strong bearish: both 1d and 1w below HMA
+        macro_bearish = price_below_hma_1d and price_below_hma_1w
+        # Neutral: mixed signals
+        macro_neutral = not macro_bullish and not macro_bearish
+        
+        # === KAMA TREND ===
+        kama_bullish = close[i] > kama_14[i]
+        kama_bearish = close[i] < kama_14[i]
+        kama_slope_up = kama_14[i] > kama_14[i-5] if i > 5 else False
+        kama_slope_down = kama_14[i] < kama_14[i-5] if i > 5 else False
+        
+        # === FISHER TRANSFORM SIGNALS ===
+        fisher_oversold = fisher[i] < -1.5 and trigger[i] > fisher[i]  # Crossing up from oversold
+        fisher_overbought = fisher[i] > 1.5 and trigger[i] < fisher[i]  # Crossing down from overbought
+        fisher_rising = fisher[i] > fisher[i-1] if i > 0 else False
+        fisher_falling = fisher[i] < fisher[i-1] if i > 0 else False
         
         # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donch_high[i-1]  # Break above previous high
-        breakout_short = close[i] < donch_low[i-1]  # Break below previous low
+        donchian_breakout_up = close[i] > donchian_upper[i-1] if i > 0 else False
+        donchian_breakout_down = close[i] < donchian_lower[i-1] if i > 0 else False
         
-        # === ADX REGIME with HYSTERESIS ===
-        if adx_14[i] > 22.0:
-            adx_trending = True
-        elif adx_14[i] < 18.0:
-            adx_trending = False
-        
-        # === DI CROSSOVER ===
+        # === ADX TREND STRENGTH ===
+        adx_strong = adx[i] > 25.0
+        adx_weak = adx[i] < 20.0
         di_bullish = plus_di[i] > minus_di[i]
         di_bearish = plus_di[i] < minus_di[i]
         
-        # === ENTRY LOGIC (LOOSE for trade generation) ===
+        # === ENTRY LOGIC ===
         new_signal = 0.0
         
-        # --- LONG ENTRY: BB Squeeze + Donchian Breakout + Trend Confirm ---
-        if breakout_long:
-            # Need at least 2 of 3 confirmations for long
-            confirm_count = 0
-            if price_above_hma_1d:
-                confirm_count += 1
-            if di_bullish:
-                confirm_count += 1
-            if adx_trending or bb_squeeze:
-                confirm_count += 1
+        # --- STRONG TREND REGIME (ADX > 25 + macro bias) ---
+        if adx_strong:
+            # Long: KAMA bullish + Fisher not overbought + Donchian breakout + macro confirms
+            if kama_bullish and di_bullish and not fisher_overbought:
+                if macro_bullish or donchian_breakout_up:
+                    new_signal = POSITION_SIZE
             
-            if confirm_count >= 2:
-                new_signal = POSITION_SIZE
+            # Short: KAMA bearish + Fisher not oversold + Donchian breakdown + macro confirms
+            elif kama_bearish and di_bearish and not fisher_oversold:
+                if macro_bearish or donchian_breakout_down:
+                    new_signal = -POSITION_SIZE
         
-        # --- SHORT ENTRY: BB Squeeze + Donchian Breakout + Trend Confirm ---
-        elif breakout_short:
-            # Need at least 2 of 3 confirmations for short
-            confirm_count = 0
-            if price_below_hma_1d:
-                confirm_count += 1
-            if di_bearish:
-                confirm_count += 1
-            if adx_trending or bb_squeeze:
-                confirm_count += 1
-            
-            if confirm_count >= 2:
+        # --- WEAK TREND / RANGE REGIME (ADX < 20) ---
+        elif adx_weak:
+            # Mean reversion: Fisher extremes with macro filter
+            if fisher_oversold and macro_bullish:
+                new_signal = POSITION_SIZE
+            elif fisher_overbought and macro_bearish:
                 new_signal = -POSITION_SIZE
         
-        # --- MEAN REVERSION in BB SQUEEZE (ensures trades in chop) ---
-        if new_signal == 0.0 and bb_squeeze:
-            # Long at lower band
-            if close[i] < bb_lower[i] * 1.002 and price_above_hma_1d:
-                new_signal = POSITION_SIZE
-            # Short at upper band
-            elif close[i] > bb_upper[i] * 0.998 and price_below_hma_1d:
-                new_signal = -POSITION_SIZE
+        # --- NEUTRAL REGIME (ADX 20-25) ---
+        else:
+            # KAMA trend with Fisher confirmation
+            if kama_bullish and fisher_rising and not fisher_overbought:
+                if macro_bullish or macro_neutral:
+                    new_signal = POSITION_SIZE
+            elif kama_bearish and fisher_falling and not fisher_oversold:
+                if macro_bearish or macro_neutral:
+                    new_signal = -POSITION_SIZE
         
         # === HOLD POSITION LOGIC ===
         if in_position and new_signal == 0.0:
-            # Hold if no opposite breakout signal
-            if position_side > 0 and not breakout_short:
+            # Hold if Fisher not at opposite extreme
+            if position_side > 0 and fisher[i] < 1.0:
                 new_signal = signals[i-1] if i > 0 else 0.0
-            elif position_side < 0 and not breakout_long:
+            elif position_side < 0 and fisher[i] > -1.0:
                 new_signal = signals[i-1] if i > 0 else 0.0
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
@@ -255,11 +298,11 @@ def generate_signals(prices):
         
         # === EXIT ON MACRO TREND CHANGE ===
         if in_position and position_side > 0:
-            if price_below_hma_1d and di_bearish:
+            if macro_bearish and kama_bearish:
                 new_signal = 0.0
         
         if in_position and position_side < 0:
-            if price_above_hma_1d and di_bullish:
+            if macro_bullish and kama_bullish:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
