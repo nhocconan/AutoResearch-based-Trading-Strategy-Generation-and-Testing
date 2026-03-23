@@ -1,40 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #101: 4h Primary + 1d/1w HTF — Simplified HMA Trend + RSI Pullback
+Experiment #102: 12h Primary + 1d HTF — Simplified RSI Mean Reversion with Trend Filter
 
-Hypothesis: Complex regime switching (CRSI, Fisher, dual-regime) caused 0 trades or negative Sharpe.
-This version uses PROVEN components from the current best strategy but SIMPLIFIED:
-1) 1d HMA(21) for macro trend direction (load ONCE before loop)
-2) 4h HMA(16/48) crossover for entry timing
-3) RSI(14) pullback entries (not extremes - allows more trades)
-4) Choppiness(14) as OPTIONAL filter (doesn't block all trades)
-5) Volume confirmation for breakouts (avoids fake moves)
-6) ATR(14) trailing stoploss at 2.5x
+Hypothesis: Previous 12h strategies failed due to overly complex position tracking and 
+conflicting entry conditions. This version uses SIMPLER signal generation with proven 
+12h/1d MTF structure but cleaner logic.
 
-Key differences from failed experiments:
-- LOOSEN RSI thresholds (40-60 range, not 30-70)
-- Choppiness is bonus filter, not required
-- 1d HMA slope confirms trend strength
-- Volume > SMA(20) confirms breakout validity
-- Discrete sizing: 0.25 base, 0.30 max with confluence
+Key changes from failures:
+1) REMOVE complex position tracking state machine - signals flow naturally
+2) SIMPLER entry: RSI extremes (RSI<40 long, RSI>60 short) with 1d HMA trend filter
+3) Choppiness is OPTIONAL boost only - doesn't block trades
+4) ATR stoploss from ENTRY price (not trailing) - cleaner exit logic
+5) Discrete sizing: 0.0, ±0.25, ±0.30 only
+6) LOOSEN thresholds to ensure 25-50 trades/year
 
-Why this should beat Sharpe=0.486:
-- Simpler = more trades across ALL symbols (BTC/ETH/SOL)
-- 4h timeframe targets 25-45 trades/year (fee-efficient)
-- 1d/1w HTF prevents counter-trend in bear markets (2025 test)
-- Volume filter reduces false breakouts (major issue in #089, #099)
-- Proper stoploss tracking (missing in many failed strategies)
+Why this should work:
+- Simpler signal logic = fewer bugs, more trades
+- 1d HMA prevents counter-trend trades in 2025 bear market
+- RSI mean reversion works in both bull and bear regimes
+- 12h timeframe naturally limits trades (no fee drag)
+- Proven MTF structure from successful strategies
 
 Position size: 0.25 base, 0.30 max with confluence
-Stoploss: 2.5*ATR trailing
+Stoploss: 2.5*ATR from entry price
 Target: 30-50 trades/year, Sharpe > 0.5 on ALL symbols
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_rsi_vol_1d1w_v1"
-timeframe = "4h"
+name = "mtf_12h_rsi_meanrev_1d_hma_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -72,8 +68,9 @@ def calculate_rsi(close, period=14):
 def calculate_choppiness(high, low, close, period=14):
     """
     Calculate Choppiness Index (CHOP).
-    CHOP > 61.8 = ranging market
-    CHOP < 38.2 = trending market
+    CHOP = 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    CHOP > 61.8 = ranging market (mean revert)
+    CHOP < 38.2 = trending market (trend follow)
     """
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -91,214 +88,138 @@ def calculate_choppiness(high, low, close, period=14):
     chop = np.nan_to_num(chop, nan=50.0)
     return chop
 
-def calculate_ema(close, period=21):
-    """Calculate EMA."""
+def calculate_sma(close, period=200):
+    """Calculate Simple Moving Average."""
     close_s = pd.Series(close)
-    ema = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    return ema.values
-
-def calculate_volume_sma(volume, period=20):
-    """Calculate volume SMA."""
-    vol_s = pd.Series(volume)
-    vol_sma = vol_s.rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+    sma = close_s.rolling(window=period, min_periods=period).mean()
+    return sma.values
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate 1d HMA for macro trend
     hma_1d = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1w HMA for ultra-macro trend
-    hma_1w = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
-    
-    # Calculate 1d HMA slope (trend strength)
-    hma_1d_slope = np.zeros(n)
-    for i in range(1, n):
-        if not np.isnan(hma_1d_aligned[i]) and not np.isnan(hma_1d_aligned[i-1]) and hma_1d_aligned[i-1] != 0:
-            hma_1d_slope[i] = (hma_1d_aligned[i] - hma_1d_aligned[i-1]) / hma_1d_aligned[i-1] * 100
-        else:
-            hma_1d_slope[i] = 0.0
-    
-    # Calculate 1w HMA slope
-    hma_1w_slope = np.zeros(n)
-    for i in range(1, n):
-        if not np.isnan(hma_1w_aligned[i]) and not np.isnan(hma_1w_aligned[i-1]) and hma_1w_aligned[i-1] != 0:
-            hma_1w_slope[i] = (hma_1w_aligned[i] - hma_1w_aligned[i-1]) / hma_1w_aligned[i-1] * 100
-        else:
-            hma_1w_slope[i] = 0.0
-    
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    hma_4h_16 = calculate_hma(close, period=16)
-    hma_4h_48 = calculate_hma(close, period=48)
     chop_14 = calculate_choppiness(high, low, close, period=14)
-    ema_21 = calculate_ema(close, period=21)
-    vol_sma_20 = calculate_volume_sma(volume, period=20)
+    sma_200 = calculate_sma(close, period=200)
     
     signals = np.zeros(n)
     POSITION_SIZE_BASE = 0.25
     POSITION_SIZE_MAX = 0.30
     
-    # Track position state for stoploss
-    in_position = False
-    position_side = 0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
-    entry_price = 0.0
+    # Track entry prices for stoploss
+    long_entry_price = np.zeros(n)
+    short_entry_price = np.zeros(n)
     
     for i in range(250, n):
         # Skip if indicators not ready
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(atr_14[i]) or atr_14[i] == 0:
+            signals[i] = 0.0
             continue
-        if np.isnan(atr_14[i]) or atr_14[i] == 0:
-            continue
-        if np.isnan(rsi_14[i]) or np.isnan(hma_4h_16[i]) or np.isnan(hma_4h_48[i]):
-            continue
-        if np.isnan(chop_14[i]) or np.isnan(ema_21[i]) or np.isnan(vol_sma_20[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(chop_14[i]) or np.isnan(sma_200[i]):
+            signals[i] = 0.0
             continue
         
-        # === HTF TREND BIAS (1d + 1w HMA) ===
+        # === HTF TREND BIAS (1d HMA) ===
         price_above_hma_1d = close[i] > hma_1d_aligned[i]
         price_below_hma_1d = close[i] < hma_1d_aligned[i]
-        price_above_hma_1w = close[i] > hma_1w_aligned[i]
-        price_below_hma_1w = close[i] < hma_1w_aligned[i]
         
-        hma_1d_slope_positive = hma_1d_slope[i] > 0.05
-        hma_1d_slope_negative = hma_1d_slope[i] < -0.05
-        hma_1w_slope_positive = hma_1w_slope[i] > 0.05
-        hma_1w_slope_negative = hma_1w_slope[i] < -0.05
+        # === CHOPPINESS REGIME (OPTIONAL BOOST) ===
+        chop_ranging = chop_14[i] > 55.0  # ranging market favors mean reversion
+        chop_trending = chop_14[i] < 45.0  # trending market
         
-        # === CHOPPINESS REGIME (OPTIONAL FILTER) ===
-        chop_trending = chop_14[i] < 50.0
-        chop_ranging = chop_14[i] > 50.0
+        # === SMA200 FILTER ===
+        price_above_sma200 = close[i] > sma_200[i]
+        price_below_sma200 = close[i] < sma_200[i]
         
-        # === 4h HMA CROSSOVER ===
-        hma_bullish = hma_4h_16[i] > hma_4h_48[i]
-        hma_bearish = hma_4h_16[i] < hma_4h_48[i]
-        
-        # === RSI ENTRY SIGNALS (LOOSE thresholds) ===
-        rsi_neutral_long = rsi_14[i] < 60.0
-        rsi_neutral_short = rsi_14[i] > 40.0
-        rsi_oversold = rsi_14[i] < 45.0
-        rsi_overbought = rsi_14[i] > 55.0
-        
-        # === EMA CONFIRMATION ===
-        ema_bullish = close[i] > ema_21[i]
-        ema_bearish = close[i] < ema_21[i]
-        
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > vol_sma_20[i]
+        # === RSI ENTRY SIGNALS (LOOSE for trade generation) ===
+        rsi_oversold = rsi_14[i] < 40.0  # long entry
+        rsi_overbought = rsi_14[i] > 60.0  # short entry
+        rsi_extreme_long = rsi_14[i] < 30.0  # strong long
+        rsi_extreme_short = rsi_14[i] > 70.0  # strong short
         
         # === ENTRY LOGIC ===
         new_signal = 0.0
-        confluence_count = 0
         
-        # --- LONG ENTRY: HTF uptrend + 4h bullish + RSI okay ---
-        long_bias = price_above_hma_1d and hma_bullish and rsi_neutral_long
-        if long_bias:
-            confluence_count = 1
-            if ema_bullish:
-                confluence_count += 1
-            if volume_confirmed:
-                confluence_count += 1
-            if chop_trending:
-                confluence_count += 1
-            
+        # --- LONG ENTRY: 1d uptrend + RSI oversold ---
+        # Primary: 1d HMA bullish + RSI < 40
+        if price_above_hma_1d and rsi_oversold:
             new_signal = POSITION_SIZE_BASE
-            if confluence_count >= 3:
+            # Boost if ranging regime (mean reversion works better)
+            if chop_ranging:
+                new_signal = POSITION_SIZE_MAX
+            # Boost if extreme RSI
+            if rsi_extreme_long:
+                new_signal = POSITION_SIZE_MAX
+            # Boost if above SMA200 (strong uptrend pullback)
+            if price_above_sma200:
                 new_signal = POSITION_SIZE_MAX
         
-        # --- SHORT ENTRY: HTF downtrend + 4h bearish + RSI okay ---
-        short_bias = price_below_hma_1d and hma_bearish and rsi_neutral_short
-        if short_bias:
-            confluence_count = 1
-            if ema_bearish:
-                confluence_count += 1
-            if volume_confirmed:
-                confluence_count += 1
-            if chop_trending:
-                confluence_count += 1
-            
+        # --- SHORT ENTRY: 1d downtrend + RSI overbought ---
+        # Primary: 1d HMA bearish + RSI > 60
+        if price_below_hma_1d and rsi_overbought:
             new_signal = -POSITION_SIZE_BASE
-            if confluence_count >= 3:
+            # Boost if ranging regime (mean reversion works better)
+            if chop_ranging:
+                new_signal = -POSITION_SIZE_MAX
+            # Boost if extreme RSI
+            if rsi_extreme_short:
+                new_signal = -POSITION_SIZE_MAX
+            # Boost if below SMA200 (strong downtrend rally)
+            if price_below_sma200:
                 new_signal = -POSITION_SIZE_MAX
         
-        # === HOLD POSITION LOGIC ===
-        if in_position and new_signal == 0.0:
-            if position_side > 0 and rsi_14[i] < 70.0:
-                new_signal = signals[i-1] if i > 0 else 0.0
-            elif position_side < 0 and rsi_14[i] > 30.0:
-                new_signal = signals[i-1] if i > 0 else 0.0
+        # === STOPLOSS CHECK (2.5 * ATR from entry) ===
+        # Check if we have an active position from previous bar
+        prev_signal = signals[i-1] if i > 0 else 0.0
         
-        # === STOPLOSS CHECK (2.5 * ATR trailing) ===
-        stoploss_triggered = False
-        
-        if in_position and position_side > 0:
-            highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.5 * atr_14[i]
-            if close[i] < stop_price:
-                stoploss_triggered = True
-        
-        if in_position and position_side < 0:
-            if lowest_since_entry == 0.0:
-                lowest_since_entry = close[i]
+        if prev_signal > 0:  # Long position active
+            # Track entry price (first bar of position)
+            if prev_signal > 0 and (i == 250 or signals[i-2] <= 0 if i > 250 else True):
+                long_entry_price[i] = close[i]
             else:
-                lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.5 * atr_14[i]
+                long_entry_price[i] = long_entry_price[i-1] if i > 0 else close[i]
+            
+            stop_price = long_entry_price[i] - 2.5 * atr_14[i]
+            if close[i] < stop_price:
+                new_signal = 0.0  # Stoploss hit
+        
+        if prev_signal < 0:  # Short position active
+            # Track entry price (first bar of position)
+            if prev_signal < 0 and (i == 250 or signals[i-2] >= 0 if i > 250 else True):
+                short_entry_price[i] = close[i]
+            else:
+                short_entry_price[i] = short_entry_price[i-1] if i > 0 else close[i]
+            
+            stop_price = short_entry_price[i] + 2.5 * atr_14[i]
             if close[i] > stop_price:
-                stoploss_triggered = True
-        
-        if stoploss_triggered:
-            new_signal = 0.0
-        
-        # === EXIT ON TREND CHANGE ===
-        if in_position and position_side > 0:
-            if price_below_hma_1d and hma_1d_slope_negative:
-                new_signal = 0.0
-        
-        if in_position and position_side < 0:
-            if price_above_hma_1d and hma_1d_slope_positive:
-                new_signal = 0.0
+                new_signal = 0.0  # Stoploss hit
         
         # === EXIT ON RSI EXTREME (take profit) ===
-        if in_position and position_side > 0 and rsi_14[i] > 70.0:
+        if prev_signal > 0 and rsi_14[i] > 70.0:
+            new_signal = 0.0  # Long take profit
+        
+        if prev_signal < 0 and rsi_14[i] < 30.0:
+            new_signal = 0.0  # Short take profit
+        
+        # === EXIT ON TREND CHANGE ===
+        # Exit long if 1d HMA turns bearish
+        if prev_signal > 0 and price_below_hma_1d:
             new_signal = 0.0
         
-        if in_position and position_side < 0 and rsi_14[i] < 30.0:
+        # Exit short if 1d HMA turns bullish
+        if prev_signal < 0 and price_above_hma_1d:
             new_signal = 0.0
-        
-        # === UPDATE POSITION TRACKING ===
-        if new_signal != 0.0:
-            if not in_position:
-                in_position = True
-                position_side = np.sign(new_signal)
-                entry_price = close[i]
-                highest_since_entry = close[i] if position_side > 0 else 0.0
-                lowest_since_entry = close[i] if position_side < 0 else 0.0
-            elif np.sign(new_signal) != position_side:
-                position_side = np.sign(new_signal)
-                entry_price = close[i]
-                highest_since_entry = close[i] if position_side > 0 else 0.0
-                lowest_since_entry = close[i] if position_side < 0 else 0.0
-        else:
-            if in_position:
-                in_position = False
-                position_side = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
         
         signals[i] = new_signal
     
