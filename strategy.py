@@ -1,27 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #1252: 12h Primary + 1d/1w HTF — Donchian Breakout with HMA Trend Filter
+Experiment #1253: 1d Primary + 1w HTF — Donchian Breakout with Weekly Trend Filter
 
-Hypothesis: Recent 12h strategies (#1242, #1246) failed with Sharpe=0.000 due to overly
-restrictive filters (Choppiness + CRSI combo). Research shows Donchian breakout + HMA
-trend worked well on 12h for SOL (Sharpe +0.879). Key changes:
-1. REMOVE Choppiness Index (caused 0 trades in #1242/#1246)
-2. REMOVE CRSI complexity (caused 0 trades)
-3. USE Donchian(20) breakout + HMA(21) trend direction
-4. 1d HMA for macro filter, 1w HMA for super-trend bias
-5. Simpler RSI filter (only exclude extremes, not require specific range)
-6. Remove hysteresis buffer (causes signal lag, reduces trade count)
-7. ATR trailing stop at 3.0x for wider stops on higher TF
+Hypothesis: Recent failures show complex regime switching creates 0 trades. Research shows
+Donchian breakout + HMA trend + RSI filter worked well for SOL (Sharpe +0.879). Key changes:
+1. SIMPLER entry: Donchian(20) breakout only (proven breakout pattern)
+2. Weekly HMA(21) for macro trend direction (only trade with weekly trend)
+3. RSI(14) filter to avoid extreme entries (RSI 35-65 range for entries)
+4. ATR(14) trailing stop at 2.5x for risk management
+5. NO hysteresis buffer (causes 0 trades in failed experiments)
+6. Discrete position sizing: 0.25 for entries
 
-Target: Sharpe > 0.612, trades >= 80 train (20/year), >= 12 test (3/year)
-Timeframe: 12h (20-50 trades/year target)
+Target: Sharpe > 0.612, trades >= 40 train (10/year), >= 6 test (4/year)
+Timeframe: 1d (20-50 trades/year target)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_hma_breakout_1d1w_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_breakout_1w_hma_rsi_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -59,18 +57,6 @@ def calculate_hma(close, period=21):
                     hma[i] = np.sum(np.array(diff_window) * weights) / np.sum(weights)
     
     return hma
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - breakout detection"""
-    n = len(high)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -115,6 +101,18 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - breakout levels"""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -122,25 +120,19 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for macro trend filter
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
-    # Calculate and align 1w HMA for super-trend bias
+    # Calculate and align 1w HMA for macro trend filter
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (12h) indicators
-    hma_12h = calculate_hma(close, period=21)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    # Calculate primary (1d) indicators
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.30
+    BASE_SIZE = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -150,80 +142,75 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    # Track last breakout level to avoid re-entry on same breakout
-    last_long_breakout = 0.0
-    last_short_breakout = 0.0
+    # Track breakout to avoid re-entry on same signal
+    last_breakout_type = 0  # 0=none, 1=long, -1=short
     
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(hma_12h[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(rsi[i]) or np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            signals[i] = 0.0
+            continue
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === MACRO TREND (1d HMA) ===
-        macro_bull = close[i] > hma_1d_aligned[i]
-        macro_bear = close[i] < hma_1d_aligned[i]
-        
-        # === SUPER TREND (1w HMA) - bias only, not hard filter ===
-        super_bull = close[i] > hma_1w_aligned[i]
-        super_bear = close[i] < hma_1w_aligned[i]
-        
-        # === PRIMARY TREND (12h HMA) ===
-        trend_bull = close[i] > hma_12h[i]
-        trend_bear = close[i] < hma_12h[i]
+        # === MACRO TREND (1w HMA) ===
+        macro_bull = close[i] > hma_1w_aligned[i]
+        macro_bear = close[i] < hma_1w_aligned[i]
         
         # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donchian_upper[i]
-        breakout_short = close[i] < donchian_lower[i]
+        # Long breakout: price crosses above Donchian upper
+        long_breakout = close[i] > donchian_upper[i-1] and close[i-1] <= donchian_upper[i-1]
+        # Short breakout: price crosses below Donchian lower
+        short_breakout = close[i] < donchian_lower[i-1] and close[i-1] >= donchian_lower[i-1]
         
-        # === RSI FILTER (only exclude extremes, not require specific range) ===
-        # Avoid long when extremely overbought, avoid short when extremely oversold
-        rsi_ok_long = rsi[i] < 80.0  # not extremely overbought
-        rsi_ok_short = rsi[i] > 20.0  # not extremely oversold
+        # === RSI FILTER (avoid extreme entries) ===
+        # For longs: RSI not overbought (< 65) but not oversold either (> 35)
+        rsi_ok_long = rsi[i] > 35.0 and rsi[i] < 65.0
+        # For shorts: RSI not oversold (> 35) but not overbought either (< 65)
+        rsi_ok_short = rsi[i] > 35.0 and rsi[i] < 65.0
         
-        # === ENTRY CONDITIONS (SIMPLIFIED for more trades) ===
+        # === ENTRY CONDITIONS ===
         desired_signal = 0.0
         
-        # LONG: Macro bull + trend bull + Donchian breakout + RSI not extreme
-        # Allow entry if 2 of 3 trend filters agree (more flexible)
-        trend_score_long = int(macro_bull) + int(trend_bull) + int(super_bull)
-        if breakout_long and rsi_ok_long and trend_score_long >= 2:
-            # Avoid re-entry on same breakout level
-            if close[i] > last_long_breakout + 0.001 * close[i]:
-                desired_signal = BASE_SIZE
-                last_long_breakout = close[i]
+        # LONG: Weekly bull + Donchian breakout + RSI filter + not already long
+        if macro_bull and long_breakout and rsi_ok_long and last_breakout_type != 1:
+            desired_signal = BASE_SIZE
+            last_breakout_type = 1
         
-        # SHORT: Macro bear + trend bear + Donchian breakout + RSI not extreme
-        trend_score_short = int(macro_bear) + int(trend_bear) + int(super_bear)
-        if breakout_short and rsi_ok_short and trend_score_short >= 2:
-            # Avoid re-entry on same breakout level
-            if close[i] < last_short_breakout - 0.001 * close[i]:
-                desired_signal = -BASE_SIZE
-                last_short_breakout = close[i]
+        # SHORT: Weekly bear + Donchian breakout + RSI filter + not already short
+        elif macro_bear and short_breakout and rsi_ok_short and last_breakout_type != -1:
+            desired_signal = -BASE_SIZE
+            last_breakout_type = -1
         
-        # === STOPLOSS CHECK (Trailing ATR 3.0x for 12h TF) ===
+        # Reset breakout tracking when flat
+        if desired_signal == 0.0:
+            last_breakout_type = 0
+        
+        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 3.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 3.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
         if stoploss_triggered:
             desired_signal = 0.0
+            last_breakout_type = 0  # Reset to allow new breakout
         
         # === DISCRETIZE SIGNAL VALUES ===
         if desired_signal > 0:
