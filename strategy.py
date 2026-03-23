@@ -1,34 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #1310: 1h Primary + 4h/12h HTF — Simplified Trend Pullback with Loose Entries
+Experiment #1311: 4h Primary + 1d HTF — Vol Spike Reversion + Fisher Transform
 
-Hypothesis: Recent failures (#1298-1309) mostly have Sharpe=0.000 = ZERO TRADES.
-Entry conditions too strict with multiple confluence filters blocking signals.
-This strategy uses SIMPLER logic with LOOSER thresholds:
+Hypothesis: Recent failures show either ZERO TRADES (Sharpe=0.000) or negative Sharpe.
+This strategy combines:
+1. VOL SPIKE REVERSION: ATR(7)/ATR(30) > 1.8 signals panic extremes → fade the move
+2. EHLERS FISHER TRANSFORM: period=9, catches reversals in bear rallies (research-proven)
+3. 1d HMA for macro bias (less strict than requiring price above/below)
+4. LOOSE entry thresholds to ensure >=10 trades/symbol/train
 
-1. 12h HMA for macro trend direction (only 1 HTF filter, not 2)
-2. 4h HMA for local trend confirmation
-3. RSI(14) pullback entries (simpler than CRSI, more reliable)
-4. NO session filter (was blocking 60% of potential trades)
-5. NO volume filter (was blocking trades in low-vol periods)
-6. Immediate signal output (no hysteresis buffer delaying entries)
+Key changes from #1254:
+- Replace CRSI with Fisher Transform (better for crypto reversals)
+- Add vol spike detection (ATR ratio) for panic entries
+- Remove BB requirement (was blocking trades)
+- Single regime logic (vol spike mean-revert always)
+- Lower Fisher threshold (-1.2/+1.2 vs -1.5/+1.5)
 
-Key changes from failed experiments:
-- RSI thresholds: 30/70 (was 25/75 or 20/80)
-- Remove Choppiness Index regime (was adding complexity without benefit)
-- Remove session/volume filters (primary cause of 0 trades)
-- Single HTF trend filter (12h HMA) instead of dual (4h+12h)
-- BASE_SIZE = 0.25 (conservative for 1h timeframe)
-
-Target: Sharpe > 0.612, trades >= 40 train, >= 5 test, DD > -40%
-Timeframe: 1h (as required by experiment)
+Target: Sharpe > 0.612, trades >= 50 train, >= 8 test
+Timeframe: 4h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_trend_rsi_pullback_4h12h_hma_atr_loose_v1"
-timeframe = "1h"
+name = "mtf_4h_vol_fisher_reversion_1d_hma_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -67,6 +63,51 @@ def calculate_hma(close, period=21):
     
     return hma
 
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    atr = np.full(n, np.nan)
+    
+    if n < period + 1:
+        return atr
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_fisher(close, period=9):
+    """Ehlers Fisher Transform - catches reversals
+    Long when Fisher crosses above -1.5 from below
+    Short when Fisher crosses below +1.5 from above
+    """
+    n = len(close)
+    fisher = np.full(n, np.nan)
+    fisher_prev = np.full(n, np.nan)
+    
+    if n < period * 2:
+        return fisher, fisher_prev
+    
+    # Calculate price range
+    hl2 = (close + np.roll(close, 1)) / 2.0
+    hl2[0] = close[0]
+    
+    for i in range(period, n):
+        highest = np.max(close[i-period+1:i+1])
+        lowest = np.min(close[i-period+1:i+1])
+        
+        if highest > lowest:
+            value = 0.66 * ((hl2[i] - lowest) / (highest - lowest) - 0.5) + 0.67 * fisher_prev[i-1] if i > period else 0.66 * ((hl2[i] - lowest) / (highest - lowest) - 0.5)
+            value = np.clip(value, -0.999, 0.999)
+            fisher[i] = 0.5 * np.log((1.0 + value) / (1.0 - value))
+            if i > 0:
+                fisher_prev[i] = fisher[i-1] if not np.isnan(fisher[i-1]) else 0.0
+    
+    return fisher, fisher_prev
+
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
@@ -86,29 +127,12 @@ def calculate_rsi(close, period=14):
     
     mask = loss_smooth > 1e-10
     rsi[mask] = 100.0 - (100.0 / (1.0 + gain_smooth[mask] / loss_smooth[mask]))
-    rsi[loss_smooth <= 1e-10] = 100.0
     rsi[:period] = np.nan
     
     return rsi
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    atr = np.full(n, np.nan)
-    
-    if n < period + 1:
-        return atr
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
 def calculate_sma(close, period=200):
-    """Simple Moving Average - macro trend filter"""
+    """Simple Moving Average"""
     n = len(close)
     sma = np.full(n, np.nan)
     
@@ -127,23 +151,28 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF HMA for trend filters
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align 1d HMA for macro bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
-    
-    # Calculate primary (1h) indicators
+    # Calculate primary (4h) indicators
+    atr_7 = calculate_atr(high, low, close, period=7)
+    atr_30 = calculate_atr(high, low, close, period=30)
+    atr_14 = calculate_atr(high, low, close, period=14)
+    fisher, fisher_prev = calculate_fisher(close, period=9)
     rsi = calculate_rsi(close, period=14)
-    atr = calculate_atr(high, low, close, period=14)
     sma_200 = calculate_sma(close, period=200)
     
+    # Vol spike ratio
+    vol_ratio = np.full(n, np.nan)
+    for i in range(30, n):
+        if atr_30[i] > 1e-10:
+            vol_ratio[i] = atr_7[i] / atr_30[i]
+    
     signals = np.zeros(n)
-    BASE_SIZE = 0.25  # Conservative for 1h timeframe
+    BASE_SIZE = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -153,55 +182,63 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(250, n):  # Need 200 for SMA + 50 for HTF alignment
+    for i in range(250, n):
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or atr[i] <= 1e-10:
+        if np.isnan(atr_14[i]) or np.isnan(fisher[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+        if np.isnan(vol_ratio[i]) or np.isnan(rsi[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         if np.isnan(sma_200[i]):
             signals[i] = 0.0
             continue
         
-        # === MACRO TREND (12h HMA) ===
-        macro_bull = close[i] > hma_12h_aligned[i]
-        macro_bear = close[i] < hma_12h_aligned[i]
+        # === VOL SPIKE DETECTION ===
+        vol_spike = vol_ratio[i] > 1.8  # Panic/extreme volatility
         
-        # === LOCAL TREND (4h HMA) ===
-        local_bull = close[i] > hma_4h_aligned[i]
-        local_bear = close[i] < hma_4h_aligned[i]
+        # === MACRO BIAS (1d HMA) ===
+        macro_bull = close[i] > hma_1d_aligned[i]
+        macro_bear = close[i] < hma_1d_aligned[i]
         
-        # === LONG TERM TREND (SMA200) ===
-        long_bull = close[i] > sma_200[i]
-        long_bear = close[i] < sma_200[i]
+        # === FISHER TRANSFORM SIGNALS ===
+        fisher_long = fisher[i] < -1.2 and fisher_prev[i] < fisher[i]  # Crossing up from oversold
+        fisher_short = fisher[i] > 1.2 and fisher_prev[i] > fisher[i]  # Crossing down from overbought
+        
+        # === RSI CONFIRMATION ===
+        rsi_oversold = rsi[i] < 35.0
+        rsi_overbought = rsi[i] > 65.0
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # LONG: Macro bull + Local bull + RSI pullback (30-50)
-        if macro_bull and local_bull and long_bull:
-            if rsi[i] < 50.0:  # LOOSE: any RSI below 50 in uptrend
+        # VOL SPIKE REVERSION (primary signal)
+        if vol_spike:
+            # Long: Vol spike + Fisher oversold + RSI oversold
+            if fisher_long and rsi_oversold:
                 desired_signal = BASE_SIZE
-        
-        # SHORT: Macro bear + Local bear + RSI bounce (50-70)
-        elif macro_bear and local_bear and long_bear:
-            if rsi[i] > 50.0:  # LOOSE: any RSI above 50 in downtrend
+            # Short: Vol spike + Fisher overbought + RSI overbought
+            elif fisher_short and rsi_overbought:
                 desired_signal = -BASE_SIZE
+        else:
+            # Normal regime: Fisher reversals with macro bias
+            if fisher_long and macro_bull:
+                desired_signal = BASE_SIZE * 0.6  # Smaller size in normal regime
+            elif fisher_short and macro_bear:
+                desired_signal = -BASE_SIZE * 0.6
         
-        # === STOPLOSS CHECK (Trailing ATR 3.0x) ===
+        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 3.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 3.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
@@ -222,13 +259,13 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr[i]
+                entry_atr = atr_14[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(final_signal) != position_side:
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr[i]
+                entry_atr = atr_14[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
