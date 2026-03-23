@@ -157,42 +157,49 @@ def git_revert_strategy():
 
 
 def append_results(results: list[dict], status: str, description: str, period: str = "train"):
-    """Append experiment results to results.tsv, skipping duplicates."""
+    """Append experiment results to results.tsv with FILE LOCKING to prevent duplicates.
+    Uses fcntl.flock to ensure only one process writes at a time."""
+    import fcntl
+
     if not RESULTS_FILE.exists():
         RESULTS_FILE.write_text(TSV_HEADER + "\n")
 
-    # Load existing to check for duplicates
-    existing = set()
-    try:
-        import csv
-        with open(RESULTS_FILE) as f:
-            reader = csv.reader(f, delimiter="\t")
-            next(reader, None)  # skip header
-            for row in reader:
-                if len(row) >= 15:
-                    existing.add((row[1], row[2], row[14]))  # (strategy, symbol, period)
-    except Exception:
-        pass
-
     commit = get_git_commit()
-    with open(RESULTS_FILE, "a") as f:
-        for m in results:
-            strategy_name = m.get("strategy", "unknown")
-            symbol = m["symbol"]
-            key = (strategy_name, symbol, period)
-            if key in existing:
-                continue  # skip duplicate
-            existing.add(key)
-            row = metrics_to_tsv_row(
-                metrics=m,
-                strategy_name=strategy_name,
-                symbol=symbol,
-                commit=commit,
-                status=status,
-                description=description[:80],
-                period=period,
-            )
-            f.write(row + "\n")
+
+    # ATOMIC read-check-write with file lock
+    with open(RESULTS_FILE, "r+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)  # exclusive lock — blocks other writers
+        try:
+            # Read existing keys while holding lock
+            existing = set()
+            f.seek(0)
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) >= 15 and parts[1] != "strategy":  # skip header
+                    existing.add((parts[1], parts[2], parts[14]))
+
+            # Append only new rows
+            f.seek(0, 2)  # seek to end
+            for m in results:
+                strategy_name = m.get("strategy", "unknown")
+                symbol = m["symbol"]
+                key = (strategy_name, symbol, period)
+                if key in existing:
+                    continue
+                existing.add(key)
+                row = metrics_to_tsv_row(
+                    metrics=m,
+                    strategy_name=strategy_name,
+                    symbol=symbol,
+                    commit=commit,
+                    status=status,
+                    description=description[:80],
+                    period=period,
+                )
+                f.write(row + "\n")
+            f.flush()
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)  # release lock
 
 
 def save_strategy(strategy_name: str):
