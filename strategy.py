@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #260: 1h Primary + 4h/12h HTF — Simplified Multi-TF Pullback
+Experiment #261: 4h Primary + 1d/1w HTF — Volume-Confirmed Trend Pullback
 
-Hypothesis: After 200+ failed experiments, the key is balancing trade frequency:
-- CRSI <15/>85 triggers TOO RARELY (0-trade failures like #248, #250, #255)
-- Pure trend has too many whipsaws (negative Sharpe like #249, #254)
-- SOLUTION: RSI 40/60 (triggers ~15% of bars) + HTF trend + volume/session filters
+Hypothesis: After 250+ experiments, the key insight is:
+1. Complex regime-switching (CHOP + CRSI + Donchian) creates 0-trade scenarios
+2. Simple trend + pullback WORKS but needs volume confirmation to filter false signals
+3. RSI zones 35-55 are too narrow — use 30/70 extremes for clearer signals
+4. Volume spike (>1.5x 20-bar avg) confirms genuine momentum, not noise
+5. Tighter stoploss (2.0x ATR vs 2.5x) reduces drawdown in whipsaw markets
 
-KEY INSIGHT FROM FAILURES:
-- #250, #255: 0 trades on 1h due to too strict entry conditions
-- #249, #254: Negative Sharpe from regime-switching whipsaws
-- Use 12h HMA for macro bias (slower than 1d, more stable)
-- Use 4h HMA for medium-term direction
-- RSI 40/60 pullback (more frequent than 35/65 or CRSI)
-- Volume filter (>0.8x 20-bar avg) + Session filter (8-20 UTC)
-- Target: 40-70 trades/year on 1h (not too many, not zero)
+KEY CHANGES from #251:
+- Wider RSI zones (30/70 vs 35-55/45-65) for more reliable signals
+- Volume confirmation (vol > 1.5x 20-bar MA) to filter fake breakouts
+- Simpler hold logic — maintain position while trend intact
+- Tighter stoploss (2.0x ATR) for faster exit on reversals
+- 1w HMA for ultra-long-term bias (not just 1d)
 
-TARGET: Sharpe > 0.5 on ALL symbols (BTC, ETH, SOL), trades >= 30 on train
+TARGET: 30-50 trades/year, Sharpe > 0.5 on ALL symbols
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_pullback_4h12h_vol_session_v1"
-timeframe = "1h"
+name = "mtf_4h_hma_rsi_vol_1d1w_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -67,47 +67,41 @@ def calculate_rsi(close, period=14):
         rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi.fillna(50.0).values
 
-def calculate_volume_avg(volume, period=20):
-    """Calculate rolling volume average."""
+def calculate_volume_ma(volume, period=20):
+    """Calculate volume moving average."""
     vol_s = pd.Series(volume)
-    return vol_s.rolling(window=period, min_periods=period).mean().values
-
-def get_hour_from_open_time(open_time):
-    """Extract hour from open_time (milliseconds timestamp)."""
-    # open_time is in milliseconds since epoch
-    hours = (open_time // (1000 * 60 * 60)) % 24
-    return hours
+    vol_ma = vol_s.rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1h indicators (primary timeframe)
+    # Calculate 4h indicators (primary timeframe)
+    hma_16 = calculate_hma(close, 16)
+    hma_48 = calculate_hma(close, 48)
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    vol_avg_20 = calculate_volume_avg(volume, period=20)
+    vol_ma_20 = calculate_volume_ma(volume, period=20)
     
-    # Calculate 4h HMA for medium-term trend (aligned properly with shift(1))
-    hma_4h_16_raw = calculate_hma(df_4h['close'].values, 16)
-    hma_4h_48_raw = calculate_hma(df_4h['close'].values, 48)
-    hma_4h_16_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_16_raw)
-    hma_4h_48_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_48_raw)
+    # Calculate 1d HMA for macro trend (aligned properly with shift(1))
+    hma_1d_raw = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 12h HMA for macro trend (aligned properly with shift(1))
-    hma_12h_21_raw = calculate_hma(df_12h['close'].values, 21)
-    hma_12h_21_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_21_raw)
+    # Calculate 1w HMA for ultra-long-term bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, 10)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
     signals = np.zeros(n)
-    POSITION_SIZE_FULL = 0.25
-    POSITION_SIZE_HALF = 0.15
+    POSITION_SIZE_FULL = 0.30
+    POSITION_SIZE_HALF = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -121,63 +115,73 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
+        if np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
+            signals[i] = 0.0
+            continue
         if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(vol_avg_20[i]) or vol_avg_20[i] <= 1e-10:
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_4h_16_aligned[i]) or np.isnan(hma_4h_48_aligned[i]):
-            signals[i] = 0.0
-            continue
-        if np.isnan(hma_12h_21_aligned[i]):
+        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        # === SESSION FILTER (8-20 UTC only) ===
-        hour = get_hour_from_open_time(open_time[i])
-        in_session = (hour >= 8) and (hour <= 20)
-        
-        # === VOLUME FILTER (> 0.8x 20-bar average) ===
-        volume_ok = volume[i] > (0.8 * vol_avg_20[i])
-        
-        # === MACRO BIAS (12h HMA) ===
-        price_above_hma_12h = close[i] > hma_12h_21_aligned[i]
-        price_below_hma_12h = close[i] < hma_12h_21_aligned[i]
+        # === MACRO BIAS (1d + 1w HMA) ===
+        price_above_hma_1d = close[i] > hma_1d_aligned[i]
+        price_below_hma_1d = close[i] < hma_1d_aligned[i]
+        price_above_hma_1w = close[i] > hma_1w_aligned[i]
+        price_below_hma_1w = close[i] < hma_1w_aligned[i]
         
         # === 4h TREND (HMA crossover) ===
-        hma_4h_bullish = hma_4h_16_aligned[i] > hma_4h_48_aligned[i]
-        hma_4h_bearish = hma_4h_16_aligned[i] < hma_4h_48_aligned[i]
+        hma_bullish = hma_16[i] > hma_48[i]
+        hma_bearish = hma_16[i] < hma_48[i]
         
-        # === RSI PULLBACK SIGNALS (40/60 thresholds - more frequent) ===
-        # Long: bullish trend + RSI pullback to 40-55 zone
-        rsi_pullback_long = (rsi_14[i] >= 40.0) and (rsi_14[i] <= 55.0)
-        # Short: bearish trend + RSI pullback to 45-60 zone
-        rsi_pullback_short = (rsi_14[i] >= 45.0) and (rsi_14[i] <= 60.0)
+        # === VOLUME CONFIRMATION ===
+        volume_spike = volume[i] > 1.5 * vol_ma_20[i]
+        
+        # === RSI ENTRY SIGNALS (wider zones) ===
+        # Long: RSI oversold zone with bullish setup
+        rsi_oversold = rsi_14[i] <= 40.0
+        # Short: RSI overbought zone with bearish setup
+        rsi_overbought = rsi_14[i] >= 60.0
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # LONG ENTRY: 12h bullish + 4h bullish + RSI pullback + session + volume
-        if price_above_hma_12h and hma_4h_bullish and rsi_pullback_long and in_session and volume_ok:
+        # LONG ENTRY: 1w bullish OR 1d bullish + 4h bullish + RSI oversold + volume spike
+        long_condition = (
+            (price_above_hma_1w or price_above_hma_1d) and
+            hma_bullish and
+            rsi_oversold and
+            volume_spike
+        )
+        if long_condition:
             desired_signal = POSITION_SIZE_FULL
         
-        # SHORT ENTRY: 12h bearish + 4h bearish + RSI pullback + session + volume
-        elif price_below_hma_12h and hma_4h_bearish and rsi_pullback_short and in_session and volume_ok:
+        # SHORT ENTRY: 1w bearish OR 1d bearish + 4h bearish + RSI overbought + volume spike
+        short_condition = (
+            (price_below_hma_1w or price_below_hma_1d) and
+            hma_bearish and
+            rsi_overbought and
+            volume_spike
+        )
+        if short_condition:
             desired_signal = -POSITION_SIZE_FULL
         
-        # === STOPLOSS CHECK (2.5 * ATR trailing) ===
+        # === STOPLOSS CHECK (2.0 * ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.5 * atr_14[i]
+            stop_price = highest_since_entry - 2.0 * atr_14[i]
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.5 * atr_14[i]
+            stop_price = lowest_since_entry + 2.0 * atr_14[i]
             if close[i] > stop_price:
                 stoploss_triggered = True
         
@@ -186,33 +190,29 @@ def generate_signals(prices):
         
         # === TREND REVERSAL EXIT ===
         # Exit long if 4h trend turns bearish
-        if in_position and position_side > 0 and hma_4h_bearish:
+        if in_position and position_side > 0 and hma_bearish:
             desired_signal = 0.0
         
         # Exit short if 4h trend turns bullish
-        if in_position and position_side < 0 and hma_4h_bullish:
+        if in_position and position_side < 0 and hma_bullish:
             desired_signal = 0.0
         
         # === RSI EXTREME EXIT (take profit) ===
-        # Exit long if RSI becomes overbought (>70)
-        if in_position and position_side > 0 and rsi_14[i] > 70.0:
+        # Exit long if RSI becomes overbought (>75)
+        if in_position and position_side > 0 and rsi_14[i] > 75.0:
             desired_signal = 0.0
         
-        # Exit short if RSI becomes oversold (<30)
-        if in_position and position_side < 0 and rsi_14[i] < 30.0:
+        # Exit short if RSI becomes oversold (<25)
+        if in_position and position_side < 0 and rsi_14[i] < 25.0:
             desired_signal = 0.0
         
-        # === HOLD LOGIC - maintain position if setup still valid ===
-        # Only hold if we're in position AND no exit signal triggered
+        # === HOLD LOGIC ===
+        # Maintain position if trend still valid (reduce to half size)
         if in_position and desired_signal == 0.0 and not stoploss_triggered:
-            if position_side > 0:
-                # Hold long if trend still bullish (even if RSI moved)
-                if hma_4h_bullish and price_above_hma_12h:
-                    desired_signal = POSITION_SIZE_HALF
-            elif position_side < 0:
-                # Hold short if trend still bearish (even if RSI moved)
-                if hma_4h_bearish and price_below_hma_12h:
-                    desired_signal = -POSITION_SIZE_HALF
+            if position_side > 0 and hma_bullish and (price_above_hma_1d or price_above_hma_1w):
+                desired_signal = POSITION_SIZE_HALF
+            elif position_side < 0 and hma_bearish and (price_below_hma_1d or price_below_hma_1w):
+                desired_signal = -POSITION_SIZE_HALF
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -220,14 +220,22 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                highest_since_entry = close[i] if position_side > 0 else float('inf')
-                lowest_since_entry = close[i] if position_side < 0 else float('inf')
+                if position_side > 0:
+                    highest_since_entry = close[i]
+                    lowest_since_entry = float('inf')
+                else:
+                    highest_since_entry = 0.0
+                    lowest_since_entry = close[i]
             elif np.sign(desired_signal) != position_side:
                 # Position flip
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                highest_since_entry = close[i] if position_side > 0 else float('inf')
-                lowest_since_entry = close[i] if position_side < 0 else float('inf')
+                if position_side > 0:
+                    highest_since_entry = close[i]
+                    lowest_since_entry = float('inf')
+                else:
+                    highest_since_entry = 0.0
+                    lowest_since_entry = close[i]
         else:
             if in_position:
                 in_position = False
