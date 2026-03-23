@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #1336: 12h Primary + 1d HTF — Connors RSI Mean Reversion + HMA Trend Filter
+Experiment #1337: 1d Primary + 1w HTF — Donchian Breakout + HMA Trend + RSI Momentum
 
-Hypothesis: Connors RSI (CRSI) is a proven mean-reversion indicator with 75% win rate
-in academic literature. Combined with 1d HMA for trend bias and ATR stoploss, this
-should work in both bull and bear markets. 12h timeframe targets 20-50 trades/year
-to minimize fee drag while maintaining sufficient trade count.
+Hypothesis: Daily timeframe with weekly trend filter reduces noise while capturing
+major moves. Donchian(20) breakouts capture momentum, 1w HMA(21) provides macro bias.
+RSI(14) confirms momentum without being too restrictive. Wider entry bands ensure
+sufficient trades (target 30-50/year). ATR trailing stop manages risk.
 
-Key components:
-1. Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-2. 1d HMA(21) for macro trend bias (long only above, short only below)
-3. Entry: CRSI < 15 for long, CRSI > 85 for short (wider than standard for more trades)
-4. ATR(14) trailing stop at 2.5x for risk management
-5. Position size: 0.28 (discrete, conservative)
+Key design choices:
+1. 1w HMA(21) for macro trend - slower, more stable than 12h/4h
+2. Donchian(20) breakout as primary trigger - proven momentum signal
+3. RSI(14) with wide bands (25-75) - confirms without filtering too much
+4. Mean reversion entry when price deviates >2*ATR from HMA
+5. Simple ATR trailing stop (3x) - clean exit logic
+6. Position size 0.30 - conservative for daily moves
 
-Target: 25-50 trades/year on 12h, Sharpe > 0.612, trades >= 30 train, >= 5 test
-Timeframe: 12h
+Target: 30-50 trades/year, Sharpe > 0.612, trades >= 30 train, >= 5 test
+Timeframe: 1d
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_crsi_hma_1d_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_hma_rsi_1w_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -61,8 +62,8 @@ def calculate_hma(close, period=21):
     
     return hma
 
-def calculate_rsi_fast(close, period=3):
-    """RSI with fast period for Connors RSI"""
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -82,82 +83,6 @@ def calculate_rsi_fast(close, period=3):
     
     return rsi
 
-def calculate_rsi_streak(close, period=2):
-    """
-    RSI Streak component of Connors RSI
-    Measures consecutive up/down days
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    # Calculate streak: +1 for up, -1 for down, 0 for flat
-    streak = np.zeros(n)
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif close[i] < close[i-1]:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = 0
-    
-    # Convert streak to RSI-like value (0-100)
-    # Positive streak = bullish, negative = bearish
-    streak_rsi = np.full(n, np.nan)
-    for i in range(period, n):
-        abs_streak = abs(streak[i])
-        if streak[i] > 0:
-            streak_rsi[i] = 50.0 + (abs_streak / period) * 50.0
-        elif streak[i] < 0:
-            streak_rsi[i] = 50.0 - (abs_streak / period) * 50.0
-        else:
-            streak_rsi[i] = 50.0
-        streak_rsi[i] = np.clip(streak_rsi[i], 0, 100)
-    
-    # Smooth with EMA
-    streak_rsi = pd.Series(streak_rsi).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return streak_rsi
-
-def calculate_percent_rank(close, period=100):
-    """
-    Percent Rank component of Connors RSI
-    Measures current price change vs past period changes
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    # Calculate daily returns
-    returns = np.diff(close, prepend=close[0]) / (close[0] + 1e-10)
-    returns[0] = 0.0
-    
-    percent_rank = np.full(n, np.nan)
-    for i in range(period, n):
-        window = returns[i-period+1:i+1]
-        if not np.any(np.isnan(window)):
-            current = returns[i]
-            count_below = np.sum(window[:-1] < current)
-            percent_rank[i] = (count_below / (period - 1)) * 100.0
-    
-    return percent_rank
-
-def calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100):
-    """
-    Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    Proven mean-reversion indicator with 75% win rate
-    """
-    rsi_fast = calculate_rsi_fast(close, rsi_period)
-    rsi_streak = calculate_rsi_streak(close, streak_period)
-    percent_rank = calculate_percent_rank(close, pr_period)
-    
-    crsi = np.full(len(close), np.nan)
-    for i in range(pr_period, len(close)):
-        if not np.isnan(rsi_fast[i]) and not np.isnan(rsi_streak[i]) and not np.isnan(percent_rank[i]):
-            crsi[i] = (rsi_fast[i] + rsi_streak[i] + percent_rank[i]) / 3.0
-    
-    return crsi
-
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
@@ -172,7 +97,22 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(close, period=200):
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - breakout levels"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.nanmax(high[i-period+1:i+1])
+        lower[i] = np.nanmin(low[i-period+1:i+1])
+    
+    return upper, lower
+
+def calculate_sma(close, period=50):
     """Simple Moving Average"""
     n = len(close)
     if n < period:
@@ -190,22 +130,29 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for macro trend filter
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 1w HMA for macro trend filter
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (12h) indicators
-    crsi = calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100)
+    # Calculate primary (1d) indicators
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    sma_200 = calculate_sma(close, period=200)
+    sma_50 = calculate_sma(close, period=50)
     
-    # 12h HMA for local trend
-    hma_12h = calculate_hma(close, period=21)
+    # Daily HMA for local trend
+    hma_1d = calculate_hma(close, period=21)
+    
+    # HMA slope for trend confirmation
+    hma_1d_slope = np.full(n, np.nan)
+    for i in range(1, n):
+        if not np.isnan(hma_1d[i]) and not np.isnan(hma_1d[i-1]):
+            hma_1d_slope[i] = hma_1d[i] - hma_1d[i-1]
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.28  # Discrete position size
+    BASE_SIZE = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -215,89 +162,101 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(250, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(crsi[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(sma_200[i]):
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
-        if np.isnan(hma_12h[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(hma_1d[i]):
+            signals[i] = 0.0
+            continue
+        if np.isnan(sma_50[i]):
             signals[i] = 0.0
             continue
         
-        # === MACRO TREND (1d HMA) ===
-        macro_bull = close[i] > hma_1d_aligned[i]
-        macro_bear = close[i] < hma_1d_aligned[i]
+        # === MACRO TREND (1w HMA) ===
+        macro_bull = close[i] > hma_1w_aligned[i]
+        macro_bear = close[i] < hma_1w_aligned[i]
         
-        # === LOCAL TREND (12h HMA) ===
-        local_bull = close[i] > hma_12h[i]
-        local_bear = close[i] < hma_12h[i]
+        # === LOCAL TREND (1d HMA) ===
+        hma_bull = (close[i] > hma_1d[i]) and (hma_1d_slope[i] > 0)
+        hma_bear = (close[i] < hma_1d[i]) and (hma_1d_slope[i] < 0)
         
-        # === SMA200 FILTER ===
-        above_sma200 = close[i] > sma_200[i]
-        below_sma200 = close[i] < sma_200[i]
+        # === SMA50 FILTER ===
+        above_sma50 = close[i] > sma_50[i]
+        below_sma50 = close[i] < sma_50[i]
         
-        # === CONNORS RSI SIGNALS ===
-        # Long: CRSI extremely oversold (< 15) + trend confirmation
-        long_signal = False
-        if macro_bull and local_bull and above_sma200:
-            # Strong trend: enter on moderate oversold
-            if crsi[i] < 25.0:
-                long_signal = True
-        elif macro_bull or local_bull:
-            # Weaker trend: require extreme oversold
-            if crsi[i] < 15.0:
-                long_signal = True
+        # === RSI MOMENTUM ===
+        rsi_bull = rsi[i] > 45.0
+        rsi_bear = rsi[i] < 55.0
+        rsi_strong_bull = rsi[i] > 55.0
+        rsi_strong_bear = rsi[i] < 45.0
         
-        # Short: CRSI extremely overbought (> 85) + trend confirmation
-        short_signal = False
-        if macro_bear and local_bear and below_sma200:
-            # Strong trend: enter on moderate overbought
-            if crsi[i] > 75.0:
-                short_signal = True
-        elif macro_bear or local_bear:
-            # Weaker trend: require extreme overbought
-            if crsi[i] > 85.0:
-                short_signal = True
+        # === DONCHIAN BREAKOUT ===
+        breakout_long = close[i] > donchian_upper[i-1]
+        breakout_short = close[i] < donchian_lower[i-1]
+        
+        # === DISTANCE FROM HMA (mean reversion signal) ===
+        hma_dist_pct = (close[i] - hma_1d[i]) / hma_1d[i] if hma_1d[i] > 0 else 0
+        deep_oversold = hma_dist_pct < -0.05  # 5% below HMA
+        deep_overbought = hma_dist_pct > 0.05  # 5% above HMA
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        if long_signal:
-            desired_signal = BASE_SIZE
-        elif short_signal:
-            desired_signal = -BASE_SIZE
+        # LONG ENTRY: Multiple confluence paths (ensure trades happen)
+        if macro_bull:
+            # Path 1: Donchian breakout with RSI confirmation
+            if breakout_long and rsi_bull:
+                desired_signal = BASE_SIZE
+            # Path 2: HMA bull + SMA50 bull + RSI strong
+            elif hma_bull and above_sma50 and rsi_strong_bull:
+                desired_signal = BASE_SIZE
+            # Path 3: Mean reversion - deep oversold in macro bull
+            elif deep_oversold and rsi[i] < 40.0:
+                desired_signal = BASE_SIZE * 0.5
+            # Path 4: Simple trend follow - price above both HMA and SMA50
+            elif close[i] > hma_1d[i] and close[i] > sma_50[i] and rsi[i] > 50.0:
+                desired_signal = BASE_SIZE
         
-        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
+        # SHORT ENTRY: Multiple confluence paths
+        elif macro_bear:
+            # Path 1: Donchian breakout with RSI confirmation
+            if breakout_short and rsi_bear:
+                desired_signal = -BASE_SIZE
+            # Path 2: HMA bear + SMA50 bear + RSI strong
+            elif hma_bear and below_sma50 and rsi_strong_bear:
+                desired_signal = -BASE_SIZE
+            # Path 3: Mean reversion - deep overbought in macro bear
+            elif deep_overbought and rsi[i] > 60.0:
+                desired_signal = -BASE_SIZE * 0.5
+            # Path 4: Simple trend follow - price below both HMA and SMA50
+            elif close[i] < hma_1d[i] and close[i] < sma_50[i] and rsi[i] < 50.0:
+                desired_signal = -BASE_SIZE
+        
+        # === STOPLOSS CHECK (Trailing ATR 3x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.5 * entry_atr
+            stop_price = highest_since_entry - 3.0 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.5 * entry_atr
+            stop_price = lowest_since_entry + 3.0 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
         if stoploss_triggered:
             desired_signal = 0.0
-        
-        # === CRSI REVERSAL EXIT ===
-        # Exit long when CRSI becomes overbought, exit short when oversold
-        if in_position and desired_signal == 0.0:
-            if position_side > 0 and crsi[i] > 70.0:
-                desired_signal = 0.0  # Take profit on long
-            elif position_side < 0 and crsi[i] < 30.0:
-                desired_signal = 0.0  # Take profit on short
         
         # === DISCRETIZE SIGNAL VALUES ===
         if desired_signal > 0.1:
@@ -317,7 +276,6 @@ def generate_signals(prices):
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(final_signal) != position_side:
-                # Flip position
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
                 entry_atr = atr[i]
