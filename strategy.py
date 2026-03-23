@@ -1,35 +1,170 @@
 #!/usr/bin/env python3
 """
-Experiment #1228: 30m Primary + 4h/1d HTF — Simplified Regime + CRSI + Funding
+Experiment #1229: 4h Primary + 1d HTF — Adaptive KAMA Trend with ADX Regime Filter
 
-Hypothesis: Previous 30m/1h strategies failed with Sharpe=0.000 (0 trades) due to 
-too many confluence filters. Key insight from #1222: funding rate z-score adds 
-alpha for BTC/ETH mean reversion. New approach:
-(1) 4h HMA(21) for trend direction — simple, stable
-(2) 1d HMA(21) for macro regime — price above = bull bias, below = bear bias
-(3) 30m CRSI(3,2,100) for entry timing — only enter on extremes IN trend direction
-(4) Funding z-score(30) as contrarian filter — extreme funding = fade
-(5) REMOVED: session filter (killed signals in #1218, #1220), strict volume
+Hypothesis: Previous Choppiness+CRSI combinations failed because they're too complex
+and generate conflicting signals. Research shows KAMA (Kaufman Adaptive Moving Average)
+outperforms EMA/HMA in crypto because it adapts to volatility - fast in trends, slow
+in chop. Combined with ADX filter (>22) to only trade when trend is strong, this
+should reduce whipsaws while maintaining trade frequency.
 
-Critical changes from failed 30m attempts:
-- Looser CRSI thresholds (25/75 instead of 15/85) to ensure trade frequency
-- No session filter (8-20 UTC killed 60% of signals)
-- Volume filter removed (too restrictive)
-- Focus on HTF direction + LTF timing only (3 filters max)
+Key differences from failed experiments:
+- KAMA instead of HMA/EMA (adapts efficiency ratio to market conditions)
+- ADX > 22 filter (only trade when trend strength is sufficient)
+- RSI momentum (45-55) instead of extremes (confirms direction, not reversal)
+- 1d HMA for macro bias (simple but effective from #1222)
+- Simpler logic = fewer conflicting conditions = more reliable trades
 
-Target: Sharpe > 0.612, trades >= 30 train, >= 3 test, DD > -50%
-Position size: 0.25 (conservative for 30m to limit fee drag)
+Target: Sharpe > 0.612, trades >= 80 train (20/year), >= 12 test (3/year), DD > -50%
+Timeframe: 4h (20-50 trades/year target)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_crsi_funding_4h1d_hma_atr_v1"
-timeframe = "30m"
+name = "mtf_4h_kama_adx_trend_1d_hma_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts smoothing based on market efficiency (trend vs noise)
+    ER = |close - close_n| / sum(|close_i - close_i-1|)
+    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    """
+    n = len(close)
+    kama = np.full(n, np.nan)
+    
+    if n < er_period + slow_period:
+        return kama
+    
+    # Calculate Efficiency Ratio
+    er = np.full(n, np.nan)
+    for i in range(er_period, n):
+        signal = abs(close[i] - close[i - er_period])
+        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        if noise > 1e-10:
+            er[i] = signal / noise
+        else:
+            er[i] = 0.0
+    
+    # Calculate Smoothing Constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = np.full(n, np.nan)
+    for i in range(er_period, n):
+        if not np.isnan(er[i]):
+            sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama[er_period] = close[er_period]
+    for i in range(er_period + 1, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1] if not np.isnan(kama[i-1]) else close[i]
+    
+    return kama
+
+def calculate_adx(high, low, close, period=14):
+    """
+    Average Directional Index (ADX) - measures trend strength
+    ADX > 25 = strong trend, ADX < 20 = weak/ranging
+    """
+    n = len(close)
+    adx = np.full(n, np.nan)
+    
+    if n < period * 2 + 1:
+        return adx
+    
+    # Calculate True Range and Directional Movement
+    tr = np.zeros(n)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        if high[i] - high[i-1] > low[i-1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+        else:
+            plus_dm[i] = 0
+            
+        if low[i-1] - low[i] > high[i] - high[i-1]:
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+        else:
+            minus_dm[i] = 0
+    
+    # Smooth TR and DM
+    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate DI and DX
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    
+    mask = tr_smooth > 1e-10
+    plus_di[mask] = 100.0 * plus_dm_smooth[mask] / tr_smooth[mask]
+    minus_di[mask] = 100.0 * minus_dm_smooth[mask] / tr_smooth[mask]
+    
+    di_sum = plus_di + minus_di
+    mask2 = di_sum > 1e-10
+    dx[mask2] = 100.0 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
+    
+    # Calculate ADX (smoothed DX)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
+
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    rsi = np.full(n, np.nan)
+    
+    if n < period + 1:
+        return rsi
+    
+    delta = np.diff(close)
+    gain = np.zeros(n)
+    loss = np.zeros(n)
+    
+    gain[1:] = np.where(delta > 0, delta, 0)
+    loss[1:] = np.where(delta < 0, -delta, 0)
+    
+    gain_smooth = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    loss_smooth = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    mask = loss_smooth > 1e-10
+    rs = np.zeros(n)
+    rs[mask] = gain_smooth[mask] / loss_smooth[mask]
+    
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi[:period] = np.nan
+    
+    return rsi
+
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    atr = np.full(n, np.nan)
+    
+    if n < period + 1:
+        return atr
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
 def calculate_hma(close, period=21):
-    """Hull Moving Average — reduces lag while maintaining smoothness."""
+    """Hull Moving Average"""
     n = len(close)
     hma = np.full(n, np.nan)
     
@@ -64,143 +199,6 @@ def calculate_hma(close, period=21):
     
     return hma
 
-def calculate_rsi(close, period=3):
-    """Relative Strength Index for Connors RSI component."""
-    n = len(close)
-    rsi = np.full(n, np.nan)
-    
-    if n < period + 1:
-        return rsi
-    
-    delta = np.diff(close)
-    gain = np.zeros(n)
-    loss = np.zeros(n)
-    
-    gain[1:] = np.where(delta > 0, delta, 0)
-    loss[1:] = np.where(delta < 0, -delta, 0)
-    
-    gain_smooth = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    loss_smooth = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    mask = loss_smooth > 1e-10
-    rs = np.zeros(n)
-    rs[mask] = gain_smooth[mask] / loss_smooth[mask]
-    
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    rsi[:period] = np.nan
-    
-    return rsi
-
-def calculate_rsi_streak(close, period=2):
-    """RSI of streak length (consecutive up/down bars) for Connors RSI."""
-    n = len(close)
-    rsi_streak = np.full(n, np.nan)
-    
-    if n < period + 1:
-        return rsi_streak
-    
-    streak = np.zeros(n)
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = max(1, streak[i-1] + 1) if streak[i-1] > 0 else 1
-        elif close[i] < close[i-1]:
-            streak[i] = min(-1, streak[i-1] - 1) if streak[i-1] < 0 else -1
-        else:
-            streak[i] = 0
-    
-    streak_abs = np.abs(streak)
-    
-    delta = np.diff(streak_abs)
-    gain = np.zeros(n)
-    loss = np.zeros(n)
-    
-    gain[1:] = np.where(delta > 0, delta, 0)
-    loss[1:] = np.where(delta < 0, -delta, 0)
-    
-    gain_smooth = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    loss_smooth = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    mask = loss_smooth > 1e-10
-    rs = np.zeros(n)
-    rs[mask] = gain_smooth[mask] / loss_smooth[mask]
-    
-    rsi_streak = 100.0 - (100.0 / (1.0 + rs))
-    rsi_streak[:period] = np.nan
-    
-    return rsi_streak
-
-def calculate_percent_rank(close, period=100):
-    """Percentile rank for Connors RSI component."""
-    n = len(close)
-    pr = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        current = close[i]
-        rank = np.sum(window < current) / period * 100.0
-        pr[i] = rank
-    
-    return pr
-
-def calculate_crsi(close, rsi_period=3, streak_period=2, pr_period=100):
-    """Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3"""
-    rsi = calculate_rsi(close, rsi_period)
-    rsi_streak = calculate_rsi_streak(close, streak_period)
-    pr = calculate_percent_rank(close, pr_period)
-    
-    crsi = (rsi + rsi_streak + pr) / 3.0
-    return crsi
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range for volatility measurement and stoploss."""
-    n = len(close)
-    atr = np.full(n, np.nan)
-    
-    if n < period + 1:
-        return atr
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_funding_zscore(prices, period=30):
-    """
-    Funding rate z-score for contrarian signal.
-    High positive funding = crowded longs = short signal
-    High negative funding = crowded shorts = long signal
-    """
-    n = len(prices)
-    zscore = np.full(n, np.nan)
-    
-    # Try to load funding data
-    try:
-        import os
-        symbol = "BTCUSDT"  # Default, will be overridden by engine
-        funding_path = f"data/processed/funding/{symbol}.parquet"
-        if os.path.exists(funding_path):
-            funding_df = pd.read_parquet(funding_path)
-            funding_rates = funding_df['funding_rate'].values
-            
-            # Align funding to prices (funding is 8h, prices are 30m)
-            # Simple approach: use last known funding rate
-            if len(funding_rates) > 0:
-                # Calculate z-score on funding rates
-                for i in range(period, n):
-                    window = funding_rates[max(0, i-period):i]
-                    if len(window) > 0:
-                        mean_f = np.mean(window)
-                        std_f = np.std(window)
-                        if std_f > 1e-10:
-                            zscore[i] = (funding_rates[min(i, len(funding_rates)-1)] - mean_f) / std_f
-    except:
-        pass
-    
-    return zscore
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -208,25 +206,21 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF HMAs
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
+    # Calculate and align 1d HMA for macro trend filter
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (30m) indicators
+    # Calculate primary (4h) indicators
+    kama_fast = calculate_kama(close, er_period=10, fast_period=2, slow_period=20)
+    kama_slow = calculate_kama(close, er_period=10, fast_period=5, slow_period=30)
+    adx = calculate_adx(high, low, close, period=14)
+    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, pr_period=100)
-    
-    # Funding z-score (contrarian filter)
-    funding_z = calculate_funding_zscore(prices, period=30)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.25  # Conservative for 30m
+    BASE_SIZE = 0.28
     
     # Position tracking for stoploss
     in_position = False
@@ -235,54 +229,49 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr[i]) or np.isnan(crsi[i]) or atr[i] <= 1e-10:
+        if np.isnan(atr[i]) or np.isnan(adx[i]) or atr[i] <= 1e-10:
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
+            continue
+        if np.isnan(rsi[i]) or np.isnan(hma_1d_aligned[i]):
             continue
         
-        # === MACRO TREND (4h HMA) ===
-        trend_bull = close[i] > hma_4h_aligned[i]
-        trend_bear = close[i] < hma_4h_aligned[i]
+        # === MACRO TREND (1d HMA) ===
+        macro_bull = close[i] > hma_1d_aligned[i]
+        macro_bear = close[i] < hma_1d_aligned[i]
         
-        # === REGIME (1d HMA) ===
-        regime_bull = close[i] > hma_1d_aligned[i]
-        regime_bear = close[i] < hma_1d_aligned[i]
+        # === TREND STRENGTH (ADX) ===
+        trend_strong = adx[i] > 22.0  # Only trade when trend is strong enough
         
-        # === CONNORS RSI EXTREMES (looser for trade frequency) ===
-        crsi_oversold = crsi[i] < 25.0  # Looser than 15 for more trades
-        crsi_overbought = crsi[i] > 75.0  # Looser than 85 for more trades
+        # === KAMA CROSSOVER ===
+        kama_bull = kama_fast[i] > kama_slow[i]
+        kama_bear = kama_fast[i] < kama_slow[i]
         
-        # === FUNDING Z-SCORE (contrarian) ===
-        funding_extreme_long = funding_z[i] > 1.5 if not np.isnan(funding_z[i]) else False
-        funding_extreme_short = funding_z[i] < -1.5 if not np.isnan(funding_z[i]) else False
+        # === KAMA SLOPE (3-bar lookback) ===
+        kama_slope_bull = False
+        kama_slope_bear = False
+        if not np.isnan(kama_fast[i]) and not np.isnan(kama_fast[i-3]):
+            if kama_fast[i] > kama_fast[i-3]:
+                kama_slope_bull = True
+            elif kama_fast[i] < kama_fast[i-3]:
+                kama_slope_bear = True
+        
+        # === RSI MOMENTUM FILTER ===
+        rsi_bull = rsi[i] > 48.0  # Momentum confirmation (not extreme)
+        rsi_bear = rsi[i] < 52.0  # Momentum confirmation (not extreme)
         
         # === ENTRY CONDITIONS ===
         desired_signal = 0.0
         
-        # LONG: Need 4h trend + 1d regime + CRSI oversold
-        # Funding filter is OPTIONAL (only adds conviction, doesn't block)
-        if trend_bull and crsi_oversold:
-            # Base long signal
-            if regime_bull:
-                # Strong confluence: both HTFs bullish
-                desired_signal = BASE_SIZE
-            else:
-                # Weaker signal: 4h bull but 1d bear (pullback in bear market rally)
-                desired_signal = BASE_SIZE * 0.6
-            # Funding boost: if funding extremely positive, increase size (crowded longs = reversal)
-            if funding_extreme_long:
-                desired_signal = min(desired_signal * 1.2, BASE_SIZE)
+        # LONG: Macro bull + trend strong + KAMA bull + KAMA slope up + RSI momentum
+        if macro_bull and trend_strong and kama_bull and kama_slope_bull and rsi_bull:
+            desired_signal = BASE_SIZE
         
-        # SHORT: Need 4h trend + 1d regime + CRSI overbought
-        if trend_bear and crsi_overbought:
-            if regime_bear:
-                desired_signal = -BASE_SIZE
-            else:
-                desired_signal = -BASE_SIZE * 0.6
-            if funding_extreme_short:
-                desired_signal = max(desired_signal * 1.2, -BASE_SIZE)
+        # SHORT: Macro bear + trend strong + KAMA bear + KAMA slope down + RSI momentum
+        elif macro_bear and trend_strong and kama_bear and kama_slope_bear and rsi_bear:
+            desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -303,9 +292,9 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal > 0.1:
+        if desired_signal > 0:
             desired_signal = BASE_SIZE
-        elif desired_signal < -0.1:
+        elif desired_signal < 0:
             desired_signal = -BASE_SIZE
         else:
             desired_signal = 0.0
