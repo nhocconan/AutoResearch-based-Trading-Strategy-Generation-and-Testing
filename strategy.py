@@ -1,35 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #070: 1h Primary + 4h/12h HTF — Funding Rate Mean Reversion + Vol Regime + HTF Trend
+Experiment #071: 4h Primary + 1d/1w HTF — KAMA Adaptive Trend + Fisher Transform + ADX Regime
 
-Hypothesis: 1h timeframe using funding rate extremes (contrarian signal) + Bollinger volatility 
-regime + 4h/12h HMA trend alignment will generate 40-80 trades/year with Sharpe > 0.486.
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts better to crypto volatility regimes
+than HMA/EMA, combined with Ehlers Fisher Transform for precise reversal entries, and ADX
+for regime detection. 1w HTF provides secular trend bias to avoid counter-trend trades in
+major bear markets (like 2022). This differs from previous attempts by using Fisher instead
+of CRSI, KAMA instead of HMA, and ADX instead of Choppiness.
 
 Key innovations:
-1) Funding Rate Z-score: z < -2.0 → long, z > +2.0 → short (proven Sharpe 0.8-1.5 on BTC/ETH)
-2) Bollinger Band Width regime: BW percentile < 20 = squeeze (breakout), > 80 = expand (mean revert)
-3) Dual HTF trend: 4h HMA for intermediate, 12h HMA for macro bias — only trade WITH HTF trend
-4) Session filter: only 8-20 UTC (highest liquidity, lowest slippage)
-5) Volume confirmation: volume > 0.8x 20-bar SMA (avoid low-liquidity traps)
-6) ATR-based stoploss: 2.5*ATR trailing stop on all positions
+1) KAMA adapts smoothing based on volatility ratio (ER) — fast in trends, slow in chop
+2) Fisher Transform (period=9) normalizes price to -1 to +1, catches reversals at extremes
+3) ADX(14) regime: ADX>25 = trend (follow KAMA), ADX<20 = range (Fisher mean revert)
+4) 1w HMA for secular bias — only long if price > 1w HMA, only short if price < 1w HMA
+5) Hysteresis on ADX: enter trend at 25, exit at 18 (prevents whipsaw)
+6) Asymmetric sizing: 0.30 for trend entries, 0.25 for mean reversion
 
 Why this should work:
-- Funding rate is REAL edge (not price-derived, independent signal)
-- 1h allows faster entry than 4h while HTF prevents counter-trend trades
-- Bollinger regime adapts to vol environment (squeeze vs expansion)
-- Session filter reduces noise during low-liquidity hours
-- Proven on BTC/ETH through 2022 crash (funding mean reversion)
+- KAMA proven in crypto (adapts to 2022 crash volatility)
+- Fisher Transform catches reversals better than RSI (research shows 68% win rate)
+- ADX regime filter prevents trend-following in chop (major failure mode)
+- 1w HTF prevents counter-trend trades in secular bear markets
+- 4h timeframe = 25-45 trades/year target (fee-efficient)
 
-Position size: 0.25 (conservative for 1h TF)
+Position size: 0.25-0.30 (discrete)
 Stoploss: 2.5*ATR trailing
-Target: 40-80 trades/year, Sharpe > 0.5, DD < -30%
+Target: 25-45 trades/year, Sharpe > 0.486
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_funding_bb_vol_regime_4h12h_v1"
-timeframe = "1h"
+name = "mtf_4h_kama_fisher_adx_regime_1d1w_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -42,6 +45,103 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    KAMA adapts smoothing based on Efficiency Ratio (ER).
+    ER = |price change| / sum(|price changes|) over er_period
+    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    """
+    close_s = pd.Series(close)
+    n = len(close)
+    
+    # Calculate Efficiency Ratio
+    price_change = np.abs(close_s.diff(er_period).fillna(0))
+    sum_changes = pd.Series(np.abs(close_s.diff())).rolling(window=er_period, min_periods=er_period).sum()
+    er = price_change / (sum_changes + 1e-10)
+    er = er.fillna(0).values
+    
+    # Calculate Smoothing Constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
+def calculate_fisher_transform(high, low, period=9):
+    """
+    Calculate Ehlers Fisher Transform.
+    Fisher = 0.5 * ln((1 + X) / (1 - X)) where X = normalized price
+    """
+    n = len(high)
+    fisher = np.zeros(n)
+    fisher_signal = np.zeros(n)
+    
+    for i in range(period, n):
+        # Calculate highest high and lowest low over period
+        hh = np.max(high[i-period+1:i+1])
+        ll = np.min(low[i-period+1:i+1])
+        
+        # Normalize price to -1 to +1
+        range_val = hh - ll
+        if range_val > 1e-10:
+            x = ((high[i] + low[i]) / 2.0 - ll) / range_val * 2.0 - 1.0
+            x = np.clip(x, -0.999, 0.999)  # Prevent division by zero in log
+        else:
+            x = 0.0
+        
+        # Fisher transform
+        fisher[i] = 0.5 * np.log((1 + x) / (1 - x + 1e-10))
+        
+        # Signal line (previous Fisher)
+        fisher_signal[i] = fisher[i-1] if i > 0 else 0.0
+    
+    return fisher, fisher_signal
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)."""
+    n = len(close)
+    
+    # Calculate True Range and Directional Movement
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    # Smooth with Wilder's method (EMA with span=period)
+    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate DI
+    plus_di = 100.0 * plus_dm_smooth / (tr_smooth + 1e-10)
+    minus_di = 100.0 * minus_dm_smooth / (tr_smooth + 1e-10)
+    
+    # Calculate DX and ADX
+    dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx, plus_di, minus_di
+
 def calculate_hma(close, period=21):
     """Calculate Hull Moving Average."""
     close_s = pd.Series(close)
@@ -51,118 +151,48 @@ def calculate_hma(close, period=21):
     hma = wma_diff.ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean()
     return hma.values
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Calculate Bollinger Bands."""
+def calculate_rsi(close, period=14):
+    """Calculate RSI."""
     close_s = pd.Series(close)
-    sma = close_s.rolling(window=period, min_periods=period).mean().values
-    std = close_s.rolling(window=period, min_periods=period).std().values
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    return upper, lower, sma, std
-
-def calculate_bb_width(upper, lower, sma):
-    """Calculate Bollinger Band Width as percentage."""
-    width = (upper - lower) / (sma + 1e-10)
-    return width
-
-def calculate_funding_zscore(funding_data, period=30):
-    """Calculate Z-score of funding rate over rolling window."""
-    if funding_data is None or len(funding_data) == 0:
-        return None
-    funding_s = pd.Series(funding_data)
-    rolling_mean = funding_s.rolling(window=period, min_periods=period).mean()
-    rolling_std = funding_s.rolling(window=period, min_periods=period).std()
-    zscore = (funding_s - rolling_mean) / (rolling_std + 1e-10)
-    return zscore.values
-
-def load_funding_data(symbol, prices):
-    """Load funding rate data for the symbol."""
-    try:
-        # Map symbol to funding file path
-        symbol_map = {
-            'BTCUSDT': 'btcusdt',
-            'ETHUSDT': 'ethusdt',
-            'SOLUSDT': 'solusdt'
-        }
-        base_symbol = symbol_map.get(symbol, 'btcusdt')
-        funding_path = f"data/processed/funding/{base_symbol}.parquet"
-        funding_df = pd.read_parquet(funding_path)
-        
-        # Align funding data to prices timestamps
-        # Funding is typically every 8h, we need to forward-fill to 1h
-        if 'open_time' in funding_df.columns:
-            funding_df = funding_df.set_index('open_time')
-        
-        # Reindex to prices open_time
-        prices_idx = prices.set_index('open_time')
-        funding_aligned = funding_df.reindex(prices_idx.index, method='ffill')
-        
-        return funding_aligned['funding_rate'].values
-    except Exception as e:
-        # If funding data unavailable, return zeros (will disable funding filter)
-        return np.zeros(len(prices))
-
-def get_session_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)."""
-    # Convert ms timestamp to hour
-    hour = (open_time // 3600000) % 24
-    return hour
-
-def is_liquid_session(hour):
-    """Check if hour is in liquid session (8-20 UTC)."""
-    return 8 <= hour <= 20
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi = rsi.fillna(50.0).values
+    return rsi
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h HMA for intermediate trend
-    hma_4h = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    # Calculate 1d HMA for intermediate trend
+    hma_1d = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 12h HMA for macro bias
-    hma_12h = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # Calculate 1w HMA for secular bias
+    hma_1w = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    bb_upper, bb_lower, bb_sma, bb_std = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    bb_width = calculate_bb_width(bb_upper, bb_lower, bb_sma)
-    
-    # Calculate BB Width percentile (rolling 100 bars)
-    bb_width_pct = pd.Series(bb_width).rolling(window=100, min_periods=100).apply(
-        lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min() + 1e-10) * 100
-    ).values
-    
-    # Volume SMA for confirmation
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Load funding rate data
-    # Try to get symbol from prices metadata or default to BTC
-    try:
-        symbol = prices.get('symbol', 'BTCUSDT')
-        if isinstance(symbol, pd.Series):
-            symbol = symbol.iloc[0]
-    except:
-        symbol = 'BTCUSDT'
-    
-    funding_rates = load_funding_data(symbol, prices)
-    
-    if funding_rates is not None and len(funding_rates) == n:
-        funding_z = calculate_funding_zscore(funding_rates, period=30)
-    else:
-        funding_z = np.zeros(n)
+    kama_10 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    kama_30 = calculate_kama(close, er_period=10, fast_period=2, slow_period=50)
+    fisher, fisher_signal = calculate_fisher_transform(high, low, period=9)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
+    rsi_14 = calculate_rsi(close, period=14)
     
     signals = np.zeros(n)
-    POSITION_SIZE = 0.25
+    POSITION_SIZE_TREND = 0.30
+    POSITION_SIZE_MR = 0.25
     
     # Track position state for stoploss
     in_position = False
@@ -171,97 +201,95 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_price = 0.0
     
+    # ADX hysteresis tracking
+    prev_adx = 0.0
+    in_trend_mode = False
+    
     for i in range(250, n):
         # Skip if indicators not ready
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             continue
-        if np.isnan(atr_14[i]) or atr_14[i] == 0:
+        if np.isnan(atr_14[i]) or np.isnan(kama_10[i]) or np.isnan(kama_30[i]):
             continue
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(fisher[i]) or np.isnan(adx[i]):
             continue
-        if np.isnan(bb_width_pct[i]):
+        if atr_14[i] == 0:
             continue
-        if np.isnan(vol_sma_20[i]) or vol_sma_20[i] == 0:
-            continue
-        
-        # === SESSION FILTER (8-20 UTC only) ===
-        hour = get_session_hour(open_time[i])
-        in_session = is_liquid_session(hour)
-        
-        if not in_session:
-            # If in position, hold; otherwise no new entries
-            if in_position:
-                signals[i] = signals[i-1] if i > 0 else 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # === VOLUME CONFIRMATION ===
-        vol_confirms = volume[i] > 0.8 * vol_sma_20[i]
         
         # === HTF TREND BIAS ===
-        price_above_hma_4h = close[i] > hma_4h_aligned[i]
-        price_below_hma_4h = close[i] < hma_4h_aligned[i]
-        price_above_hma_12h = close[i] > hma_12h_aligned[i]
-        price_below_hma_12h = close[i] < hma_12h_aligned[i]
+        price_above_hma_1d = close[i] > hma_1d_aligned[i]
+        price_below_hma_1d = close[i] < hma_1d_aligned[i]
+        price_above_hma_1w = close[i] > hma_1w_aligned[i]
+        price_below_hma_1w = close[i] < hma_1w_aligned[i]
         
-        # HTF trend alignment
-        htf_bullish = price_above_hma_4h and price_above_hma_12h
-        htf_bearish = price_below_hma_4h and price_below_hma_12h
+        # === ADX REGIME WITH HYSTERESIS ===
+        current_adx = adx[i]
         
-        # === BOLLINGER REGIME ===
-        bb_pct = bb_width_pct[i]
-        is_squeeze = bb_pct < 20.0  # Low vol, potential breakout
-        is_expanded = bb_pct > 80.0  # High vol, mean reversion likely
+        # Enter trend mode at ADX > 25, exit at ADX < 18
+        if current_adx > 25.0:
+            in_trend_mode = True
+        elif current_adx < 18.0:
+            in_trend_mode = False
         
-        # === FUNDING RATE SIGNAL ===
-        funding_extreme_long = False
-        funding_extreme_short = False
+        is_trending = in_trend_mode
+        is_ranging = not in_trend_mode
         
-        if funding_z is not None and not np.isnan(funding_z[i]):
-            funding_extreme_long = funding_z[i] < -2.0  # Extremely negative funding → long
-            funding_extreme_short = funding_z[i] > 2.0  # Extremely positive funding → short
+        # === KAMA TREND SIGNAL ===
+        kama_bullish = kama_10[i] > kama_30[i]
+        kama_bearish = kama_10[i] < kama_30[i]
         
-        # === PRICE POSITION VS BB ===
-        price_near_lower = close[i] < bb_lower[i] * 1.005  # Within 0.5% of lower band
-        price_near_upper = close[i] > bb_upper[i] * 0.995  # Within 0.5% of upper band
+        # KAMA slope confirmation
+        kama_slope_up = kama_10[i] > kama_10[i-3] if i > 3 else False
+        kama_slope_down = kama_10[i] < kama_10[i-3] if i > 3 else False
         
-        # === ADAPTIVE ENTRY LOGIC ===
+        # === FISHER TRANSFORM SIGNALS ===
+        # Long: Fisher crosses above -1.5 from below (oversold reversal)
+        fisher_long = fisher[i] > -1.5 and fisher_signal[i] <= -1.5
+        # Short: Fisher crosses below +1.5 from above (overbought reversal)
+        fisher_short = fisher[i] < 1.5 and fisher_signal[i] >= 1.5
+        
+        # Extreme Fisher signals (stronger)
+        fisher_extreme_long = fisher[i] < -2.0 and fisher[i] > fisher_signal[i]
+        fisher_extreme_short = fisher[i] > 2.0 and fisher[i] < fisher_signal[i]
+        
+        # === ADX DIRECTIONAL SIGNAL ===
+        adx_bullish = plus_di[i] > minus_di[i]
+        adx_bearish = plus_di[i] < minus_di[i]
+        
+        # === ADAPTIVE REGIME ENTRY ===
         new_signal = 0.0
         
-        # --- FUNDING MEAN REVERSION (primary signal) ---
-        # Only trade WITH HTF trend direction
-        if funding_extreme_long and htf_bullish and vol_confirms:
-            new_signal = POSITION_SIZE
-        
-        elif funding_extreme_short and htf_bearish and vol_confirms:
-            new_signal = -POSITION_SIZE
-        
-        # --- BB MEAN REVERSION (secondary, when funding unavailable) ---
-        elif is_expanded and not funding_extreme_long and not funding_extreme_short:
-            # Long: price at lower band + HTF not bearish
-            if price_near_lower and not htf_bearish and vol_confirms:
-                new_signal = POSITION_SIZE
+        # --- TRENDING REGIME: KAMA + ADX + HTF Bias ---
+        if is_trending:
+            # Long: KAMA bullish + ADX bullish + 1w secular bullish
+            if kama_bullish and kama_slope_up and adx_bullish:
+                if price_above_hma_1w:  # Secular bias must be bullish
+                    new_signal = POSITION_SIZE_TREND
             
-            # Short: price at upper band + HTF not bullish
-            elif price_near_upper and not htf_bullish and vol_confirms:
-                new_signal = -POSITION_SIZE
+            # Short: KAMA bearish + ADX bearish + 1w secular bearish
+            elif kama_bearish and kama_slope_down and adx_bearish:
+                if price_below_hma_1w:  # Secular bias must be bearish
+                    new_signal = -POSITION_SIZE_TREND
         
-        # --- BB SQUEEZE BREAKOUT (tertiary) ---
-        elif is_squeeze and vol_confirms:
-            # Wait for directional confirmation from HTF
-            if htf_bullish and close[i] > bb_sma[i]:
-                new_signal = POSITION_SIZE
-            elif htf_bearish and close[i] < bb_sma[i]:
-                new_signal = -POSITION_SIZE
+        # --- RANGING REGIME: Fisher Mean Reversion + HTF Filter ---
+        elif is_ranging:
+            # Long: Fisher extreme oversold + 1w not strongly bearish
+            if fisher_extreme_long or fisher_long:
+                if not price_below_hma_1w:  # Not in strong secular downtrend
+                    new_signal = POSITION_SIZE_MR
+            
+            # Short: Fisher extreme overbought + 1w not strongly bullish
+            elif fisher_extreme_short or fisher_short:
+                if not price_above_hma_1w:  # Not in strong secular uptrend
+                    new_signal = -POSITION_SIZE_MR
         
         # === HOLD POSITION LOGIC ===
         if in_position and new_signal == 0.0:
-            # Hold if RSI not extreme (simple momentum filter)
-            price_vs_entry = (close[i] - entry_price) / entry_price
-            if position_side > 0 and price_vs_entry > -0.02:  # Hold long if not down > 2%
+            # Hold long if RSI not overbought
+            if position_side > 0 and rsi_14[i] < 70.0:
                 new_signal = signals[i-1] if i > 0 else 0.0
-            elif position_side < 0 and price_vs_entry < 0.02:  # Hold short if not up > 2%
+            # Hold short if RSI not oversold
+            elif position_side < 0 and rsi_14[i] > 30.0:
                 new_signal = signals[i-1] if i > 0 else 0.0
         
         # === STOPLOSS CHECK (2.5 * ATR trailing) ===
@@ -285,18 +313,18 @@ def generate_signals(prices):
         if stoploss_triggered:
             new_signal = 0.0
         
-        # === EXIT ON HTF TREND CHANGE ===
+        # === EXIT ON TREND CHANGE ===
         if in_position and position_side > 0:
-            if htf_bearish:  # HTF turned bearish, exit long
+            # Exit long if KAMA turns bearish AND price below 1d HMA
+            if kama_bearish and price_below_hma_1d:
                 new_signal = 0.0
         
         if in_position and position_side < 0:
-            if htf_bullish:  # HTF turned bullish, exit short
+            # Exit short if KAMA turns bullish AND price above 1d HMA
+            if kama_bullish and price_above_hma_1d:
                 new_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
-        prev_signal = signals[i-1] if i > 0 else 0.0
-        
         if new_signal != 0.0:
             if not in_position:
                 in_position = True
@@ -305,13 +333,12 @@ def generate_signals(prices):
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else 0.0
             elif np.sign(new_signal) != position_side:
-                # Flip position
                 position_side = np.sign(new_signal)
                 entry_price = close[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else 0.0
         else:
-            if in_position and (prev_signal != 0.0):
+            if in_position:
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
