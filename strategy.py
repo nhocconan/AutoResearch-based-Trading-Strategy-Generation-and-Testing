@@ -1,31 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #837: 15m Primary + 4h/12h HTF — Mean Reversion with HTF Bias
+Experiment #838: 4h Primary + 1d HTF — Donchian Breakout with RSI Pullback
 
-Hypothesis: 15m timeframe needs LOOSE entry conditions to generate trades.
-Previous 15m experiments failed with 0 trades (Sharpe=0.000) due to overly
-strict HTF filters. This version uses HTF as SOFT BIAS, not hard filter.
+Hypothesis: 4h timeframe with 1d HTF bias provides optimal trade frequency (20-50/year).
+Combining Donchian channel breakouts (proven on SOL) with RSI pullback entries and
+Choppiness Index regime adjustment creates robust edge across all market conditions.
 
 Key innovations:
-1. 4h HMA(21) for trend BIAS only — prefer longs in bull, but allow counter-trend
-2. 15m RSI(7) with loose thresholds (25/75 not 30/70) for more entries
-3. 15m Bollinger Band squeeze for volatility confirmation
-4. Session filter: 00-12 UTC only (London/NY overlap) — reduces trade count
-5. Force entry after 20 bars of no signal on RSI extreme (guarantees trades)
-6. Discrete sizing: 0.0, ±0.15, ±0.20 (smaller for 15m frequency)
-7. ATR(14) 2.0x trailing stop for tighter risk on lower TF
+1. 1d HMA(21) for HTF trend bias — simple, reliable direction filter
+2. 4h Donchian(20) breakout detection — captures momentum moves
+3. 4h RSI(14) pullback entries — enters on retracements, not breakouts
+4. Choppiness Index(14) for position sizing — reduce size in chop, full size in trends
+5. ATR(14) 2.5x trailing stop for risk management
+6. LOOSE entry thresholds to guarantee ≥30 trades/train, ≥3/test
 
-Target: Sharpe>0.40, trades>=40 train, trades>=5 test, DD>-40%
-Timeframe: 15m
-Size: 0.15-0.20 discrete
-Trade freq: 40-100/year (session filter + HTF bias)
+Entry conditions (LOOSE for trade generation):
+- LONG: 1d HMA bull + price > Donchian mid + RSI < 55 (pullback)
+- SHORT: 1d HMA bear + price < Donchian mid + RSI > 45 (pullback)
+- Choppiness < 61.8 = trend (full size), Choppiness > 61.8 = chop (half size)
+
+Target: Sharpe>0.45, trades>=30 train, trades>=3 test, DD>-40%
+Timeframe: 4h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_rsi_bb_session_4h12h_v1"
-timeframe = "15m"
+name = "mtf_4h_donchian_rsi_chop_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -83,53 +86,68 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Bollinger Bands - volatility bands for mean reversion"""
-    n = len(close)
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - breakout detection"""
+    n = len(high)
     if n < period:
         return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2.0
     
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    width = (upper - lower) / sma  # Band width as % of price
+    return upper, lower, mid
+
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - measures market ranging vs trending (47.5-61.8 range)"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    return upper, lower, width
+    chop = np.zeros(n)
+    chop[:] = np.nan
+    
+    for i in range(period, n):
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        
+        if highest_high == lowest_low:
+            chop[i] = 100.0
+            continue
+        
+        atr_sum = 0.0
+        for j in range(i-period+1, i+1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            atr_sum += tr
+        
+        chop[i] = 100.0 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+    
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF HMA
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
-    
-    # Calculate 15m indicators
-    rsi_7 = calculate_rsi(close, period=7)
+    # Calculate 4h indicators
+    hma_16 = calculate_hma(close, period=16)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=20)
     rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger(close, period=20, std_mult=2.0)
-    
-    # BB width percentile for squeeze detection
-    bb_width_sma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
-    bb_width_std = pd.Series(bb_width).rolling(window=50, min_periods=50).std().values
-    bb_width_zscore = (bb_width - bb_width_sma) / (bb_width_std + 1e-10)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
+    SIZE_CHOP = 0.15  # Reduced size in choppy markets
     
     # Position tracking for stoploss
     in_position = False
@@ -139,7 +157,6 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    bars_since_signal = 0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -150,114 +167,85 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]) or np.isnan(bb_width[i]):
+        if np.isnan(hma_16[i]) or np.isnan(rsi_14[i]) or np.isnan(chop_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+        if np.isnan(donchian_mid[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER: 00-12 UTC only (London/NY overlap) ===
-        # open_time is in milliseconds since epoch
-        hour_utc = (open_time[i] // 3600000) % 24
-        in_session = (hour_utc >= 0) and (hour_utc < 12)
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === HTF BIAS (4h/12h HMA) — SOFT BIAS, NOT HARD FILTER ===
-        htf_4h_bull = close[i] > hma_4h_aligned[i]
-        htf_4h_bear = close[i] < hma_4h_aligned[i]
-        htf_12h_bull = close[i] > hma_12h_aligned[i]
-        htf_12h_bear = close[i] < hma_12h_aligned[i]
+        # === HTF BIAS (1d HMA) ===
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # Strong bias when both agree
-        htf_strong_bull = htf_4h_bull and htf_12h_bull
-        htf_strong_bear = htf_4h_bear and htf_12h_bear
+        # === 4h DONCHIAN POSITION ===
+        price_above_mid = close[i] > donchian_mid[i]
+        price_below_mid = close[i] < donchian_mid[i]
         
-        # === RSI CONDITIONS (LOOSE for more trades on 15m) ===
-        rsi_oversold = rsi_7[i] < 25.0
-        rsi_overbought = rsi_7[i] > 75.0
-        rsi_extreme_oversold = rsi_7[i] < 15.0
-        rsi_extreme_overbought = rsi_7[i] > 85.0
+        # === 4h HMA TREND ===
+        hma_4h_bull = hma_16[i] > donchian_mid[i]
+        hma_4h_bear = hma_16[i] < donchian_mid[i]
         
-        # === BOLLINGER CONDITIONS ===
-        price_below_bb = close[i] < bb_lower[i]
-        price_above_bb = close[i] > bb_upper[i]
-        bb_squeeze = bb_width_zscore[i] < -1.0  # Width below average
+        # === RSI CONDITIONS (LOOSE for more trades) ===
+        rsi_oversold = rsi_14[i] < 50.0  # Pullback zone for longs
+        rsi_overbought = rsi_14[i] > 50.0  # Pullback zone for shorts
+        rsi_extreme_oversold = rsi_14[i] < 35.0
+        rsi_extreme_overbought = rsi_14[i] > 65.0
+        
+        # === CHOPPINESS REGIME ===
+        chop_trend = chop_14[i] < 55.0  # Trending market
+        chop_range = chop_14[i] >= 55.0  # Ranging market
         
         # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADE GENERATION) ===
         desired_signal = 0.0
         
-        # LONG: In session + (RSI oversold OR price below BB)
-        # HTF bias increases size but doesn't block entry
-        if in_session:
-            if rsi_oversold or price_below_bb:
-                if htf_strong_bull:
-                    # Strong bull bias = larger size
-                    if rsi_extreme_oversold or price_below_bb:
-                        desired_signal = SIZE_STRONG
-                    else:
-                        desired_signal = SIZE_BASE
-                elif htf_4h_bull:
-                    # Mild bull bias
-                    if rsi_extreme_oversold:
-                        desired_signal = SIZE_BASE
-                    else:
-                        desired_signal = SIZE_BASE * 0.75
+        # LONG: HTF bull + price above Donchian mid + RSI pullback
+        if htf_1d_bull and price_above_mid:
+            if rsi_oversold or hma_4h_bull:
+                if rsi_extreme_oversold:
+                    desired_signal = SIZE_STRONG
                 else:
-                    # Counter-trend (bear HTF) = only on extreme
-                    if rsi_extreme_oversold and bb_squeeze:
-                        desired_signal = SIZE_BASE * 0.5
+                    desired_signal = SIZE_BASE
         
-        # SHORT: In session + (RSI overbought OR price above BB)
-            elif rsi_overbought or price_above_bb:
-                if htf_strong_bear:
-                    # Strong bear bias = larger size
-                    if rsi_extreme_overbought or price_above_bb:
-                        desired_signal = -SIZE_STRONG
-                    else:
-                        desired_signal = -SIZE_BASE
-                elif htf_4h_bear:
-                    # Mild bear bias
-                    if rsi_extreme_overbought:
-                        desired_signal = -SIZE_BASE
-                    else:
-                        desired_signal = -SIZE_BASE * 0.75
+        # SHORT: HTF bear + price below Donchian mid + RSI pullback
+        elif htf_1d_bear and price_below_mid:
+            if rsi_overbought or hma_4h_bear:
+                if rsi_extreme_overbought:
+                    desired_signal = -SIZE_STRONG
                 else:
-                    # Counter-trend (bull HTF) = only on extreme
-                    if rsi_extreme_overbought and bb_squeeze:
-                        desired_signal = -SIZE_BASE * 0.5
+                    desired_signal = -SIZE_BASE
         
-        # === FORCE ENTRY AFTER 20 BARS OF NO SIGNAL ===
-        # This guarantees trade generation (critical for 15m)
-        bars_since_signal += 1
-        if bars_since_signal >= 20 and desired_signal == 0.0:
-            if rsi_extreme_oversold and in_session:
-                desired_signal = SIZE_BASE * 0.5
-            elif rsi_extreme_overbought and in_session:
-                desired_signal = -SIZE_BASE * 0.5
+        # === ADJUST SIZE FOR CHOPPINESS ===
+        if chop_range and desired_signal != 0.0:
+            desired_signal = desired_signal * (SIZE_CHOP / SIZE_BASE)
         
-        if desired_signal != 0.0:
-            bars_since_signal = 0
-        
-        # === STOPLOSS CHECK (2.0x ATR trailing) ===
+        # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -274,9 +262,10 @@ def generate_signals(prices):
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
-        elif abs(desired_signal) >= SIZE_BASE * 0.4:
-            # Small positions rounded to base size
-            final_signal = np.sign(desired_signal) * SIZE_BASE
+        elif desired_signal >= SIZE_CHOP * 0.9:
+            final_signal = SIZE_CHOP
+        elif desired_signal <= -SIZE_CHOP * 0.9:
+            final_signal = -SIZE_CHOP
         else:
             final_signal = 0.0
         
@@ -290,9 +279,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
