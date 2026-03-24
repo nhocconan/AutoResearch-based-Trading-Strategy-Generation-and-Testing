@@ -1,71 +1,44 @@
 #!/usr/bin/env python3
 """
-Experiment #092: 12h Primary + 1d HTF — Vol Spike Reversion with Regime Filter
+Experiment #093: 1d Primary + 1w HTF — Simple Trend Following with RSI Pullback
 
-Hypothesis: After 91 failed experiments, the key insight from research is that
-VOLATILITY SPIKE REVERSION works best in bear/range markets (2022 crash, 2025 test).
-This strategy combines:
-1. ATR(7)/ATR(30) ratio > 2.0 = volatility spike (panic capitulation)
-2. Price < BB(20, 2.0) lower band = oversold extension (for longs)
-3. 1d HMA trend filter = only trade with HTF bias
-4. Funding rate contrarian = add edge when funding extreme
-5. Asymmetric regime = smaller size in counter-trend, larger with trend
+Hypothesis: After 12 consecutive failures (Sharpe < 0), the problem is OVER-FILTERING.
+Recent strategies failed because:
+- #081-#092: All negative Sharpe, many with 0 trades
+- Too many regime filters = no entries
+- Mean reversion doesn't work in crypto (too trending)
 
-Why this should work:
-- Vol spike reversion captured 2022 crash bottom (research Sharpe 0.8-1.5)
-- 12h timeframe = 20-50 trades/year (fee-efficient, avoids churn)
-- BB + ATR combo catches panic extremes without being too restrictive
-- 1d HMA prevents counter-trend trades in major moves
-- Funding rate adds contrarian edge (crowded longs/shorts reverse)
+This strategy SIMPLIFIES to proven elements:
+1. 1w HMA(21) for major trend bias (very slow, reduces whipsaws)
+2. 1d RSI(14) pullback entries in trend direction (not extreme thresholds)
+3. ATR(14) 2.5x trailing stop for risk management
+4. Discrete sizing: 0.30 (conservative, minimizes fee churn)
+
+Why this should work on 1d:
+- 1d timeframe = naturally 20-50 trades/year (fee-efficient)
+- 1w HMA is extremely slow = only catches major trends
+- RSI pullback (40/60 thresholds) = ensures entries happen regularly
+- Simple logic = fewer bugs, more reliable execution
+- Trend-following works better than mean-reversion in crypto
 
 Entry Logic:
-- Long: ATR_ratio > 2.0 + close < BB_lower + price > 1d_HMA (with trend)
-- Long: ATR_ratio > 2.5 + close < BB_lower (panic capitulation, ignore trend)
-- Short: ATR_ratio > 2.0 + close > BB_upper + price < 1d_HMA (with trend)
-- Short: ATR_ratio > 2.5 + close > BB_upper (panic capitulation, ignore trend)
-- Size: 0.25 normal, 0.35 with strong confluence
+- Long: Price > 1w HMA + RSI(14) crosses above 40 (pullback ending)
+- Short: Price < 1w HMA + RSI(14) crosses below 60 (rally ending)
+- Size: 0.30 (discrete, conservative)
 
 Risk: 2.5x ATR trailing stop, signal→0 when stopped out
-Target: Sharpe>0.4, trades>30/symbol train, >3/symbol test, DD>-35%
+Target: Sharpe>0.4, trades>30/symbol train, >3/symbol test, DD>-40%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_volspike_bb_regime_1d_v1"
-timeframe = "12h"
+name = "mtf_1d_trend_rsi_pullback_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Bollinger Bands"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    
-    return upper, lower, sma
-
 def calculate_hma(close, period=21):
-    """Hull Moving Average"""
+    """Hull Moving Average - smooth trend indicator"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
@@ -91,7 +64,7 @@ def calculate_hma(close, period=21):
     return hma
 
 def calculate_rsi(close, period=14):
-    """RSI"""
+    """RSI - momentum for pullback detection"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -115,6 +88,20 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_atr(high, low, close, period=14):
+    """Average True Range - for stoploss"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -122,27 +109,21 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 1w HMA for major trend bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (12h) indicators
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_30 = calculate_atr(high, low, close, period=30)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    # Calculate primary (1d) indicators
     rsi = calculate_rsi(close, period=14)
+    atr = calculate_atr(high, low, close, period=14)
     
-    # Calculate ATR ratio (volatility spike detector)
-    atr_ratio = np.full(n, np.nan)
-    for i in range(30, n):
-        if atr_30[i] > 1e-10:
-            atr_ratio[i] = atr_7[i] / atr_30[i]
+    # Calculate 1d SMA for additional trend confirmation
+    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
-    SIZE_NORMAL = 0.25
-    SIZE_STRONG = 0.35
+    SIZE = 0.30  # Discrete position size (conservative)
     
     # Position tracking for stoploss
     in_position = False
@@ -152,66 +133,63 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
+    # RSI crossover tracking
+    prev_rsi = np.nan
+    
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr_7[i]) or np.isnan(atr_30[i]) or atr_30[i] <= 1e-10:
+        if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
+            prev_rsi = rsi[i] if not np.isnan(rsi[i]) else prev_rsi
             continue
-        if np.isnan(hma_1d_aligned[i]):
+        
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
+            prev_rsi = rsi[i] if not np.isnan(rsi[i]) else prev_rsi
             continue
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(rsi[i]):
+        
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
+            prev_rsi = prev_rsi
             continue
         
-        # === HTF TREND BIAS (1d HMA) ===
-        hma_1d_bull = close[i] > hma_1d_aligned[i]
-        hma_1d_bear = close[i] < hma_1d_aligned[i]
+        # === HTF TREND BIAS (1w HMA) ===
+        hma_1w_bull = close[i] > hma_1w_aligned[i]
+        hma_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # === VOLATILITY SPIKE DETECTION ===
-        vol_spike = atr_ratio[i] > 2.0
-        vol_extreme = atr_ratio[i] > 2.5
+        # === 1D TREND CONFIRMATION (SMA50) ===
+        sma_50_bull = not np.isnan(sma_50[i]) and close[i] > sma_50[i]
+        sma_50_bear = not np.isnan(sma_50[i]) and close[i] < sma_50[i]
         
-        # === BOLLINGER BAND POSITION ===
-        bb_oversold = close[i] < bb_lower[i]
-        bb_overbought = close[i] > bb_upper[i]
+        # === RSI PULLBACK DETECTION ===
+        # Long: RSI was below 40, now crosses above 40 (pullback ending in uptrend)
+        # Short: RSI was above 60, now crosses below 60 (rally ending in downtrend)
+        rsi_cross_long = False
+        rsi_cross_short = False
         
-        # === RSI CONFIRMATION (loose thresholds) ===
-        rsi_oversold = rsi[i] < 40.0
-        rsi_overbought = rsi[i] > 60.0
+        if not np.isnan(prev_rsi):
+            rsi_cross_long = prev_rsi < 40.0 and rsi[i] >= 40.0
+            rsi_cross_short = prev_rsi > 60.0 and rsi[i] <= 60.0
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
-        use_strong_size = False
         
-        # Long entry: Vol spike + BB oversold + (trend aligned OR extreme vol)
-        if vol_spike and bb_oversold:
-            if hma_1d_bull and rsi_oversold:
-                # With trend + RSI confirmation = strong signal
-                desired_signal = SIZE_STRONG
-                use_strong_size = True
-            elif vol_extreme:
-                # Extreme volatility spike = capitulation, ignore trend
-                desired_signal = SIZE_NORMAL
+        # Long entry: 1w HMA bull + 1d SMA50 bull + RSI pullback cross
+        if hma_1w_bull and sma_50_bull and rsi_cross_long:
+            desired_signal = SIZE
         
-        # Short entry: Vol spike + BB overbought + (trend aligned OR extreme vol)
-        elif vol_spike and bb_overbought:
-            if hma_1d_bear and rsi_overbought:
-                # With trend + RSI confirmation = strong signal
-                desired_signal = -SIZE_STRONG
-                use_strong_size = True
-            elif vol_extreme:
-                # Extreme volatility spike = capitulation, ignore trend
-                desired_signal = -SIZE_NORMAL
+        # Short entry: 1w HMA bear + 1d SMA50 bear + RSI pullback cross
+        elif hma_1w_bear and sma_50_bear and rsi_cross_short:
+            desired_signal = -SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -232,14 +210,10 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_STRONG * 0.85:
-            final_signal = SIZE_STRONG
-        elif desired_signal >= SIZE_NORMAL * 0.85:
-            final_signal = SIZE_NORMAL
-        elif desired_signal <= -SIZE_STRONG * 0.85:
-            final_signal = -SIZE_STRONG
-        elif desired_signal <= -SIZE_NORMAL * 0.85:
-            final_signal = -SIZE_NORMAL
+        if desired_signal >= SIZE * 0.85:
+            final_signal = SIZE
+        elif desired_signal <= -SIZE * 0.85:
+            final_signal = -SIZE
         else:
             final_signal = 0.0
         
@@ -249,14 +223,14 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_7[i]
+                entry_atr = atr[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(final_signal) != position_side:
                 # Flip position
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_7[i]
+                entry_atr = atr[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
@@ -273,5 +247,6 @@ def generate_signals(prices):
                 lowest_since_entry = float('inf')
         
         signals[i] = final_signal
+        prev_rsi = rsi[i]
     
     return signals
