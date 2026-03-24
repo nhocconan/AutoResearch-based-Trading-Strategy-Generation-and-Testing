@@ -1,43 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #1651: 4h Primary + 1d HTF — Dual Regime (Chop/Trend) + Connors RSI + HMA
+Experiment #1652: 12h Primary + 1d/1w HTF — Simplified Dual Regime (Chop/Trend)
 
-Hypothesis: #1639 failed (Sharpe=-0.093) due to OVER-FILTERING — three conditions
-(KAMA + 1d HMA + RSI) all needing agreement is too restrictive, resulting in too few
-trades and missed opportunities. This strategy uses REGIME DETECTION to switch between
-two simpler strategies:
+Hypothesis: #1651 failed (Sharpe=-0.298) due to OVER-FILTERING — requiring daily bias
+AND HMA slope AND regime agreement is too restrictive. This strategy SIMPLIFIES entries:
 
-1. CHOPPY REGIME (CHOP > 61.8): Mean reversion using Connors RSI extremes
-   - CRSI < 20 → long (oversold bounce)
-   - CRSI > 80 → short (overbought drop)
-   - Works in range-bound markets (2022, 2025 bear/range)
+1. CHOPPY REGIME (CHOP > 55): Pure Connors RSI mean reversion
+   - CRSI < 25 → long (oversold, no other filters)
+   - CRSI > 75 → short (overbought, no other filters)
+   - More trades in range-bound 2022/2025
 
-2. TRENDING REGIME (CHOP < 38.2): Trend following using HMA crossover
-   - Price > HMA(21) + HMA sloping up → long
-   - Price < HMA(21) + HMA sloping down → short
-   - Works in strong trends (2021 bull, 2024 rally)
+2. TRENDING REGIME (CHOP < 45 + ADX > 25): HMA trend following
+   - Price > HMA(21) → long
+   - Price < HMA(21) → short
+   - ADX confirms trend strength
 
-3. 1d HMA for overall bias (loose filter — just direction, not strict confluence)
-4. ATR(14) 2.5x trailing stop for risk management
-5. LOOSER entries = MORE TRADES (target 30-50/year)
+3. 1d HMA as soft bias only (not strict confluence)
+4. 1w HMA for ultra-long-term trend context
+5. ATR(14) 2.5x trailing stop
+6. LOOSER thresholds = MORE TRADES (target 30-50/year per symbol)
 
-Why this should beat #1639:
-- Regime detection adapts to market conditions (key for 2022 crash + 2025 bear)
-- Connors RSI proven for mean reversion (75% win rate in ranges)
-- Fewer confluence conditions = more trade opportunities
-- 4h timeframe optimal for 20-50 trades/year
-- Dual regime = works in both chop (2022 bottom) and trend (2021, 2024)
+Key changes from #1651:
+- Lower CHOP thresholds (55/45 vs 61.8/38.2) = more regime switches = more trades
+- CRSI thresholds 25/75 vs 20/80 = more mean reversion signals
+- Remove HMA slope requirement = simpler trend entries
+- 1d HMA is soft bias, not hard filter
+- 12h timeframe = fewer false signals than 4h, more than 1d
 
-Timeframe: 4h (required)
-HTF: 1d HMA via mtf_data.get_htf_data() — called ONCE before loop
-Target: Sharpe > 0.618, trades > 30/symbol train, > 5/symbol test, DD > -40%
+Timeframe: 12h (required for this experiment)
+HTF: 1d and 1w via mtf_data.get_htf_data() — called ONCE before loop
+Target: Sharpe > 0.618, trades > 30/symbol train, > 3/symbol test, DD > -40%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_dual_regime_chop_crsi_hma_1d_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_simplified_dual_regime_crsi_hma_1d1w_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -98,8 +97,8 @@ def calculate_choppiness(high, low, close, period=14):
     """
     Choppiness Index (CHOP)
     Measures market choppy vs trending
-    CHOP > 61.8 = choppy/range
-    CHOP < 38.2 = trending
+    CHOP > 55 = choppy/range (lowered from 61.8 for more signals)
+    CHOP < 45 = trending (raised from 38.2 for more signals)
     """
     n = len(close)
     if n < period + 1:
@@ -124,11 +123,43 @@ def calculate_choppiness(high, low, close, period=14):
     
     return chop
 
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index - trend strength"""
+    n = len(close)
+    if n < period * 2 + 1:
+        return np.full(n, np.nan)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        if high[i] - high[i-1] > low[i-1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+        else:
+            plus_dm[i] = 0
+        
+        if low[i-1] - low[i] > high[i] - high[i-1]:
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+        else:
+            minus_dm[i] = 0
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = 100.0 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10)
+    minus_di = 100.0 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10)
+    
+    dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
+
 def calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100):
     """
     Connors RSI (CRSI)
     CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    Extreme values (<10 or >90) signal mean reversion opportunities
+    Extreme values (<25 or >75) signal mean reversion opportunities
     """
     n = len(close)
     if n < rank_period + 5:
@@ -202,16 +233,22 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align 1d HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (4h) indicators
-    hma_4h = calculate_hma(close, period=21)
+    # Calculate and align 1w HMA for ultra-long-term bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    
+    # Calculate primary (12h) indicators
+    hma_12h = calculate_hma(close, period=21)
     atr = calculate_atr(high, low, close, period=14)
     chop = calculate_choppiness(high, low, close, period=14)
     crsi = calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    adx = calculate_adx(high, low, close, period=14)
     
     signals = np.zeros(n)
     BASE_SIZE = 0.30
@@ -224,7 +261,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(150, n):
+    for i in range(200, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -232,13 +269,13 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_4h[i]) or np.isnan(chop[i]) or np.isnan(crsi[i]):
+        if np.isnan(hma_12h[i]) or np.isnan(chop[i]) or np.isnan(crsi[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -246,43 +283,43 @@ def generate_signals(prices):
             continue
         
         # === REGIME DETECTION (Choppiness Index) ===
-        is_choppy = chop[i] > 61.8
-        is_trending = chop[i] < 38.2
+        is_choppy = chop[i] > 55.0
+        is_trending = chop[i] < 45.0 and adx[i] > 25.0
         
-        # === 1d HMA BIAS (loose filter) ===
+        # === 1d HMA BIAS (soft filter - just note direction) ===
         daily_bull = close[i] > hma_1d_aligned[i]
         daily_bear = close[i] < hma_1d_aligned[i]
         
-        # === 4h HMA SLOPE ===
-        hma_slope_bull = hma_4h[i] > hma_4h[i-5] if not np.isnan(hma_4h[i-5]) else False
-        hma_slope_bear = hma_4h[i] < hma_4h[i-5] if not np.isnan(hma_4h[i-5]) else False
+        # === 1w HMA BIAS (ultra-long-term context) ===
+        weekly_bull = close[i] > hma_1w_aligned[i]
+        weekly_bear = close[i] < hma_1w_aligned[i]
         
         # === DESIRED SIGNAL BASED ON REGIME ===
         desired_signal = 0.0
         
         if is_choppy:
-            # MEAN REVERSION REGIME - use Connors RSI extremes
-            # Long: CRSI < 20 (oversold) + daily bias not strongly bearish
-            if crsi[i] < 20.0 and not daily_bear:
+            # MEAN REVERSION REGIME - use Connors RSI extremes (LOOSE conditions)
+            # Long: CRSI < 25 (oversold)
+            if crsi[i] < 25.0:
                 desired_signal = BASE_SIZE
-            # Short: CRSI > 80 (overbought) + daily bias not strongly bullish
-            elif crsi[i] > 80.0 and not daily_bull:
+            # Short: CRSI > 75 (overbought)
+            elif crsi[i] > 75.0:
                 desired_signal = -BASE_SIZE
         
         elif is_trending:
-            # TREND REGIME - use HMA crossover + slope
-            # Long: Price > HMA + HMA sloping up + daily bullish
-            if close[i] > hma_4h[i] and hma_slope_bull and daily_bull:
+            # TREND REGIME - use HMA position (SIMPLE - no slope requirement)
+            # Long: Price > HMA
+            if close[i] > hma_12h[i]:
                 desired_signal = BASE_SIZE
-            # Short: Price < HMA + HMA sloping down + daily bearish
-            elif close[i] < hma_4h[i] and hma_slope_bear and daily_bear:
+            # Short: Price < HMA
+            elif close[i] < hma_12h[i]:
                 desired_signal = -BASE_SIZE
         
         else:
-            # NEUTRAL REGIME (38.2 <= CHOP <= 61.8) - use simpler HMA cross
-            if close[i] > hma_4h[i] and daily_bull:
-                desired_signal = BASE_SIZE * 0.5  # half size in neutral
-            elif close[i] < hma_4h[i] and daily_bear:
+            # NEUTRAL REGIME (45 <= CHOP <= 55 or ADX < 25) - use 1d bias
+            if daily_bull and weekly_bull:
+                desired_signal = BASE_SIZE * 0.5
+            elif daily_bear and weekly_bear:
                 desired_signal = -BASE_SIZE * 0.5
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
