@@ -1,41 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #1053: 5m Primary + 15m/4h HTF — Session Filter + HMA Trend + RSI Pullback
+Experiment #1054: 1d Primary + 1w HTF — Donchian Breakout + HMA Trend + RSI Filter
 
-Hypothesis: 5m timeframe has never been tested. Using strict session filter (08-20 UTC)
-combined with 4h HMA trend direction and 15m/5m RSI pullback entries will generate
-profitable trades while avoiding noise during low-liquidity hours.
+Hypothesis: Daily timeframe with weekly trend filter provides optimal balance between
+signal quality and trade frequency. Donchian breakouts capture major moves while
+HMA trend filter avoids counter-trend traps. RSI filter prevents entering at extremes.
 
 Key innovations:
-1. Session filter: Only trade 08:00-20:00 UTC (London/NY overlap = highest liquidity)
-2. 4h HMA(21) for primary trend direction (NEVER trade counter-trend on 5m)
-3. 15m RSI(14) for intermediate momentum confirmation
-4. 5m RSI(7) pullback entries (fast RSI for precise timing)
-5. ATR(14) 2.0x trailing stoploss
-6. Small position size (0.15) due to higher fee drag on 5m
+1. 1w HMA(21) for long-term trend bias (only trade in direction of weekly trend)
+2. 1d Donchian(20) breakout for entries (proven on crypto daily charts)
+3. RSI(14) filter 35-65 range (avoid overbought/oversold entries)
+4. ATR(14) 2.5x trailing stop for risk management
+5. Position sizing: 0.25 base, 0.30 strong signals
+6. Discrete signal levels to minimize fee churn
 
-Why this should work:
-- Session filter avoids Asian session chop and weekend gaps
-- 4h trend filter prevents counter-trend trades (major failure mode)
-- 15m RSI confirms momentum before 5m entry
-- 5m RSI pullback catches entries at better prices within trend
-- Small size (0.15) accounts for 50-120 trades/year fee drag
+Why this should work on 1d:
+- Daily captures multi-week swings (20-50 trades/year target)
+- Weekly HMA filter avoids 2022 crash counter-trend longs
+- Donchian breakout works in both bull and bear markets
+- RSI filter reduces false breakouts at extremes
+- Simpler than regime-switching = fewer conditions to fail
 
-Entry conditions (balanced for trades):
-- LONG: 4h_HMA bullish + 15m_RSI > 40 + 5m_RSI < 45 (pullback in uptrend)
-- SHORT: 4h_HMA bearish + 15m_RSI < 60 + 5m_RSI > 55 (pullback in downtrend)
-- Session active: hour 08-20 UTC only
+Entry conditions (LOOSE to guarantee 30+ trades):
+- LONG: price > 1w_HMA + Donchian_upper breakout + RSI 35-65
+- SHORT: price < 1w_HMA + Donchian_lower breakout + RSI 35-65
 
-Target: Sharpe>0.45, trades>=30 train, trades>=3 test, DD>-40%
-Timeframe: 5m
-Size: 0.15 (discrete: 0.0, ±0.15)
+Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
+Timeframe: 1d
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_5m_session_hma_rsi_pullback_15m4h_v1"
-timeframe = "5m"
+name = "mtf_1d_donchian_hma_rsi_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -100,50 +99,42 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def is_session_active(open_times, start_hour=8, end_hour=20):
-    """
-    Check if bar is within trading session (UTC hours)
-    open_times: array of open_time in milliseconds
-    Returns: boolean array
-    """
-    n = len(open_times)
-    session_mask = np.zeros(n, dtype=bool)
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - upper and lower bounds"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
     
-    for i in range(n):
-        # Convert ms to hours UTC
-        hour = (open_times[i] // 3600000) % 24
-        if start_hour <= hour < end_hour:
-            session_mask[i] = True
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
     
-    return session_mask
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_times = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_15m = get_htf_data(prices, '15m')
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    rsi_15m_raw = calculate_rsi(df_15m['close'].values, period=14)
-    rsi_15m_aligned = align_htf_to_ltf(prices, df_15m, rsi_15m_raw)
-    
-    # Calculate 5m indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_5m = calculate_rsi(close, period=7)  # Faster RSI for 5m entries
-    
-    # Session filter
-    session_active = is_session_active(open_times, start_hour=8, end_hour=20)
+    rsi_14 = calculate_rsi(close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
-    SIZE = 0.15  # Small size for 5m due to fee drag
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -154,7 +145,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -163,57 +154,68 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_5m[i]) or np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_15m_aligned[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (MANDATORY for 5m) ===
-        if not session_active[i]:
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF TREND DIRECTION (4h HMA) ===
-        hma_4h_bull = close[i] > hma_4h_aligned[i]
-        hma_4h_bear = close[i] < hma_4h_aligned[i]
+        # === TREND BIAS (Weekly HMA) ===
+        weekly_bull = close[i] > hma_1w_aligned[i]
+        weekly_bear = close[i] < hma_1w_aligned[i]
         
-        # === INTERMEDIATE MOMENTUM (15m RSI) ===
-        rsi_15m_val = rsi_15m_aligned[i]
-        rsi_15m_bull = rsi_15m_val > 40.0  # Not oversold on 15m
-        rsi_15m_bear = rsi_15m_val < 60.0  # Not overbought on 15m
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Breakout = price crosses above upper or below lower
+        prev_upper = donchian_upper[i-1] if i > 0 else donchian_upper[i]
+        prev_lower = donchian_lower[i-1] if i > 0 else donchian_lower[i]
         
-        # === 5m ENTRY TIMING (RSI Pullback) ===
-        rsi_5m_val = rsi_5m[i]
+        breakout_long = high[i] > prev_upper and close[i] > prev_upper
+        breakout_short = low[i] < prev_lower and close[i] < prev_lower
         
-        # === ENTRY LOGIC (ALL CONDITIONS MUST ALIGN) ===
+        # === RSI FILTER (avoid extremes) ===
+        rsi_ok_long = 35.0 <= rsi_14[i] <= 70.0
+        rsi_ok_short = 30.0 <= rsi_14[i] <= 65.0
+        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: 4h bullish + 15m momentum OK + 5m RSI pullback
-        if hma_4h_bull and rsi_15m_bull and rsi_5m_val < 45.0:
-            desired_signal = SIZE
+        # LONG: Weekly bull + Donchian breakout + RSI filter
+        if weekly_bull and breakout_long and rsi_ok_long:
+            # Strong signal if RSI not too high
+            if rsi_14[i] < 55.0:
+                desired_signal = SIZE_STRONG
+            else:
+                desired_signal = SIZE_BASE
         
-        # SHORT: 4h bearish + 15m momentum OK + 5m RSI pullback
-        elif hma_4h_bear and rsi_15m_bear and rsi_5m_val > 55.0:
-            desired_signal = -SIZE
+        # SHORT: Weekly bear + Donchian breakout + RSI filter
+        elif weekly_bear and breakout_short and rsi_ok_short:
+            # Strong signal if RSI not too low
+            if rsi_14[i] > 45.0:
+                desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
         
-        # === STOPLOSS CHECK (2.0x ATR trailing) ===
+        # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -222,10 +224,14 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE * 0.9:
-            final_signal = SIZE
-        elif desired_signal <= -SIZE * 0.9:
-            final_signal = -SIZE
+        if desired_signal >= SIZE_STRONG * 0.9:
+            final_signal = SIZE_STRONG
+        elif desired_signal <= -SIZE_STRONG * 0.9:
+            final_signal = -SIZE_STRONG
+        elif desired_signal >= SIZE_BASE * 0.9:
+            final_signal = SIZE_BASE
+        elif desired_signal <= -SIZE_BASE * 0.9:
+            final_signal = -SIZE_BASE
         else:
             final_signal = 0.0
         
@@ -239,9 +245,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
