@@ -9,6 +9,7 @@ prevents duplicates natively via INSERT OR IGNORE.
 """
 
 import sqlite3
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -37,9 +38,22 @@ CREATE TABLE IF NOT EXISTS results (
 );
 """
 
-_CREATE_INDEX = """
-CREATE INDEX IF NOT EXISTS idx_status_period ON results(status, period);
-"""
+_CREATE_INDEXES = [
+    # For ORDER BY sharpe DESC per period (tables)
+    "CREATE INDEX IF NOT EXISTS idx_period_sharpe    ON results(period, sharpe DESC);",
+    # For GROUP BY strategy per period (avg table) — avoids temp B-TREE for GROUP BY
+    "CREATE INDEX IF NOT EXISTS idx_period_strategy  ON results(period, strategy);",
+    # For chart data (ordered by id per symbol+period)
+    "CREATE INDEX IF NOT EXISTS idx_symbol_period_id ON results(symbol, period, id);",
+    # For strategy modal lookups
+    "CREATE INDEX IF NOT EXISTS idx_strategy         ON results(strategy);",
+]
+
+# In-memory stats cache — TTL 60s (cross-process safe) + dirty flag for same-process writes
+_stats_cache: dict = {}
+_stats_dirty: bool = True
+_stats_ts: float = 0.0
+_STATS_TTL: float = 60.0
 
 
 def get_conn() -> sqlite3.Connection:
@@ -54,7 +68,8 @@ def init_db():
     """Create table and indexes if they don't exist."""
     with get_conn() as conn:
         conn.execute(_CREATE_TABLE)
-        conn.execute(_CREATE_INDEX)
+        for idx_sql in _CREATE_INDEXES:
+            conn.execute(idx_sql)
 
 
 def append_results(results: list[dict], status: str, description: str, period: str = "train"):
@@ -104,9 +119,13 @@ def append_results(results: list[dict], status: str, description: str, period: s
     with get_conn() as conn:
         conn.executemany(sql, rows)
 
+    global _stats_dirty
+    _stats_dirty = True
+
 
 def load_results() -> pd.DataFrame:
-    """Return all results as a DataFrame (same columns as old TSV)."""
+    """Return all results as a DataFrame (same columns as old TSV).
+    NOTE: Loads full table — use query_*() functions for dashboard to avoid 55k-row scan."""
     if not DB_FILE.exists():
         return pd.DataFrame()
     try:
@@ -120,6 +139,104 @@ def load_results() -> pd.DataFrame:
         return df
     except Exception:
         return pd.DataFrame()
+
+
+def query_stats() -> dict:
+    """Return aggregate stats without loading all rows. Used by dashboard.
+    Cache expires after 60s (cross-process safe) or immediately after same-process writes."""
+    global _stats_cache, _stats_dirty, _stats_ts
+    if _stats_cache and not _stats_dirty and (time.monotonic() - _stats_ts) < _STATS_TTL:
+        return _stats_cache
+    if not DB_FILE.exists():
+        return {}
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(status='keep') as kept,
+                SUM(status='discard') as discarded,
+                SUM(status='crash') as crashed,
+                MAX(sharpe) as best_sharpe,
+                SUM(period='train') as train_total,
+                SUM(period='train' AND status='keep') as train_kept,
+                MAX(CASE WHEN period='train' THEN sharpe END) as train_best,
+                SUM(period='test') as test_total,
+                SUM(period='test' AND status='keep') as test_kept,
+                MAX(CASE WHEN period='test' THEN sharpe END) as test_best
+            FROM results
+        """).fetchone()
+    keys = ["total","kept","discarded","crashed","best_sharpe",
+            "train_total","train_kept","train_best",
+            "test_total","test_kept","test_best"]
+    _stats_cache = dict(zip(keys, row))
+    _stats_dirty = False
+    _stats_ts = time.monotonic()
+    return _stats_cache
+
+
+def query_top_rows(period: str, limit: int = 100) -> pd.DataFrame:
+    """Return top rows by Sharpe for a given period. Used by dashboard tables."""
+    if not DB_FILE.exists():
+        return pd.DataFrame()
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            'SELECT strategy, symbol, sharpe, return_pct, cagr_pct, max_dd_pct, '
+            'win_rate, profit_factor, trades, sortino, calmar, status, period '
+            f'FROM results WHERE period=? ORDER BY sharpe DESC LIMIT {limit}',
+            conn, params=(period,)
+        )
+
+
+def query_avg_rows(period: str, limit: int = 50) -> pd.DataFrame:
+    """Return per-strategy average metrics for a given period. Used by dashboard avg table."""
+    if not DB_FILE.exists():
+        return pd.DataFrame()
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            """SELECT strategy,
+                AVG(sharpe) as sharpe, AVG(return_pct) as return_pct,
+                AVG(max_dd_pct) as max_dd_pct, AVG(win_rate) as win_rate,
+                AVG(trades) as trades, MAX(status) as status
+               FROM results WHERE period=?
+               GROUP BY strategy
+               ORDER BY AVG(sharpe) DESC LIMIT ?""",
+            conn, params=(period, limit)
+        )
+
+
+def query_chart_data(symbol: str = "BTCUSDT", period: str = "train") -> list:
+    """Return ordered Sharpe values for progress chart."""
+    if not DB_FILE.exists():
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT sharpe FROM results WHERE symbol=? AND period=? ORDER BY id",
+            (symbol, period)
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def query_distinct_symbols() -> list:
+    """Return sorted list of distinct symbols."""
+    if not DB_FILE.exists():
+        return []
+    with get_conn() as conn:
+        rows = conn.execute("SELECT DISTINCT symbol FROM results ORDER BY symbol").fetchall()
+    return [r[0] for r in rows]
+
+
+def query_best_kept_sharpe() -> float:
+    """Return best mean-per-strategy Sharpe among kept strategies. Used by agent loop."""
+    if not DB_FILE.exists():
+        return 0.0
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT MAX(avg_sharpe) FROM (
+                SELECT AVG(sharpe) as avg_sharpe FROM results
+                WHERE status='keep' GROUP BY strategy
+            )
+        """).fetchone()
+    return float(row[0] or 0.0)
 
 
 def upsert_results(rows: list[dict]):

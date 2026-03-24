@@ -34,6 +34,7 @@ _tf_cache: dict = {}
 
 
 def load_results() -> pd.DataFrame:
+    """Full load — only used by get_strategy_data() modal. Dashboard render uses targeted queries."""
     from results_db import load_results as _db_load
     return _db_load()
 
@@ -157,19 +158,19 @@ def build_strategy_data(df: pd.DataFrame) -> str:
     return json.dumps(strategies, ensure_ascii=False)
 
 
-def _build_avg_table_rows(df: pd.DataFrame, limit: int = 50) -> str:
+def _build_avg_table_rows(df: pd.DataFrame, limit: int = 50, presorted: bool = False) -> str:
     """Build table rows showing average metrics per strategy across all symbols."""
     if df.empty or "sharpe" not in df.columns:
         return '<tr><td colspan="8" class="no-data" style="padding:10px;color:#8b949e">No data</td></tr>'
 
-    agg = df.groupby("strategy").agg({
-        "sharpe": "mean",
-        "return_pct": "mean",
-        "max_dd_pct": "mean",
-        "win_rate": "mean",
-        "trades": "mean",
-        "status": "first",
-    }).sort_values("sharpe", ascending=False).head(limit)
+    if presorted:
+        # df is already aggregated+sorted by SQL query_avg_rows()
+        agg = df.set_index("strategy")
+    else:
+        agg = df.groupby("strategy").agg({
+            "sharpe": "mean", "return_pct": "mean", "max_dd_pct": "mean",
+            "win_rate": "mean", "trades": "mean", "status": "first",
+        }).sort_values("sharpe", ascending=False).head(limit)
 
     rows = ""
     for strategy, row in agg.iterrows():
@@ -194,7 +195,9 @@ def _build_avg_table_rows(df: pd.DataFrame, limit: int = 50) -> str:
 
 
 def render_html() -> str:
-    df = load_results()
+    from results_db import (query_stats, query_top_rows, query_avg_rows,
+                             query_chart_data, query_distinct_symbols)
+
     git_log = get_git_log()
     current_strategy = get_current_strategy()
     current_val = run_validation(current_strategy)
@@ -204,50 +207,44 @@ def render_html() -> str:
     current_val_badge = "badge-pass" if current_val.valid else "badge-fail"
     current_val_label = "PASS" if current_val.valid else "FAIL"
 
-    # Overall stats
-    total = len(df)
-    kept = len(df[df["status"] == "keep"]) if total > 0 else 0
-    discarded = len(df[df["status"] == "discard"]) if total > 0 else 0
-    crashed = len(df[df["status"] == "crash"]) if total > 0 else 0
-    best_sharpe = df["sharpe"].max() if total > 0 and "sharpe" in df.columns else 0
+    # --- Targeted SQL queries (no full 55k-row scan) ---
+    stats = query_stats()
+    total       = int(stats.get("total", 0) or 0)
+    kept        = int(stats.get("kept", 0) or 0)
+    discarded   = int(stats.get("discarded", 0) or 0)
+    crashed     = int(stats.get("crashed", 0) or 0)
+    best_sharpe = float(stats.get("best_sharpe", 0) or 0)
+    train_total = int(stats.get("train_total", 0) or 0)
+    train_kept  = int(stats.get("train_kept", 0) or 0)
+    train_best  = float(stats.get("train_best", 0) or 0)
+    test_total  = int(stats.get("test_total", 0) or 0)
+    test_kept   = int(stats.get("test_kept", 0) or 0)
+    test_best   = float(stats.get("test_best", 0) or 0)
 
-    # Split by period
-    train_df = df[df["period"] == "train"] if total > 0 else pd.DataFrame()
-    test_df = df[df["period"] == "test"] if total > 0 else pd.DataFrame()
+    # Top rows for tables (already sorted by Sharpe DESC, limit 100)
+    train_df     = query_top_rows("train", limit=100)
+    train_avg_df = query_avg_rows("train", limit=50)
+    test_df      = query_top_rows("test",  limit=100)
+    test_avg_df  = query_avg_rows("test",  limit=50)
 
-    train_total = len(train_df)
-    test_total = len(test_df)
-    train_kept = len(train_df[train_df["status"] == "keep"]) if train_total > 0 else 0
-    test_kept = len(test_df[test_df["status"] == "keep"]) if test_total > 0 else 0
-    train_best = train_df["sharpe"].max() if train_total > 0 and "sharpe" in train_df.columns else 0
-    test_best = test_df["sharpe"].max() if test_total > 0 and "sharpe" in test_df.columns else 0
+    train_rows     = _build_table_rows(train_df, presorted=True)
+    train_avg_rows = _build_avg_table_rows(train_avg_df, presorted=True)
+    test_rows      = _build_table_rows(test_df, presorted=True)
+    test_avg_rows  = _build_avg_table_rows(test_avg_df, presorted=True)
 
-    # Build results table rows (all rows, JS filters client-side)
-    train_rows = _build_table_rows(train_df, limit=100)
-    train_avg_rows = _build_avg_table_rows(train_df, limit=50)
-    test_rows = _build_table_rows(test_df, limit=100)
-    test_avg_rows = _build_avg_table_rows(test_df, limit=50)
-
-    # Get unique symbols and timeframes
-    symbols = sorted(df["symbol"].unique().tolist()) if total > 0 and "symbol" in df.columns else []
+    # Symbols and timeframes
+    symbols = query_distinct_symbols()
     symbols_json = json.dumps(symbols)
-    # Extract timeframes from strategy files
-    tf_set = set()
-    if total > 0:
-        for s in df["strategy"].unique():
-            tf_set.add(get_strategy_timeframe(str(s)))
-    tf_set.discard("?")
-    timeframes = sorted(tf_set)
+    timeframes = sorted(set(tf for tf in _tf_cache.values() if tf != "?"))
 
-    # Chart data: Sharpe over time for BTCUSDT (train only)
+    # Chart data: Sharpe over time for BTCUSDT train
     chart_data, chart_labels, running_best_data = "[]", "[]", "[]"
-    if train_total > 0 and "sharpe" in train_df.columns:
-        btc = train_df[train_df["symbol"] == "BTCUSDT"].reset_index(drop=True)
-        if len(btc) > 0:
-            sharpes = btc["sharpe"].tolist()
+    if train_total > 0:
+        sharpes = query_chart_data("BTCUSDT", "train")
+        if sharpes:
             labels = [f"#{i+1}" for i in range(len(sharpes))]
             running_best = []
-            best_so_far = -999
+            best_so_far = -999.0
             for s in sharpes:
                 best_so_far = max(best_so_far, s)
                 running_best.append(round(best_so_far, 4))
@@ -998,13 +995,12 @@ function openCandleChart(data) {{
 </html>"""
 
 
-def _build_table_rows(df: pd.DataFrame, limit: int = 100) -> str:
+def _build_table_rows(df: pd.DataFrame, limit: int = 100, presorted: bool = False) -> str:
     if df.empty or "sharpe" not in df.columns:
         return '<tr><td colspan="9" class="no-data" style="padding:10px;color:#8b949e">No data</td></tr>'
 
-    # Cache timeframes
     tf_cache = {}
-    best = df.sort_values("sharpe", ascending=False).head(limit)
+    best = df if presorted else df.sort_values("sharpe", ascending=False).head(limit)
     rows = ""
     for _, row in best.iterrows():
         sharpe_val = float(row.get("sharpe", 0) or 0)
@@ -1301,6 +1297,12 @@ def _cache_worker(interval: int = 30):
         time.sleep(interval)
 
 
+from socketserver import ThreadingMixIn
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle each HTTP request in its own thread."""
+    daemon_threads = True
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
@@ -1362,7 +1364,7 @@ def main():
     t.start()
     print(f"Cache refresh every {args.cache_interval}s (background thread)")
 
-    server = HTTPServer((args.host, args.port), DashboardHandler)
+    server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     print(f"Dashboard running at http://{args.host}:{args.port}")
     print("Auto-refreshes every 10 minutes. Press Ctrl+C to stop.")
     server.serve_forever()

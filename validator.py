@@ -46,6 +46,23 @@ MANUAL_MTF_PATTERNS = [
     (r"n_\d+h\s*=.*//", "Manual HTF bar count — use mtf_data.get_htf_data()"),
 ]
 
+# Patterns that cause frequent runtime TypeErrors (caught before wasting backtest time)
+RUNTIME_ERROR_PATTERNS = [
+    # Datetime floor-division (639 occurrences in production)
+    (r"prices\.index\s*//",
+     "TypeError: prices.index // N divides datetime64 — use integer loop variable or get_htf_data()"),
+    (r"['\"]open_time['\"]\s*\]\s*//",
+     "TypeError: open_time // N divides datetime64 — use integer index, not timestamp column"),
+    (r"\.open_time\s*//",
+     "TypeError: .open_time // N divides datetime64 — use integer index, not timestamp column"),
+    # DatetimeIndex has no .dt accessor (unlike pd.Series) — 33 occurrences
+    (r"\.index\.dt\.",
+     "AttributeError: DatetimeIndex has no .dt — access .hour/.day/.month directly on the index (no .dt needed)"),
+    # Deprecated pandas fillna(method=...) — 6 occurrences
+    (r"\.fillna\s*\([^)]*method\s*=",
+     "TypeError: fillna(method=) removed in pandas 2.x — use .ffill() or .bfill() instead"),
+]
+
 
 @dataclass
 class ValidationResult:
@@ -111,6 +128,15 @@ def validate_strategy(code: str) -> ValidationResult:
             if re.search(pattern, code):
                 result.errors.append(msg)
                 result.valid = False
+
+    # --- 3d. Runtime error patterns (saves backtest time on known-bad patterns) ---
+    for pattern, msg in RUNTIME_ERROR_PATTERNS:
+        if re.search(pattern, code):
+            result.errors.append(msg)
+            result.valid = False
+
+    # --- 3e. Undefined bare variables that cause NameError at runtime ---
+    _check_undefined_bare_names(code, result)
 
     # --- 4. AST: extract metadata values ---
     leverage_found = None
@@ -182,6 +208,55 @@ def validate_strategy(code: str) -> ValidationResult:
         result.info.append("✓ No compliance violations detected")
 
     return result
+
+
+def _check_undefined_bare_names(code: str, result: ValidationResult):
+    """AST check: catch common NameErrors before backtesting.
+
+    Detects variables used as bare names inside generate_signals() that are
+    never assigned there — the top recurring runtime errors are 'close' (159x)
+    and 'j' (78x) in production logs.
+    """
+    BARE_NAMES = {"close", "high", "low", "open", "volume", "j"}
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return  # already caught above
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef) and node.name == "generate_signals"):
+            continue
+        # Collect all names assigned within this function
+        assigned = set()
+        for child in ast.walk(node):
+            if isinstance(child, ast.Assign):
+                for t in ast.walk(child):
+                    if isinstance(t, ast.Name) and isinstance(child, ast.Assign) and t in ast.walk(child.targets[0] if child.targets else ast.parse("x")):
+                        assigned.add(t.id)
+            elif isinstance(child, (ast.AugAssign, ast.AnnAssign)):
+                if isinstance(getattr(child, 'target', None), ast.Name):
+                    assigned.add(child.target.id)
+            elif isinstance(child, ast.For):
+                if isinstance(child.target, ast.Name):
+                    assigned.add(child.target.id)
+            elif isinstance(child, ast.NamedExpr):
+                if isinstance(child.target, ast.Name):
+                    assigned.add(child.target.id)
+        # Also include function arguments as "assigned"
+        for arg in node.args.args:
+            assigned.add(arg.arg)
+
+        # Check if any bare name from BARE_NAMES is used but not assigned
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name) and child.id in BARE_NAMES and child.id not in assigned:
+                if isinstance(child.ctx, ast.Load):
+                    result.errors.append(
+                        f"NameError: '{child.id}' used but never assigned in generate_signals() — "
+                        f"use prices['{child.id}'].values or prices['{child.id}'] instead"
+                    )
+                    result.valid = False
+                    BARE_NAMES.discard(child.id)  # report each name only once
+        break
 
 
 def validate_file(path: str) -> ValidationResult:

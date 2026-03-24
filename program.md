@@ -185,6 +185,88 @@ Use this as your reference. Pick specific strategies, implement them properly wi
 - **Dynamic leverage**: low vol → higher leverage (up to 3x), high vol → 1x
 - **Fractional Kelly**: optimal f* = (edge * odds) / odds, use 1/4 Kelly for crypto
 
+### TIER 7: PIVOT BOSS PIVOT METHODS (Frank Ochoa)
+
+**15. Central Pivot Range (CPR)** (best on 4h/1d, daily CPR)
+- Pivot = (High + Low + Close) / 3
+- BC (Bottom Central) = (High + Low) / 2
+- TC (Top Central) = (Pivot - BC) + Pivot
+- CPR width = TC - BC. Narrow CPR → trending day. Wide CPR → ranging day.
+- Entry: price breaks above TC → long; breaks below BC → short
+- Filter: if today's CPR is above yesterday's → bullish bias (non-overlapping CPR)
+- **Virgin CPR**: an untested CPR level from a prior day acts as strong S/R
+- Implementation: use 1d HTF data for CPR levels, trade on 4h/1h entry TF
+
+**16. Weekly/Monthly Pivot Levels** (best on 4h/1d)
+- Standard pivots: P=(H+L+C)/3; R1=2P-L; S1=2P-H; R2=P+(H-L); S2=P-(H-L)
+- Camarilla levels: R3=C+1.1*(H-L)/4; S3=C-1.1*(H-L)/4 (very tight, mean-reversion)
+- Woodie pivot: P=(H+L+2C)/4 (weights closing price more)
+- Trade: fade at R1/S1 (mean reversion). Breakout above R2 → momentum long.
+- Use WEEKLY pivots as major zones, DAILY pivots for entries
+- Implementation: from 1w HTF data, compute each week's pivot for the following week
+
+**17. CPR Trend Day vs Range Day** (best on 1h/4h)
+- Non-overlapping CPR (today's CPR entirely above/below yesterday's) → trending day
+- Overlapping CPR → ranging day
+- Trend day: enter on CPR break, trail with ATR, ignore mean reversion
+- Range day: fade moves at CPR edges, take profit at ±1 ATR
+- Filter with ADX: ADX > 25 confirms trend day, ADX < 20 confirms range day
+
+**18. Floor Trader Pivot + Session** (best on 1h)
+- Asian session (00:00-08:00 UTC): accumulation. Range = high-low of session.
+- London open (08:00 UTC): often breaks Asian range direction
+- NY open (13:00 UTC): strongest move, often reversal or continuation
+- Use previous day high/low/close for floor trader pivots
+- Long: price holds above pivot + Asian range high breaks at London open
+
+### TIER 8: ICHIMOKU CLOUD STRATEGIES (一目均衡表)
+
+**19. Classic Ichimoku Trend** (best on 4h/1d — original params designed for daily)
+- Tenkan-sen (Conversion): (9H + 9L) / 2  — fast signal
+- Kijun-sen (Base): (26H + 26L) / 2  — slow signal / support
+- Senkou Span A = (Tenkan + Kijun) / 2, plotted 26 bars ahead
+- Senkou Span B = (52H + 52L) / 2, plotted 26 bars ahead
+- Chikou Span = Close, plotted 26 bars BACK
+- Cloud (Kumo) = area between Span A and Span B
+- **TK Cross**: Tenkan crosses above Kijun → long signal (bearish if below cloud)
+- **Cloud Breakout**: price breaks above cloud → strong long signal
+- **Chikou confirmation**: Chikou above price of 26 bars ago → bullish
+- Full bullish: price above cloud + TK cross up + Chikou clear + green cloud ahead
+- Note: in backtest, use Span A/B from 26 bars AGO (already closed) to avoid look-ahead
+
+**20. Ichimoku + RSI Combo** (best on 4h)
+- Use Ichimoku cloud for trend direction only (price above/below cloud)
+- RSI(14) for entry timing: oversold bounce (RSI < 40) in uptrend = long
+- Exit: price enters cloud or RSI > 70
+- This simplifies Ichimoku to a trend filter — more robust than full system
+
+**21. Kijun Bounce Strategy** (best on 1d/4h)
+- Kijun-sen acts as magnetic support/resistance in trending markets
+- In uptrend (price above cloud): buy pullbacks to Kijun-sen
+- Stop: below Kumo (cloud bottom)
+- Target: previous swing high or Tenkan-sen
+- Filter: only take bounces when Kijun is flat (acts as magnet, not dynamic)
+
+**22. Kumo Breakout + ATR** (best on 4h/12h)
+- Wait for price to be inside cloud (consolidation)
+- On breakout above cloud top (Span A or B, whichever is higher): long
+- Position size proportional to cloud thickness (wider = stronger breakout)
+- Stop: below cloud bottom. Target: 2x cloud thickness above entry
+- Filter: avoid if cloud ahead is thin (< 0.5% price) — weak breakout
+
+**23. Ichimoku Flat Kijun Scalp** (best on 1h)
+- Flat Kijun (no change for 10+ bars) = price magnet / equilibrium
+- Price deviates > 1 ATR from flat Kijun → mean-revert back to Kijun
+- Long: price > 1 ATR below flat Kijun. Exit when price touches Kijun.
+- Short: price > 1 ATR above flat Kijun. Exit at Kijun.
+- Avoid if Chikou shows trend (Chikou far from price 26 bars ago)
+
+**24. Multi-TF Ichimoku** (best on 1d primary, 4h entry)
+- 1d cloud for trend bias: above cloud = long-only mode
+- 4h TK cross for entry timing within 1d trend direction
+- 4h Kijun as stop level
+- This is the most common professional Ichimoku setup
+
 ### COMBINATION MATRIX (proven combos)
 
 | Strategy A | Strategy B | Why |
@@ -196,6 +278,12 @@ Use this as your reference. Pick specific strategies, implement them properly wi
 | Multi-TF MACD | ATR sizing | Direction from multiple TFs + risk |
 | OBV divergence | Supertrend | Hidden accumulation + trend confirm |
 | Regime detection | Strategy ensemble | Best strategy per market condition |
+| CPR trend/range | ADX filter | Day type detection + trend confirmation |
+| Weekly pivot S/R | Donchian breakout | Macro levels + breakout confirmation |
+| Ichimoku cloud | RSI | Trend filter + oversold/overbought timing |
+| Kijun bounce | ATR trailing stop | Mean-revert to equilibrium + risk control |
+| Multi-TF Ichimoku | Kijun stop | Professional setup (1d trend, 4h entry) |
+| CPR virgin levels | Volume breakout | Key untested levels + volume confirmation |
 
 ## EXPERIMENT PROGRESSION
 
@@ -234,6 +322,23 @@ Take best strategies and add risk management:
 20. Add volatility-adjusted position sizing
 21. Add dynamic leverage based on regime
 22. Parameter sensitivity analysis
+
+### Phase 5: Pivot Boss Pivots (priority: HIGH — unexplored)
+Try each on 4h timeframe with 1d HTF pivots:
+23. Daily CPR breakout (TC/BC levels as entries)
+24. Weekly standard pivots (R1/S1 fade, R2 breakout)
+25. CPR width filter (narrow=trend day, wide=range day)
+26. Virgin CPR mean-reversion (untested prior CPR levels)
+27. Camarilla R3/S3 mean-reversion
+
+### Phase 6: Ichimoku Strategies (priority: HIGH — unexplored)
+Try each on 4h/1d:
+28. TK Cross with cloud filter (4h)
+29. Cloud breakout with ATR stop (4h/12h)
+30. Kijun bounce in uptrend (1d primary, 4h entry)
+31. Ichimoku + RSI combo (simplified, 4h)
+32. Multi-TF: 1d cloud direction + 4h TK cross entry
+33. Flat Kijun mean-reversion (1h)
 
 ## NEVER STOP
 

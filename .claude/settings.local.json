@@ -39,7 +39,15 @@
       "Bash(echo \"exit: $?\")",
       "Bash(for i:*)",
       "Bash(do time:*)",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(curl -s --max-time 5 http://127.0.0.1:8888)",
+      "Bash(curl -v --max-time 10 http://127.0.0.1:8888)",
+      "Bash(kill 1926746 4030288)",
+      "Bash(pkill -f \"agent_research.py\")",
+      "Bash(pkill -f \"dashboard.py\")",
+      "Bash(xargs -r kill)",
+      "Bash(.venv/bin/python3 -c \"from results_db import query_stats; s=query_stats\\(\\); print\\(s\\)\")",
+      "Bash(/home/trading-llm-auto-research/watchdog.sh:*)"
     ]
   }
 }
