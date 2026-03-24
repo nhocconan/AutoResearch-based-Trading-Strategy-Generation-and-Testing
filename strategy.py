@@ -1,34 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #189: 15m Primary + 1h/1d HTF — Session RSI Mean Reversion with Trend Filter
+Experiment #190: 1h Primary + 4h/1d HTF — Mean Reversion with Trend Filter
 
-Hypothesis: 15m timeframe can capture intraday mean-reversion opportunities when filtered by 
-higher timeframe trend direction. Previous 15m attempts failed with 0 trades because entry 
-conditions were too strict. This version LOOSENS entries while keeping HTF filters:
+Hypothesis: 1h timeframe is optimal for balancing trade frequency (40-80/year) 
+with signal quality. BTC/ETH 2025+ is bear/range market — pure trend following fails.
+This strategy uses:
 
-Core Logic:
-- 1d HMA(50): Major trend bias (only long if price > 1d HMA, only short if price < 1d HMA)
-- 1h HMA(21): Intermediate trend confirmation
-- 15m RSI(7): Entry timing (oversold <25 for long, overbought >75 for short)
-- Session filter: Prefer 00-12 UTC (London/NY overlap = higher volume, cleaner moves)
-- ATR(14) stoploss: 2.5x trailing stop
+1. 4h HMA(21) for major trend bias (only trade long if 4h bullish, short if bearish)
+2. 1h RSI(7) for fast mean reversion entries (RSI<30 long, RSI>70 short)
+3. Z-score(20) for extreme confirmation (|z|>1.5)
+4. Session filter: 08-20 UTC (high liquidity hours)
+5. 1d HMA(50) as meta-filter (avoid counter-trend trades vs daily)
 
-Why this might work on 15m:
-- RSI(7) is faster than RSI(14), catches more intraday reversals
-- HTF filters prevent trading against major trend
-- Session filter reduces noise during low-volume periods
-- Position size 0.20 (conservative for 15m frequency)
+Key insight: In bear/range markets, mean reversion WITH trend filter outperforms 
+pure trend following. RSI(7) is faster than RSI(14) for 1h entries.
 
-Target: Sharpe>0.4 (beat current best 0.399), DD>-40%, trades>=30 train, trades>=3 test
-Position sizing: 0.20 base (smaller for 15m to reduce fee impact)
-Trade frequency target: 50-100 trades/year (use session + HTF filters to limit)
+Position sizing: 0.25 base, 0.30 strong (when all 4 filters align)
+Stoploss: 2.5x ATR trailing
+Target: Sharpe>0.40 (beat #183), DD>-30%, trades>=40 train, trades>=5 test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_session_rsi_hma_1h1d_v2"
-timeframe = "15m"
+name = "mtf_1h_mr_rsi_zscore_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -88,6 +84,18 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_zscore(close, period=20):
+    """Z-score of price vs rolling mean"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    rolling_mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    rolling_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    zscore = (close - rolling_mean) / (rolling_std + 1e-10)
+    return zscore
+
 def calculate_sma(close, period):
     """Simple Moving Average"""
     n = len(close)
@@ -105,25 +113,27 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1h = get_htf_data(prices, '1h')
     
-    # Calculate and align HTF HMA for trend bias
+    # Calculate and align 4h HMA for intermediate trend
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
+    # Calculate and align 1d HMA for major trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_1h_raw = calculate_hma(df_1h['close'].values, period=21)
-    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
-    
-    # Calculate primary (15m) indicators
+    # Calculate primary (1h) indicators
     rsi_7 = calculate_rsi(close, period=7)
     rsi_14 = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    zscore = calculate_zscore(close, period=20)
     sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20  # 20% position size (conservative for 15m)
-    SIZE_STRONG = 0.25  # 25% for strong signals
+    SIZE_BASE = 0.25  # 25% base position size
+    SIZE_STRONG = 0.30  # 30% for strong signals
     
     # Position tracking for stoploss
     in_position = False
@@ -141,68 +151,80 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1h_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(sma_200[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(zscore[i]) or np.isnan(sma_200[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (00-12 UTC preferred) ===
-        # Extract hour from open_time (milliseconds timestamp)
-        hour_utc = (open_time[i] // 3600000) % 24
-        is_preferred_session = 0 <= hour_utc <= 12  # London/NY overlap
+        # === EXTRACT HOUR FROM open_time (UTC) ===
+        # open_time is in milliseconds since epoch
+        hour_utc = (open_time[i] // (1000 * 60 * 60)) % 24
         
-        # === HTF BIAS (1d HMA) ===
+        # === SESSION FILTER (08-20 UTC = high liquidity) ===
+        in_session = 8 <= hour_utc <= 20
+        
+        # === HTF BIAS (4h HMA) ===
+        htf_4h_bull = close[i] > hma_4h_aligned[i]
+        htf_4h_bear = close[i] < hma_4h_aligned[i]
+        
+        # === HTF BIAS (1d HMA) — meta filter ===
         htf_1d_bull = close[i] > hma_1d_aligned[i]
         htf_1d_bear = close[i] < hma_1d_aligned[i]
-        
-        # === HTF BIAS (1h HMA) ===
-        htf_1h_bull = close[i] > hma_1h_aligned[i]
-        htf_1h_bear = close[i] < hma_1h_aligned[i]
         
         # === SMA200 FILTER ===
         above_sma200 = close[i] > sma_200[i]
         below_sma200 = close[i] < sma_200[i]
         
-        # === RSI EXTREMES (faster RSI(7) for 15m) ===
-        rsi_oversold = rsi_7[i] < 30.0  # Loose threshold for more trades
+        # === RSI EXTREMES (fast RSI(7)) ===
+        rsi_oversold = rsi_7[i] < 30.0
         rsi_overbought = rsi_7[i] > 70.0
         
-        rsi_extreme_oversold = rsi_7[i] < 20.0  # Strong signal
-        rsi_extreme_overbought = rsi_7[i] > 80.0
+        # === Z-SCORE EXTREMES ===
+        zscore_extreme_low = zscore[i] < -1.5
+        zscore_extreme_high = zscore[i] > 1.5
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
+        confluence_count = 0
         
-        # LONG ENTRY: RSI oversold + HTF bullish bias
-        if rsi_oversold and htf_1d_bull and above_sma200:
-            # Strong signal: extreme RSI + both HTF bullish + preferred session
-            if rsi_extreme_oversold and htf_1h_bull and is_preferred_session:
+        # LONG SETUP: Need 4h bullish + RSI oversold + Z-score low
+        long_conditions = [
+            htf_4h_bull,           # 4h trend up
+            rsi_oversold,          # RSI(7) < 30
+            zscore_extreme_low,    # Z-score < -1.5
+            in_session,            # During liquid hours
+        ]
+        confluence_count = sum(long_conditions)
+        
+        if confluence_count >= 3:
+            # Strong signal if 4h AND 1d align
+            if htf_4h_bull and htf_1d_bull:
                 desired_signal = SIZE_STRONG
-            # Base signal: RSI oversold + 1d bullish (looser for more trades)
-            elif htf_1d_bull:
+            elif htf_4h_bull:
                 desired_signal = SIZE_BASE
         
-        # SHORT ENTRY: RSI overbought + HTF bearish bias
-        elif rsi_overbought and htf_1d_bear and below_sma200:
-            # Strong signal: extreme RSI + both HTF bearish + preferred session
-            if rsi_extreme_overbought and htf_1h_bear and is_preferred_session:
+        # SHORT SETUP: Need 4h bearish + RSI overbought + Z-score high
+        short_conditions = [
+            htf_4h_bear,           # 4h trend down
+            rsi_overbought,        # RSI(7) > 70
+            zscore_extreme_high,   # Z-score > 1.5
+            in_session,            # During liquid hours
+        ]
+        confluence_count = sum(short_conditions)
+        
+        if confluence_count >= 3:
+            # Strong signal if 4h AND 1d align
+            if htf_4h_bear and htf_1d_bear:
                 desired_signal = -SIZE_STRONG
-            # Base signal: RSI overbought + 1d bearish (looser for more trades)
-            elif htf_1d_bear:
+            elif htf_4h_bear:
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
