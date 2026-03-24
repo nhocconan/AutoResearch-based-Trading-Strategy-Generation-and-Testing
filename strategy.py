@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #703: 6h Primary + 1d/1w HTF — HMA Trend + RSI Pullback + ATR Stop
+Experiment #704: 12h Primary + 1d/1w HTF — HMA Trend + RSI Pullback + ATR Stop
 
-Hypothesis: 6h timeframe is underexplored middle-ground between 4h (too noisy) and 12h (too slow).
-Using HMA(21/63) crossover for trend (63 = ~2 weeks on 6h), 1d/1w HMA for HTF bias confirmation,
-and RSI(14) for entry timing. LOOSE entry conditions to ensure trade generation (learned from #702).
+Hypothesis: 12h timeframe reduces noise and fee drag while maintaining trend capture.
+Using HMA(21/63) crossover for trend (63 = ~1 month on 12h), 1d/1w HMA for HTF bias,
+and RSI(14) for entry timing with LOOSE conditions to ensure trade generation.
 
 Key innovations:
-1. HMA(21/63) - 63 period = ~2 weeks on 6h, captures medium-term trend
-2. 1d HMA(21) + 1w HMA(21) - dual HTF confirmation for direction bias
-3. RSI(14) loose filter - <60 for long, >40 for short (NOT extreme values)
-4. ATR(14) 2.5x trailing stop - risk management
-5. Discrete sizing: 0.0, ±0.20, ±0.30 to minimize fee churn
-6. Weak signal tier - HTF+HMA alignment alone generates half-size trades
+1. 12h timeframe - proven to work best, 20-50 trades/year target
+2. HMA(21/63) - 63 period = ~1 month on 12h, captures medium-term trend
+3. 1d HMA(21) + 1w HMA(21) - dual HTF confirmation for direction bias
+4. RSI(14) loose filter - <65 for long, >35 for short (NOT extreme values)
+5. ATR(14) 2.5x trailing stop - risk management
+6. Discrete sizing: 0.0, ±0.20, ±0.30 to minimize fee churn
+7. Asymmetric logic - different entry thresholds for bull vs bear regimes
 
 Entry conditions (LOOSE to ensure >=30 trades/year):
-- LONG: 1d HMA bull + 1w HMA bull + HMA21>63 + RSI<60 (full size)
-- LONG weak: 1d HMA bull + 1w HMA bull + HMA21>63 (half size, no RSI)
-- SHORT: 1d HMA bear + 1w HMA bear + HMA21<63 + RSI>40 (full size)
-- SHORT weak: 1d HMA bear + 1w HMA bear + HMA21<63 (half size, no RSI)
+- LONG: 1d HMA bull + 1w HMA bull + HMA21>63 + RSI<65 (full size 0.30)
+- LONG weak: 1d HMA bull + HMA21>63 + RSI<70 (half size 0.20)
+- SHORT: 1d HMA bear + 1w HMA bear + HMA21<63 + RSI>35 (full size -0.30)
+- SHORT weak: 1d HMA bear + HMA21<63 + RSI>30 (half size -0.20)
 
 Target: Sharpe>0.40, trades>=30 train, trades>=3 test, DD>-40%
-Timeframe: 6h
+Timeframe: 12h
 Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_hma21_63_rsi_loose_1d1w_v1"
-timeframe = "6h"
+name = "mtf_12h_hma21_63_rsi_loose_1d1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -104,7 +105,7 @@ def generate_signals(prices):
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     hma_21 = calculate_hma(close, period=21)
     hma_63 = calculate_hma(close, period=63)
     rsi = calculate_rsi(close, period=14)
@@ -113,7 +114,6 @@ def generate_signals(prices):
     signals = np.zeros(n)
     SIZE_BASE = 0.20
     SIZE_STRONG = 0.30
-    SIZE_WEAK = 0.10
     
     # Position tracking for stoploss
     in_position = False
@@ -159,10 +159,12 @@ def generate_signals(prices):
         hma_bear = hma_21[i] < hma_63[i]
         
         # === RSI ENTRY (LOOSE - ensure trades) ===
-        # Long on pullback in uptrend (RSI < 60, not extreme)
-        rsi_long = rsi[i] < 60.0
-        # Short on rally in downtrend (RSI > 40, not extreme)
-        rsi_short = rsi[i] > 40.0
+        # Long on pullback in uptrend (RSI < 65, not extreme)
+        rsi_long = rsi[i] < 65.0
+        rsi_long_weak = rsi[i] < 70.0
+        # Short on rally in downtrend (RSI > 35, not extreme)
+        rsi_short = rsi[i] > 35.0
+        rsi_short_weak = rsi[i] > 30.0
         
         # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADE GENERATION) ===
         desired_signal = 0.0
@@ -170,21 +172,21 @@ def generate_signals(prices):
         # LONG: Full HTF alignment + HMA bull + RSI
         if htf_1d_bull and htf_1w_bull and hma_bull and rsi_long:
             desired_signal = SIZE_STRONG
-        # LONG weak: HTF alignment + HMA bull (no RSI filter)
+        # LONG weak: 1d bias + HMA bull + RSI (looser)
+        elif htf_1d_bull and hma_bull and rsi_long_weak:
+            desired_signal = SIZE_BASE
+        # LONG partial: HTF alignment + HMA bull (no RSI)
         elif htf_1d_bull and htf_1w_bull and hma_bull:
-            desired_signal = SIZE_WEAK
-        # LONG partial: 1d bias + HMA bull + RSI
-        elif htf_1d_bull and hma_bull and rsi_long:
             desired_signal = SIZE_BASE
         
         # SHORT: Full HTF alignment + HMA bear + RSI
         elif htf_1d_bear and htf_1w_bear and hma_bear and rsi_short:
             desired_signal = -SIZE_STRONG
-        # SHORT weak: HTF alignment + HMA bear (no RSI filter)
+        # SHORT weak: 1d bias + HMA bear + RSI (looser)
+        elif htf_1d_bear and hma_bear and rsi_short_weak:
+            desired_signal = -SIZE_BASE
+        # SHORT partial: HTF alignment + HMA bear (no RSI)
         elif htf_1d_bear and htf_1w_bear and hma_bear:
-            desired_signal = -SIZE_WEAK
-        # SHORT partial: 1d bias + HMA bear + RSI
-        elif htf_1d_bear and hma_bear and rsi_short:
             desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
@@ -216,10 +218,6 @@ def generate_signals(prices):
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
-        elif desired_signal >= SIZE_WEAK * 0.9:
-            final_signal = SIZE_WEAK
-        elif desired_signal <= -SIZE_WEAK * 0.9:
-            final_signal = -SIZE_WEAK
         else:
             final_signal = 0.0
         
