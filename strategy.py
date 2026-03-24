@@ -1,32 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #269: 15m Primary + 1h/1d HTF — Trend-Filtered Mean Reversion v1
+Experiment #271: 6h Primary + 1w/1d HTF — Market Structure + MFI Volume Trend v1
 
-Hypothesis: 15m timeframe with strict HTF trend filter can capture intraday mean-reversion
-while avoiding counter-trend trades that destroy returns. Key design:
+Hypothesis: 6h market structure (HH/HL vs LH/LL patterns) combined with volume-weighted 
+momentum (MFI) and multi-timeframe trend filters can capture sustained trends while 
+avoiding false breakouts. Market structure is lag-free compared to oscillators.
 
-1. HTF DIRECTION LOCK: Only trade long when 1d HMA(50) bullish, short when bearish
-2. INTERMEDIATE CONFIRMATION: 1h HMA(21) must agree with 1d direction
-3. 15m ENTRY: RSI(7) extremes ( <25 long, >75 short) + price vs EMA(21) pullback
-4. SESSION FILTER: Only trade 00-12 UTC (London+NY overlap = higher volume)
-5. VOLATILITY FILTER: ATR(14) > median ATR (avoid dead/choppy markets)
-6. STOPLOSS: 2.0x ATR trailing stop
+Key innovations vs previous 6h attempts:
+1. MARKET STRUCTURE: Pure price action - detect swing highs/lows (5-bar left/right)
+   - HH/HL sequence = bullish structure → only long entries
+   - LH/LL sequence = bearish structure → only short entries
+   - No indicator lag, responds immediately to price changes
 
-Why this might work on 15m:
-- HTF filters reduce trade frequency to 40-100/year (critical for fee drag)
-- Mean reversion on 15m works better than trend-following (less whipsaw)
-- Session filter avoids low-volume Asian session chop
-- Smaller position size (0.15-0.25) accounts for higher frequency
+2. MFI (Money Flow Index): Volume-weighted RSI equivalent
+   - MFI > 50 = buying pressure, MFI < 50 = selling pressure
+   - More reliable than RSI alone because it includes volume
 
-Position sizing: 0.15 base, 0.25 strong (discrete levels to minimize churn)
-Target: Sharpe>0.40, DD>-40%, trades>=30 train, trades>=3 test
+3. HTF BIAS: 1w HMA(21) for major trend, 1d HMA(50) for intermediate
+   - Only long if price > 1w HMA (major bullish bias)
+   - Only short if price < 1w HMA (major bearish bias)
+   - 1d HMA confirms intermediate direction
+
+4. VOLUME CONFIRMATION: Volume > SMA(volume, 20) on entry bars
+   - Ensures institutional participation in moves
+
+5. ATR STOPLOSS: 2.5x trailing stop to protect capital
+
+Target: 30-60 trades/year on 6h, Sharpe > 0.40 (beat current 0.399)
+Position sizing: 0.25 base, 0.30 strong signals (discrete levels)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_trend_filtered_mr_rsi_session_1h1d_v1"
-timeframe = "15m"
+name = "mtf_6h_market_structure_mfi_vol_1w1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -46,32 +54,6 @@ def calculate_hma(close, period):
     
     return hma
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    gain = np.concatenate([[0.0], gain])
-    loss = np.concatenate([[0.0], loss])
-    
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rsi = np.zeros(n)
-    rsi[:] = np.nan
-    for i in range(period, n):
-        if avg_loss[i] < 1e-10:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-    
-    return rsi
-
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
@@ -86,67 +68,162 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Exponential Moving Average"""
+def calculate_mfi(high, low, close, volume, period=14):
+    """
+    Money Flow Index - volume-weighted RSI
+    Formula: 100 - 100 / (1 + Money Flow Ratio)
+    Money Flow Ratio = (Positive Money Flow over n) / (Negative Money Flow over n)
+    Typical Price = (High + Low + Close) / 3
+    Raw Money Flow = Typical Price * Volume
+    """
     n = len(close)
-    if n < period:
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
+    # Typical Price
+    typical_price = (high + low + close) / 3.0
+    
+    # Raw Money Flow
+    raw_money_flow = typical_price * volume
+    
+    # Positive and Negative Money Flow
+    positive_flow = np.zeros(n)
+    negative_flow = np.zeros(n)
+    
+    for i in range(1, n):
+        if typical_price[i] > typical_price[i-1]:
+            positive_flow[i] = raw_money_flow[i]
+            negative_flow[i] = 0.0
+        elif typical_price[i] < typical_price[i-1]:
+            positive_flow[i] = 0.0
+            negative_flow[i] = raw_money_flow[i]
+        else:
+            positive_flow[i] = 0.0
+            negative_flow[i] = 0.0
+    
+    # Money Flow Ratio
+    mfi = np.zeros(n)
+    mfi[:] = np.nan
+    
+    for i in range(period, n):
+        pos_sum = np.sum(positive_flow[i-period+1:i+1])
+        neg_sum = np.sum(negative_flow[i-period+1:i+1])
+        
+        if neg_sum < 1e-10:
+            mfi[i] = 100.0
+        else:
+            money_flow_ratio = pos_sum / neg_sum
+            mfi[i] = 100.0 - (100.0 / (1.0 + money_flow_ratio))
+    
+    return mfi
 
-def calculate_sma(close, period):
+def calculate_sma(values, period):
     """Simple Moving Average"""
-    n = len(close)
+    n = len(values)
     if n < period:
         return np.full(n, np.nan)
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    sma = pd.Series(values).rolling(window=period, min_periods=period).mean().values
     return sma
 
-def get_hour_from_open_time(prices):
-    """Extract UTC hour from open_time column"""
-    # open_time is in milliseconds since epoch
-    open_time_ms = prices["open_time"].values
-    hours = (open_time_ms // (1000 * 60 * 60)) % 24
-    return hours
+def detect_market_structure(high, low, close, swing_bars=5):
+    """
+    Detect market structure: HH/HL (bullish) vs LH/LL (bearish)
+    
+    Swing High: bar with higher high than swing_bars bars on each side
+    Swing Low: bar with lower low than swing_bars bars on each side
+    
+    Returns:
+    - structure: 1 = bullish (HH/HL), -1 = bearish (LH/LL), 0 = unclear
+    - last_swing_high: price of most recent swing high
+    - last_swing_low: price of most recent swing low
+    """
+    n = len(close)
+    structure = np.zeros(n)
+    swing_highs = np.full(n, np.nan)
+    swing_lows = np.full(n, np.nan)
+    
+    # Detect swing points
+    for i in range(swing_bars, n - swing_bars):
+        # Swing High
+        is_swing_high = True
+        for j in range(1, swing_bars + 1):
+            if high[i] <= high[i-j] or high[i] <= high[i+j]:
+                is_swing_high = False
+                break
+        if is_swing_high:
+            swing_highs[i] = high[i]
+        
+        # Swing Low
+        is_swing_low = True
+        for j in range(1, swing_bars + 1):
+            if low[i] >= low[i-j] or low[i] >= low[i+j]:
+                is_swing_low = False
+                break
+        if is_swing_low:
+            swing_lows[i] = low[i]
+    
+    # Track structure evolution
+    last_sh = np.nan
+    last_sl = np.nan
+    prev_sh = np.nan
+    prev_sl = np.nan
+    
+    for i in range(swing_bars * 2, n):
+        # Update swing points
+        if not np.isnan(swing_highs[i]):
+            prev_sh = last_sh
+            last_sh = swing_highs[i]
+        
+        if not np.isnan(swing_lows[i]):
+            prev_sl = last_sl
+            last_sl = swing_lows[i]
+        
+        # Determine structure
+        if not np.isnan(last_sh) and not np.isnan(prev_sh) and not np.isnan(last_sl) and not np.isnan(prev_sl):
+            if last_sh > prev_sh and last_sl > prev_sl:
+                structure[i] = 1  # Bullish HH/HL
+            elif last_sh < prev_sh and last_sl < prev_sl:
+                structure[i] = -1  # Bearish LH/LL
+            else:
+                # Keep previous structure if unclear
+                structure[i] = structure[i-1] if i > 0 else 0
+        else:
+            structure[i] = structure[i-1] if i > 0 else 0
+    
+    return structure, swing_highs, swing_lows
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # Extract UTC hour for session filter
-    hours = get_hour_from_open_time(prices)
-    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_1h_raw = calculate_hma(df_1h['close'].values, period=21)
-    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (15m) indicators
-    ema_15m = calculate_ema(close, period=21)
+    # Calculate primary (6h) indicators
     atr = calculate_atr(high, low, close, period=14)
-    rsi = calculate_rsi(close, period=7)  # Faster RSI for 15m
-    sma_200 = calculate_sma(close, 200)
+    mfi = calculate_mfi(high, low, close, volume, period=14)
+    vol_sma = calculate_sma(volume, 20)
     
-    # Calculate median ATR for volatility filter (use last 500 bars)
-    atr_median = np.nanmedian(atr[-500:]) if n >= 500 else np.nanmedian(atr[100:])
-    if np.isnan(atr_median) or atr_median < 1e-10:
-        atr_median = np.nanpercentile(atr[~np.isnan(atr)], 50) if np.any(~np.isnan(atr)) else 1.0
+    # Market structure detection
+    structure, swing_highs, swing_lows = detect_market_structure(high, low, close, swing_bars=5)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.25
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
-    # Position tracking for stoploss
+    # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
@@ -154,7 +231,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(300, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -162,85 +239,82 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(ema_15m[i]) or np.isnan(rsi[i]):
+        if np.isnan(mfi[i]) or np.isnan(vol_sma[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(sma_200[i]):
+        if np.isnan(structure[i]) or structure[i] == 0:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === SESSION FILTER (00-12 UTC = London+NY overlap) ===
-        in_session = hours[i] < 12  # 00:00 to 11:59 UTC
+        # === HTF BIAS (1w Major Trend) ===
+        htf_1w_bull = close[i] > hma_1w_aligned[i]
+        htf_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # === VOLATILITY FILTER (avoid dead markets) ===
-        vol_ok = atr[i] > atr_median * 0.7  # At least 70% of median ATR
-        
-        # === HTF TREND BIAS ===
-        # 1d HMA for major trend direction
+        # === 1d Intermediate Trend ===
         htf_1d_bull = close[i] > hma_1d_aligned[i]
         htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # 1h HMA for intermediate confirmation
-        htf_1h_bull = close[i] > hma_1h_aligned[i]
-        htf_1h_bear = close[i] < hma_1h_aligned[i]
+        # === MARKET STRUCTURE ===
+        bullish_structure = structure[i] == 1  # HH/HL
+        bearish_structure = structure[i] == -1  # LH/LL
         
-        # === 15m EMA TREND ===
-        ema_bull = close[i] > ema_15m[i]
-        ema_bear = close[i] < ema_15m[i]
+        # === MFI MOMENTUM ===
+        mfi_bull = mfi[i] > 50.0
+        mfi_bear = mfi[i] < 50.0
+        mfi_strong_bull = mfi[i] > 60.0
+        mfi_strong_bear = mfi[i] < 40.0
         
-        # === SMA200 FILTER (major trend) ===
-        above_sma200 = close[i] > sma_200[i]
-        below_sma200 = close[i] < sma_200[i]
-        
-        # === RSI EXTREMES (mean reversion entries) ===
-        rsi_oversold = rsi[i] < 25.0  # Long entry
-        rsi_overbought = rsi[i] > 75.0  # Short entry
+        # === VOLUME CONFIRMATION ===
+        volume_confirmed = volume[i] > vol_sma[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish + 1h bullish + RSI oversold + in session + vol ok
-        # Entry on pullback (price < EMA) or bounce (price > EMA but RSI extreme)
-        if htf_1d_bull and htf_1h_bull and above_sma200:
-            if rsi_oversold and in_session and vol_ok:
-                # Strong signal if price also below EMA (pullback)
-                if ema_bear:
+        # LONG: Bullish structure + MFI bull + 1w HMA bull + volume confirmation
+        if bullish_structure and htf_1w_bull and mfi_bull:
+            if volume_confirmed and htf_1d_bull:
+                # Strong signal: all conditions aligned
+                if mfi_strong_bull:
                     desired_signal = SIZE_STRONG
                 else:
                     desired_signal = SIZE_BASE
+            elif mfi_strong_bull:
+                # Medium signal: strong MFI but no volume spike
+                desired_signal = SIZE_BASE
         
-        # SHORT: 1d bearish + 1h bearish + RSI overbought + in session + vol ok
-        elif htf_1d_bear and htf_1h_bear and below_sma200:
-            if rsi_overbought and in_session and vol_ok:
-                # Strong signal if price also above EMA (pullback)
-                if ema_bull:
+        # SHORT: Bearish structure + MFI bear + 1w HMA bear + volume confirmation
+        elif bearish_structure and htf_1w_bear and mfi_bear:
+            if volume_confirmed and htf_1d_bear:
+                if mfi_strong_bear:
                     desired_signal = -SIZE_STRONG
                 else:
                     desired_signal = -SIZE_BASE
+            elif mfi_strong_bear:
+                desired_signal = -SIZE_BASE
         
-        # === STOPLOSS CHECK (Trailing ATR 2.0x) ===
+        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            stop_price = highest_since_entry - 2.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            stop_price = lowest_since_entry + 2.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if high[i] > stop_price:
                 stoploss_triggered = True
         
