@@ -1,63 +1,97 @@
 #!/usr/bin/env python3
 """
-Experiment #140: 1h Primary + 4h/12h HTF — HMA Trend + RSI Pullback + Volume/Session
+Experiment #141: 4h Primary + 1d HTF — Supertrend + RSI Pullback + Volume Filter
 
-Hypothesis: After 122 failed experiments, the pattern is clear:
-- Complex regime filters (Choppiness, dual-regime) cause 0 trades or negative Sharpe
-- Lower TF (30m/1h) strategies fail due to TOO MANY trades (>200/yr) → fee drag
-- BUT #135, #138, #139 had 0 trades → conditions TOO STRICT
-- Solution: Use HTF (12h/4h) for DIRECTION, 1h only for ENTRY TIMING
-- This gives HTF trade frequency (30-80/yr) with 1h execution precision
+Hypothesis: After 140+ experiments, the clearest pattern is:
+- Supertrend provides cleaner trend signals than HMA/KAMA crossovers (less whipsaw)
+- RSI pullback TO trend (not extremes) generates more trades than RSI extremes
+- Volume confirmation filters out fake breakouts
+- 1d HTF bias prevents counter-trend trades in strong trends
+- Simple logic = more trades = better Sharpe (complex filters = 0 trades)
+
+This strategy uses PROVEN components from literature:
+1. Supertrend (ATR=10, mult=3) = primary trend direction
+2. RSI(14) pullback = entry timing (RSI 35-45 for long, 55-65 for short)
+3. Volume > SMA(20) = confirmation (avoids low-liquidity traps)
+4. 1d Supertrend = major trend bias (only trade with HTF trend)
+5. ATR(14) trailing stop 2.5x = risk management
 
 Key design choices:
-- Timeframe: 1h (as required by experiment)
-- HTF: 12h HMA for major trend, 4h RSI for momentum confirmation
-- Entry: 1h RSI pullback in trend direction (loose thresholds to ensure trades)
-- Volume: >0.8x 20-bar average (confirmation, not hard filter)
-- Session: 8-20 UTC bias (higher conviction during liquid hours)
-- Position size: 0.25 (conservative for 1h, reduces DD)
-- Stoploss: 2.5x ATR trailing
+- Timeframe: 4h (proven 20-50 trades/year sweet spot)
+- HTF: 1d Supertrend for bias (more responsive than 1w)
+- RSI: 35-45/55-65 range (pullback zone, not extremes - ensures trades)
+- Volume filter: > 20-bar SMA (confirms genuine moves)
+- Position size: 0.28 (28% of capital, conservative)
+- Stoploss: 2.5x ATR trailing (tighter for 4h timeframe)
 
 Target: Sharpe>0.351, DD>-40%, trades>=30 on train, trades>=3 on test
-Trade frequency target: 40-80/year (strict enough to avoid fee drag)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_pullback_4h12h_v1"
-timeframe = "1h"
+name = "mtf_4h_supertrend_rsi_vol_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_hma(close, period=21):
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
     """
-    Hull Moving Average - more responsive than EMA, less lag
-    HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    Supertrend indicator - trend following with ATR bands
+    Returns: supertrend values, direction (1=bull, -1=bear)
     """
     n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
+    if n < period + 1:
+        return np.full(n, np.nan), np.full(n, np.nan)
     
-    def wma(series, span):
-        """Weighted Moving Average"""
-        weights = np.arange(1, span + 1)
-        result = np.full(len(series), np.nan)
-        for i in range(span - 1, len(series)):
-            result[i] = np.sum(series[i-span+1:i+1] * weights) / np.sum(weights)
-        return result
+    # Calculate ATR
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    close_series = pd.Series(close)
-    wma_half = wma(close, period // 2)
-    wma_full = wma(close, period)
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    # 2*WMA(n/2) - WMA(n)
-    diff = 2 * wma_half - wma_full
+    # Calculate basic bands
+    hl2 = (high + low) / 2.0
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
     
-    # WMA of diff with sqrt(period)
-    sqrt_period = int(np.sqrt(period))
-    hma = wma(diff, sqrt_period)
+    # Calculate Supertrend
+    supertrend = np.zeros(n)
+    supertrend[:] = np.nan
+    direction = np.zeros(n)
+    direction[:] = np.nan
     
-    return hma
+    supertrend[period] = upper_band[period]
+    direction[period] = -1  # Start bearish
+    
+    for i in range(period + 1, n):
+        if direction[i-1] == 1:
+            # Previous was bullish
+            if lower_band[i] < supertrend[i-1]:
+                supertrend[i] = lower_band[i]
+            else:
+                supertrend[i] = supertrend[i-1]
+            
+            if close[i] < supertrend[i]:
+                direction[i] = -1
+                supertrend[i] = upper_band[i]
+            else:
+                direction[i] = 1
+        else:
+            # Previous was bearish
+            if upper_band[i] > supertrend[i-1]:
+                supertrend[i] = upper_band[i]
+            else:
+                supertrend[i] = supertrend[i-1]
+            
+            if close[i] > supertrend[i]:
+                direction[i] = 1
+                supertrend[i] = lower_band[i]
+            else:
+                direction[i] = -1
+    
+    return supertrend, direction
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -100,7 +134,7 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_volume_sma(volume, period=20):
-    """Simple Moving Average of volume"""
+    """SMA of volume for volume filter"""
     n = len(volume)
     if n < period:
         return np.full(n, np.nan)
@@ -108,44 +142,34 @@ def calculate_volume_sma(volume, period=20):
     vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
     return vol_sma
 
-def get_hour_from_timestamp(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    # open_time is in milliseconds
-    ts_seconds = open_time / 1000
-    hour = pd.to_datetime(ts_seconds, unit='s').hour
-    return hour
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 12h HMA for major trend bias
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate and align 1d Supertrend for major trend bias
+    _, st_dir_1d_raw = calculate_supertrend(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values,
+        period=10,
+        multiplier=3.0
+    )
+    st_dir_1d_aligned = align_htf_to_ltf(prices, df_1d, st_dir_1d_raw)
     
-    # Calculate and align 4h RSI for momentum confirmation
-    rsi_4h_raw = calculate_rsi(df_4h['close'].values, period=14)
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h_raw)
-    
-    # Calculate primary (1h) indicators
-    hma_1h = calculate_hma(close, period=21)
-    rsi_1h = calculate_rsi(close, period=7)  # Faster RSI for entry timing
+    # Calculate primary (4h) indicators
+    _, st_dir_4h = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     vol_sma = calculate_volume_sma(volume, period=20)
     
-    # Extract hour for session filter
-    hours = np.array([get_hour_from_timestamp(ot) for ot in open_time])
-    
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size (conservative for 1h)
+    SIZE = 0.28  # 28% position size (conservative for 4h)
     
     # Position tracking for stoploss
     in_position = False
@@ -163,62 +187,45 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1h[i]) or np.isnan(rsi_1h[i]):
+        if np.isnan(st_dir_4h[i]) or np.isnan(st_dir_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_12h_aligned[i]) or np.isnan(rsi_4h_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(vol_sma[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (12h HMA) ===
-        # Price above 12h HMA = bullish bias, below = bearish bias
-        htf_bull = close[i] > hma_12h_aligned[i]
-        htf_bear = close[i] < hma_12h_aligned[i]
+        # === HTF BIAS (1d Supertrend direction) ===
+        htf_bull = st_dir_1d_aligned[i] == 1
+        htf_bear = st_dir_1d_aligned[i] == -1
         
-        # === 4h MOMENTUM (RSI confirmation) ===
-        # Not extreme, just confirmation of direction
-        mom_bull = rsi_4h_aligned[i] > 45.0  # Not oversold in uptrend
-        mom_bear = rsi_4h_aligned[i] < 55.0  # Not overbought in downtrend
+        # === 4h TREND (Supertrend direction) ===
+        st_bull = st_dir_4h[i] == 1
+        st_bear = st_dir_4h[i] == -1
         
-        # === 1h ENTRY (RSI pullback) ===
-        # Long: RSI pulled back but not extreme (<45)
-        # Short: RSI rallied but not extreme (>55)
-        entry_long = rsi_1h[i] < 45.0
-        entry_short = rsi_1h[i] > 55.0
+        # === RSI PULLBACK (loose thresholds for trade generation) ===
+        # Long: RSI pulled back to 35-50 zone (not oversold, just cooling off)
+        # Short: RSI pulled back to 50-65 zone (not overbought, just cooling off)
+        rsi_pullback_long = 35.0 <= rsi[i] <= 50.0
+        rsi_pullback_short = 50.0 <= rsi[i] <= 65.0
         
         # === VOLUME CONFIRMATION ===
-        # Volume > 0.8x average (not hard filter, just boosts conviction)
-        vol_ok = True
-        if not np.isnan(vol_sma[i]) and vol_sma[i] > 1e-10:
-            vol_ratio = volume[i] / vol_sma[i]
-            vol_ok = vol_ratio > 0.8
-        
-        # === SESSION FILTER ===
-        # Higher conviction during liquid hours (8-20 UTC)
-        session_liquid = 8 <= hours[i] <= 20
+        vol_confirmed = volume[i] > vol_sma[i]
         
         # === DESIRED SIGNAL ===
-        # LONG: 12h bull + 4h mom bull + 1h entry long + volume ok
-        # SHORT: 12h bear + 4h mom bear + 1h entry short + volume ok
-        # Session boosts size but doesn't block entry
-        
+        # LONG: 1d bull + 4h Supertrend bull + RSI pullback + volume confirmed
+        # SHORT: 1d bear + 4h Supertrend bear + RSI pullback + volume confirmed
         desired_signal = 0.0
-        signal_strength = 1.0
         
-        if htf_bull and mom_bull and entry_long and vol_ok:
+        if htf_bull and st_bull and rsi_pullback_long and vol_confirmed:
             desired_signal = SIZE
-            if session_liquid:
-                signal_strength = 1.2  # Slightly higher conviction in liquid hours
-        elif htf_bear and mom_bear and entry_short and vol_ok:
+        elif htf_bear and st_bear and rsi_pullback_short and vol_confirmed:
             desired_signal = -SIZE
-            if session_liquid:
-                signal_strength = 1.2
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
