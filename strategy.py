@@ -1,118 +1,133 @@
 #!/usr/bin/env python3
 """
-Experiment #657: 15m Primary + 4h/12h HTF — Dual Regime Adaptive Strategy
+Experiment #658: 4h Primary + 1d HTF — KAMA Trend + RSI Pullback + Choppiness Filter
 
-Hypothesis: 15m timeframe with REGIME-ADAPTIVE logic should work in both trending (2021)
-and ranging/choppy (2022-2024) markets. Previous 15m strategies failed with 0 trades because
-entry conditions were too strict. This uses Choppiness Index to DETECT regime, then applies
-different logic:
-
-1. RANGE REGIME (CHOP > 61.8): Mean reversion at Bollinger Bands + RSI extremes
-   - Long: price < BB_lower + RSI(7) < 30 + 4h HMA bullish bias
-   - Short: price > BB_upper + RSI(7) > 70 + 4h HMA bearish bias
-   - This generates trades in 2022-2024 choppy period
-
-2. TREND REGIME (CHOP < 38.2): Trend following with HMA + Donchian breakout
-   - Long: price > 15m HMA + 4h HMA bullish + Donchian(20) breakout
-   - Short: price < 15m HMA + 4h HMA bearish + Donchian(20) breakdown
-   - This captures 2021 bull run and any 2025+ trends
-
-3. TRANSITION (38.2 <= CHOP <= 61.8): Reduced size, wait for confirmation
+Hypothesis: Instead of requiring Donchian breakouts (rare), use RSI pullback entries 
+within the trend direction. This generates more consistent trades while maintaining 
+quality. KAMA adapts to market efficiency, 1d HMA provides bias, Choppiness reduces 
+size in ranges.
 
 Key innovations:
-- Regime detection adapts to market conditions (proven in academic literature)
-- LOOSE entry thresholds to ensure >=50 trades/year on 15m
-- 4h HMA for direction filter (HTF bias)
-- 12h Choppiness for regime confirmation (avoid false signals)
-- Position size: 0.15-0.20 (smaller for 15m frequency control)
-- ATR(14) trailing stop at 2.5x for risk management
+1. 1d HMA(21) for primary trend bias - long above, short below
+2. 4h KAMA(14) adaptive trend - slopes up/down for direction confirmation
+3. RSI(14) 40-60 pullback zone - enters on dips in uptrend, rallies in downtrend
+4. Choppiness Index(14) - reduces size by 50% when CHOP > 55 (choppy market)
+5. ATR(14) 2.5x trailing stop - protects profits and limits losses
+6. Discrete sizing: 0.0, ±0.20, ±0.30 to minimize fee churn
 
-Target: Sharpe>0.40, trades>=50 train, trades>=5 test, DD>-40%
-Timeframe: 15m
-Size: 0.15-0.20 discrete
+Entry logic (LOOSE to ensure trades):
+- LONG: close > 1d HMA AND KAMA sloping up (3 bars) AND RSI 35-55 (pullback)
+- SHORT: close < 1d HMA AND KAMA sloping down (3 bars) AND RSI 45-65 (pullback)
+- CHOP > 55: reduce size by 50% but don't block entries
+
+Target: Sharpe>0.40, trades>=30 train, trades>=3 test, DD>-30%
+Timeframe: 4h
+Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_regime_adaptive_chop_bb_rsi_4h12h_v1"
-timeframe = "15m"
+name = "mtf_4h_kama_rsi_pullback_chop_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP) - measures market choppiness vs trending
-    Formula: 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
-    CHOP > 61.8 = rangebound, CHOP < 38.2 = trending
-    """
+def calculate_kama(close, period=14, fast=2, slow=30):
+    """Kaufman Adaptive Moving Average - adjusts smoothing based on market efficiency"""
     n = len(close)
-    if n < period + 1:
+    if n < period + slow:
         return np.full(n, np.nan)
     
-    # Calculate True Range
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.zeros(n)
-    chop[:] = np.nan
+    kama = np.zeros(n)
+    kama[:] = np.nan
     
     for i in range(period, n):
-        tr_sum = np.sum(tr[i-period+1:i+1])
-        hh = np.max(high[i-period+1:i+1])
-        ll = np.min(low[i-period+1:i+1])
+        price_change = abs(close[i] - close[i - period])
         
-        if hh - ll > 1e-10 and tr_sum > 1e-10:
-            chop[i] = 100.0 * np.log10(tr_sum / (hh - ll)) / np.log10(period)
+        volatility = 0.0
+        for j in range(i - period + 1, i + 1):
+            volatility += abs(close[j] - close[j - 1])
+        
+        if volatility > 1e-10:
+            er = price_change / volatility
         else:
-            chop[i] = 50.0  # neutral
+            er = 0.0
+        
+        sc = (er * (2.0 / (fast + 1) - 2.0 / (slow + 1)) + 2.0 / (slow + 1)) ** 2
+        
+        if i == period:
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
     
-    return chop
+    return kama
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
-    """Bollinger Bands - mean reversion levels"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    width = (upper - lower) / sma * 100.0  # bandwidth percentage
-    
-    return upper, lower, width
-
-def calculate_rsi(close, period=7):
-    """Relative Strength Index - momentum oscillator"""
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
     
     delta = np.diff(close)
-    delta = np.insert(delta, 0, 0.0)
-    
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
     
     avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
     avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    rs = np.zeros(n)
-    rs[:] = np.nan
+    rsi = np.zeros(n)
+    rsi[:] = np.nan
     for i in range(period, n):
-        if avg_loss[i] > 1e-10:
-            rs[i] = avg_gain[i] / avg_loss[i]
+        if avg_loss[i] < 1e-10:
+            rsi[i] = 100.0
         else:
-            rs[i] = 100.0
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
     
-    rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi
 
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - measures market chop vs trend"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    chop = np.zeros(n)
+    chop[:] = np.nan
+    
+    for i in range(period - 1, n):
+        highest_high = np.nanmax(high[i - period + 1:i + 1])
+        lowest_low = np.nanmin(low[i - period + 1:i + 1])
+        
+        if highest_high - lowest_low < 1e-10:
+            chop[i] = 100.0
+        else:
+            atr_sum = 0.0
+            for j in range(i - period + 1, i + 1):
+                if j > 0:
+                    tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+                    atr_sum += tr
+            
+            chop[i] = 100.0 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+    
+    return chop
+
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
 def calculate_hma(close, period):
-    """Hull Moving Average - smooth trend indicator"""
+    """Hull Moving Average for HTF"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
@@ -128,31 +143,6 @@ def calculate_hma(close, period):
     
     return hma
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - breakout levels"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    return upper, lower
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range - volatility measure"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -160,34 +150,22 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align HTF HMA
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    chop_12h_raw = calculate_choppiness(
-        df_12h['high'].values,
-        df_12h['low'].values,
-        df_12h['close'].values,
-        period=14
-    )
-    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h_raw)
-    
-    # Calculate 15m indicators
-    chop_15m = calculate_choppiness(high, low, close, period=14)
-    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    rsi_7 = calculate_rsi(close, period=7)
-    hma_15m = calculate_hma(close, period=21)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    # Calculate 4h indicators
+    kama = calculate_kama(close, period=14, fast=2, slow=30)
+    rsi = calculate_rsi(close, period=14)
+    chop = calculate_choppiness(high, low, close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    
-    # Position sizing for 15m (smaller due to higher frequency)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
+    SIZE_WEAK = 0.15
     
     # Position tracking for stoploss
     in_position = False
@@ -207,84 +185,64 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(chop_15m[i]) or np.isnan(bb_upper[i]) or np.isnan(rsi_7[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_15m[i]) or np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME DETECTION ===
-        # Use 12h CHOP for regime confirmation (more stable than 15m)
-        chop_12h = chop_12h_aligned[i]
-        chop_15m_val = chop_15m[i]
+        # === HTF BIAS (1d HMA) ===
+        htf_bull = close[i] > hma_1d_aligned[i]
+        htf_bear = close[i] < hma_1d_aligned[i]
         
-        # Regime: range, trend, or transition
-        if not np.isnan(chop_12h):
-            is_range = chop_12h > 61.8
-            is_trend = chop_12h < 38.2
-        else:
-            # Fallback to 15m chop if 12h not available
-            is_range = chop_15m_val > 61.8
-            is_trend = chop_15m_val < 38.2
+        # === KAMA TREND DIRECTION (3-bar slope) ===
+        kama_bull = False
+        kama_bear = False
+        if i >= 3 and not np.isnan(kama[i-3]):
+            kama_bull = kama[i] > kama[i-1] and kama[i-1] > kama[i-2] and kama[i-2] > kama[i-3]
+            kama_bear = kama[i] < kama[i-1] and kama[i-1] < kama[i-2] and kama[i-2] < kama[i-3]
         
-        # === HTF BIAS (4h HMA) ===
-        htf_bull = close[i] > hma_4h_aligned[i]
-        htf_bear = close[i] < hma_4h_aligned[i]
+        # === RSI PULLBACK ZONE ===
+        # Long: RSI 35-55 (pullback in uptrend, not oversold)
+        # Short: RSI 45-65 (pullback in downtrend, not overbought)
+        rsi_long_pullback = 35.0 <= rsi[i] <= 55.0
+        rsi_short_pullback = 45.0 <= rsi[i] <= 65.0
         
-        # === 15m TREND DIRECTION ===
-        hma_15m_bull = close[i] > hma_15m[i]
-        hma_15m_bear = close[i] < hma_15m[i]
+        # === CHOPPINESS FILTER ===
+        choppy_market = chop[i] > 55.0
         
-        # === ENTRY LOGIC - LOOSE CONDITIONS TO ENSURE TRADES ===
+        # === ENTRY LOGIC (LOOSE CONDITIONS) ===
         desired_signal = 0.0
         
-        # RANGE REGIME: Mean reversion at BB extremes
-        if is_range:
-            # Long: price at BB lower + RSI oversold + HTF bull bias (preferred)
-            if close[i] <= bb_lower[i] and rsi_7[i] < 35:
-                if htf_bull:
-                    desired_signal = SIZE_STRONG
-                else:
-                    desired_signal = SIZE_BASE  # weaker signal without HTF confirmation
-            
-            # Short: price at BB upper + RSI overbought + HTF bear bias (preferred)
-            elif close[i] >= bb_upper[i] and rsi_7[i] > 65:
-                if htf_bear:
-                    desired_signal = -SIZE_STRONG
-                else:
-                    desired_signal = -SIZE_BASE
-        
-        # TREND REGIME: Trend following with breakout
-        elif is_trend:
-            # Long: HTF bull + 15m HMA bull + price above Donchian upper
-            if htf_bull and hma_15m_bull and close[i] >= donchian_upper[i]:
-                desired_signal = SIZE_STRONG
-            # Long: HTF bull + 15m HMA bull (weaker, no breakout required)
-            elif htf_bull and hma_15m_bull and close[i] > hma_15m[i]:
+        # LONG: HTF bull + KAMA up + RSI pullback
+        if htf_bull and kama_bull and rsi_long_pullback:
+            if choppy_market:
+                desired_signal = SIZE_WEAK
+            else:
                 desired_signal = SIZE_BASE
-            
-            # Short: HTF bear + 15m HMA bear + price below Donchian lower
-            elif htf_bear and hma_15m_bear and close[i] <= donchian_lower[i]:
-                desired_signal = -SIZE_STRONG
-            # Short: HTF bear + 15m HMA bear (weaker, no breakdown required)
-            elif htf_bear and hma_15m_bear and close[i] < hma_15m[i]:
-                desired_signal = -SIZE_BASE
+        elif htf_bull and kama_bull and close[i] > kama[i]:
+            # Weaker: just HTF + KAMA alignment without RSI pullback
+            if not choppy_market:
+                desired_signal = SIZE_WEAK
         
-        # TRANSITION REGIME: Reduced size, only strong signals
-        else:
-            # Only trade if BOTH HTF and 15m agree strongly
-            if htf_bull and hma_15m_bull and close[i] >= donchian_upper[i]:
-                desired_signal = SIZE_BASE * 0.5
-            elif htf_bear and hma_15m_bear and close[i] <= donchian_lower[i]:
-                desired_signal = -SIZE_BASE * 0.5
+        # SHORT: HTF bear + KAMA down + RSI pullback
+        elif htf_bear and kama_bear and rsi_short_pullback:
+            if choppy_market:
+                desired_signal = -SIZE_WEAK
+            else:
+                desired_signal = -SIZE_BASE
+        elif htf_bear and kama_bear and close[i] < kama[i]:
+            # Weaker: just HTF + KAMA alignment without RSI pullback
+            if not choppy_market:
+                desired_signal = -SIZE_WEAK
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -307,16 +265,14 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_STRONG * 0.9:
-            final_signal = SIZE_STRONG
-        elif desired_signal <= -SIZE_STRONG * 0.9:
-            final_signal = -SIZE_STRONG
-        elif desired_signal >= SIZE_BASE * 0.9:
+        if desired_signal >= SIZE_BASE * 0.9:
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
-        elif abs(desired_signal) >= SIZE_BASE * 0.4:
-            final_signal = np.sign(desired_signal) * SIZE_BASE * 0.5
+        elif desired_signal >= SIZE_WEAK * 0.9:
+            final_signal = SIZE_WEAK
+        elif desired_signal <= -SIZE_WEAK * 0.9:
+            final_signal = -SIZE_WEAK
         else:
             final_signal = 0.0
         
