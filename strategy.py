@@ -1,41 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #1443: 1d Primary + 1w HTF — Simplified Donchian + HMA Trend + Volume
+Experiment #1444: 4h Primary + 12h HTF — Simplified HMA + RSI + Donchian
 
-Hypothesis: Previous strategy (#1442) failed because entry conditions were too complex
-(multiple regime filters + CRSI + Donchian all needing to align). This version simplifies:
-1. Remove Choppiness Index (causes whipsaw, inconsistent across symbols)
-2. Keep 1w HMA as single macro trend filter (proven to work)
-3. Donchian(20) breakout for entries (simpler than dual Donchian)
-4. Add volume confirmation on breakouts (filters false breakouts)
-5. CRSI only for counter-trend entries in strong trends (simplified thresholds)
-6. ATR(14) trailing stop 2.5x for risk management
+Hypothesis: Recent 4h strategies failed due to over-filtering (0 trades on many).
+This version simplifies to core proven patterns:
+1. 12h HMA(21) = trend direction (call ONCE before loop)
+2. RSI(14) extremes for mean reversion entries
+3. Donchian(20) breakout for trend entries
+4. ATR(14) 2.5x trailing stop
+5. Looser thresholds to ensure 30+ trades/train, 3+/test
 
-Why this should work better:
-- Fewer AND conditions = more trades generated (critical for passing trade count)
-- Volume filter reduces false breakouts without over-complicating
-- 1w HMA is the strongest single filter for macro direction
-- Simpler logic = more consistent across BTC/ETH/SOL (all must have Sharpe>0)
+Why this should work:
+- Simpler = more trades (recent failures had 0 trades)
+- 12h HTF less restrictive than 1w (more signal opportunities)
+- RSI + Donchian combo proven in research (SOL +0.782, +0.879)
+- 4h TF targets 20-50 trades/year
 
-Design:
-1. 1w HMA(21) = macro trend (call ONCE before loop, align properly)
-2. Donchian(20) breakout = entry trigger
-3. Volume > SMA(volume, 20) * 1.2 = breakout confirmation
-4. Long: price > 1w_HMA + Donchian breakout + volume confirm
-5. Short: price < 1w_HMA + Donchian breakdown + volume confirm
-6. CRSI < 20 for long adds in strong uptrend (pullback entry)
-7. ATR(14) trailing stop 2.5x
-8. Position size 0.25 (discrete: 0.0, ±0.25)
-
-Target: 30-60 trades/year, Sharpe > 0.618, trades >= 30 train, >= 3 test ALL symbols
-Timeframe: 1d
+Target: Sharpe > 0.618 (beat current best), trades >= 30 train, >= 3 test
+Timeframe: 4h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_hma_vol_1w_atr_v2"
-timeframe = "1d"
+name = "mtf_4h_hma_rsi_donchian_12h_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -95,60 +84,6 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_crsi_simple(close, rsi_period=3, rank_period=50):
-    """Simplified Connors RSI for faster computation"""
-    n = len(close)
-    if n < rank_period + rsi_period:
-        return np.full(n, np.nan)
-    
-    crsi = np.full(n, np.nan)
-    
-    # RSI(3)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    gain_smooth = pd.Series(gain).ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean().values
-    loss_smooth = pd.Series(loss).ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean().values
-    
-    rsi_short = np.full(n, np.nan)
-    mask = loss_smooth > 1e-10
-    rsi_short[mask] = 100.0 - (100.0 / (1.0 + gain_smooth[mask] / loss_smooth[mask]))
-    rsi_short[loss_smooth <= 1e-10] = 100.0
-    
-    # Streak RSI (simplified)
-    streak_rsi = np.full(n, np.nan)
-    for i in range(2, n):
-        streak = 0
-        if close[i] > close[i-1]:
-            j = i
-            while j > 0 and close[j] > close[j-1]:
-                streak += 1
-                j -= 1
-        elif close[i] < close[i-1]:
-            j = i
-            while j > 0 and close[j] < close[j-1]:
-                streak -= 1
-                j -= 1
-        streak_rsi[i] = 50.0 + streak * 25.0
-        streak_rsi[i] = np.clip(streak_rsi[i], 0.0, 100.0)
-    
-    # Percent Rank (simplified to 50 period for speed)
-    percent_rank = np.full(n, np.nan)
-    for i in range(rank_period, n):
-        returns = np.diff(close[i-rank_period+1:i+1])
-        if len(returns) > 0 and not np.any(np.isnan(returns)):
-            current_return = returns[-1]
-            count_below = np.sum(returns[:-1] < current_return)
-            percent_rank[i] = 100.0 * count_below / (len(returns) - 1) if len(returns) > 1 else 50.0
-    
-    # Combine
-    for i in range(rank_period, n):
-        if not np.isnan(rsi_short[i]) and not np.isnan(streak_rsi[i]) and not np.isnan(percent_rank[i]):
-            crsi[i] = (rsi_short[i] + streak_rsi[i] + percent_rank[i]) / 3.0
-    
-    return crsi
-
 def calculate_atr(high, low, close, period=14):
     """Average True Range - for stoploss sizing"""
     n = len(close)
@@ -178,41 +113,59 @@ def calculate_donchian(high, low, period=20):
     
     return upper, lower
 
-def calculate_volume_sma(volume, period=20):
-    """Simple moving average of volume"""
-    n = len(volume)
-    if n < period:
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Kaufman Adaptive Moving Average - adapts to market noise"""
+    n = len(close)
+    if n < er_period + slow_period:
         return np.full(n, np.nan)
     
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+    kama = np.full(n, np.nan)
+    
+    # Calculate Efficiency Ratio
+    er = np.full(n, np.nan)
+    for i in range(er_period, n):
+        signal = abs(close[i] - close[i - er_period])
+        noise = np.sum(np.abs(np.diff(close[i-er_period:i+1])))
+        if noise > 1e-10:
+            er[i] = signal / noise
+        else:
+            er[i] = 1.0
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA
+    kama[er_period] = close[er_period]
+    
+    for i in range(er_period + 1, n):
+        if not np.isnan(er[i]):
+            sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+            kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+    
+    return kama
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate and align 1w HMA for macro trend
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 12h HMA for trend filter
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate primary (1d) indicators
+    # Calculate primary (4h) indicators
     donchian_20_upper, donchian_20_lower = calculate_donchian(high, low, period=20)
-    donchian_55_upper, donchian_55_lower = calculate_donchian(high, low, period=55)
-    crsi = calculate_crsi_simple(close, rsi_period=3, rank_period=50)
+    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    vol_sma = calculate_volume_sma(volume, period=20)
-    
-    # Also calculate 1d HMA for additional trend confirmation
-    hma_1d = calculate_hma(close, period=21)
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.25
+    BASE_SIZE = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -230,58 +183,59 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(donchian_20_upper[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(donchian_20_upper[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(kama[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === MACRO TREND (1w HMA) ===
-        macro_bull = close[i] > hma_1w_aligned[i]
-        macro_bear = close[i] < hma_1w_aligned[i]
+        # === TREND FILTER (12h HMA) ===
+        trend_bull = close[i] > hma_12h_aligned[i]
+        trend_bear = close[i] < hma_12h_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        volume_confirm = volume[i] > vol_sma[i] * 1.15  # 15% above average
+        # === KAMA TREND CONFIRMATION ===
+        kama_bull = close[i] > kama[i]
+        kama_bear = close[i] < kama[i]
+        
+        # === RSI EXTREMES (mean reversion) ===
+        rsi_oversold = rsi[i] < 35.0  # Looser than 30 for more trades
+        rsi_overbought = rsi[i] > 65.0  # Looser than 70 for more trades
         
         # === DONCHIAN BREAKOUT ===
         breakout_long = close[i] > donchian_20_upper[i-1] if i > 0 else False
         breakout_short = close[i] < donchian_20_lower[i-1] if i > 0 else False
         
-        # === 1D HMA CONFIRMATION ===
-        hma_1d_bull = close[i] > hma_1d[i]
-        hma_1d_bear = close[i] < hma_1d[i]
-        
         # === DESIRED SIGNAL - SIMPLIFIED LOGIC ===
         desired_signal = 0.0
         
-        # LONG ENTRIES
-        # Path 1: Macro bull + Donchian breakout + volume confirm (primary)
-        if macro_bull and breakout_long and volume_confirm:
+        # LONG ENTRIES (3 paths for more trade generation)
+        # Path 1: Trend + RSI pullback (most common)
+        if trend_bull and kama_bull and rsi_oversold:
             desired_signal = BASE_SIZE
-        # Path 2: Macro bull + CRSI oversold (pullback entry in uptrend)
-        elif macro_bull and not np.isnan(crsi[i]) and crsi[i] < 25.0:
+        # Path 2: Trend + Donchian breakout
+        elif trend_bull and kama_bull and breakout_long:
+            desired_signal = BASE_SIZE
+        # Path 3: Strong RSI oversold (any trend)
+        elif rsi[i] < 25.0:
             desired_signal = BASE_SIZE * 0.5
-        # Path 3: Both HMA aligned bull + Donchian breakout (stronger signal)
-        elif macro_bull and hma_1d_bull and breakout_long:
-            desired_signal = BASE_SIZE
         
-        # SHORT ENTRIES
-        # Path 1: Macro bear + Donchian breakdown + volume confirm (primary)
-        elif macro_bear and breakout_short and volume_confirm:
+        # SHORT ENTRIES (3 paths for more trade generation)
+        # Path 1: Trend + RSI pullback
+        elif trend_bear and kama_bear and rsi_overbought:
             desired_signal = -BASE_SIZE
-        # Path 2: Macro bear + CRSI overbought (pullback entry in downtrend)
-        elif macro_bear and not np.isnan(crsi[i]) and crsi[i] > 75.0:
+        # Path 2: Trend + Donchian breakout
+        elif trend_bear and kama_bear and breakout_short:
+            desired_signal = -BASE_SIZE
+        # Path 3: Strong RSI overbought (any trend)
+        elif rsi[i] > 75.0:
             desired_signal = -BASE_SIZE * 0.5
-        # Path 3: Both HMA aligned bear + Donchian breakdown (stronger signal)
-        elif macro_bear and hma_1d_bear and breakout_short:
-            desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -302,11 +256,8 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if abs(desired_signal) >= BASE_SIZE * 0.4:
-            if desired_signal > 0:
-                final_signal = BASE_SIZE
-            else:
-                final_signal = -BASE_SIZE
+        if desired_signal >= BASE_SIZE * 0.4:
+            final_signal = BASE_SIZE if desired_signal > 0 else -BASE_SIZE
         else:
             final_signal = 0.0
         
