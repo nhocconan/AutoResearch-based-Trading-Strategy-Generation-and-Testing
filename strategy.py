@@ -1,46 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #063: 1d Primary + 1w HTF — Simplified Donchian Breakout with Weekly Trend
+Experiment #064: 4h Primary + 12h/1d HTF — Donchian Breakout with Choppiness Regime Filter
 
-Hypothesis: After 62 experiments, the clearest lesson is TOO MANY FILTERS = 0 trades.
-This strategy uses the PROVEN 1d timeframe with MAXIMAL SIMPLICITY:
-1. Donchian(20) breakout - proven for SOL (Sharpe +0.782 in research)
-2. 1w HMA trend filter - only one HTF filter, not multiple
-3. RSI(14) with VERY LOOSE thresholds (30/70) - ensures trades generate
-4. ATR(14) 2.5x trailing stop - proven risk management from #056
-5. Size: 0.30 (discrete, minimizes fee churn)
+Hypothesis: After analyzing failures, the key issue is OVER-FILTERING = 0 trades.
+This strategy combines proven elements with LOOSE thresholds:
+1. Donchian(20) breakout - proven for crypto volatility (SOL Sharpe +0.782 in research)
+2. 12h HMA trend filter - prevents counter-trend trades
+3. Choppiness Index(14) regime filter - only trade when CHOP < 50 (trending market)
+4. RSI(14) LOOSE thresholds (35/65) - ensures we get actual entries
+5. ATR(14) 2.5x trailing stop - proven risk management from #056
 
-Why this should work on 1d:
-- 1d timeframe = 20-50 trades/year target (fee-efficient, matches research)
-- Donchian breakouts happen regularly in crypto volatility
-- 1w HMA prevents counter-trend trades in major moves (BTC 2022 crash protection)
-- LOOSE RSI thresholds (30/70 not 15/85) ensure we actually get entries
-- ONLY 3 filters max (Donchian + HMA + RSI) vs 5+ in failed strategies
-- Proper breakout detection: high > upper OR low < lower (not just close)
-
-Critical fixes from #056 failure:
-- Breakout detection uses HIGH/LOW not CLOSE (catches intrabar breakouts)
-- Simpler position tracking (no complex flip logic)
-- Clearer stoploss implementation
+Why this should work on 4h:
+- 4h timeframe = 20-50 trades/year target (fee-efficient per Rule 10)
+- Donchian breakouts happen regularly in crypto (unlike tight RSI thresholds)
+- Choppiness filter avoids whipsaw in range markets (major issue in 2022-2024)
+- 12h HMA provides trend bias without being too restrictive
+- LOOSE RSI ensures we generate trades (learned from 0-trade failures)
 
 Entry Logic:
-- Long: High breaks Donchian(20) high + RSI(14) > 30 + price > 1w HMA
-- Short: Low breaks Donchian(20) low + RSI(14) < 70 + price < 1w HMA
-- Size: 0.30 (discrete, minimizes fee churn)
+- Long: Donchian(20) high breakout + RSI(14) > 35 + CHOP(14) < 50 + price > 12h HMA
+- Short: Donchian(20) low breakout + RSI(14) < 65 + CHOP(14) < 50 + price < 12h HMA
+- Size: 0.30 (discrete, balances return vs drawdown)
 
 Risk: 2.5x ATR trailing stop, signal→0 when stopped out
-Target: Sharpe>0.4, trades>30/symbol train, >3/symbol test, DD>-40%
+Target: Sharpe>0.37 (beat current best), trades>30/symbol train, >3/symbol test, DD>-40%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_hma_rsi_1w_simple_v1"
-timeframe = "1d"
+name = "mtf_4h_donchian_chop_hma_rsi_loose_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_donchian(high, low, period=20):
-    """Donchian Channel - breakout levels using HIGH/LOW of window"""
+    """Donchian Channel - breakout levels"""
     n = len(high)
     if n < period:
         return np.full(n, np.nan), np.full(n, np.nan)
@@ -119,6 +113,40 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP) - measures market choppiness vs trending
+    Formula: 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    
+    CHOP > 61.8 = choppy/range market (mean revert)
+    CHOP < 38.2 = trending market (trend follow)
+    We use CHOP < 50 as threshold for trend-following breakouts
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    # Calculate True Range
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        sum_atr = np.sum(tr[i - period + 1:i + 1])
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        price_range = highest_high - lowest_low
+        
+        if price_range < 1e-10 or sum_atr < 1e-10:
+            chop[i] = 100.0  # Extremely choppy if no range
+        else:
+            chop[i] = 100.0 * np.log10(sum_atr / price_range) / np.log10(period)
+    
+    return chop
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -126,19 +154,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate and align 1w HMA for trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 12h HMA for trend bias
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate primary (1d) indicators
+    # Calculate primary (4h) indicators
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    chop = calculate_choppiness(high, low, close, period=14)
     
     signals = np.zeros(n)
-    SIZE = 0.30  # Discrete position size
+    SIZE = 0.30  # Discrete position size (0.20-0.35 normal range per Rule 4)
     
     # Position tracking for stoploss
     in_position = False
@@ -152,61 +181,71 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         if np.isnan(rsi[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        # === HTF TREND BIAS (1w HMA) ===
-        hma_1w_bull = close[i] > hma_1w_aligned[i]
-        hma_1w_bear = close[i] < hma_1w_aligned[i]
+        # === HTF TREND BIAS (12h HMA) ===
+        hma_12h_bull = close[i] > hma_12h_aligned[i]
+        hma_12h_bear = close[i] < hma_12h_aligned[i]
+        
+        # === CHOPPY INDEX REGIME FILTER ===
+        # CHOP < 50 = trending market (good for breakouts)
+        # CHOP > 50 = choppy market (avoid breakout trades)
+        is_trending = chop[i] < 50.0
         
         # === DONCHIAN BREAKOUT DETECTION ===
-        # Check if HIGH broke above previous upper OR LOW broke below previous lower
-        # This catches intrabar breakouts that close might miss
-        prev_upper = donchian_upper[i-1] if i > 0 else donchian_upper[i]
-        prev_lower = donchian_lower[i-1] if i > 0 else donchian_lower[i]
+        # Check if price broke out THIS bar (close > previous upper or close < previous lower)
+        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
+        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
         
-        breakout_long = high[i] > prev_upper
-        breakout_short = low[i] < prev_lower
-        
-        # === RSI FILTER (VERY LOOSE thresholds to ensure trades) ===
-        rsi_ok_long = rsi[i] > 30.0  # Not extremely oversold
-        rsi_ok_short = rsi[i] < 70.0  # Not extremely overbought
+        # === RSI FILTER (LOOSE thresholds to ensure trades) ===
+        rsi_ok_long = rsi[i] > 35.0  # Not extremely oversold
+        rsi_ok_short = rsi[i] < 65.0  # Not extremely overbought
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # Long entry: Donchian breakout + RSI filter + 1w HMA bullish
-        if breakout_long and rsi_ok_long and hma_1w_bull:
+        # Long entry: Donchian breakout + RSI filter + 12h HMA bullish + Trending regime
+        if breakout_long and rsi_ok_long and hma_12h_bull and is_trending:
             desired_signal = SIZE
         
-        # Short entry: Donchian breakout + RSI filter + 1w HMA bearish
-        elif breakout_short and rsi_ok_short and hma_1w_bear:
+        # Short entry: Donchian breakout + RSI filter + 12h HMA bearish + Trending regime
+        elif breakout_short and rsi_ok_short and hma_12h_bear and is_trending:
             desired_signal = -SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
-            highest_since_entry = max(highest_since_entry, high[i])
+            highest_since_entry = max(highest_since_entry, close[i])
             stop_price = highest_since_entry - 2.5 * entry_atr
-            if low[i] < stop_price:
+            if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
-            lowest_since_entry = min(lowest_since_entry, low[i])
+            lowest_since_entry = min(lowest_since_entry, close[i])
             stop_price = lowest_since_entry + 2.5 * entry_atr
-            if high[i] > stop_price:
+            if close[i] > stop_price:
                 stoploss_triggered = True
         
         if stoploss_triggered:
@@ -222,18 +261,24 @@ def generate_signals(prices):
         
         # === UPDATE POSITION TRACKING ===
         if final_signal != 0.0:
-            if not in_position or np.sign(final_signal) != position_side:
-                # New position or flip
+            if not in_position:
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
                 entry_atr = atr[i]
-                highest_since_entry = high[i] if position_side > 0 else 0.0
-                lowest_since_entry = low[i] if position_side < 0 else float('inf')
+                highest_since_entry = close[i] if position_side > 0 else 0.0
+                lowest_since_entry = close[i] if position_side < 0 else float('inf')
+            elif np.sign(final_signal) != position_side:
+                # Flip position
+                position_side = int(np.sign(final_signal))
+                entry_price = close[i]
+                entry_atr = atr[i]
+                highest_since_entry = close[i] if position_side > 0 else 0.0
+                lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
-                highest_since_entry = max(highest_since_entry, high[i])
+                highest_since_entry = max(highest_since_entry, close[i])
             elif position_side < 0:
-                lowest_since_entry = min(lowest_since_entry, low[i])
+                lowest_since_entry = min(lowest_since_entry, close[i])
         else:
             if in_position:
                 in_position = False
