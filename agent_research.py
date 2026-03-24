@@ -26,7 +26,7 @@ from llm_client import LLMClient
 from evaluate import compute_metrics
 from backtest import run_strategy_backtest
 from prepare import load_config
-from results_db import append_results, load_results as _load_results_db  # noqa: F401
+from results_db import append_results, query_best_kept_sharpe  # noqa: F401
 
 
 STRATEGY_FILE = Path("strategy.py")
@@ -529,9 +529,7 @@ def main():
     print(f"  Symbols: {symbols}")
     print()
 
-    # Ensure results file exists
-    if not RESULTS_FILE.exists():
-        RESULTS_FILE.write_text(TSV_HEADER + "\n")
+    # results.db is auto-initialized by results_db on import
 
     # Load program
     program = read_file("program.md")
@@ -543,13 +541,10 @@ def main():
     # Initialize best_sharpe from existing results (don't start from -999)
     best_sharpe = 0.0  # Minimum bar: must beat Sharpe=0 (better than doing nothing)
     try:
-        df = _load_results_db()
-        kept = df[df["status"] == "keep"]
-        if len(kept) > 0 and "sharpe" in kept.columns:
-            prev_best = kept.groupby("strategy")["sharpe"].mean().max()
-            if prev_best > best_sharpe:
-                best_sharpe = float(prev_best)
-                print(f"  Resuming from previous best Sharpe: {best_sharpe:.3f}")
+        prev_best = query_best_kept_sharpe()
+        if prev_best > best_sharpe:
+            best_sharpe = prev_best
+            print(f"  Resuming from previous best Sharpe: {best_sharpe:.3f}")
     except Exception:
         pass
 
@@ -624,7 +619,7 @@ def main():
                 dd = m["max_drawdown_pct"]
                 print(f"    {symbol} train: Sharpe={sharpe:+.3f} Ret={m['total_return_pct']:+.1f}% DD={dd:.1f}% T={trades}")
 
-                train_pass = sharpe > 0 and trades >= 30 and dd > -50
+                train_pass = sharpe > 0.3 and trades >= 30 and dd > -50
                 sym_status = "keep" if train_pass else "discard"
                 append_results(train_result, sym_status, description, period="train")
                 all_train_results.extend(train_result)
