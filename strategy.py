@@ -1,66 +1,113 @@
 #!/usr/bin/env python3
 """
-Experiment #005: 1h Primary + 4h/1d HTF — HMA Trend + RSI Pullback + Volume/Session Filter
+Experiment #006: 12h Primary + 1d HTF — KAMA Adaptive Trend + ADX Regime Filter
 
-Hypothesis: After 4 failed experiments (all with Choppiness Index or overly complex filters),
-this strategy SIMPLIFIES while using proven elements for lower timeframe:
-1. 4h HMA(21) for trend direction - smooth, lag-reduced trend filter
-2. 1h RSI(14) pullback entries - enter on dips in uptrend, rallies in downtrend
-3. Volume confirmation (>0.8x 20-bar avg) - ensures real moves, not noise
-4. Session filter (8-20 UTC) - avoids low-liquidity Asian night hours
-5. ADX(14) > 20 - filters out choppy/ranging markets
-6. ATR(14) 2.5x trailing stop - proven risk management
+Hypothesis: After 5 failed experiments with complex regime switching (Choppiness, Connors RSI),
+the key is SIMPLER adaptive trend following with fewer but stronger filters.
 
-Why 1h with HTF works:
-- 4h/1d determines SIGNAL DIRECTION (reduces whipsaw)
-- 1h determines ENTRY TIMING (better entry price within HTF trend)
-- Session + Volume filters keep trades to 30-60/year target (fee-efficient)
-- Discrete sizing 0.25 minimizes fee churn on signal changes
+Why KAMA + ADX should work:
+1. KAMA (Kaufman Adaptive MA) adapts to volatility - smooth in trends, flat in chop
+2. ADX(14)>25 ensures we only trade when trend exists (filters whipsaw)
+3. RSI pullback entry (not breakout) = more frequent signals than Donchian
+4. 1d HMA for major trend bias (proven in research)
+5. Fewer filters = more trades (learned: 0-trade strategies auto-reject)
 
 Entry Logic:
-- Long: 4h HMA bullish + 1h RSI 40-55 (pullback) + Volume > 0.8x avg + ADX > 20 + Session 8-20 UTC
-- Short: 4h HMA bearish + 1h RSI 45-60 (rally) + Volume > 0.8x avg + ADX > 20 + Session 8-20 UTC
-- Size: 0.25 (discrete, conservative for 1h TF)
+- Long: price>KAMA(14) + ADX>25 + RSI(14) crosses above 45 + price>1d HMA
+- Short: price<KAMA(14) + ADX>25 + RSI(14) crosses below 55 + price<1d HMA
+- Size: 0.28 (discrete, between 0.25-0.30 range)
 
 Risk: 2.5x ATR trailing stop, signal→0 when stopped out
-Target: Sharpe>0.3, trades>30/symbol train, >3/symbol test, DD>-40%, 30-60 trades/year
+Target: Sharpe>0.3, trades>30/symbol train, >3/symbol test, DD>-40%
+
+DIFFERENT from failed exps:
+- No Choppiness Index (failed #002, #003)
+- No Connors RSI (failed #002)
+- No volume/session (failed #005)
+- Simpler than Donchian breakout (current baseline)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_volume_session_v1"
-timeframe = "1h"
+name = "mtf_12h_kama_adx_rsi_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_hma(close, period=21):
-    """Hull Moving Average - reduced lag trend indicator"""
+def calculate_kama(close, period=14, fast_period=2, slow_period=30):
+    """Kaufman Adaptive Moving Average - adapts to volatility"""
     n = len(close)
-    if n < period:
+    if n < period + slow_period:
         return np.full(n, np.nan)
     
-    half_period = max(period // 2, 1)
-    sqrt_period = max(int(np.sqrt(period)), 1)
+    kama = np.full(n, np.nan)
     
-    def wma(series, span):
-        if len(series) < span:
-            return np.full(len(series), np.nan)
-        result = np.full(len(series), np.nan)
-        weights = np.arange(1, span + 1, dtype=float)
-        for i in range(span - 1, len(series)):
-            window = series[i - span + 1:i + 1]
-            result[i] = np.sum(window * weights) / np.sum(weights)
-        return result
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(slow_period, n):
+        signal = abs(close[i] - close[i - slow_period])
+        noise = np.sum(np.abs(np.diff(close[i - slow_period:i + 1])))
+        if noise > 1e-10:
+            er[i] = signal / noise
+        else:
+            er[i] = 0.0
     
-    wma_half = wma(close, half_period)
-    wma_full = wma(close, period)
-    raw_hma = 2.0 * wma_half - wma_full
-    hma = wma(raw_hma, sqrt_period)
+    # Calculate smoothing constants
+    fast_sc = 2.0 / (fast_period + 1.0)
+    slow_sc = 2.0 / (slow_period + 1.0)
     
-    return hma
+    # Initialize KAMA
+    kama[slow_period] = close[slow_period]
+    
+    for i in range(slow_period + 1, n):
+        sc = er[i] * (fast_sc - slow_sc) + slow_sc
+        kama[i] = kama[i - 1] + sc * sc * (close[i] - kama[i - 1])
+    
+    return kama
+
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index - trend strength"""
+    n = len(close)
+    if n < period * 2 + 1:
+        return np.full(n, np.nan)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    # Smooth TR, +DM, -DM
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate DI and DX
+    plus_di = np.where(atr > 1e-10, 100.0 * plus_di / atr, 0.0)
+    minus_di = np.where(atr > 1e-10, 100.0 * minus_di / atr, 0.0)
+    
+    dx = np.zeros(n)
+    for i in range(period * 2, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 1e-10:
+            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    # ADX = smoothed DX
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
 
 def calculate_rsi(close, period=14):
-    """RSI - momentum oscillator for pullback entries"""
+    """RSI - momentum for pullback entries"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -98,86 +145,53 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """ADX - trend strength filter"""
+def calculate_hma(close, period=21):
+    """Hull Moving Average - for HTF trend"""
     n = len(close)
-    if n < period * 2 + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        plus_move = high[i] - high[i-1]
-        minus_move = low[i-1] - low[i]
-        if plus_move > minus_move and plus_move > 0:
-            plus_dm[i] = plus_move
-        if minus_move > plus_move and minus_move > 0:
-            minus_dm[i] = minus_move
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10) * 100
-    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr + 1e-10) * 100
-    
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
-
-def calculate_volume_avg(volume, period=20):
-    """Simple moving average of volume"""
-    n = len(volume)
     if n < period:
         return np.full(n, np.nan)
     
-    vol_avg = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        vol_avg[i] = np.mean(volume[i - period + 1:i + 1])
+    half_period = max(period // 2, 1)
+    sqrt_period = max(int(np.sqrt(period)), 1)
     
-    return vol_avg
-
-def get_utc_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    # open_time is in milliseconds since epoch
-    ts_seconds = open_time / 1000.0
-    utc_hour = pd.to_datetime(ts_seconds, unit='s').hour
-    return utc_hour
+    def wma(series, span):
+        if len(series) < span:
+            return np.full(len(series), np.nan)
+        result = np.full(len(series), np.nan)
+        weights = np.arange(1, span + 1, dtype=float)
+        for i in range(span - 1, len(series)):
+            window = series[i - span + 1:i + 1]
+            result[i] = np.sum(window * weights) / np.sum(weights)
+        return result
+    
+    wma_half = wma(close, half_period)
+    wma_full = wma(close, period)
+    raw_hma = 2.0 * wma_half - wma_full
+    hma = wma(raw_hma, sqrt_period)
+    
+    return hma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 4h HMA for trend bias
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
-    # Calculate and align 1d HMA for stronger trend confirmation
+    # Calculate and align 1d HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (1h) indicators
+    # Calculate primary (12h) indicators
+    kama = calculate_kama(close, period=14)
+    adx = calculate_adx(high, low, close, period=14)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    adx = calculate_adx(high, low, close, period=14)
-    vol_avg = calculate_volume_avg(volume, period=20)
-    
-    # Extract UTC hours for session filter
-    utc_hours = np.array([get_utc_hour(ot) for ot in open_time])
     
     signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position size (conservative for 1h TF)
+    SIZE = 0.28  # Discrete position size
     
     # Position tracking for stoploss
     in_position = False
@@ -187,6 +201,9 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
+    # Track RSI crosses
+    prev_rsi = 0.0
+    
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
@@ -194,54 +211,47 @@ def generate_signals(prices):
             if in_position:
                 in_position = False
                 position_side = 0
+            prev_rsi = rsi[i] if not np.isnan(rsi[i]) else prev_rsi
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
+            prev_rsi = rsi[i] if not np.isnan(rsi[i]) else prev_rsi
             continue
-        if np.isnan(rsi[i]) or np.isnan(adx[i]) or np.isnan(vol_avg[i]):
+        if np.isnan(rsi[i]) or np.isnan(kama[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
+            prev_rsi = rsi[i] if not np.isnan(rsi[i]) else prev_rsi
             continue
         
-        # === SESSION FILTER (8-20 UTC) ===
-        in_session = 8 <= utc_hours[i] <= 20
-        
-        # === VOLUME CONFIRMATION ===
-        volume_ok = volume[i] > 0.8 * vol_avg[i]
-        
-        # === ADX TREND STRENGTH ===
-        adx_ok = adx[i] > 20.0
-        
-        # === HTF TREND BIAS (4h + 1d HMA) ===
-        hma_4h_bull = close[i] > hma_4h_aligned[i]
-        hma_4h_bear = close[i] < hma_4h_aligned[i]
+        # === HTF TREND BIAS (1d HMA) ===
         hma_1d_bull = close[i] > hma_1d_aligned[i]
         hma_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # Stronger signal when both 4h and 1d agree
-        strong_bull = hma_4h_bull and hma_1d_bull
-        strong_bear = hma_4h_bear and hma_1d_bear
+        # === ADX REGIME FILTER (trend strength) ===
+        adx_trending = adx[i] > 25.0  # Only trade when trend exists
         
-        # === RSI PULLBACK ENTRY (moderate thresholds for trade frequency) ===
-        # Long: RSI pulled back to 40-55 in uptrend
-        rsi_ok_long = 40.0 <= rsi[i] <= 55.0
-        # Short: RSI rallied to 45-60 in downtrend
-        rsi_ok_short = 45.0 <= rsi[i] <= 60.0
+        # === KAMA TREND DIRECTION ===
+        kama_bull = close[i] > kama[i]
+        kama_bear = close[i] < kama[i]
+        
+        # === RSI PULLBACK ENTRY (crosses) ===
+        rsi_cross_long = prev_rsi <= 45.0 and rsi[i] > 45.0
+        rsi_cross_short = prev_rsi >= 55.0 and rsi[i] < 55.0
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # Long entry: HTF bullish + RSI pullback + volume + ADX + session
-        if strong_bull and rsi_ok_long and volume_ok and adx_ok and in_session:
+        # Long entry: KAMA bull + ADX trending + RSI cross + 1d HMA bull
+        if kama_bull and adx_trending and rsi_cross_long and hma_1d_bull:
             desired_signal = SIZE
         
-        # Short entry: HTF bearish + RSI rally + volume + ADX + session
-        elif strong_bear and rsi_ok_short and volume_ok and adx_ok and in_session:
+        # Short entry: KAMA bear + ADX trending + RSI cross + 1d HMA bear
+        elif kama_bear and adx_trending and rsi_cross_short and hma_1d_bear:
             desired_signal = -SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
@@ -300,5 +310,6 @@ def generate_signals(prices):
                 lowest_since_entry = float('inf')
         
         signals[i] = final_signal
+        prev_rsi = rsi[i]
     
     return signals
