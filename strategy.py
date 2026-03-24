@@ -1,60 +1,78 @@
 #!/usr/bin/env python3
 """
-Experiment #291: 6h Primary + 1d/1w HTF — Weekly Pivot Bounce + RSI Divergence v1
+Experiment #292: 12h Primary + 1d HTF — KAMA Adaptive Trend + RSI Pullback v1
 
-Hypothesis: 6h timeframe captures multi-day swings ideal for weekly pivot reactions.
-Weekly pivot levels (WS1, WS2, WM1, WM2) act as strong S/R on 6h charts.
-Combined with RSI divergence for entry timing and 1d/1w HMA for trend bias.
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts better to changing volatility
+than HMA/EMA, reducing whipsaws in 2022 crash and 2025 bear market. Combined with
+RSI pullback entries (not extremes) and 1d trend filter for direction bias.
 
-Key differences from failed #287 (funding_chop_crsi):
-1. REMOVED funding rate (didn't help on 6h timeframe)
-2. ADDED weekly pivot levels as primary S/R (proven on 6h)
-3. ADDED RSI divergence (hidden + regular) for entry confirmation
-4. ADDED volume spike filter (1.5x avg) to confirm breakouts
-5. SIMPLIFIED regime detection (pivot-based, not CHOP-based)
-
-Weekly Pivot Calculation (Woodie):
-P = (H + L + 2*C) / 4
-R1 = 2*P - L
-S1 = 2*P - H
-R2 = P + (H - L)
-S2 = P - (H - L)
+Key differences from #284:
+1. KAMA instead of HMA - adapts ER (Efficiency Ratio) to volatility
+2. SIMPLIFIED entries - RSI 40-60 pullback zone (not extreme CRSI)
+3. ADX > 18 filter for trend strength (not too restrictive)
+4. Removed funding rate (symbol loading issues caused problems)
+5. Looser entry conditions to ensure 30-50 trades/year
+6. Asymmetric sizing: 0.30 when 1d aligned, 0.20 otherwise
 
 Entry Logic:
-- Long: Price near WS1/WS2 + RSI bullish divergence + 1d HMA bull + volume spike
-- Short: Price near WR1/WR2 + RSI bearish divergence + 1d HMA bear + volume spike
-- Breakout: Price breaks weekly pivot P + 1w HMA alignment + volume confirm
+- Long: price > 1d KAMA + 12h KAMA bullish + RSI 40-55 + ADX > 18
+- Short: price < 1d KAMA + 12h KAMA bearish + RSI 45-60 + ADX > 18
+- Exit: RSI crosses opposite zone OR stoploss hit (2.5x ATR)
 
-Position sizing: 0.25 base, 0.30 when 1w aligned (discrete levels)
-Stoploss: 2.5x ATR from entry
+Position sizing: 0.20 base, 0.30 when 1d KMA aligned with 12h signal
+Stoploss: 2.5x ATR from entry price
 
-Target: Sharpe>0.40, DD>-35%, trades>=30 train, trades>=3 test
-Timeframe: 6h (30-60 trades/year target)
+Target: Sharpe>0.45, DD>-35%, trades>=30 train, trades>=3 test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_weekly_pivot_rsi_div_vol_1d1w_v1"
-timeframe = "6h"
+name = "mtf_12h_kama_rsi_adx_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_hma(close, period):
-    """Hull Moving Average - faster response than EMA"""
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average
+    Adapts to market noise via Efficiency Ratio
+    """
     n = len(close)
-    if n < period:
+    if n < period + slow_period:
         return np.full(n, np.nan)
     
-    half = period // 2
-    sqrt_period = int(np.sqrt(period))
+    kama = np.zeros(n)
+    kama[:] = np.nan
     
-    wma1 = pd.Series(close).ewm(span=half, min_periods=half, adjust=False).mean().values
-    wma2 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # Calculate Efficiency Ratio
+    er = np.zeros(n)
+    for i in range(period, n):
+        price_change = abs(close[i] - close[i-period])
+        volatility = np.sum(np.abs(np.diff(close[max(0, i-period):i+1])))
+        if volatility > 1e-10:
+            er[i] = price_change / volatility
+        else:
+            er[i] = 0.0
     
-    diff = 2.0 * wma1 - wma2
-    hma = pd.Series(diff).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean().values
+    # Calculate smoothing constant
+    sc = np.zeros(n)
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
     
-    return hma
+    for i in range(period, n):
+        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    # Calculate KAMA
+    for i in range(period + 1, n):
+        if not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = close[i]
+    
+    return kama
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -96,111 +114,49 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_weekly_pivots(high, low, close, lookback_weeks=1):
+def calculate_adx(high, low, close, period=14):
     """
-    Weekly Pivot Levels (Woodie formula)
-    P = (H + L + 2*C) / 4
-    R1 = 2*P - L
-    S1 = 2*P - H
-    R2 = P + (H - L)
-    S2 = P - (H - L)
-    
-    Returns arrays for P, R1, S1, R2, S2 aligned to 6h bars
+    Average Directional Index - measures trend strength
+    ADX > 25 = strong trend, ADX < 20 = weak/range
     """
     n = len(close)
-    P = np.zeros(n)
-    R1 = np.zeros(n)
-    S1 = np.zeros(n)
-    R2 = np.zeros(n)
-    S2 = np.zeros(n)
-    P[:] = np.nan
-    R1[:] = np.nan
-    S1[:] = np.nan
-    R2[:] = np.nan
-    S2[:] = np.nan
+    if n < period * 2 + 1:
+        return np.full(n, np.nan)
     
-    # Weekly bars: approximately 28 x 6h bars per week
-    bars_per_week = 28
+    # Calculate True Range and Directional Movement
+    tr = np.zeros(n)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
     
-    for i in range(bars_per_week * lookback_weeks, n):
-        # Get previous week's H, L, C
-        week_start = i - bars_per_week * lookback_weeks
-        week_end = i
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        if week_start >= 0:
-            week_high = np.nanmax(high[week_start:week_end])
-            week_low = np.nanmin(low[week_start:week_end])
-            week_close = close[week_end - 1]
+        if high[i] - high[i-1] > low[i-1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i-1], 0.0)
+        else:
+            plus_dm[i] = 0.0
             
-            if not np.isnan(week_high) and not np.isnan(week_low) and not np.isnan(week_close):
-                pivot = (week_high + week_low + 2.0 * week_close) / 4.0
-                P[i] = pivot
-                R1[i] = 2.0 * pivot - week_low
-                S1[i] = 2.0 * pivot - week_high
-                R2[i] = pivot + (week_high - week_low)
-                S2[i] = pivot - (week_high - week_low)
+        if low[i-1] - low[i] > high[i] - high[i-1]:
+            minus_dm[i] = max(low[i-1] - low[i], 0.0)
+        else:
+            minus_dm[i] = 0.0
     
-    return P, R1, S1, R2, S2
-
-def calculate_rsi_divergence(close, rsi, lookback=5):
-    """
-    Detect RSI divergence (regular and hidden)
-    Returns: div_bull (bullish div), div_bear (bearish div)
+    # Smooth with EMA
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    Regular Bullish: Price lower low, RSI higher low
-    Regular Bearish: Price higher high, RSI lower high
-    Hidden Bullish: Price higher low, RSI lower low (trend continuation)
-    Hidden Bearish: Price lower high, RSI higher high (trend continuation)
-    """
-    n = len(close)
-    div_bull = np.zeros(n, dtype=bool)
-    div_bear = np.zeros(n, dtype=bool)
-    
-    for i in range(lookback * 2, n):
-        if np.isnan(rsi[i]) or np.isnan(rsi[i-lookback]):
-            continue
-        
-        # Find local extrema in price and RSI
-        price_window = close[i-lookback:i+1]
-        rsi_window = rsi[i-lookback:i+1]
-        
-        if len(price_window) < 3 or len(rsi_window) < 3:
-            continue
-        
-        # Check for bullish divergence (price making lower low, RSI making higher low)
-        price_low_idx = np.argmin(price_window)
-        rsi_low_idx = np.argmin(rsi_window)
-        
-        if price_low_idx > 0 and rsi_low_idx > 0:
-            # Regular bullish: price LL, RSI HL
-            if close[i] < close[i-lookback] and rsi[i] > rsi[i-lookback]:
-                div_bull[i] = True
-            # Hidden bullish: price HL, RSI LL (in uptrend)
-            elif close[i] > close[i-lookback] and rsi[i] < rsi[i-lookback]:
-                div_bull[i] = True
-        
-        # Check for bearish divergence (price making higher high, RSI making lower high)
-        price_high_idx = np.argmax(price_window)
-        rsi_high_idx = np.argmax(rsi_window)
-        
-        if close[i] > close[i-lookback] and rsi[i] < rsi[i-lookback]:
-            div_bear[i] = True
-        elif close[i] < close[i-lookback] and rsi[i] > rsi[i-lookback]:
-            div_bear[i] = True
-    
-    return div_bull, div_bear
-
-def calculate_volume_spike(volume, period=20, threshold=1.5):
-    """Detect volume spikes (volume > threshold * avg volume)"""
-    n = len(volume)
-    spike = np.zeros(n, dtype=bool)
-    
+    # Calculate DX and ADX
+    dx = np.zeros(n)
+    dx[:] = np.nan
     for i in range(period, n):
-        avg_vol = np.nanmean(volume[i-period:i])
-        if avg_vol > 1e-10 and volume[i] > threshold * avg_vol:
-            spike[i] = True
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 1e-10:
+            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
     
-    return spike
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return adx
 
 def calculate_sma(close, period):
     """Simple Moving Average"""
@@ -215,37 +171,25 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align HTF HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align HTF KAMA for trend bias
+    kama_1d_raw = calculate_kama(df_1d['close'].values, period=21)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate primary (6h) indicators
-    hma_6h = calculate_hma(close, period=21)
+    # Calculate primary (12h) indicators
+    kama_12h_fast = calculate_kama(close, period=10, fast_period=2, slow_period=30)
+    kama_12h_slow = calculate_kama(close, period=21, fast_period=2, slow_period=30)
     atr = calculate_atr(high, low, close, period=14)
     rsi = calculate_rsi(close, period=14)
+    adx = calculate_adx(high, low, close, period=14)
     sma_200 = calculate_sma(close, 200)
     
-    # Weekly pivot levels
-    pivot_P, pivot_R1, pivot_S1, pivot_R2, pivot_S2 = calculate_weekly_pivots(high, low, close, lookback_weeks=1)
-    
-    # RSI divergence detection
-    div_bull, div_bear = calculate_rsi_divergence(close, rsi, lookback=5)
-    
-    # Volume spike detection
-    vol_spike = calculate_volume_spike(volume, period=20, threshold=1.5)
-    
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
+    SIZE_BASE = 0.20
     SIZE_STRONG = 0.30
     
     # Position tracking
@@ -264,85 +208,65 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_6h[i]) or np.isnan(rsi[i]):
+        if np.isnan(kama_12h_fast[i]) or np.isnan(kama_12h_slow[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(sma_200[i]):
+        if np.isnan(kama_1d_aligned[i]) or np.isnan(sma_200[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(pivot_P[i]):
+        if np.isnan(rsi[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS ===
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        # === 1d KAMA TREND BIAS ===
+        htf_bull = close[i] > kama_1d_aligned[i]
+        htf_bear = close[i] < kama_1d_aligned[i]
         
-        # 1w for major trend (optional boost)
-        htf_1w_bull = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
-        htf_1w_bear = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
+        # === 12h KAMA CROSSOVER ===
+        kama_bull = kama_12h_fast[i] > kama_12h_slow[i]
+        kama_bear = kama_12h_fast[i] < kama_12h_slow[i]
         
-        # === 6h HMA TREND ===
-        hma_bull = close[i] > hma_6h[i]
-        hma_bear = close[i] < hma_6h[i]
+        # === KAMA SLOPE (momentum confirmation) ===
+        kama_slope_bull = False
+        kama_slope_bear = False
+        if i > 5 and not np.isnan(kama_12h_fast[i-5]):
+            kama_slope_bull = kama_12h_fast[i] > kama_12h_fast[i-5]
+            kama_slope_bear = kama_12h_fast[i] < kama_12h_fast[i-5]
+        
+        # === ADX TREND STRENGTH ===
+        adx_strong = adx[i] > 18.0  # Lowered from 25 for more trades
+        
+        # === RSI PULLBACK ZONE (not extremes) ===
+        rsi_pullback_long = 38.0 <= rsi[i] <= 55.0  # Pullback in uptrend
+        rsi_pullback_short = 45.0 <= rsi[i] <= 62.0  # Rally in downtrend
         
         # === SMA200 FILTER ===
         above_sma200 = close[i] > sma_200[i]
         below_sma200 = close[i] < sma_200[i]
         
-        # === PIVOT PROXIMITY (within 1% of pivot level) ===
-        near_S1 = abs(close[i] - pivot_S1[i]) / close[i] < 0.01 if not np.isnan(pivot_S1[i]) else False
-        near_S2 = abs(close[i] - pivot_S2[i]) / close[i] < 0.01 if not np.isnan(pivot_S2[i]) else False
-        near_R1 = abs(close[i] - pivot_R1[i]) / close[i] < 0.01 if not np.isnan(pivot_R1[i]) else False
-        near_R2 = abs(close[i] - pivot_R2[i]) / close[i] < 0.01 if not np.isnan(pivot_R2[i]) else False
-        near_P = abs(close[i] - pivot_P[i]) / close[i] < 0.01 if not np.isnan(pivot_P[i]) else False
-        
-        # === RSI EXTREMES ===
-        rsi_oversold = rsi[i] < 35.0
-        rsi_overbought = rsi[i] > 65.0
-        
-        # === VOLUME CONFIRMATION ===
-        vol_confirm = vol_spike[i]
-        
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG SETUP: Near support pivot + RSI divergence/oversold + HTF bull
-        if near_S1 or near_S2 or near_P:
-            # Need either divergence OR oversold RSI
-            if (div_bull[i] or rsi_oversold) and htf_1d_bull:
-                # Volume confirmation preferred but not required for pivot bounce
-                if vol_confirm or rsi_oversold:
-                    desired_signal = SIZE_STRONG if htf_1w_bull else SIZE_BASE
+        # LONG: 1d bull + 12h KAMA bull + RSI pullback + ADX confirmation
+        if htf_bull and kama_bull and kama_slope_bull and rsi_pullback_long:
+            if adx_strong or above_sma200:  # Either trend strength OR above SMA200
+                desired_signal = SIZE_STRONG if adx_strong else SIZE_BASE
         
-        # SHORT SETUP: Near resistance pivot + RSI divergence/overbought + HTF bear
-        elif near_R1 or near_R2 or near_P:
-            # Need either divergence OR overbought RSI
-            if (div_bear[i] or rsi_overbought) and htf_1d_bear:
-                # Volume confirmation preferred but not required for pivot rejection
-                if vol_confirm or rsi_overbought:
-                    desired_signal = -SIZE_STRONG if htf_1w_bear else -SIZE_BASE
-        
-        # BREAKOUT SETUP: Price breaks pivot with volume + HTF alignment
-        if close[i] > pivot_P[i] and htf_1d_bull and hma_bull and vol_confirm:
-            desired_signal = SIZE_STRONG if htf_1w_bull else SIZE_BASE
-        
-        if close[i] < pivot_P[i] and htf_1d_bear and hma_bear and vol_confirm:
-            if desired_signal > 0:
-                pass  # Don't flip on same bar
-            else:
-                desired_signal = -SIZE_STRONG if htf_1w_bear else -SIZE_BASE
+        # SHORT: 1d bear + 12h KAMA bear + RSI rally + ADX confirmation
+        elif htf_bear and kama_bear and kama_slope_bear and rsi_pullback_short:
+            if adx_strong or below_sma200:  # Either trend strength OR below SMA200
+                desired_signal = -SIZE_STRONG if adx_strong else -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR from entry) ===
         stoploss_triggered = False
@@ -356,6 +280,15 @@ def generate_signals(prices):
                 stoploss_triggered = True
         
         if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === EXIT SIGNAL (RSI cross opposite zone) ===
+        if in_position and position_side > 0 and rsi[i] > 65.0:
+            # Long exit on overbought
+            desired_signal = 0.0
+        
+        if in_position and position_side < 0 and rsi[i] < 35.0:
+            # Short exit on oversold
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
