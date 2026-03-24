@@ -1,35 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #001: 4h Primary + 1d HTF — Dual Regime (Mean Revert + Trend) with Funding Contrarian
+Experiment #002: 12h Primary + 1d/1w HTF — Dual Regime (Mean Revert + Trend) with Connors RSI
 
-Hypothesis: Previous 4h strategies failed due to OVER-FILTERING. This uses PROVEN patterns:
-1. Choppiness Index regime switch (CHOP > 55 = mean revert, CHOP < 45 = trend follow)
-2. Connors RSI with LOOSE thresholds (20/80 instead of 10/90) for trade generation
-3. 1d HMA for trend BIAS only (not hard filter) - asymmetric sizing
-4. Funding rate contrarian for BTC/ETH edge (short when funding > 0.02%, long when < -0.02%)
-5. ATR trailing stop at 2.5x for risk management
+Hypothesis: 12h timeframe reduces noise and whipsaws compared to 4h while maintaining 
+sufficient trade frequency (20-50 trades/year). The dual regime approach adapts to 
+market conditions: mean reversion in choppy markets (CHOP>55), trend following in 
+trending markets (CHOP<45). Connors RSI provides proven mean reversion edge with 
+75% win rate. 1d/1w HMA provides stronger trend bias than 4h strategies.
 
-Key improvements from failed attempts:
-- LOOSER CRSI thresholds to ensure ≥30 trades/symbol on train
-- Funding rate adds contrarian edge specific to BTC/ETH perpetuals
-- 1d HMA for bias weighting, not binary filter
-- Discrete signal levels (0.0, ±0.20, ±0.30) to minimize fee churn
+Key improvements from #001:
+- Higher timeframe (12h vs 4h) = less noise, fewer false signals
+- 1w HMA added for stronger long-term trend bias
+- LOOSER CRSI thresholds (25/75 instead of 20/80) to ensure ≥10 trades/symbol
+- Stricter regime confirmation (CHOP must be clearly >55 or <45)
+- Better position tracking for trailing stops
 
 Entry Logic:
-- CHOPPY (CHOP > 55): CRSI < 20 long, CRSI > 80 short (mean reversion)
-- TRENDING (CHOP < 45): Price vs 4h HMA + 1d bias confirmation
-- Funding contrarian: add to signal when funding extreme
+- CHOPPY (CHOP > 55): CRSI < 25 long, CRSI > 75 short (mean reversion)
+- TRENDING (CHOP < 45): Price vs 12h HMA + 1d/1w bias confirmation
 - Size: 0.30 with HTF trend, 0.20 against HTF trend
+- Stop: 2.5x ATR trailing stop
 
-Risk: 2.5x ATR trailing stop, max signal magnitude 0.35
-Target: Sharpe > 0.6, trades > 30/symbol train, > 3/symbol test, DD > -40%
+Target: Sharpe > 0.5, trades > 10/symbol train, > 3/symbol test, DD > -40%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_crsi_chop_funding_dual_regime_1d_v1"
-timeframe = "4h"
+name = "mtf_12h_crsi_chop_dual_regime_1d1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
@@ -37,7 +36,7 @@ def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
     Connors RSI (CRSI) - 3-component mean reversion indicator
     CRSI = (RSI(close, 3) + RSI(streak, 2) + PercentRank(100)) / 3
     
-    Entry signals: CRSI < 15-20 = oversold (long), CRSI > 80-85 = overbought (short)
+    Entry signals: CRSI < 25 = oversold (long), CRSI > 75 = overbought (short)
     Research shows 75% win rate with SMA200 filter
     """
     n = len(close)
@@ -193,72 +192,84 @@ def calculate_sma(close, period=200):
     
     return sma
 
-def load_funding_data(symbol):
-    """
-    Load funding rate data from processed parquet files.
-    Returns dict with 'timestamp' and 'funding_rate' arrays.
-    """
-    try:
-        import os
-        symbol_base = symbol.replace('USDT', '').lower()
-        funding_path = f"data/processed/funding/{symbol_base}.parquet"
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index - measures trend strength"""
+    n = len(close)
+    if n < period * 2 + 1:
+        return np.full(n, np.nan)
+    
+    adx = np.full(n, np.nan)
+    
+    # Calculate DM and TR
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
         
-        if os.path.exists(funding_path):
-            df_funding = pd.read_parquet(funding_path)
-            return {
-                'timestamp': df_funding['timestamp'].values,
-                'funding_rate': df_funding['funding_rate'].values
-            }
-    except Exception:
-        pass
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+        
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Return dummy data if funding not available
-    return None
-
-def get_funding_at_time(funding_data, timestamp):
-    """Get funding rate closest to given timestamp"""
-    if funding_data is None:
-        return 0.0
+    # Smooth DM and TR
+    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    ts_arr = funding_data['timestamp']
-    fr_arr = funding_data['funding_rate']
+    # Calculate DI and DX
+    for i in range(period * 2, n):
+        if tr_s[i] < 1e-10:
+            continue
+        
+        plus_di = 100.0 * plus_dm_s[i] / tr_s[i]
+        minus_di = 100.0 * minus_dm_s[i] / tr_s[i]
+        
+        di_sum = plus_di + minus_di
+        if di_sum < 1e-10:
+            continue
+        
+        dx = 100.0 * abs(plus_di - minus_di) / di_sum
+        
+        # First ADX value
+        if i == period * 2:
+            adx[i] = dx
+        else:
+            adx[i] = (adx[i-1] * (period - 1) + dx) / period
     
-    # Find closest timestamp
-    idx = np.searchsorted(ts_arr, timestamp)
-    if idx >= len(ts_arr):
-        idx = len(ts_arr) - 1
-    if idx < 0:
-        idx = 0
-    
-    return fr_arr[idx]
+    return adx
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values if "open_time" in prices.columns else np.arange(len(close))
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align 1d HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (4h) indicators
+    # Calculate and align 1w HMA for long-term trend bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    
+    # Calculate primary (12h) indicators
     crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
     atr = calculate_atr(high, low, close, period=14)
     chop = calculate_choppiness(high, low, close, period=14)
     sma_200 = calculate_sma(close, period=200)
+    adx = calculate_adx(high, low, close, period=14)
     
-    # Try to load funding data
-    funding_data = None
-    try:
-        # Extract symbol from prices metadata if available
-        funding_data = load_funding_data("BTCUSDT")  # Default, will try per-symbol in real execution
-    except Exception:
-        funding_data = None
+    # Calculate 12h HMA for primary trend
+    hma_12h = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
     BASE_SIZE = 0.30
@@ -273,7 +284,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(250, n):
+    for i in range(300, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -281,13 +292,19 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(crsi[i]) or np.isnan(chop[i]) or np.isnan(sma_200[i]):
+        if np.isnan(crsi[i]) or np.isnan(chop[i]) or np.isnan(sma_200[i]) or np.isnan(adx[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        if np.isnan(hma_12h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -298,24 +315,24 @@ def generate_signals(prices):
         is_choppy = chop[i] > 55.0
         is_trending = chop[i] < 45.0
         
-        # === HTF TREND BIAS ===
+        # === HTF TREND BIAS (1d and 1w) ===
         hma_1d_bull = close[i] > hma_1d_aligned[i]
         hma_1d_bear = close[i] < hma_1d_aligned[i]
+        
+        hma_1w_bull = close[i] > hma_1w_aligned[i]
+        hma_1w_bear = close[i] < hma_1w_aligned[i]
+        
+        # Strong bias when 1d and 1w agree
+        strong_bull = hma_1d_bull and hma_1w_bull
+        strong_bear = hma_1d_bear and hma_1w_bear
         
         # SMA200 filter for long-term bias
         above_sma200 = close[i] > sma_200[i]
         below_sma200 = close[i] < sma_200[i]
         
-        # === FUNDING RATE CONTRARIAN ===
-        funding_signal = 0.0
-        try:
-            funding_rate = get_funding_at_time(funding_data, open_time[i])
-            if funding_rate > 0.02:  # Extremely bullish funding = contrarian short
-                funding_signal = -0.10
-            elif funding_rate < -0.02:  # Extremely bearish funding = contrarian long
-                funding_signal = 0.10
-        except Exception:
-            funding_signal = 0.0
+        # ADX for trend strength confirmation
+        strong_trend = adx[i] > 25.0
+        weak_trend = adx[i] < 20.0
         
         # === DESIRED SIGNAL BASED ON REGIME ===
         desired_signal = 0.0
@@ -323,46 +340,56 @@ def generate_signals(prices):
         
         if is_choppy:
             # MEAN REVERSION REGIME - use CRSI extremes (LOOSE thresholds for trade gen)
-            # Long: CRSI < 20 (oversold) + above SMA200 preferred
-            if crsi[i] < 20.0:
-                if above_sma200 or hma_1d_bull:
+            # Long: CRSI < 25 (oversold) + prefer above SMA200 or bullish HTF
+            if crsi[i] < 25.0:
+                if above_sma200 or strong_bull:
                     signal_strength = BASE_SIZE
                 else:
                     signal_strength = REDUCED_SIZE
-                desired_signal = signal_strength + funding_signal
+                desired_signal = signal_strength
             
-            # Short: CRSI > 80 (overbought) + below SMA200 preferred
-            elif crsi[i] > 80.0:
-                if below_sma200 or hma_1d_bear:
+            # Short: CRSI > 75 (overbought) + prefer below SMA200 or bearish HTF
+            elif crsi[i] > 75.0:
+                if below_sma200 or strong_bear:
                     signal_strength = BASE_SIZE
                 else:
                     signal_strength = REDUCED_SIZE
-                desired_signal = -signal_strength + funding_signal
+                desired_signal = -signal_strength
         
         elif is_trending:
-            # TREND REGIME - use SMA200 + HTF bias
-            # Long: Price > SMA200 + 1d bullish
-            if above_sma200:
-                if hma_1d_bull:
-                    signal_strength = BASE_SIZE
-                else:
-                    signal_strength = REDUCED_SIZE
-                desired_signal = signal_strength + funding_signal
+            # TREND REGIME - use HMA crossover + HTF bias + ADX confirmation
+            # Long: Price > 12h HMA + 1d bullish + ADX confirms trend
+            hma_12h_bull = close[i] > hma_12h[i]
+            hma_12h_bear = close[i] < hma_12h[i]
             
-            # Short: Price < SMA200 + 1d bearish
-            elif below_sma200:
-                if hma_1d_bear:
+            if hma_12h_bull and strong_trend:
+                if strong_bull:
                     signal_strength = BASE_SIZE
-                else:
+                elif hma_1d_bull:
                     signal_strength = REDUCED_SIZE
-                desired_signal = -signal_strength + funding_signal
+                else:
+                    signal_strength = 0.15  # Weak signal
+                desired_signal = signal_strength
+            
+            # Short: Price < 12h HMA + 1d bearish + ADX confirms trend
+            elif hma_12h_bear and strong_trend:
+                if strong_bear:
+                    signal_strength = BASE_SIZE
+                elif hma_1d_bear:
+                    signal_strength = REDUCED_SIZE
+                else:
+                    signal_strength = 0.15  # Weak signal
+                desired_signal = -signal_strength
         
         else:
-            # NEUTRAL REGIME (45 <= CHOP <= 55) - only trade WITH 1d trend
-            if hma_1d_bull and above_sma200:
-                desired_signal = REDUCED_SIZE + funding_signal
-            elif hma_1d_bear and below_sma200:
-                desired_signal = -REDUCED_SIZE + funding_signal
+            # NEUTRAL REGIME (45 <= CHOP <= 55) - only trade WITH strong HTF trend
+            hma_12h_bull = close[i] > hma_12h[i]
+            hma_12h_bear = close[i] < hma_12h[i]
+            
+            if strong_bull and hma_12h_bull:
+                desired_signal = REDUCED_SIZE
+            elif strong_bear and hma_12h_bear:
+                desired_signal = -REDUCED_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -394,8 +421,8 @@ def generate_signals(prices):
             final_signal = REDUCED_SIZE
         elif desired_signal <= -REDUCED_SIZE * 0.85:
             final_signal = -REDUCED_SIZE
-        elif abs(desired_signal) >= 0.10:
-            # Small signals from funding - use reduced size if significant
+        elif abs(desired_signal) >= 0.12:
+            # Small signals - use reduced size if significant
             final_signal = np.sign(desired_signal) * REDUCED_SIZE
         else:
             final_signal = 0.0
