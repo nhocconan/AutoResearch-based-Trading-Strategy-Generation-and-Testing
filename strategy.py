@@ -1,35 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #1644: 4h Primary + 1d HTF — Donchian Breakout + HMA Trend + RSI Momentum
+Experiment #1645: 1h Primary + 4h/1d HTF — Simplified Trend + Momentum + Session
 
-Hypothesis: Previous 4h strategies failed due to OVER-FILTERING (too many confluence conditions).
-Strategy #1639 (KAMA+HMA+RSI) got Sharpe=-0.093 - close but negative. The issue is likely
-that requiring ALL three conditions (KAMA slope + 1d HMA bias + RSI>50) filters out too many
-valid trades, especially in 2022 crash and 2025 bear market.
+Hypothesis: Previous 1h strategies (#1635, #1638, #1640) failed with Sharpe=0.000 
+because entry conditions were TOO STRICT (Choppiness + CRSI + Fisher all together).
 
-This strategy SIMPLIFIES to proven patterns from best performer (#1632 lineage):
-1. Donchian(20) breakout - generates MORE signals than KAMA crossover
-2. 1d HMA(21) for trend bias - proven in best strategy (Sharpe=0.618)
-3. RSI(14) with WIDE bands (35/65) - loose momentum filter = MORE TRADES
-4. ATR(14) 2.5x trailing stop - controlled drawdown
-5. NO regime switching - pure breakout with trend filter
+This strategy SIMPLIFIES while keeping the proven MTF pattern:
+1. HTF bias: 4h HMA(21) + 1d HMA(21) for trend direction (dual confirmation)
+2. 1h RSI(14): Loose momentum filter (>45 long, <55 short) - NOT extreme values
+3. Session filter: 8-20 UTC only (liquid hours, reduces trade count)
+4. Volume filter: >0.7x 20-bar average (loose, just avoids dead hours)
+5. ATR(14) 2.5x trailing stoploss
 
-Key changes from #1639:
-- Donchian breakout instead of KAMA (breakouts generate more signals in volatile markets)
-- RSI bands 35/65 instead of 50/50 (wider = more entries)
-- Single HTF (1d) instead of complex multi-HTF logic
-- Simpler entry = fewer conditions that can conflict
+Key differences from failed 1h strategies:
+- NO Choppiness Index (was filtering out valid trades in #1635, #1640)
+- NO CRSI extreme values (was too rare in #1638)
+- NO Fisher Transform (added complexity without benefit in #1640)
+- RSI thresholds LOOSE: >45/<55 instead of >60/<40
+- Volume threshold LOOSE: 0.7x instead of 1.2x
+- Size: 0.25 (conservative for 1h timeframe)
 
-Timeframe: 4h (required)
-HTF: 1d HMA via mtf_data.get_htf_data() — called ONCE before loop
+Why this should work on 1h:
+- Dual HTF (4h+1d) provides strong trend bias without over-filtering
+- Loose RSI ensures trades actually trigger (30-80/year target)
+- Session filter naturally limits trades to liquid hours
+- Simple logic = fewer conditions that can conflict
+
+Timeframe: 1h (required for this experiment)
+HTF: 4h + 1d HMA via mtf_data.get_htf_data() — called ONCE before loop
 Target: Sharpe > 0.618, trades > 30/symbol train, > 5/symbol test, DD > -40%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_1d_rsi_atr_v3"
-timeframe = "4h"
+name = "mtf_1h_hma_4h1d_rsi_session_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -100,41 +106,50 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - upper/lower bounds"""
-    n = len(high)
+def calculate_volume_sma(volume, period=20):
+    """Simple moving average of volume"""
+    n = len(volume)
     if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+        return np.full(n, np.nan)
     
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.nanmax(high[i - period + 1:i + 1])
-        lower[i] = np.nanmin(low[i - period + 1:i + 1])
-    
-    return upper, lower
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_sma
+
+def get_hour_from_open_time(open_time_col):
+    """Extract UTC hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds since epoch
+    hours = ((open_time_col // 1000) % 86400) // 3600
+    return hours.astype(int)
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 1d HMA for trend bias
+    # Calculate and align HTF HMA for trend bias
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (4h) indicators
+    # Calculate primary (1h) indicators
     atr = calculate_atr(high, low, close, period=14)
     rsi = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    vol_sma = calculate_volume_sma(volume, period=20)
+    
+    # Extract UTC hour for session filter
+    utc_hour = get_hour_from_open_time(open_time)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.30
+    BASE_SIZE = 0.25  # Conservative size for 1h timeframe
     
     # Position tracking for stoploss
     in_position = False
@@ -152,7 +167,7 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -164,36 +179,41 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(vol_sma[i]) or vol_sma[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND BIAS (1d HMA) ===
-        daily_bull = close[i] > hma_1d_aligned[i]
-        daily_bear = close[i] < hma_1d_aligned[i]
+        # === SESSION FILTER (8-20 UTC only) ===
+        in_session = (utc_hour[i] >= 8) and (utc_hour[i] <= 20)
         
-        # === DONCHIAN BREAKOUT (4h) ===
-        # Breakout above upper = bullish momentum
-        # Breakout below lower = bearish momentum
-        breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
+        # === VOLUME FILTER (>0.7x average) ===
+        volume_ok = volume[i] > 0.7 * vol_sma[i]
         
-        # === RSI MOMENTUM FILTER (wide bands for more trades) ===
-        rsi_bull = rsi[i] > 35.0  # Wide band = more entries
-        rsi_bear = rsi[i] < 65.0  # Wide band = more entries
+        # === TREND BIAS (Dual HTF: 4h + 1d HMA) ===
+        # Both HTF must agree for strong signal
+        hma_4h_bull = close[i] > hma_4h_aligned[i]
+        hma_4h_bear = close[i] < hma_4h_aligned[i]
+        
+        hma_1d_bull = close[i] > hma_1d_aligned[i]
+        hma_1d_bear = close[i] < hma_1d_aligned[i]
+        
+        # === RSI MOMENTUM FILTER (Loose thresholds for trade frequency) ===
+        # Using >45/<55 instead of extreme values to ensure trades trigger
+        rsi_bull = rsi[i] > 45.0
+        rsi_bear = rsi[i] < 55.0
         
         # === PRIMARY SIGNAL ===
         desired_signal = 0.0
         
-        # LONG: Donchian breakout + price above 1d HMA + RSI not oversold
-        if breakout_long and daily_bull and rsi_bull:
+        # LONG: Both HTF bull + RSI momentum + session + volume
+        if hma_4h_bull and hma_1d_bull and rsi_bull and in_session and volume_ok:
             desired_signal = BASE_SIZE
         
-        # SHORT: Donchian breakout + price below 1d HMA + RSI not overbought
-        elif breakout_short and daily_bear and rsi_bear:
+        # SHORT: Both HTF bear + RSI momentum + session + volume
+        elif hma_4h_bear and hma_1d_bear and rsi_bear and in_session and volume_ok:
             desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
