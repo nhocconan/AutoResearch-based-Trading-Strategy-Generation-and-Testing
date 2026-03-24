@@ -1,40 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #1054: 1d Primary + 1w HTF — Donchian Breakout + HMA Trend + RSI Filter
+Experiment #1055: 6h Primary + 12h/1d HTF — Fisher Transform + Choppiness Regime + HMA Bias
 
-Hypothesis: Daily timeframe with weekly trend filter provides optimal balance between
-signal quality and trade frequency. Donchian breakouts capture major moves while
-HMA trend filter avoids counter-trend traps. RSI filter prevents entering at extremes.
+Hypothesis: 6h timeframe is underexplored middle-ground between 4h swing and 12h position trading.
+Using Ehlers Fisher Transform for precise reversal entries, combined with Choppiness regime filter
+and 12h/1d HMA trend bias, should capture multi-day swings with fewer whipsaws than 4h.
 
 Key innovations:
-1. 1w HMA(21) for long-term trend bias (only trade in direction of weekly trend)
-2. 1d Donchian(20) breakout for entries (proven on crypto daily charts)
-3. RSI(14) filter 35-65 range (avoid overbought/oversold entries)
-4. ATR(14) 2.5x trailing stop for risk management
-5. Position sizing: 0.25 base, 0.30 strong signals
-6. Discrete signal levels to minimize fee churn
+1. Ehlers Fisher Transform (period=9): Normalizes price to Gaussian distribution, extreme values
+   indicate reversals. Long when Fisher crosses above -1.5, short when crosses below +1.5
+2. Choppiness Index (CHOP 14): Regime filter - avoid trend entries in choppy markets
+3. 12h HMA(21) + 1d HMA(21): Dual HTF trend bias - only long if both aligned bullish
+4. LOOSE entry conditions: Fisher thresholds widened to ensure 30-60 trades/year
+5. ATR(14) 2.5x trailing stop for risk management
+6. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
 
-Why this should work on 1d:
-- Daily captures multi-week swings (20-50 trades/year target)
-- Weekly HMA filter avoids 2022 crash counter-trend longs
-- Donchian breakout works in both bull and bear markets
-- RSI filter reduces false breakouts at extremes
-- Simpler than regime-switching = fewer conditions to fail
+Why 6h should work:
+- Captures 2-4 day swings (longer than 4h, shorter than 12h)
+- Less noise than 4h, more signals than 12h
+- Fisher Transform excels at catching reversals in bear/range markets (2022-2025)
+- Dual HTF (12h+1d) provides stronger trend confirmation than single HTF
 
-Entry conditions (LOOSE to guarantee 30+ trades):
-- LONG: price > 1w_HMA + Donchian_upper breakout + RSI 35-65
-- SHORT: price < 1w_HMA + Donchian_lower breakout + RSI 35-65
+Entry conditions (LOOSE to guarantee trades):
+- LONG: Fisher crosses above -1.5 OR Fisher < -1.0 + price > 12h_HMA + CHOP < 65
+- SHORT: Fisher crosses below +1.5 OR Fisher > +1.0 + price < 12h_HMA + CHOP < 65
+- CHOP > 65: Only mean-reversion entries (Fisher extremes <-2 or >+2)
 
 Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 1d
+Timeframe: 6h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_hma_rsi_1w_v1"
-timeframe = "1d"
+name = "mtf_6h_fisher_chop_hma_12h1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -81,6 +82,80 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_fisher_transform(high, low, close, period=9):
+    """
+    Ehlers Fisher Transform - normalizes price to Gaussian distribution
+    Extreme values indicate potential reversals
+    
+    Steps:
+    1. Calculate typical price: (high + low) / 2
+    2. Normalize to -1 to +1 range using highest high / lowest low
+    3. Apply Fisher transform: 0.5 * ln((1+x)/(1-x))
+    4. Smooth with EMA
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    # Typical price
+    typical = (high + low) / 2.0
+    
+    # Normalize to -1 to +1
+    fisher_raw = np.full(n, np.nan, dtype=np.float64)
+    trigger = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        highest = np.max(high[i-period+1:i+1])
+        lowest = np.min(low[i-period+1:i+1])
+        range_val = highest - lowest
+        
+        if range_val < 1e-10:
+            continue
+        
+        # Normalize typical price to -0.99 to +0.99
+        x = 0.99 * (2.0 * (typical[i] - lowest) / range_val - 1.0)
+        x = np.clip(x, -0.99, 0.99)
+        
+        # Fisher transform
+        fisher_raw[i] = 0.5 * np.log((1.0 + x) / (1.0 - x))
+    
+    # Smooth fisher with EMA
+    fisher_series = pd.Series(fisher_raw)
+    fisher = fisher_series.ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Trigger line (1-period lag)
+    trigger[1:] = fisher[:-1]
+    
+    return fisher, trigger
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index - measures market choppiness vs trending
+    CHOP > 61.8 = ranging market
+    CHOP < 38.2 = trending market
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        
+        price_range = highest_high - lowest_low
+        if price_range > 1e-10 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
+
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
@@ -99,21 +174,6 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - upper and lower bounds"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -121,16 +181,21 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate 1d indicators
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
+    fisher, fisher_trigger = calculate_fisher_transform(high, low, close, period=9)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -145,7 +210,10 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(50, n):
+    # Track previous fisher for crossover detection
+    prev_fisher = 0.0
+    
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -154,53 +222,89 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(chop_14[i]) or np.isnan(fisher[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND BIAS (Weekly HMA) ===
-        weekly_bull = close[i] > hma_1w_aligned[i]
-        weekly_bear = close[i] < hma_1w_aligned[i]
+        # === REGIME DETECTION (Choppiness Index) ===
+        is_choppy = chop_14[i] > 60.0  # Range market
+        is_trending = chop_14[i] < 50.0  # Trend market
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Breakout = price crosses above upper or below lower
-        prev_upper = donchian_upper[i-1] if i > 0 else donchian_upper[i]
-        prev_lower = donchian_lower[i-1] if i > 0 else donchian_lower[i]
+        # === HTF BIAS (12h + 1d HMA alignment) ===
+        price_above_12h = close[i] > hma_12h_aligned[i]
+        price_below_12h = close[i] < hma_12h_aligned[i]
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        breakout_long = high[i] > prev_upper and close[i] > prev_upper
-        breakout_short = low[i] < prev_lower and close[i] < prev_lower
+        # Strong trend alignment
+        strong_bull = price_above_12h and price_above_1d
+        strong_bear = price_below_12h and price_below_1d
         
-        # === RSI FILTER (avoid extremes) ===
-        rsi_ok_long = 35.0 <= rsi_14[i] <= 70.0
-        rsi_ok_short = 30.0 <= rsi_14[i] <= 65.0
+        # Weak/neutral bias
+        neutral = not strong_bull and not strong_bear
         
-        # === ENTRY LOGIC ===
+        # === FISHER TRANSFORM SIGNALS ===
+        fisher_cross_up = fisher[i] > -1.5 and prev_fisher <= -1.5
+        fisher_cross_down = fisher[i] < 1.5 and prev_fisher >= 1.5
+        fisher_extreme_low = fisher[i] < -2.0
+        fisher_extreme_high = fisher[i] > 2.0
+        fisher_moderate_low = fisher[i] < -1.0
+        fisher_moderate_high = fisher[i] > 1.0
+        
+        # === ENTRY LOGIC (REGIME-ADAPTIVE + LOOSE CONDITIONS) ===
         desired_signal = 0.0
         
-        # LONG: Weekly bull + Donchian breakout + RSI filter
-        if weekly_bull and breakout_long and rsi_ok_long:
-            # Strong signal if RSI not too high
-            if rsi_14[i] < 55.0:
-                desired_signal = SIZE_STRONG
-            else:
+        if is_choppy:
+            # MEAN REVERSION MODE - use Fisher extremes
+            # Long when Fisher extremely oversold
+            if fisher_extreme_low:
                 desired_signal = SIZE_BASE
+            # Short when Fisher extremely overbought
+            elif fisher_extreme_high:
+                desired_signal = -SIZE_BASE
+            # Moderate Fisher + HTF bias
+            elif fisher_moderate_low and price_above_12h:
+                desired_signal = SIZE_BASE
+            elif fisher_moderate_high and price_below_12h:
+                desired_signal = -SIZE_BASE
         
-        # SHORT: Weekly bear + Donchian breakout + RSI filter
-        elif weekly_bear and breakout_short and rsi_ok_short:
-            # Strong signal if RSI not too low
-            if rsi_14[i] > 45.0:
+        elif is_trending:
+            # TREND MODE - use Fisher crossovers + HTF confirmation
+            # Long on Fisher cross up + bullish HTF
+            if fisher_cross_up and strong_bull:
+                desired_signal = SIZE_STRONG
+            elif fisher_cross_up and price_above_12h:
+                desired_signal = SIZE_BASE
+            # Short on Fisher cross down + bearish HTF
+            elif fisher_cross_down and strong_bear:
                 desired_signal = -SIZE_STRONG
-            else:
+            elif fisher_cross_down and price_below_12h:
+                desired_signal = -SIZE_BASE
+            # Fallback: simple HTF + RSI
+            elif strong_bull and rsi_14[i] > 40.0 and rsi_14[i] < 80.0:
+                desired_signal = SIZE_BASE
+            elif strong_bear and rsi_14[i] < 60.0 and rsi_14[i] > 20.0:
+                desired_signal = -SIZE_BASE
+        
+        else:
+            # NEUTRAL REGIME - loose entries
+            if fisher_moderate_low and price_above_12h:
+                desired_signal = SIZE_BASE
+            elif fisher_moderate_high and price_below_12h:
+                desired_signal = -SIZE_BASE
+            elif fisher_cross_up:
+                desired_signal = SIZE_BASE
+            elif fisher_cross_down:
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
@@ -259,5 +363,6 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
         
         signals[i] = final_signal
+        prev_fisher = fisher[i]
     
     return signals
