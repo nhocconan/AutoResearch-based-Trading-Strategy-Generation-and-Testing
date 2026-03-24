@@ -1,79 +1,128 @@
 #!/usr/bin/env python3
 """
-Experiment #1571: 4h Primary + 1d/1w HTF — KAMA Adaptive Trend Strategy
+Experiment #1572: 12h Primary + 1d/1w HTF — Choppiness Regime + Connors RSI Strategy
 
-Hypothesis: After 11 failed 4h experiments with complex regime switching, simpler is better.
-KAMA (Kaufman Adaptive Moving Average) adapts to market efficiency - follows price in trends,
-flattens in ranges. This should reduce whipsaw compared to HMA/EMA crossovers.
+Hypothesis: After 11 failed 4h experiments, 12h timeframe with regime-switching logic
+should work better. Key insight from exp #1562/#1566: Choppiness Index + Connors RSI
+showed promise on ETH (Sharpe +0.923). This strategy switches between:
+- Range regime (CHOP > 61.8): Mean reversion with Connors RSI extremes
+- Trend regime (CHOP < 38.2): Trend following with HMA crossover
+
+Why 12h should beat 4h:
+- Fewer whipsaws (4h had major whipsaw issues in 2022)
+- 20-50 trades/year target = optimal fee efficiency
+- HTF filters (1d/1w) work better on 12h than 4h (less noise)
 
 Key innovations:
-1. KAMA(10,2,30) on 4h - adapts to volatility, less lag than EMA
-2. 1d HMA(21) for trend bias (proven in best strategies)
-3. 1w HMA(21) for long-term regime filter (only trade with weekly trend)
-4. RSI(14) 45-55 filter for trend continuation (not extreme reversals)
+1. Choppiness Index(14) regime detection — proven meta-filter for bear markets
+2. Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3 — 75% win rate
+3. 1d HMA(21) for intermediate trend bias
+4. 1w HMA(21) for long-term regime filter
 5. ATR(14) 2.5x trailing stop for drawdown control
-6. Discrete position sizing (0.30) to minimize fee churn
+6. Looser entry thresholds to ensure >30 trades/year (critical lesson from failures)
 
-Why this should beat Sharpe 0.618:
-- KAMA reduces whipsaw in choppy 4h markets (major issue in prior experiments)
-- Dual HTF filter (1d + 1w) ensures we only trade with major trend
-- RSI continuation filter (45-55) catches trend continuations, not reversals
-- Simpler logic = more reliable signals = more trades (>30/year target)
-- 4h targets 20-50 trades/year — optimal for fee efficiency
-
-Timeframe: 4h (required for this experiment)
-HTF: 1d HMA + 1w HMA for bias (use mtf_data helper - call ONCE before loop)
-Target: Sharpe > 0.618, trades > 10/symbol train, > 3/symbol test, DD > -50%
+Timeframe: 12h (required for this experiment)
+HTF: 1d HMA + 1w HMA for bias (use mtf_data helper — call ONCE before loop)
+Target: Sharpe > 0.618, trades > 30/symbol train, > 3/symbol test, DD > -50%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_trend_1d1w_hma_rsi_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_chop_regime_crsi_1d1w_hma_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_kama(close, fast_period=10, slow_period=30, smooth_period=2):
+def calculate_choppiness(high, low, close, period=14):
     """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts to market efficiency ratio (ER)
-    ER = |close - close_n| / sum(|close_i - close_i-1|)
-    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
-    KAMA = KAMA_prev + SC * (close - KAMA_prev)
-    
-    Fast SC = 2/(fast+1), Slow SC = 2/(slow+1)
+    Choppiness Index (CHOP)
+    Measures market choppiness vs trending
+    CHOP = 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    CHOP > 61.8 = range/choppy, CHOP < 38.2 = trending
     """
     n = len(close)
-    if n < slow_period:
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    kama = np.full(n, np.nan)
+    chop = np.full(n, np.nan)
     
-    # Calculate Efficiency Ratio
-    er = np.full(n, np.nan)
-    for i in range(slow_period - 1, n):
-        signal = abs(close[i] - close[i - slow_period + 1])
-        noise = np.sum(np.abs(np.diff(close[i - slow_period + 1:i + 1])))
-        if noise > 1e-10:
-            er[i] = signal / noise
+    # Calculate ATR for each bar
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 1e-10:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
         else:
-            er[i] = 0.0
+            chop[i] = 50.0  # neutral
     
-    # Smoothing constants
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
+    return chop
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Connors RSI (CRSI)
+    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    Long: CRSI < 10, Short: CRSI > 90
+    """
+    n = len(close)
+    if n < rank_period:
+        return np.full(n, np.nan)
     
-    # Initialize KAMA at SMA of first slow_period bars
-    kama[slow_period - 1] = np.mean(close[:slow_period])
+    crsi = np.full(n, np.nan)
     
-    # Calculate KAMA
-    for i in range(slow_period, n):
-        if np.isnan(er[i]):
-            continue
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    # RSI(3)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    return kama
+    gain_smooth = pd.Series(gain).ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean().values
+    loss_smooth = pd.Series(loss).ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean().values
+    
+    rsi_short = np.full(n, np.nan)
+    mask = loss_smooth > 1e-10
+    rsi_short[mask] = 100.0 - (100.0 / (1.0 + gain_smooth[mask] / loss_smooth[mask]))
+    rsi_short[loss_smooth <= 1e-10] = 100.0
+    rsi_short[:rsi_period] = np.nan
+    
+    # RSI Streak (consecutive up/down days)
+    streak = np.zeros(n)
+    streak_rsi = np.full(n, np.nan)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = 0
+    
+    # Convert streak to RSI-like value (0-100)
+    for i in range(streak_period, n):
+        if streak[i] >= 0:
+            streak_rsi[i] = 50.0 + min(streak[i] * 10, 50.0)
+        else:
+            streak_rsi[i] = 50.0 - min(abs(streak[i]) * 10, 50.0)
+    
+    # Percent Rank (100)
+    percent_rank = np.full(n, np.nan)
+    for i in range(rank_period, n):
+        window = close[i-rank_period+1:i+1]
+        current = close[i]
+        count_below = np.sum(window[:-1] < current)
+        percent_rank[i] = 100.0 * count_below / (rank_period - 1)
+    
+    # Combine into CRSI
+    for i in range(rank_period, n):
+        if not np.isnan(rsi_short[i]) and not np.isnan(streak_rsi[i]) and not np.isnan(percent_rank[i]):
+            crsi[i] = (rsi_short[i] + streak_rsi[i] + percent_rank[i]) / 3.0
+    
+    return crsi
 
 def calculate_hma(close, period=21):
     """
@@ -109,27 +158,6 @@ def calculate_hma(close, period=21):
     
     hma = wma(diff, sqrt_period)
     return hma
-
-def calculate_rsi(close, period=14):
-    """Relative Strength Index with proper min_periods"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    gain_smooth = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    loss_smooth = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rsi = np.full(n, np.nan)
-    mask = loss_smooth > 1e-10
-    rsi[mask] = 100.0 - (100.0 / (1.0 + gain_smooth[mask] / loss_smooth[mask]))
-    rsi[loss_smooth <= 1e-10] = 100.0
-    rsi[:period] = np.nan
-    
-    return rsi
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range with proper min_periods"""
@@ -175,18 +203,11 @@ def generate_signals(prices):
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (4h) indicators
+    # Calculate primary (12h) indicators
     atr = calculate_atr(high, low, close, period=14)
-    rsi = calculate_rsi(close, period=14)
-    
-    # KAMA adaptive moving averages
-    kama_fast = calculate_kama(close, fast_period=10, slow_period=30, smooth_period=2)
-    kama_slow = calculate_kama(close, fast_period=20, slow_period=50, smooth_period=2)
-    
-    # HMA for additional confirmation
-    hma_4h = calculate_hma(close, period=21)
-    
-    # SMA 200 for long-term trend
+    chop = calculate_choppiness(high, low, close, period=14)
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    hma_12h = calculate_hma(close, period=21)
     sma_200 = calculate_sma(close, period=200)
     
     signals = np.zeros(n)
@@ -214,12 +235,16 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]) or np.isnan(rsi[i]):
+        if np.isnan(chop[i]) or np.isnan(crsi[i]) or np.isnan(hma_12h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
+        
+        # === REGIME DETECTION (Choppiness Index) ===
+        is_choppy = chop[i] > 61.8  # Range regime - mean reversion
+        is_trending = chop[i] < 38.2  # Trend regime - trend following
         
         # === TREND BIAS (1d HMA + 1w HMA) ===
         daily_bull = close[i] > hma_1d_aligned[i]
@@ -227,25 +252,34 @@ def generate_signals(prices):
         weekly_bull = close[i] > hma_1w_aligned[i]
         weekly_bear = close[i] < hma_1w_aligned[i]
         
-        # === KAMA TREND SIGNAL ===
-        kama_bull = kama_fast[i] > kama_slow[i]
-        kama_bear = kama_fast[i] < kama_slow[i]
-        
-        # === RSI CONTINUATION FILTER (45-55 for trend continuation) ===
-        rsi_neutral = 45.0 <= rsi[i] <= 55.0
-        rsi_bull = rsi[i] >= 45.0
-        rsi_bear = rsi[i] <= 55.0
-        
         # === PRIMARY SIGNAL ===
         desired_signal = 0.0
         
-        # LONG: KAMA bull + Daily bull + Weekly bull (or neutral) + RSI support
-        if kama_bull and daily_bull and (weekly_bull or not weekly_bear) and rsi_bull:
-            desired_signal = BASE_SIZE
+        if is_choppy:
+            # MEAN REVERSION REGIME
+            # Long: CRSI < 20 + price > SMA200 + daily bull bias
+            if crsi[i] < 20.0 and (not np.isnan(sma_200[i]) and close[i] > sma_200[i] * 0.98) and daily_bull:
+                desired_signal = BASE_SIZE
+            # Short: CRSI > 80 + price < SMA200 + daily bear bias
+            elif crsi[i] > 80.0 and (not np.isnan(sma_200[i]) and close[i] < sma_200[i] * 1.02) and daily_bear:
+                desired_signal = -BASE_SIZE
         
-        # SHORT: KAMA bear + Daily bear + Weekly bear (or neutral) + RSI support
-        elif kama_bear and daily_bear and (weekly_bear or not weekly_bull) and rsi_bear:
-            desired_signal = -BASE_SIZE
+        elif is_trending:
+            # TREND FOLLOWING REGIME
+            # Long: HMA bull + daily bull + weekly neutral/bull
+            if hma_12h[i] > close[i] * 0.995 and daily_bull and (weekly_bull or not weekly_bear):
+                desired_signal = BASE_SIZE
+            # Short: HMA bear + daily bear + weekly neutral/bear
+            elif hma_12h[i] < close[i] * 1.005 and daily_bear and (weekly_bear or not weekly_bull):
+                desired_signal = -BASE_SIZE
+        
+        else:
+            # NEUTRAL REGIME (38.2 <= CHOP <= 61.8)
+            # Use CRSI extremes with weaker filters
+            if crsi[i] < 15.0 and daily_bull:
+                desired_signal = BASE_SIZE
+            elif crsi[i] > 85.0 and daily_bear:
+                desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
