@@ -1,40 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #205: 15m Primary + 4h/1d HTF — Daily CPR Breakout + Session Filter
+Experiment #206: 1d Primary + 1w HTF — Fisher Transform + Choppiness Regime
 
-Hypothesis: 15m timeframe with Daily CPR (Central Pivot Range) levels from 1d HTF
-can capture institutional breakout moves during high-volume sessions. Previous 15m
-attempts failed due to too many filters (0 trades). This version simplifies:
+Hypothesis: Daily timeframe with weekly trend filter can capture major moves while
+avoiding whipsaws. Fisher Transform excels at catching reversals in bear markets
+(2022 crash, 2025 bear). Choppiness Index switches between mean-reversion (chop)
+and trend-following (trend) regimes.
 
-Daily CPR Components (from 1d HTF):
-- TC (Top Central) = (H + L + C) / 3
-- BC (Bottom Central) = (H + L) / 2
-- Pivot = (H + L + C) / 3
-- Narrow CPR = when TC-BC width < 20% of ATR → breakout likely
+Key improvements over failed #194:
+- LOOSEN entry conditions (that had 0 trades)
+- Fisher Transform for reversals (proven in bear markets)
+- Simpler regime logic (CHOP > 55 = mean revert, CHOP < 45 = trend)
+- Weekly HMA(34) for major trend bias only (not hard filter)
+- Position size: 0.25 base, 0.30 strong signals
+- Stoploss: 2.5x ATR trailing
 
-Entry Logic:
-- Long: 15m close > TC + 4h HMA bullish + RSI(7) > 50 + session 00-12 UTC
-- Short: 15m close < BC + 4h HMA bearish + RSI(7) < 50 + session 00-12 UTC
-- Narrow CPR breakout gets 1.5x position size (higher conviction)
-
-Session Filter:
-- 00-12 UTC = London + NY overlap (highest crypto volume)
-- Reduces trade frequency to 50-80/year target
-
-4h HTF Filter:
-- HMA(21) for trend direction
-- Only trade breakouts in direction of 4h trend
-
-Position sizing: 0.20 base, 0.30 for narrow CPR breakouts
-Stoploss: 2.0x ATR trailing
-Target: Sharpe>0.40, DD>-35%, trades>=40 train, trades>=5 test
+Target: Sharpe > 0.399 (beat current best), trades >= 20 train, trades >= 3 test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_cpr_session_breakout_4h1d_v1"
-timeframe = "15m"
+name = "mtf_1d_fisher_chop_regime_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -68,6 +56,77 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index - measures market choppiness vs trending
+    CHOP > 61.8 = choppy/range bound (mean revert)
+    CHOP < 38.2 = trending (trend follow)
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.zeros(n)
+    chop[:] = np.nan
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
+
+def calculate_fisher_transform(high, low, period=9):
+    """
+    Ehlers Fisher Transform - normalizes price to Gaussian distribution
+    Catches reversals at extreme values (-2 to +2)
+    Long when Fisher crosses above -1.5 from below
+    Short when Fisher crosses below +1.5 from above
+    """
+    n = len(close) if 'close' in dir() else len(high)
+    if n < period + 1:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    # Use (high + low) / 2 as price input
+    hl2 = (high + low) / 2.0
+    
+    # Normalize to range -1 to +1
+    fisher_raw = np.zeros(n)
+    fisher_raw[:] = np.nan
+    
+    for i in range(period, n):
+        highest = np.max(hl2[i-period+1:i+1])
+        lowest = np.min(hl2[i-period+1:i+1])
+        range_val = highest - lowest
+        
+        if range_val > 1e-10:
+            normalized = 2.0 * (hl2[i] - lowest) / range_val - 1.0
+            # Clamp to avoid division issues
+            normalized = max(-0.999, min(0.999, normalized))
+            fisher_raw[i] = normalized
+    
+    # Apply Fisher transform: 0.5 * ln((1+x)/(1-x))
+    fisher = np.zeros(n)
+    fisher[:] = np.nan
+    fisher_prev = np.zeros(n)
+    fisher_prev[:] = np.nan
+    
+    for i in range(period + 1, n):
+        if not np.isnan(fisher_raw[i]) and not np.isnan(fisher_raw[i-1]):
+            fisher[i] = 0.5 * np.log((1.0 + fisher_raw[i]) / (1.0 - fisher_raw[i]))
+            fisher_prev[i] = 0.5 * np.log((1.0 + fisher_raw[i-1]) / (1.0 - fisher_raw[i-1]))
+    
+    return fisher, fisher_prev
+
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
@@ -94,86 +153,40 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_daily_cpr(df_daily):
-    """
-    Calculate Daily CPR (Central Pivot Range) levels
-    TC = Top Central, BC = Bottom Central, Pivot = standard pivot
+def calculate_sma(close, period):
+    """Simple Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
     
-    Returns arrays aligned with daily bars
-    """
-    n = len(df_daily)
-    if n < 2:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    high = df_daily['high'].values
-    low = df_daily['low'].values
-    close = df_daily['close'].values
-    
-    tc = np.zeros(n)
-    bc = np.zeros(n)
-    pivot = np.zeros(n)
-    cpr_width = np.zeros(n)
-    
-    tc[:] = np.nan
-    bc[:] = np.nan
-    pivot[:] = np.nan
-    cpr_width[:] = np.nan
-    
-    for i in range(1, n):
-        # Use PREVIOUS day's data for current day's levels (no look-ahead)
-        h = high[i-1]
-        l = low[i-1]
-        c = close[i-1]
-        
-        pivot[i] = (h + l + c) / 3.0
-        tc[i] = (h + l + c) / 3.0  # Same as pivot in standard CPR
-        bc[i] = (h + l) / 2.0
-        cpr_width[i] = tc[i] - bc[i]
-    
-    return tc, bc, pivot, cpr_width
-
-def is_session_active(open_time_unix, start_hour=0, end_hour=12):
-    """
-    Check if timestamp is within session hours (UTC)
-    Default: 00-12 UTC (London + NY overlap for crypto)
-    """
-    # Convert unix ms to hour
-    hour = (open_time_unix // (1000 * 60 * 60)) % 24
-    return start_hour <= hour < end_hour
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d CPR levels
-    tc_1d_raw, bc_1d_raw, pivot_1d_raw, cpr_width_1d_raw = calculate_daily_cpr(df_1d)
-    tc_1d = align_htf_to_ltf(prices, df_1d, tc_1d_raw)
-    bc_1d = align_htf_to_ltf(prices, df_1d, bc_1d_raw)
-    cpr_width_1d = align_htf_to_ltf(prices, df_1d, cpr_width_1d_raw)
+    # Calculate and align 1w HMA for major trend bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=34)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate and align 4h HMA for trend bias
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
-    # Calculate primary (15m) indicators
+    # Calculate primary (1d) indicators
     atr = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)
-    rsi_14 = calculate_rsi(close, period=14)
-    
-    # Calculate 1d ATR for CPR width comparison
-    atr_1d_raw = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
-    atr_1d = align_htf_to_ltf(prices, df_1d, atr_1d_raw)
+    chop = calculate_choppiness(high, low, close, period=14)
+    fisher, fisher_prev = calculate_fisher_transform(high, low, period=9)
+    rsi = calculate_rsi(close, period=14)
+    hma_21 = calculate_hma(close, period=21)
+    hma_50 = calculate_hma(close, period=50)
+    sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20  # 20% base position size for 15m
-    SIZE_STRONG = 0.30  # 30% for narrow CPR breakouts
+    SIZE_BASE = 0.25  # 25% base position size
+    SIZE_STRONG = 0.30  # 30% for strong signals
     
     # Position tracking for stoploss
     in_position = False
@@ -183,7 +196,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(200, n):  # Start after indicators are ready
+    for i in range(250, n):  # Start after indicators are ready
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -191,96 +204,98 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_4h[i]) or np.isnan(tc_1d[i]) or np.isnan(bc_1d[i]):
+        if np.isnan(chop[i]) or np.isnan(fisher[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(sma_200[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (00-12 UTC) ===
-        in_session = is_session_active(open_time[i], start_hour=0, end_hour=12)
+        # === HTF BIAS (1w HMA) ===
+        htf_bull = close[i] > hma_1w_aligned[i]
+        htf_bear = close[i] < hma_1w_aligned[i]
         
-        # === HTF BIAS (4h HMA) ===
-        htf_4h_bull = close[i] > hma_4h[i]
-        htf_4h_bear = close[i] < hma_4h[i]
+        # === REGIME DETECTION (Choppiness Index) ===
+        is_choppy = chop[i] > 55.0  # Range-bound market → mean revert
+        is_trending = chop[i] < 45.0  # Trending market → trend follow
         
-        # === CPR LEVELS ===
-        tc = tc_1d[i]
-        bc = bc_1d[i]
-        cpr_w = cpr_width_1d[i]
-        atr_daily = atr_1d[i] if not np.isnan(atr_1d[i]) else atr[i] * 96  # Approximate daily ATR
+        # === FISHER TRANSFORM SIGNALS ===
+        fisher_long = False
+        fisher_short = False
         
-        # === NARROW CPR DETECTION ===
-        # CPR width < 20% of daily ATR = narrow = breakout likely
-        is_narrow_cpr = False
-        if not np.isnan(cpr_w) and not np.isnan(atr_daily) and atr_daily > 1e-10:
-            is_narrow_cpr = cpr_w < 0.20 * atr_daily
+        if not np.isnan(fisher[i]) and not np.isnan(fisher_prev[i]):
+            # Long: Fisher crosses above -1.5 from below (oversold reversal)
+            if fisher_prev[i] < -1.5 and fisher[i] >= -1.5:
+                fisher_long = True
+            # Short: Fisher crosses below +1.5 from above (overbought reversal)
+            if fisher_prev[i] > 1.5 and fisher[i] <= 1.5:
+                fisher_short = True
         
-        # === PRICE POSITION RELATIVE TO CPR ===
-        above_tc = close[i] > tc
-        below_bc = close[i] < bc
-        inside_cpr = (close[i] >= bc) and (close[i] <= tc)
+        # === RSI EXTREMES (for choppy regime) ===
+        rsi_oversold = not np.isnan(rsi[i]) and rsi[i] < 35.0
+        rsi_overbought = not np.isnan(rsi[i]) and rsi[i] > 65.0
         
-        # === BREAKOUT CONFIRMATION ===
-        # Price broke above TC from inside/below
-        breakout_long = above_tc and (close[i-1] <= tc if not np.isnan(tc) else False)
-        # Price broke below BC from inside/above
-        breakout_short = below_bc and (close[i-1] >= bc if not np.isnan(bc) else False)
+        # === HMA TREND ===
+        hma_bull = close[i] > hma_21[i] and hma_21[i] > hma_50[i]
+        hma_bear = close[i] < hma_21[i] and hma_21[i] < hma_50[i]
         
-        # === MOMENTUM CONFIRMATION ===
-        rsi_bull = rsi_7[i] > 50.0
-        rsi_bear = rsi_7[i] < 50.0
-        rsi_extreme_long = rsi_7[i] < 35.0  # Oversold bounce setup
-        rsi_extreme_short = rsi_7[i] > 65.0  # Overbought fade setup
+        # === SMA200 FILTER ===
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG ENTRIES
-        if in_session:
-            # Breakout long with trend + momentum
-            if above_tc and htf_4h_bull and rsi_bull:
-                if is_narrow_cpr:
-                    desired_signal = SIZE_STRONG  # High conviction narrow CPR
-                else:
-                    desired_signal = SIZE_BASE
+        # REGIME 1: CHOPPY (mean reversion with Fisher + RSI)
+        if is_choppy:
+            # Long: Fisher reversal + RSI oversold + above SMA200
+            if fisher_long and rsi_oversold and above_sma200:
+                desired_signal = SIZE_BASE
             
-            # Mean reversion long inside CPR (fade to BC)
-            elif inside_cpr and rsi_extreme_long and htf_4h_bull:
-                desired_signal = SIZE_BASE * 0.7
+            # Short: Fisher reversal + RSI overbought + below SMA200
+            elif fisher_short and rsi_overbought and below_sma200:
+                desired_signal = -SIZE_BASE
         
-        # SHORT ENTRIES
-        if in_session:
-            # Breakout short with trend + momentum
-            if below_bc and htf_4h_bear and rsi_bear:
-                if is_narrow_cpr:
-                    desired_signal = -SIZE_STRONG  # High conviction narrow CPR
-                else:
-                    desired_signal = -SIZE_BASE
+        # REGIME 2: TRENDING (trend follow with HMA + HTF)
+        elif is_trending:
+            # Long: HMA bull + HTF bull + Fisher not overbought
+            if hma_bull and htf_bull and not fisher_short:
+                # Enter on Fisher long or pullback
+                if fisher_long or (rsi_oversold and above_sma200):
+                    desired_signal = SIZE_STRONG
             
-            # Mean reversion short inside CPR (fade to TC)
-            elif inside_cpr and rsi_extreme_short and htf_4h_bear:
-                desired_signal = -SIZE_BASE * 0.7
+            # Short: HMA bear + HTF bear + Fisher not oversold
+            elif hma_bear and htf_bear and not fisher_long:
+                # Enter on Fisher short or bounce
+                if fisher_short or (rsi_overbought and below_sma200):
+                    desired_signal = -SIZE_STRONG
         
-        # === STOPLOSS CHECK (Trailing ATR 2.0x) ===
+        # REGIME 3: TRANSITION (45-55 chop) - use HTF bias only
+        else:
+            # Simple HTF-following with Fisher confirmation
+            if htf_bull and fisher_long:
+                desired_signal = SIZE_BASE * 0.8
+            elif htf_bear and fisher_short:
+                desired_signal = -SIZE_BASE * 0.8
+        
+        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
@@ -297,9 +312,9 @@ def generate_signals(prices):
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
         elif desired_signal >= SIZE_BASE * 0.5:
-            final_signal = SIZE_BASE * 0.7
+            final_signal = SIZE_BASE * 0.8
         elif desired_signal <= -SIZE_BASE * 0.5:
-            final_signal = -SIZE_BASE * 0.7
+            final_signal = -SIZE_BASE * 0.8
         else:
             final_signal = 0.0
         
