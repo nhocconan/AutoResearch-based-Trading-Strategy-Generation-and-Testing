@@ -1,40 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #265: 15m Primary + 4h/1d HTF — Daily Pivot + RSI Mean Reversion v1
+Experiment #266: 1d Primary + 1w HTF — Asymmetric Dual Regime v1
 
-Hypothesis: 15m timeframe can work with VERY selective entries using daily pivot levels
-as key S/R zones. This combines:
-1. Daily pivot levels (from 1d HTF) as support/resistance zones
-2. 4h HMA(21) for intermediate trend direction
-3. 15m RSI(7) for oversold/overbought entry timing
-4. Session filter: 00-12 UTC (London+NY overlap, highest crypto volume)
-5. Require 3+ confluence before entry
+Hypothesis: Daily timeframe with weekly trend filter provides optimal balance of
+signal quality and trade frequency (target 20-50 trades/year). Key innovations:
 
-Key insight from failed 15m experiments (#257, #261):
-- Too many trades = fee death. Must be VERY selective.
-- Use HTF for DIRECTION, 15m only for ENTRY TIMING
-- Position size smaller (0.15-0.25) due to higher frequency
+1. ASYMMETRIC ENTRY LOGIC: Different thresholds for long vs short entries
+   - Longs require stronger confirmation (bear market bias in 2025+)
+   - Shorts more aggressive when weekly trend is bearish
 
-Daily Pivot Calculation (Standard):
-P = (H + L + C) / 3
-R1 = 2*P - L, S1 = 2*P - H
-R2 = P + (H - L), S2 = P - (H - L)
-TC (Top Central) = (H + L) / 2, BC (Bottom Central) = (H + L + C) / 3
+2. IMPROVED REGIME DETECTION: Choppiness Index with tighter thresholds
+   - CHOP > 58 = choppy (mean reversion with Connors RSI)
+   - CHOP < 42 = trending (Donchian breakout with HTF confirmation)
+   - 42-58 = transition (reduce position size by 50%)
 
-Entry Logic:
-- Long: price near S1/S2 + RSI(7)<30 + 4h HMA bullish + session filter
-- Short: price near R1/R2 + RSI(7)>70 + 4h HMA bearish + session filter
+3. VOLUME CONFIRMATION: Breakout must have volume > 1.5x 20-day average
+   Filters false breakouts which destroy returns in range markets
 
-Position sizing: 0.15 base, 0.25 strong (discrete levels)
-Stoploss: 2.5x ATR trailing
-Target: 40-100 trades/year, Sharpe>0.40, DD>-40%
+4. WEEKLY HMA BIAS: Only trade with 1w HMA direction in trending regime
+   - Long only when close > HMA_1w(21)
+   - Short only when close < HMA_1w(21)
+   - In choppy regime, weekly bias is optional (mean reversion works both ways)
+
+5. SIMPLIFIED STOPLOSS: 2.5x ATR trailing, but also time-based exit
+   - Exit after 10 bars if no profit (prevents dead capital)
+
+Position sizing: 0.25 base, 0.30 strong signals, 0.15 in transition regime
+Target: Sharpe>0.45, DD>-35%, trades>=30 train, trades>=5 test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_daily_pivot_rsi_session_4h1d_v1"
-timeframe = "15m"
+name = "mtf_1d_asymmetric_regime_crsi_donchian_vol_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -94,6 +93,103 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index - measures market choppiness vs trending
+    CHOP > 61.8 = choppy/range bound
+    CHOP < 38.2 = trending
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.zeros(n)
+    chop[:] = np.nan
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
+
+def calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100):
+    """
+    Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    """
+    n = len(close)
+    if n < pr_period + 10:
+        return np.full(n, np.nan)
+    
+    # RSI(3)
+    rsi_short = calculate_rsi(close, rsi_period)
+    
+    # Streak calculation
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = streak[i-1]
+    
+    # Streak RSI
+    streak_rsi = np.zeros(n)
+    streak_rsi[:] = np.nan
+    for i in range(streak_period, n):
+        up_count = np.sum(streak[max(0, i-streak_period+1):i+1] > 0)
+        streak_rsi[i] = 100.0 * up_count / streak_period
+    
+    # Percent Rank of returns
+    returns = np.zeros(n)
+    for i in range(1, n):
+        if close[i-1] > 1e-10:
+            returns[i] = (close[i] - close[i-1]) / close[i-1] * 100.0
+    
+    percent_rank = np.zeros(n)
+    percent_rank[:] = np.nan
+    for i in range(pr_period, n):
+        window = returns[i-pr_period:i]
+        if len(window) > 0 and not np.isnan(returns[i]):
+            count_below = np.sum(window < returns[i])
+            percent_rank[i] = 100.0 * count_below / len(window)
+    
+    # Combine into CRSI
+    crsi = np.zeros(n)
+    crsi[:] = np.nan
+    for i in range(pr_period, n):
+        if not np.isnan(rsi_short[i]) and not np.isnan(streak_rsi[i]) and not np.isnan(percent_rank[i]):
+            crsi[i] = (rsi_short[i] + streak_rsi[i] + percent_rank[i]) / 3.0
+    
+    return crsi
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
+    
+    for i in range(period-1, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    return upper, lower
+
 def calculate_sma(close, period):
     """Simple Moving Average"""
     n = len(close)
@@ -103,70 +199,49 @@ def calculate_sma(close, period):
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     return sma
 
-def calculate_daily_pivots(df_1d):
-    """
-    Calculate daily pivot levels from 1d data.
-    Returns arrays aligned to 1d bars that will be aligned to 15m later.
-    """
-    n = len(df_1d)
+def calculate_volume_sma(volume, period=20):
+    """Volume Simple Moving Average"""
+    n = len(volume)
+    if n < period:
+        return np.full(n, np.nan)
     
-    # Pivot = (H + L + C) / 3
-    pivot = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1 = 2.0 * pivot - df_1d['low'].values
-    s1 = 2.0 * pivot - df_1d['high'].values
-    
-    # R2 = P + (H - L), S2 = P - (H - L)
-    r2 = pivot + (df_1d['high'].values - df_1d['low'].values)
-    s2 = pivot - (df_1d['high'].values - df_1d['low'].values)
-    
-    # TC (Top Central) = (H + L) / 2, BC (Bottom Central) = Pivot
-    tc = (df_1d['high'].values + df_1d['low'].values) / 2.0
-    bc = pivot
-    
-    return pivot, r1, s1, r2, s2, tc, bc
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 4h HMA for trend direction
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align HTF HMA for weekly trend bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate daily pivot levels from 1d data
-    pivot_1d, r1_1d, s1_1d, r2_1d, s2_1d, tc_1d, bc_1d = calculate_daily_pivots(df_1d)
-    
-    # Align daily pivots to 15m (use previous day's pivots = shift by 1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # Calculate primary (15m) indicators
-    rsi_7 = calculate_rsi(close, period=7)
-    rsi_14 = calculate_rsi(close, period=14)
+    # Calculate primary (1d) indicators
+    hma_1d = calculate_hma(close, period=21)
     atr = calculate_atr(high, low, close, period=14)
+    chop = calculate_choppiness(high, low, close, period=14)
+    crsi = calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     sma_200 = calculate_sma(close, 200)
+    vol_sma = calculate_volume_sma(volume, 20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.25
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
+    SIZE_TRANSITION = 0.15
     
     # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
+    entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
@@ -174,102 +249,123 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(pivot_aligned[i]):
+        if np.isnan(hma_1d[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(sma_200[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_position = False
+            position_side = 0
             continue
         
-        # === SESSION FILTER (00-12 UTC preferred) ===
-        # open_time is in milliseconds
-        hour_utc = (open_time[i] // (1000 * 60 * 60)) % 24
-        in_session = (hour_utc >= 0 and hour_utc < 12)
+        if np.isnan(vol_sma[i]) or vol_sma[i] <= 1e-10:
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
         
-        # === 4H TREND BIAS ===
-        htf_4h_bull = close[i] > hma_4h_aligned[i]
-        htf_4h_bear = close[i] < hma_4h_aligned[i]
+        # === REGIME DETECTION ===
+        choppy_threshold = 58.0
+        trending_threshold = 42.0
+        
+        if chop[i] > choppy_threshold:
+            current_regime = 2  # choppy
+        elif chop[i] < trending_threshold:
+            current_regime = 1  # trending
+        else:
+            current_regime = 0  # transition
+        
+        # === WEEKLY BIAS ===
+        htf_1w_bull = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
+        htf_1w_bear = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
+        
+        # === 1d HMA TREND ===
+        hma_bull = close[i] > hma_1d[i]
+        hma_bear = close[i] < hma_1d[i]
         
         # === SMA200 FILTER ===
         above_sma200 = close[i] > sma_200[i]
         below_sma200 = close[i] < sma_200[i]
         
-        # === DAILY PIVOT ZONES ===
-        # Check if price is near support (S1, S2) or resistance (R1, R2)
-        # Use 0.5% tolerance for "near"
-        tol = 0.005
+        # === VOLUME CONFIRMATION ===
+        volume_confirmed = volume[i] > 1.5 * vol_sma[i]
         
-        near_s1 = abs(close[i] - s1_aligned[i]) / close[i] < tol
-        near_s2 = abs(close[i] - s2_aligned[i]) / close[i] < tol
-        near_r1 = abs(close[i] - r1_aligned[i]) / close[i] < tol
-        near_r2 = abs(close[i] - r2_aligned[i]) / close[i] < tol
+        # === DONCHIAN BREAKOUT ===
+        breakout_long = False
+        breakout_short = False
+        if not np.isnan(donchian_upper[i-1]):
+            breakout_long = close[i] > donchian_upper[i-1]
+        if not np.isnan(donchian_lower[i-1]):
+            breakout_short = close[i] < donchian_lower[i-1]
         
-        near_support = near_s1 or near_s2
-        near_resistance = near_r1 or near_r2
-        
-        # Also check if price is BETWEEN pivot levels (value area)
-        in_value_area_long = (close[i] > s1_aligned[i]) and (close[i] < pivot_aligned[i])
-        in_value_area_short = (close[i] < r1_aligned[i]) and (close[i] > pivot_aligned[i])
-        
-        # === RSI EXTREMES ===
-        rsi_oversold = rsi_7[i] < 30.0
-        rsi_overbought = rsi_7[i] > 70.0
+        # === CRSI VALUES ===
+        crsi_extreme_low = False
+        crsi_extreme_high = False
+        if not np.isnan(crsi[i]):
+            crsi_extreme_low = crsi[i] < 15.0  # More extreme for daily
+            crsi_extreme_high = crsi[i] > 85.0
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
+        desired_size = SIZE_BASE
         
-        # LONG: Near support + RSI oversold + 4h bullish + session filter
-        # Need 3+ confluence
-        long_confluence = 0
-        if near_support:
-            long_confluence += 1
-        if rsi_oversold:
-            long_confluence += 1
-        if htf_4h_bull:
-            long_confluence += 1
-        if above_sma200:
-            long_confluence += 1
-        if in_session:
-            long_confluence += 0.5  # session is soft filter
+        # REGIME 0: TRANSITION (reduced size)
+        if current_regime == 0:
+            desired_size = SIZE_TRANSITION
+            
+            # Still allow entries but smaller
+            if crsi_extreme_low and above_sma200:
+                desired_signal = desired_size
+            elif crsi_extreme_high and below_sma200:
+                desired_signal = -desired_size
         
-        # SHORT: Near resistance + RSI overbought + 4h bearish + session filter
-        short_confluence = 0
-        if near_resistance:
-            short_confluence += 1
-        if rsi_overbought:
-            short_confluence += 1
-        if htf_4h_bear:
-            short_confluence += 1
-        if below_sma200:
-            short_confluence += 1
-        if in_session:
-            short_confluence += 0.5
+        # REGIME 1: TRENDING (breakout with HTF confirmation)
+        elif current_regime == 1:
+            # ASYMMETRIC: Longs need stronger confirmation
+            if breakout_long and hma_bull and volume_confirmed:
+                # Require weekly bull for long
+                if htf_1w_bull:
+                    desired_signal = SIZE_STRONG
+                # Without weekly confirmation, skip long (asymmetric)
+            
+            # Shorts more aggressive in trending regime
+            elif breakout_short and hma_bear and volume_confirmed:
+                if htf_1w_bear:
+                    desired_signal = -SIZE_STRONG
+                else:
+                    # Allow short even without weekly bear if strong breakout
+                    desired_signal = -SIZE_BASE
         
-        # Require 3+ confluence for entry
-        if long_confluence >= 3.0 and rsi_oversold:
-            # Strong signal if 4h trend + SMA200 aligned
-            if htf_4h_bull and above_sma200:
-                desired_signal = SIZE_STRONG
-            else:
-                desired_signal = SIZE_BASE
+        # REGIME 2: CHOPPY (mean reversion with CRSI)
+        elif current_regime == 2:
+            # Mean reversion works both ways in chop
+            # But still apply asymmetric bias based on weekly trend
+            if crsi_extreme_low and above_sma200:
+                if htf_1w_bull:
+                    desired_signal = SIZE_BASE
+                else:
+                    desired_signal = SIZE_TRANSITION  # Smaller against weekly trend
+            
+            elif crsi_extreme_high and below_sma200:
+                if htf_1w_bear:
+                    desired_signal = -SIZE_BASE
+                else:
+                    desired_signal = -SIZE_TRANSITION
         
-        if short_confluence >= 3.0 and rsi_overbought:
-            if htf_4h_bear and below_sma200:
-                desired_signal = -SIZE_STRONG
-            else:
-                desired_signal = -SIZE_BASE
+        # === TIME-BASED EXIT (after 10 bars without profit) ===
+        time_exit = False
+        if in_position and (i - entry_bar) > 10:
+            if position_side > 0 and close[i] <= entry_price:
+                time_exit = True
+            elif position_side < 0 and close[i] >= entry_price:
+                time_exit = True
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -286,7 +382,7 @@ def generate_signals(prices):
             if high[i] > stop_price:
                 stoploss_triggered = True
         
-        if stoploss_triggered:
+        if stoploss_triggered or time_exit:
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
@@ -298,6 +394,10 @@ def generate_signals(prices):
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
+        elif desired_signal >= SIZE_TRANSITION * 0.9:
+            final_signal = SIZE_TRANSITION
+        elif desired_signal <= -SIZE_TRANSITION * 0.9:
+            final_signal = -SIZE_TRANSITION
         else:
             final_signal = 0.0
         
@@ -308,6 +408,7 @@ def generate_signals(prices):
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
                 entry_atr = atr[i]
+                entry_bar = i
                 highest_since_entry = high[i] if position_side > 0 else 0.0
                 lowest_since_entry = low[i] if position_side < 0 else float('inf')
             elif np.sign(final_signal) != position_side:
@@ -315,6 +416,7 @@ def generate_signals(prices):
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
                 entry_atr = atr[i]
+                entry_bar = i
                 highest_since_entry = high[i] if position_side > 0 else 0.0
                 lowest_since_entry = low[i] if position_side < 0 else float('inf')
             elif position_side > 0:
@@ -327,6 +429,7 @@ def generate_signals(prices):
                 position_side = 0
                 entry_price = 0.0
                 entry_atr = 0.0
+                entry_bar = 0
                 highest_since_entry = 0.0
                 lowest_since_entry = float('inf')
         
