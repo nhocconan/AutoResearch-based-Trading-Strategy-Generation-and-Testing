@@ -1,35 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #043: 1d Primary + 1w HTF — HMA Crossover + RSI Momentum + ATR Trail
+Experiment #044: 4h Primary + 1d HTF — Dual-Mode HMA + RSI Pullback
 
-Hypothesis: After 35+ failed experiments, the pattern is clear for 1d timeframe:
-1. Complex regime filters (Choppiness, dual-regime) cause 0 trades on daily
-2. Simple HMA crossover works best on higher timeframes (proven on SOL)
-3. 1w HMA provides strong trend bias without over-filtering
-4. Loose RSI thresholds (45/55 vs 30/70) ensure trade generation
-5. 3x ATR trailing stop appropriate for 1d volatility
+Hypothesis: After analyzing 43 experiments, the winning pattern is SIMPLE + LOOSE:
+1. 1d HMA for HTF trend bias (proven in #043 Sharpe=0.313)
+2. 4h HMA for primary trend direction
+3. RSI pullback entries with VERY LOOSE thresholds (RSI 45/55 vs 30/70)
+4. NO strict regime filters that cause 0 trades
+5. ATR trailing stop for risk management
 
-Entry Logic (SIMPLE - proven to generate trades):
-- Long: 1w_HMA_bull + 1d_HMA9>21 + RSI>45
-- Short: 1w_HMA_bear + 1d_HMA9<21 + RSI<55
-- Size: 0.30 (discrete, safe through 77% crash)
+Key insight: Strategies with Sharpe=0.000 had entry conditions too strict.
+This strategy requires ONLY 2 of 3 conditions to trigger:
+- LONG: 1d_HMA_bull + (4h_HMA_bull OR RSI<55)
+- SHORT: 1d_HMA_bear + (4h_HMA_bear OR RSI>45)
 
-Why this should work where others failed:
-- No Choppiness Index (failed in #032, #033, #034, #036, #037, #038, #039)
-- No Connors RSI complexity (failed in #033, #035, #037, #038, #039)
-- Simple HMA crossover = fewer conditions to all align
-- 1w HTF = smoother trend filter than 1d/4h
-- RSI 45/55 = enters early in momentum, not waiting for extremes
-
-Target: Sharpe>0.22, trades>30/symbol train, >3/symbol test, DD>-40%
-Timeframe: 1d (target 20-50 trades/year)
+This ensures we trade with HTF trend but enter on ANY pullback/rally.
+Size: 0.30 (discrete, proven safe through 77% crash)
+Target: Beat Sharpe=0.313, trades>30/symbol train, >3/symbol test, DD>-40%
+Timeframe: 4h (target 20-50 trades/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_cross_rsi_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_hma_rsi_dual_loose_1d_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -82,7 +77,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range - for stoploss (3x for 1d timeframe)"""
+    """Average True Range - for stoploss"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -95,6 +90,20 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Bollinger Bands - for mean reversion entries"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    
+    return upper, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -102,17 +111,18 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 1w HMA for HTF trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 1d HMA for HTF trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (1d) indicators
-    hma_1d_fast = calculate_hma(close, period=9)
-    hma_1d_slow = calculate_hma(close, period=21)
+    # Calculate primary (4h) indicators
+    hma_4h = calculate_hma(close, period=21)
+    hma_4h_fast = calculate_hma(close, period=9)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    bb_upper, bb_lower = calculate_bollinger_bands(close, period=20, std_mult=2.0)
     
     signals = np.zeros(n)
     SIZE = 0.30  # Discrete position size - safe through 77% crash
@@ -133,7 +143,7 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(hma_1d_fast[i]) or np.isnan(hma_1d_slow[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_4h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -146,37 +156,61 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === HTF BIAS (1w HMA) ===
-        hma_1w_bull = close[i] > hma_1w_aligned[i]
-        hma_1w_bear = close[i] < hma_1w_aligned[i]
+        # === HTF BIAS (1d HMA) ===
+        hma_1d_bull = close[i] > hma_1d_aligned[i]
+        hma_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === 1d HMA CROSSOVER ===
-        hma_cross_bull = hma_1d_fast[i] > hma_1d_slow[i]
-        hma_cross_bear = hma_1d_fast[i] < hma_1d_slow[i]
+        # === 4h TREND ===
+        hma_4h_bull = close[i] > hma_4h[i]
+        hma_4h_bear = close[i] < hma_4h[i]
+        hma_fast_above_slow = hma_4h_fast[i] > hma_4h[i] if not np.isnan(hma_4h_fast[i]) else False
+        hma_fast_below_slow = hma_4h_fast[i] < hma_4h[i] if not np.isnan(hma_4h_fast[i]) else False
+        
+        # === BOLLINGER BAND POSITION ===
+        near_bb_lower = close[i] < bb_lower[i] * 1.01 if not np.isnan(bb_lower[i]) else False
+        near_bb_upper = close[i] > bb_upper[i] * 0.99 if not np.isnan(bb_upper[i]) else False
         
         # === DESIRED SIGNAL (LOOSE thresholds for trade generation) ===
         desired_signal = 0.0
         
-        # LONG: 1w bull + 1d HMA cross bull + RSI momentum > 45
-        if hma_1w_bull and hma_cross_bull and rsi[i] > 45.0:
-            desired_signal = SIZE
+        # LONG: 1d bull + (4h bull OR RSI pullback < 55 OR BB lower)
+        # Multiple entry conditions to ensure trade generation
+        if hma_1d_bull:
+            if hma_4h_bull and hma_fast_above_slow:
+                # Strong uptrend - enter
+                desired_signal = SIZE
+            elif rsi[i] < 55.0:
+                # Pullback in uptrend - buy the dip (loose threshold)
+                desired_signal = SIZE
+            elif near_bb_lower and rsi[i] < 50.0:
+                # Mean reversion at BB lower
+                desired_signal = SIZE
         
-        # SHORT: 1w bear + 1d HMA cross bear + RSI momentum < 55
-        if hma_1w_bear and hma_cross_bear and rsi[i] < 55.0:
-            desired_signal = -SIZE
+        # SHORT: 1d bear + (4h bear OR RSI rally > 45 OR BB upper)
+        # Multiple entry conditions to ensure trade generation
+        if hma_1d_bear:
+            if hma_4h_bear and hma_fast_below_slow:
+                # Strong downtrend - enter
+                desired_signal = -SIZE
+            elif rsi[i] > 45.0:
+                # Rally in downtrend - sell the rip (loose threshold)
+                desired_signal = -SIZE
+            elif near_bb_upper and rsi[i] > 50.0:
+                # Mean reversion at BB upper
+                desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (Trailing ATR 3x for 1d) ===
+        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 3.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 3.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
