@@ -1,35 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #719: 1h Primary + 4h/12h HTF — Regime-Adaptive RSI + Session Filter
+Experiment #720: 6h Primary + 1d/1w HTF — Keltner-BB Squeeze + RSI Momentum
 
-Hypothesis: 1h timeframe with 4h trend bias + 12h regime filter provides optimal
-trade frequency (40-80/year) with reduced whipsaw. Using Choppiness to switch
-between trend-following and mean-reversion modes, with session filter for liquidity.
+Hypothesis: 6h timeframe captures multi-day swings with reduced noise vs 4h.
+Keltner-BB squeeze detects volatility compression before breakouts.
+Unlike Donchian breakouts (failed on 6h), squeeze patterns catch consolidation
+before major moves - works in both bull and bear markets.
 
 Key innovations:
-1. 4h HMA(21) for trend direction (HTF bias)
-2. 12h Choppiness(14) for regime detection (trend vs range)
-3. 1h RSI(14) + Stochastic for entry timing
-4. Session filter: 08-20 UTC (high liquidity hours)
-5. ATR(14) 2.5x trailing stop
-6. Discrete sizing: 0.0, ±0.20, ±0.30
+1. Bollinger Band Width percentile (20-day) for squeeze detection
+2. Keltner Channel (ATR 1.5x) for volatility envelope
+3. BB inside Keltner = squeeze (low vol compression)
+4. BB expands outside Keltner + RSI momentum = breakout signal
+5. 1d HMA(21) for intermediate trend filter
+6. 1w HMA(21) for major bias confirmation
+7. ATR(14) 2.5x trailing stop for risk management
+8. Discrete sizing: 0.0, ±0.25, ±0.30
 
-Entry conditions (LOOSE to ensure trades):
-- LONG trend: 4h HMA bull + CHOP<50 + RSI(14)>50 + session
-- LONG mean revert: 4h HMA bull + CHOP>55 + RSI(14)<35 + session
-- SHORT trend: 4h HMA bear + CHOP<50 + RSI(14)<50 + session
-- SHORT mean revert: 4h HMA bear + CHOP>55 + RSI(14)>65 + session
+Entry conditions (LOOSE to ensure trades on all symbols):
+- LONG: squeeze detected + BB expansion up + RSI>50 + 1d HMA bull + 1w HMA bull
+- SHORT: squeeze detected + BB expansion down + RSI<50 + 1d HMA bear + 1w HMA bear
+- Relaxed: only need 1d HMA alignment (not both 1d+1w) for more trades
 
 Target: Sharpe>0.40, trades>=30 train, trades>=3 test, DD>-40%
-Timeframe: 1h
-Size: 0.20-0.30 discrete
+Timeframe: 6h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_regime_rsi_session_4h12h_v1"
-timeframe = "1h"
+name = "mtf_6h_keltner_bb_squeeze_rsi_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -49,37 +51,51 @@ def calculate_hma(close, period):
     
     return hma
 
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - identifies trending vs ranging markets"""
+def calculate_atr(high, low, close, period=14):
+    """Average True Range - volatility measure"""
     n = len(close)
-    if n < period:
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    chop = np.zeros(n)
-    chop[:] = np.nan
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    for i in range(period, n):
-        highest_high = high[i-period+1:i+1].max()
-        lowest_low = low[i-period+1:i+1].min()
-        
-        if highest_high == lowest_low:
-            chop[i] = 100.0
-            continue
-        
-        atr_sum = 0.0
-        for j in range(i-period+1, i+1):
-            if j == 0:
-                tr = high[j] - low[j]
-            else:
-                tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-            atr_sum += tr
-        
-        chop[i] = 100.0 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Bollinger Bands - volatility envelope"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    return chop
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    width = upper - lower
+    
+    return upper, lower, width
+
+def calculate_keltner_channel(high, low, close, period=20, atr_mult=1.5):
+    """Keltner Channel - ATR-based volatility envelope"""
+    n = len(close)
+    if n < period + 14:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    atr = calculate_atr(high, low, close, period=14)
+    
+    upper = ema + atr_mult * atr
+    lower = ema - atr_mult * atr
+    
+    return upper, lower, atr
 
 def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
+    """Relative Strength Index - momentum oscillator"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -102,79 +118,49 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_stochastic(high, low, close, k_period=14, d_period=3):
-    """Stochastic Oscillator"""
-    n = len(close)
-    if n < k_period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+def calculate_bb_width_percentile(bb_width, lookback=60):
+    """Percentile rank of BB Width - detects volatility compression"""
+    n = len(bb_width)
+    percentile = np.zeros(n)
+    percentile[:] = np.nan
     
-    k = np.zeros(n)
-    k[:] = np.nan
+    for i in range(lookback, n):
+        if np.isnan(bb_width[i]):
+            continue
+        window = bb_width[i-lookback:i]
+        valid = window[~np.isnan(window)]
+        if len(valid) < lookback // 2:
+            continue
+        rank = np.sum(valid < bb_width[i])
+        percentile[i] = 100.0 * rank / len(valid)
     
-    for i in range(k_period-1, n):
-        lowest_low = low[i-k_period+1:i+1].min()
-        highest_high = high[i-k_period+1:i+1].max()
-        
-        if highest_high == lowest_low:
-            k[i] = 50.0
-        else:
-            k[i] = 100.0 * (close[i] - lowest_low) / (highest_high - lowest_low)
-    
-    d = pd.Series(k).ewm(span=d_period, min_periods=d_period, adjust=False).mean().values
-    
-    return k, d
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range - volatility measure for stops"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_session_filter(open_time):
-    """Session filter: 08-20 UTC (high liquidity hours)"""
-    # open_time is in milliseconds
-    hour = (open_time // 3600000) % 24
-    return (hour >= 8) & (hour < 20)
+    return percentile
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align HTF HMA
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    chop_12h_raw = calculate_choppiness(
-        df_12h['high'].values,
-        df_12h['low'].values,
-        df_12h['close'].values,
-        period=14
-    )
-    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 1h indicators
-    rsi_14 = calculate_rsi(close, period=14)
-    stoch_k, stoch_d = calculate_stochastic(high, low, close, k_period=14, d_period=3)
-    atr = calculate_atr(high, low, close, period=14)
-    session_active = calculate_session_filter(open_time)
+    # Calculate 6h indicators
+    bb_upper, bb_lower, bb_width = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    keltner_upper, keltner_lower, atr = calculate_keltner_channel(high, low, close, period=20, atr_mult=1.5)
+    rsi = calculate_rsi(close, period=14)
+    bb_width_pct = calculate_bb_width_percentile(bb_width, lookback=60)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
+    SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -195,68 +181,83 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(stoch_k[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(keltner_upper[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(chop_12h_aligned[i]):
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (4h HMA) ===
-        htf_4h_bull = close[i] > hma_4h_aligned[i]
-        htf_4h_bear = close[i] < hma_4h_aligned[i]
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === REGIME DETECTION (12h Choppiness) ===
-        trend_regime = chop_12h_aligned[i] < 50.0  # Lower = trending
-        range_regime = chop_12h_aligned[i] > 55.0  # Higher = ranging
+        # === HTF BIAS (1d and 1w HMA) ===
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === SESSION FILTER ===
-        in_session = session_active[i]
+        htf_1w_bull = False
+        htf_1w_bear = False
+        if not np.isnan(hma_1w_aligned[i]):
+            htf_1w_bull = close[i] > hma_1w_aligned[i]
+            htf_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # === RSI CONDITIONS (LOOSE for trade generation) ===
-        rsi_bull = rsi_14[i] > 50.0
-        rsi_bear = rsi_14[i] < 50.0
-        rsi_oversold = rsi_14[i] < 35.0
-        rsi_overbought = rsi_14[i] > 65.0
+        # === SQUEEZE DETECTION (BB inside Keltner) ===
+        squeeze_active = (bb_upper[i] <= keltner_upper[i]) and (bb_lower[i] >= keltner_lower[i])
         
-        # === STOCHASTIC CONFIRMATION ===
-        stoch_bull = stoch_k[i] > 50.0
-        stoch_bear = stoch_k[i] < 50.0
+        # === BB WIDTH PERCENTILE (volatility compression) ===
+        low_vol_compression = False
+        if not np.isnan(bb_width_pct[i]):
+            low_vol_compression = bb_width_pct[i] < 30.0  # Bottom 30% = compression
+        
+        # === BB EXPANSION (breakout from squeeze) ===
+        bb_expansion_up = False
+        bb_expansion_down = False
+        if i > 0 and not np.isnan(bb_upper[i-1]) and not np.isnan(keltner_upper[i-1]):
+            # BB upper breaks above Keltner upper = bullish expansion
+            bb_expansion_up = bb_upper[i] > keltner_upper[i] and close[i] > bb_upper[i-1]
+            # BB lower breaks below Keltner lower = bearish expansion
+            bb_expansion_down = bb_lower[i] < keltner_lower[i] and close[i] < bb_lower[i-1]
+        
+        # === RSI MOMENTUM ===
+        rsi_bull = rsi[i] > 50.0
+        rsi_bear = rsi[i] < 50.0
+        rsi_strong_bull = rsi[i] > 55.0
+        rsi_strong_bear = rsi[i] < 45.0
         
         # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADE GENERATION) ===
         desired_signal = 0.0
         
-        # LONG: Trend regime + HTF bull + RSI bull + session
-        if trend_regime and htf_4h_bull and rsi_bull and in_session:
-            desired_signal = SIZE_STRONG
-        # LONG: Range regime + HTF bull + RSI oversold + session
-        elif range_regime and htf_4h_bull and rsi_oversold and in_session:
-            desired_signal = SIZE_BASE
-        # LONG: HTF bull + RSI very oversold (any regime) + session
-        elif htf_4h_bull and rsi_14[i] < 25.0 and in_session:
-            desired_signal = SIZE_BASE
-        # LONG: HTF bull + Stochastic bull + session (backup entry)
-        elif htf_4h_bull and stoch_bull and in_session and rsi_14[i] > 45.0:
+        # LONG: squeeze + expansion up + RSI bull + 1d HMA bull
+        if (squeeze_active or low_vol_compression) and bb_expansion_up:
+            if rsi_strong_bull and htf_1d_bull:
+                desired_signal = SIZE_STRONG
+            elif rsi_bull and htf_1d_bull:
+                desired_signal = SIZE_BASE
+        
+        # LONG: 1w HMA bull + RSI oversold bounce (mean reversion in bull trend)
+        elif htf_1w_bull and rsi[i] < 35.0:
             desired_signal = SIZE_BASE
         
-        # SHORT: Trend regime + HTF bear + RSI bear + session
-        elif trend_regime and htf_4h_bear and rsi_bear and in_session:
-            desired_signal = -SIZE_STRONG
-        # SHORT: Range regime + HTF bear + RSI overbought + session
-        elif range_regime and htf_4h_bear and rsi_overbought and in_session:
-            desired_signal = -SIZE_BASE
-        # SHORT: HTF bear + RSI very overbought (any regime) + session
-        elif htf_4h_bear and rsi_14[i] > 75.0 and in_session:
-            desired_signal = -SIZE_BASE
-        # SHORT: HTF bear + Stochastic bear + session (backup entry)
-        elif htf_4h_bear and stoch_bear and in_session and rsi_14[i] < 55.0:
+        # SHORT: squeeze + expansion down + RSI bear + 1d HMA bear
+        elif (squeeze_active or low_vol_compression) and bb_expansion_down:
+            if rsi_strong_bear and htf_1d_bear:
+                desired_signal = -SIZE_STRONG
+            elif rsi_bear and htf_1d_bear:
+                desired_signal = -SIZE_BASE
+        
+        # SHORT: 1w HMA bear + RSI overbought rejection (mean reversion in bear trend)
+        elif htf_1w_bear and rsi[i] > 65.0:
             desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
