@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #256: 30m Primary + 4h/1d HTF — RSI Pullback + Volume Spike + HTF Trend
+Experiment #257: 15m Primary + 4h/12h HTF — Simplified Trend-Pullback with Volume Filter
 
-Hypothesis: 30m timeframe can work if we use HTF (4h/1d) for TREND DIRECTION
-and 30m only for ENTRY TIMING. Key insight from failures: too many filters = 0 trades.
+Hypothesis: Previous 15m strategies failed (Sharpe=0.000) because entry conditions were TOO STRICT.
+This version uses LOOSER entry logic to ensure 40-100 trades/year while maintaining edge:
 
-This strategy combines:
-1. 4h HMA(21) for primary trend bias (long only when 4h HMA bullish)
-2. 1d HMA(50) for major trend confirmation
-3. 30m RSI(14) pullback entries (RSI<40 long, RSI>60 short) - LOOSENED thresholds
-4. Volume spike confirmation (vol > 1.3x 20-bar avg) - optional, not required
-5. ATR(14) trailing stoploss at 2.5x
+1. 4h HMA(21) for trend bias — simpler than dual HTF
+2. 15m RSI(7) extremes for entries — RSI<35 long, RSI>65 short (not extreme 20/80)
+3. Volume filter — only trade when volume > 0.5x 20-bar avg (avoid dead hours)
+4. 12h HMA for major trend confirmation — only require alignment, not strict filter
+5. ATR(14) 2.5x trailing stoploss
 
-CRITICAL CHANGES FROM FAILED ATTEMPTS:
-- RSI thresholds LOOSENED: 40/60 instead of 30/70 (ensures trades)
-- Volume filter is OPTIONAL confluence, not required (prevents 0 trades)
-- No session filter (previous attempts with session = 0 trades)
-- Position size: 0.25 base, 0.30 strong (discrete levels)
-- Stoploss: 2.5x ATR trailing
+Key changes from failed 15m attempts:
+- RSI threshold: 35/65 instead of 30/70 (more triggers)
+- Removed session filter (was killing trade count)
+- Removed SMA200 filter (too slow for 15m)
+- Single HTF (4h) for direction, 12h for confirmation only
+- Position size: 0.20 base, 0.25 strong (smaller for higher frequency)
 
-Target: 40-80 trades/year, Sharpe>0.40, DD>-40%
+Target: Sharpe>0.40, DD>-30%, trades>=40/year per symbol
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_rsi_pullback_hma_4h1d_vol_v1"
-timeframe = "30m"
+name = "mtf_15m_trend_pullback_rsi_vol_4h12h_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -104,26 +103,24 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate and align HTF HMA for trend bias
     hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate primary (30m) indicators
-    rsi = calculate_rsi(close, period=14)
+    # Calculate primary (15m) indicators
+    hma_15m = calculate_hma(close, period=21)
     atr = calculate_atr(high, low, close, period=14)
-    sma_200 = calculate_sma(close, 200)
-    
-    # Volume SMA for spike detection
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    rsi = calculate_rsi(close, period=7)  # Faster RSI for 15m
+    vol_sma = calculate_sma(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.25
     
     # Position tracking
     in_position = False
@@ -133,67 +130,59 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(250, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_15m[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
             continue
         
-        # === HTF TREND BIAS ===
-        # 4h HMA for intermediate trend
-        htf_4h_bull = close[i] > hma_4h_aligned[i]
-        htf_4h_bear = close[i] < hma_4h_aligned[i]
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(vol_sma[i]):
+            signals[i] = 0.0
+            continue
         
-        # 1d HMA for major trend (optional confluence)
-        htf_1d_valid = not np.isnan(hma_1d_aligned[i])
-        htf_1d_bull = htf_1d_valid and close[i] > hma_1d_aligned[i]
-        htf_1d_bear = htf_1d_valid and close[i] < hma_1d_aligned[i]
+        # === HTF TREND BIAS (4h HMA) ===
+        htf_bull = close[i] > hma_4h_aligned[i]
+        htf_bear = close[i] < hma_4h_aligned[i]
         
-        # === SMA200 FILTER ===
-        above_sma200 = not np.isnan(sma_200[i]) and close[i] > sma_200[i]
-        below_sma200 = not np.isnan(sma_200[i]) and close[i] < sma_200[i]
+        # === 12h MAJOR TREND CONFIRMATION ===
+        major_bull = not np.isnan(hma_12h_aligned[i]) and close[i] > hma_12h_aligned[i]
+        major_bear = not np.isnan(hma_12h_aligned[i]) and close[i] < hma_12h_aligned[i]
         
-        # === RSI PULLBACK (LOOSENED THRESHOLDS) ===
-        rsi_oversold = rsi[i] < 40.0  # was 30, now 40 for more trades
-        rsi_overbought = rsi[i] > 60.0  # was 70, now 60 for more trades
+        # === VOLUME FILTER ===
+        # Only trade when volume > 50% of 20-bar average (avoid dead hours)
+        vol_ok = volume[i] > 0.5 * vol_sma[i]
         
-        # === VOLUME SPIKE (OPTIONAL CONFLUENCE) ===
-        vol_spike = False
-        if not np.isnan(vol_sma[i]) and vol_sma[i] > 1e-10:
-            vol_spike = volume[i] > 1.3 * vol_sma[i]
+        # === RSI EXTREMES (looser thresholds for more trades) ===
+        rsi_oversold = rsi[i] < 35.0
+        rsi_overbought = rsi[i] > 65.0
+        
+        # === 15m HMA TREND ===
+        hma_bull = close[i] > hma_15m[i]
+        hma_bear = close[i] < hma_15m[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: 4h bullish + RSI pullback + (optional: volume spike OR 1d bullish)
-        if htf_4h_bull and rsi_oversold:
-            # Require at least one additional confluence
-            if vol_spike or (htf_1d_valid and htf_1d_bull) or above_sma200:
-                # Strong signal if multiple confluence
-                confluence_count = sum([vol_spike, htf_1d_bull, above_sma200])
-                if confluence_count >= 2:
-                    desired_signal = SIZE_STRONG
-                else:
-                    desired_signal = SIZE_BASE
+        # LONG: 4h bullish + RSI oversold + volume ok
+        # Entry on pullback in uptrend
+        if htf_bull and rsi_oversold and vol_ok:
+            # Strong signal if 12h also bullish
+            if major_bull:
+                desired_signal = SIZE_STRONG
+            else:
+                desired_signal = SIZE_BASE
         
-        # SHORT: 4h bearish + RSI overbought + (optional: volume spike OR 1d bearish)
-        elif htf_4h_bear and rsi_overbought:
-            if vol_spike or (htf_1d_valid and htf_1d_bear) or below_sma200:
-                confluence_count = sum([vol_spike, htf_1d_bear, below_sma200])
-                if confluence_count >= 2:
-                    desired_signal = -SIZE_STRONG
-                else:
-                    desired_signal = -SIZE_BASE
+        # SHORT: 4h bearish + RSI overbought + volume ok
+        # Entry on rally in downtrend
+        elif htf_bear and rsi_overbought and vol_ok:
+            if major_bear:
+                desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
