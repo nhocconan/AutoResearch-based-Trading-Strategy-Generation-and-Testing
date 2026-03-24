@@ -1,35 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #1505: 1h Primary + 4h/1d HTF — Simplified HMA Trend + RSI Pullback
+Experiment #1506: 12h Primary + 1d HTF — Simplified HMA Trend + RSI Pullback
 
-Hypothesis: After analyzing 1100+ failed strategies, the pattern for 1h is clear:
-1. 1h timeframe MUST generate 30-80 trades/year (not 0 trades like #1495, #1500)
-2. Complex filters (CRSI+CHOP+session+volume) = 0 trades on lower TF
-3. SIMPLER is better: HTF trend (4h/1d HMA) + 1h RSI pullback + ATR stop
-4. LOOSE entry conditions ensure trades happen (RSI 35-65, not tight bands)
-5. 4h/1d HMA for direction, 1h RSI for entry timing within trend
+Hypothesis: After 1100+ failed strategies, the pattern is clear:
+1. 12h timeframe should generate 20-50 trades/year (not 0 like complex filter strategies)
+2. Complex filters (CRSI+CHOP+session+volume) = 0 trades (#1495, #1498, #1500)
+3. SIMPLER works: 1d HMA for trend bias + 12h HMA/RSI for entry timing
+4. 12h is the sweet spot: fewer trades than 1h (less fee drag), more signals than 1d
+5. Proven pattern from #1505 (1h HMA+RSI) but adapted for 12h with 1d HTF
 
 Key design choices:
-- Remove session filter (too restrictive for 1h)
-- Remove volume filter (too restrictive)
-- Remove CHOP index (adds complexity, rarely triggers on 1h)
-- Use 4h HMA + 1d HMA for trend direction (dual HTF confirmation)
-- Use 1h RSI(14) for pullback entries (RSI<45 long in uptrend, RSI>55 short in downtrend)
-- ATR(14) 2.5x trailing stop for risk management
-- Position size 0.25 (smaller for 1h to handle more trades)
-- Discrete signal levels (0.0, ±0.25) to minimize fee churn
+- Use 1d HMA(21) for macro trend direction (HTF filter)
+- Use 12h HMA(21) for primary trend confirmation
+- Use 12h RSI(14) for pullback entries within trend
+- Use ATR(14) 2.5x trailing stop for risk management
+- Position size 0.30 (appropriate for 12h trade frequency)
+- Discrete signal levels (0.0, ±0.30) to minimize fee churn
+- LOOSE entry conditions to ensure trades happen (RSI 35-65 bands)
 
-Timeframe: 1h (as required by experiment)
-HTF: 4h + 1d (dual HTF trend confirmation)
-Position Size: 0.25 (discrete: 0.0, ±0.25)
-Target: 40-100 trades/train, 10-20 trades/test, Sharpe > 0.618
+Timeframe: 12h (as required by experiment)
+HTF: 1d (daily trend bias)
+Position Size: 0.30 (discrete: 0.0, ±0.30)
+Target: 80-200 trades/train (4 years), 20-50 trades/test (15 months), Sharpe > 0.618
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_4h1d_pullback_atr_v1"
-timeframe = "1h"
+name = "mtf_12h_hma_rsi_1d_trend_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -108,15 +107,6 @@ def calculate_sma(close, period=50):
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     return sma
 
-def calculate_ema(close, period=21):
-    """Exponential Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -124,25 +114,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF HMAs for trend bias
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
+    # Calculate and align 1d HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (1h) indicators
-    hma_1h = calculate_hma(close, period=21)
+    # Calculate primary (12h) indicators
+    hma_12h = calculate_hma(close, period=21)
     sma_50 = calculate_sma(close, period=50)
-    ema_21 = calculate_ema(close, period=21)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.25  # Smaller size for 1h (more trades expected)
+    BASE_SIZE = 0.30  # Appropriate size for 12h (fewer trades than 1h)
     
     # Position tracking for stoploss
     in_position = False
@@ -160,13 +145,13 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(hma_1h[i]):
+        if np.isnan(rsi[i]) or np.isnan(hma_12h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]) or np.isnan(sma_50[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(sma_50[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -177,48 +162,50 @@ def generate_signals(prices):
         daily_bull = close[i] > hma_1d_aligned[i]
         daily_bear = close[i] < hma_1d_aligned[i]
         
-        # === INTERMEDIATE TREND (4h HMA) - confirmation ===
-        h4_bull = close[i] > hma_4h_aligned[i]
-        h4_bear = close[i] < hma_4h_aligned[i]
-        
-        # === PRIMARY TREND (1h HMA) - entry timing ===
-        h1_bull = close[i] > hma_1h[i]
-        h1_bear = close[i] < hma_1h[i]
+        # === PRIMARY TREND (12h HMA) - confirmation ===
+        h12_bull = close[i] > hma_12h[i]
+        h12_bear = close[i] < hma_12h[i]
         
         # === SMA50 FILTER ===
         above_sma50 = close[i] > sma_50[i]
         below_sma50 = close[i] < sma_50[i]
         
         # === RSI PULLBACK - LOOSE bands for MORE trades ===
-        # Long: RSI pulled back but not oversold (35-50)
-        rsi_pullback_long = 35.0 <= rsi[i] <= 50.0
-        # Short: RSI rallied but not overbought (50-65)
-        rsi_pullback_short = 50.0 <= rsi[i] <= 65.0
+        # Long: RSI pulled back but not oversold (35-55)
+        rsi_pullback_long = 35.0 <= rsi[i] <= 55.0
+        # Short: RSI rallied but not overbought (45-65)
+        rsi_pullback_short = 45.0 <= rsi[i] <= 65.0
         
-        # === DESIRED SIGNAL - SIMPLIFIED FOR 1h ===
+        # === DESIRED SIGNAL - SIMPLIFIED FOR 12h ===
         desired_signal = 0.0
         
-        # LONG: All HTF bullish + 1h pullback entry
-        # Option 1: Strong trend (1d + 4h + 1h all bull) + RSI pullback
-        if daily_bull and h4_bull and h1_bull and rsi_pullback_long:
+        # LONG: 1d bullish + 12h bullish + RSI pullback
+        # Option 1: Strong trend (1d + 12h both bull) + RSI pullback
+        if daily_bull and h12_bull and rsi_pullback_long:
             desired_signal = BASE_SIZE
-        # Option 2: 1d + 4h bull + 1h above SMA50 + RSI support (looser)
-        elif daily_bull and h4_bull and above_sma50 and rsi[i] > 40.0:
+        # Option 2: 1d bull + 12h bull + above SMA50 (looser, ensures trades)
+        elif daily_bull and h12_bull and above_sma50:
             desired_signal = BASE_SIZE * 0.8
-        # Option 3: 1d bull + 4h bull + RSI not overbought (loosest, ensures trades)
-        elif daily_bull and h4_bull and rsi[i] < 60.0:
+        # Option 3: 1d bull + 12h above HMA + RSI not overbought (loosest)
+        elif daily_bull and h12_bull and rsi[i] < 60.0:
             desired_signal = BASE_SIZE * 0.6
+        # Option 4: 1d bull only + strong RSI support (fallback for trades)
+        elif daily_bull and rsi[i] < 50.0 and above_sma50:
+            desired_signal = BASE_SIZE * 0.5
         
-        # SHORT: All HTF bearish + 1h pullback entry
-        # Option 1: Strong trend (1d + 4h + 1h all bear) + RSI pullback
-        elif daily_bear and h4_bear and h1_bear and rsi_pullback_short:
+        # SHORT: 1d bearish + 12h bearish + RSI pullback
+        # Option 1: Strong trend (1d + 12h both bear) + RSI pullback
+        elif daily_bear and h12_bear and rsi_pullback_short:
             desired_signal = -BASE_SIZE
-        # Option 2: 1d + 4h bear + 1h below SMA50 + RSI support (looser)
-        elif daily_bear and h4_bear and below_sma50 and rsi[i] < 60.0:
+        # Option 2: 1d bear + 12h bear + below SMA50 (looser, ensures trades)
+        elif daily_bear and h12_bear and below_sma50:
             desired_signal = -BASE_SIZE * 0.8
-        # Option 3: 1d bear + 4h bear + RSI not oversold (loosest, ensures trades)
-        elif daily_bear and h4_bear and rsi[i] > 40.0:
+        # Option 3: 1d bear + 12h below HMA + RSI not oversold (loosest)
+        elif daily_bear and h12_bear and rsi[i] > 40.0:
             desired_signal = -BASE_SIZE * 0.6
+        # Option 4: 1d bear only + strong RSI resistance (fallback for trades)
+        elif daily_bear and rsi[i] > 50.0 and below_sma50:
+            desired_signal = -BASE_SIZE * 0.5
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
