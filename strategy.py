@@ -1,42 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #1071: 6h Primary + 1d/1w HTF — Donchian Breakout + RSI Pullback + HMA Bias
+Experiment #1072: 12h Primary + 1d HTF — Simple HMA Trend + RSI Filter
 
-Hypothesis: 6h timeframe is under-explored (0 experiments). Using Donchian Channel breakouts
-for trend confirmation combined with RSI pullback entries and 1d/1w HMA bias should capture
-multi-day swings while avoiding whipsaws. This is simpler than regime-switching approaches
-that failed in experiments #1060-1070.
+Hypothesis: A very simple 12h strategy with 1d HMA bias + 12h HMA crossover 
++ minimal RSI filter will generate enough trades across all symbols while 
+maintaining positive Sharpe. Previous complex strategies failed due to 0 trades.
 
-Key innovations:
-1. Donchian Channel(20): Breakout above 20-bar high = bullish momentum, below low = bearish
-2. RSI(14) pullback: Enter on RSI 35-45 in uptrend, 55-65 in downtrend (not extremes)
-3. 1d HMA(21) primary bias: Only long if price > 1d_HMA, only short if price < 1d_HMA
-4. 1w HMA(21) secondary filter: Strengthens signal when aligned with 1d
-5. ATR(14) 2.5x trailing stop for risk management
-6. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
+Key design:
+1. 1d HMA(21) for long-term bias (only trade with bias)
+2. 12h HMA(8/21) crossover for entry timing
+3. RSI(14) > 30 for long, < 70 for short (very loose)
+4. ATR(14) 2.5x trailing stop
+5. LOOSE conditions to guarantee ≥30 trades/train, ≥3/test
 
-Why this should work on 6h:
-- Donchian breakout captures sustained momentum (proven on daily/weekly)
-- RSI pullback entries avoid chasing breakouts (better risk/reward)
-- 1d/1w HMA filters prevent counter-trend trades in strong trends
-- 6h captures 2-4 day swings without 4h noise or 12h slowness
-- Simpler logic = more trades (target 30-60/year, not 10-20)
+Entry (LOOSE):
+- LONG: 12h_HMA8 > 12h_HMA21 + close > 1d_HMA21 + RSI > 30
+- SHORT: 12h_HMA8 < 12h_HMA21 + close < 1d_HMA21 + RSI < 70
 
-Entry conditions (LOOSE to guarantee trades):
-- LONG: price > 1d_HMA + Donchian breakout (close > 20-bar high) + RSI 35-55
-- SHORT: price < 1d_HMA + Donchian breakdown (close < 20-bar low) + RSI 45-65
-- Strengthen with 1w_HMA alignment for 0.30 size vs 0.25 base
-
-Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 6h
-Size: 0.25-0.30 discrete
+Why this works:
+- 12h captures multi-day swings (20-50 trades/year target)
+- Simple HMA crossover generates frequent signals
+- 1d bias filters against major trend
+- Loose RSI ensures trades in all market conditions
+- Discrete sizing minimizes fee churn
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_rsi_hma_bias_1d1w_v1"
-timeframe = "6h"
+name = "mtf_12h_hma_cross_rsi_simple_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -101,47 +94,24 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """
-    Donchian Channel - tracks highest high and lowest low over period
-    Returns: (upper_band, lower_band, middle_band)
-    Breakout above upper = bullish, below lower = bearish
-    """
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    middle = (upper + lower) / 2.0
-    return upper, lower, middle
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    # Load 1d HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align HTF indicators
+    # Calculate and align 1d HMA
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower, donchian_middle = calculate_donchian(high, low, period=20)
+    hma_12h_8 = calculate_hma(close, period=8)
+    hma_12h_21 = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -156,6 +126,9 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
+    # Track previous HMA relationship for crossover detection
+    prev_hma8_above_hma21 = False
+    
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
@@ -165,65 +138,50 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_12h_8[i]) or np.isnan(hma_12h_21[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d/1w HMA alignment) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
+        # Current HMA relationship
+        curr_hma8_above_hma21 = hma_12h_8[i] > hma_12h_21[i]
         
-        # Strong alignment when both 1d and 1w agree
-        strong_bull = price_above_1d and price_above_1w and hma_1d_aligned[i] > hma_1w_aligned[i]
-        strong_bear = price_below_1d and price_below_1w and hma_1d_aligned[i] < hma_1w_aligned[i]
+        # === TREND BIAS (1d HMA) ===
+        trend_bull = close[i] > hma_1d_aligned[i]
+        trend_bear = close[i] < hma_1d_aligned[i]
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Breakout: close above upper band (bullish momentum)
-        donchian_bull = close[i] > donchian_upper[i]
-        # Breakdown: close below lower band (bearish momentum)
-        donchian_bear = close[i] < donchian_lower[i]
+        # === CROSSOVER DETECTION ===
+        # Bullish crossover: HMA8 crosses above HMA21
+        bullish_cross = curr_hma8_above_hma21 and not prev_hma8_above_hma21
+        # Bearish crossover: HMA8 crosses below HMA21
+        bearish_cross = not curr_hma8_above_hma21 and prev_hma8_above_hma21
         
-        # === RSI PULLBACK ZONES ===
-        # In uptrend, look for RSI pullback to 35-55 zone (not oversold, just resting)
-        rsi_pullback_long = 35.0 <= rsi_14[i] <= 55.0
-        # In downtrend, look for RSI bounce to 45-65 zone (not overbought, just resting)
-        rsi_pullback_short = 45.0 <= rsi_14[i] <= 65.0
-        
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (LOOSE CONDITIONS) ===
         desired_signal = 0.0
         
-        # LONG entries: bullish bias + momentum + pullback
-        if price_above_1d:
-            if donchian_bull and rsi_pullback_long:
-                if strong_bull:
-                    desired_signal = SIZE_STRONG  # 0.30
-                else:
-                    desired_signal = SIZE_BASE  # 0.25
-            # Alternative: RSI oversold in uptrend (mean reversion within trend)
-            elif rsi_14[i] < 40.0 and price_above_1w:
+        # LONG: bullish cross OR already bullish + trend bias + RSI not extreme
+        if (bullish_cross or curr_hma8_above_hma21) and trend_bull and rsi_14[i] > 30.0:
+            # Stronger signal on fresh crossover
+            if bullish_cross and rsi_14[i] < 70.0:
+                desired_signal = SIZE_STRONG
+            elif rsi_14[i] < 65.0:
                 desired_signal = SIZE_BASE
         
-        # SHORT entries: bearish bias + momentum + pullback
-        if price_below_1d:
-            if donchian_bear and rsi_pullback_short:
-                if strong_bear:
-                    desired_signal = -SIZE_STRONG  # -0.30
-                else:
-                    desired_signal = -SIZE_BASE  # -0.25
-            # Alternative: RSI overbought in downtrend (mean reversion within trend)
-            elif rsi_14[i] > 60.0 and price_below_1w:
+        # SHORT: bearish cross OR already bearish + trend bias + RSI not extreme
+        elif (bearish_cross or not curr_hma8_above_hma21) and trend_bear and rsi_14[i] < 70.0:
+            # Stronger signal on fresh crossover
+            if bearish_cross and rsi_14[i] > 30.0:
+                desired_signal = -SIZE_STRONG
+            elif rsi_14[i] > 35.0:
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
@@ -282,5 +240,8 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
         
         signals[i] = final_signal
+        
+        # Update previous state for next iteration
+        prev_hma8_above_hma21 = curr_hma8_above_hma21
     
     return signals
