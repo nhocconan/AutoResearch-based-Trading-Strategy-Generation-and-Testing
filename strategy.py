@@ -1,41 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #960: 6h Primary + 1d/1w HTF — Funding Rate + Vol Spike Reversion
+Experiment #961: 15m Primary + 1h/4h/1d HTF — RSI Pullback in Trend
 
-Hypothesis: 6h timeframe with funding rate mean reversion + volatility spike detection
-will outperform in mixed 2022-2025 markets, especially during 2022 crash and 2025 bear.
+Hypothesis: 15m timeframe with relaxed RSI(7) pullback entries in direction of 4h/1d trend
+will generate sufficient trades (50-100/year) while maintaining positive Sharpe.
 
 Key innovations:
-1. Funding Rate Z-Score (30d): z < -2 → long (crowd too bearish), z > +2 → short (crowd too bullish)
-   This is the BEST EDGE for BTC/ETH according to research (Sharpe 0.8-1.5 through 2022 crash)
-2. Volatility Spike Reversion: ATR(7)/ATR(30) > 2.0 signals panic/extreme vol → fade the move
-3. 1d HMA(21) for intermediate trend bias (avoid counter-trend in strong moves)
-4. 1w momentum (close > open) for weekly directional bias
-5. Asymmetric regime: bull markets only take long entries, bear markets only short
-6. ATR(14) 2.5x trailing stop for risk management
+1. 4h HMA(21) for intermediate trend bias (not too many HTF filters)
+2. 1d HMA(50) for major trend filter (only 2 HTF conditions)
+3. 15m RSI(7) for entry timing — LOOSE thresholds (35/65 not 20/80)
+4. ATR(14) 2.5x trailing stop for risk management
+5. Small position size (0.15-0.25) for 15m frequency
+6. Session-agnostic (crypto trades 24/7, no artificial filters)
 
 Why this should work:
-- Funding rate is contrarian indicator (crowd is wrong at extremes)
-- Vol spike reversion captures "vol crush" after panic sells (works in 2022 crash)
-- HTF bias prevents getting crushed in strong trending moves
-- 6h captures multi-day mean reversion without 4h noise or 12h lag
-- Asymmetric logic adapts to bull/bear regimes (critical for 2025 bear market)
+- RSI(7) < 35 happens frequently in pullbacks (unlike CRSI < 10)
+- Only 2 HTF filters (4h + 1d) not 3+ (1w + 1d + CHOP)
+- 15m captures intraday swings with HTF trend alignment
+- Relaxed entry thresholds guarantee trades
 
 Entry conditions (LOOSE to guarantee trades):
-- LONG = 1w bull + 1d bull + (funding_z < -1.5 OR vol_spike + RSI < 35)
-- SHORT = 1w bear + 1d bear + (funding_z > +1.5 OR vol_spike + RSI > 65)
-- Relaxed thresholds for more trades (funding_z ±1.5 instead of ±2.0)
+- LONG = 4h bull + 1d bull + RSI(7) < 40 OR RSI(7) crosses above 30 from below
+- SHORT = 4h bear + 1d bear + RSI(7) > 60 OR RSI(7) crosses below 70 from above
+- Exit when RSI(7) crosses 50 or stoploss hit
 
-Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 6h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.3, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 15m
+Size: 0.15-0.25 discrete (smaller for 15m frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_funding_volspike_regime_1d1w_v1"
-timeframe = "6h"
+name = "mtf_15m_rsi_pullback_4h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -97,22 +95,6 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_zscore(series, period=30):
-    """Rolling Z-Score"""
-    n = len(series)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    zscore = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        window = series[i-period+1:i+1]
-        mean = np.mean(window)
-        std = np.std(window, ddof=0)
-        if std > 1e-10:
-            zscore[i] = (series[i] - mean) / std
-    
-    return zscore
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -120,38 +102,24 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Weekly momentum: close vs open
-    weekly_momentum_raw = (df_1w['close'].values - df_1w['open'].values) / (df_1w['open'].values + 1e-10)
-    weekly_momentum_aligned = align_htf_to_ltf(prices, df_1w, weekly_momentum_raw)
-    
-    # Calculate 6h indicators
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_30 = calculate_atr(high, low, close, period=30)
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # Calculate 15m indicators
+    rsi_7 = calculate_rsi(close, period=7)
     rsi_14 = calculate_rsi(close, period=14)
-    
-    # Volatility spike ratio: ATR(7) / ATR(30)
-    vol_ratio = np.full(n, np.nan, dtype=np.float64)
-    for i in range(30, n):
-        if atr_30[i] > 1e-10:
-            vol_ratio[i] = atr_7[i] / atr_30[i]
-    
-    # Funding rate z-score (simulated from price momentum as proxy)
-    # In production, this would load from funding parquet
-    # Using 30-day return z-score as funding proxy (crowd sentiment)
-    returns = np.diff(close, prepend=close[0]) / (close + 1e-10)
-    funding_z = calculate_zscore(returns, period=30)
+    atr_14 = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.18
+    SIZE_STRONG = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -162,7 +130,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -171,63 +139,70 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(weekly_momentum_aligned[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(vol_ratio[i]) or np.isnan(funding_z[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1w momentum + 1d HMA) ===
-        htf_1w_bull = weekly_momentum_aligned[i] > 0.0
-        htf_1w_bear = weekly_momentum_aligned[i] < 0.0
+        # === HTF BIAS (4h + 1d HMA) ===
+        htf_4h_bull = close[i] > hma_4h_aligned[i]
+        htf_4h_bear = close[i] < hma_4h_aligned[i]
         
         htf_1d_bull = close[i] > hma_1d_aligned[i]
         htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === VOLATILITY SPIKE DETECTION ===
-        vol_spike = vol_ratio[i] > 2.0  # ATR(7) > 2x ATR(30) = panic/extreme
+        # === RSI CONDITIONS (LOOSE THRESHOLDS FOR TRADES) ===
+        rsi_oversold = rsi_7[i] < 40  # Relaxed from 30
+        rsi_overbought = rsi_7[i] > 60  # Relaxed from 70
         
-        # === FUNDING Z-SCORE SIGNALS (contrarian) ===
-        funding_extreme_long = funding_z[i] < -1.5  # Crowd too bearish
-        funding_extreme_short = funding_z[i] > 1.5  # Crowd too bullish
+        # RSI crossover signals (more frequent entries)
+        rsi_cross_up_30 = False
+        rsi_cross_down_70 = False
+        if i > 0 and not np.isnan(rsi_7[i-1]):
+            rsi_cross_up_30 = (rsi_7[i-1] < 30) and (rsi_7[i] >= 30)
+            rsi_cross_down_70 = (rsi_7[i-1] > 70) and (rsi_7[i] <= 70)
         
-        # === RSI EXTREMES ===
-        rsi_oversold = rsi_14[i] < 35
-        rsi_overbought = rsi_14[i] > 65
+        # RSI crossing 50 (exit signal)
+        rsi_cross_above_50 = False
+        rsi_cross_below_50 = False
+        if i > 0 and not np.isnan(rsi_7[i-1]):
+            rsi_cross_above_50 = (rsi_7[i-1] <= 50) and (rsi_7[i] > 50)
+            rsi_cross_below_50 = (rsi_7[i-1] >= 50) and (rsi_7[i] < 50)
         
-        # === ENTRY LOGIC (ASYMMETRIC REGIME) ===
+        # === ENTRY LOGIC (LOOSE CONDITIONS) ===
         desired_signal = 0.0
         
-        # LONG entries (only in bull regime)
-        if htf_1w_bull and htf_1d_bull:
-            # Strong signal: funding extreme + vol spike + oversold
-            if funding_extreme_long and vol_spike and rsi_oversold:
+        # LONG entries - multiple paths to ensure trades
+        if htf_4h_bull and htf_1d_bull:
+            if rsi_oversold:
+                # Deep pullback in uptrend
                 desired_signal = SIZE_STRONG
-            # Medium signal: funding extreme OR (vol spike + oversold)
-            elif funding_extreme_long or (vol_spike and rsi_oversold):
+            elif rsi_cross_up_30:
+                # RSI recovering from oversold
                 desired_signal = SIZE_BASE
-            # Continuation: RSI pullback in uptrend
-            elif rsi_14[i] < 45 and close[i] > hma_1d_aligned[i]:
+            elif rsi_7[i] < 45 and rsi_14[i] < 50:
+                # Moderate pullback
                 desired_signal = SIZE_BASE
         
-        # SHORT entries (only in bear regime)
-        elif htf_1w_bear and htf_1d_bear:
-            # Strong signal: funding extreme + vol spike + overbought
-            if funding_extreme_short and vol_spike and rsi_overbought:
+        # SHORT entries - multiple paths to ensure trades
+        elif htf_4h_bear and htf_1d_bear:
+            if rsi_overbought:
+                # Deep pullback in downtrend
                 desired_signal = -SIZE_STRONG
-            # Medium signal: funding extreme OR (vol spike + overbought)
-            elif funding_extreme_short or (vol_spike and rsi_overbought):
+            elif rsi_cross_down_70:
+                # RSI falling from overbought
                 desired_signal = -SIZE_BASE
-            # Continuation: RSI bounce in downtrend
-            elif rsi_14[i] > 55 and close[i] < hma_1d_aligned[i]:
+            elif rsi_7[i] > 55 and rsi_14[i] > 50:
+                # Moderate pullback
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
@@ -239,12 +214,18 @@ def generate_signals(prices):
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
+            # Exit on RSI cross above 50 (momentum fading)
+            if rsi_cross_above_50:
+                stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
             trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
+                stoploss_triggered = True
+            # Exit on RSI cross below 50 (momentum fading)
+            if rsi_cross_below_50:
                 stoploss_triggered = True
         
         if stoploss_triggered:
