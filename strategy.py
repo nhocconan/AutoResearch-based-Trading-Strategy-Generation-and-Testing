@@ -1,32 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #450: 1h Primary + 4h/1d HTF — Simplified Trend + Mean Reversion
+Experiment #451: 6h Primary + 1d/1w HTF — Simplified Trend + Volume Confirmation
 
-Hypothesis: 1h strategies keep failing due to TOO MANY filters (0 trades).
-Solution: MINIMAL confluence (2-3 conditions max), NO session filter,
-wider RSI thresholds, lower ADX threshold.
+Hypothesis: 6h failures stem from OVER-COMPLEXITY (dual HTF, complex regime detection).
+Previous 6h attempts (#443, #447) show:
+- Fisher + Chop regime: Sharpe=-1.054 (too many false signals in chop)
+- CRSI + weighted HTF: Sharpe=0.130 (barely positive, too few trades)
+- Dual HTF (12h+1d): Too restrictive, misses trends when HTFs disagree temporarily
 
-Key changes from failed 1h attempts:
-1. NO session filter (killing 50% of potential trades)
-2. RSI thresholds: 25/75 (not 15/85 or 30/70)
-3. ADX threshold: 12 (not 18-25)
-4. Only require 4h HMA bias (not 4h+1d dual)
-5. Add Donchian breakout as alternative entry (catches trends RSI misses)
+NEW APPROACH:
+1. SINGLE HTF BIAS: 1d HMA for trend direction (not dual 12h+1d)
+2. 1w MAJOR FILTER: Only use 1w for extreme bias (price vs 1w HMA > 5%)
+3. VOLUME CONFIRMATION: Taker buy volume spike confirms breakout validity
+4. SIMPLER ENTRY: 6h HMA cross + RSI momentum (not complex regime switching)
+5. ATR TRAILING STOP: Dynamic stop based on volatility (2.5x ATR)
+6. LOOSER THRESHOLDS: RSI 45/55 for momentum (not 40/60 extremes)
+
+Why this should work on 6h:
+- 6h captures multi-day swings without 4h noise
+- 1d trend filter reduces whipsaw (proven on 4h strategies)
+- Volume confirmation filters false breakouts (critical on HTF)
+- Simpler logic = more trades qualify (target 40-60/year)
 
 Entry Logic:
-- Long: 4h HMA bull + (RSI<25 OR Donchian breakout) + ADX>12
-- Short: 4h HMA bear + (RSI>75 OR Donchian breakdown) + ADX>12
-- Stoploss: 2.5x ATR from entry
+- Long: 1d HMA bull + 6h HMA cross up + RSI > 50 + volume spike
+- Short: 1d HMA bear + 6h HMA cross down + RSI < 50 + volume spike
+- 1w filter: Skip longs if price > 1w HMA + 8% (overextended), skip shorts if < -8%
 
-Target: Sharpe>0.40, DD>-35%, trades>=60 train (15/year), trades>=10 test
-Timeframe: 1h
+Target: Sharpe>0.45, DD>-35%, trades>=60 train, trades>=10 test
+Timeframe: 6h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_simplified_4h_hma_rsi_donchian_v1"
-timeframe = "1h"
+name = "mtf_6h_simplified_trend_volume_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -86,86 +95,62 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - trend strength"""
-    n = len(close)
-    if n < period * 2:
+def calculate_volume_sma(volume, period=20):
+    """Simple Moving Average of Volume"""
+    n = len(volume)
+    if n < period:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        up = high[i] - high[i-1]
-        down = low[i-1] - low[i]
-        if up > down and up > 0:
-            plus_dm[i] = up
-        if down > up and down > 0:
-            minus_dm[i] = down
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period, n):
-        if atr[i] > 1e-10:
-            plus_di[i] = 100.0 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr[i]
-            minus_di[i] = 100.0 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr[i]
-    
-    dx = np.zeros(n)
-    dx[:] = np.nan
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 1e-10:
-            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return adx
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    return upper, lower
-
-def calculate_sma(close, period):
-    """Simple Moving Average"""
+def calculate_momentum(close, period=10):
+    """Rate of Change / Momentum"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    return sma
+    momentum = np.zeros(n)
+    momentum[:] = np.nan
+    for i in range(period, n):
+        if close[i-period] > 1e-10:
+            momentum[i] = 100.0 * (close[i] - close[i-period]) / close[i-period]
+    
+    return momentum
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    taker_buy_vol = prices["taker_buy_volume"].values if "taker_buy_volume" in prices.columns else volume * 0.5
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF HMA for trend bias
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (1h) indicators
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    
+    # Calculate primary (6h) indicators
+    hma_6h = calculate_hma(close, period=21)
+    hma_6h_fast = calculate_hma(close, period=10)
     atr = calculate_atr(high, low, close, period=14)
-    adx = calculate_adx(high, low, close, period=14)
-    rsi = calculate_rsi(close, period=7)  # Faster RSI for 1h
-    sma_50 = calculate_sma(close, 50)
-    sma_200 = calculate_sma(close, 200)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    rsi = calculate_rsi(close, period=14)
+    vol_sma = calculate_volume_sma(volume, period=20)
+    momentum = calculate_momentum(close, period=10)
+    
+    # Taker buy ratio (buying pressure)
+    taker_ratio = np.zeros(n)
+    taker_ratio[:] = np.nan
+    for i in range(n):
+        if volume[i] > 1e-10:
+            taker_ratio[i] = taker_buy_vol[i] / volume[i]
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -177,8 +162,10 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
+    highest_price = 0.0
+    lowest_price = 0.0
     
-    for i in range(250, n):
+    for i in range(300, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -187,98 +174,115 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(adx[i]):
+        if np.isnan(hma_6h[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(sma_50[i]) or np.isnan(sma_200[i]):
+        if np.isnan(vol_sma[i]) or np.isnan(taker_ratio[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === 1D TREND BIAS (single HTF, not dual) ===
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === 4h HTF TREND BIAS ===
-        htf_bull = close[i] > hma_4h_aligned[i]
-        htf_bear = close[i] < hma_4h_aligned[i]
+        # === 1W MAJOR FILTER (overextension check) ===
+        # Skip longs if price > 1w HMA + 8% (overbought on weekly)
+        # Skip shorts if price < 1w HMA - 8% (oversold on weekly)
+        hma_1w_val = hma_1w_aligned[i]
+        price_vs_1w = (close[i] - hma_1w_val) / hma_1w_val * 100.0 if hma_1w_val > 1e-10 else 0.0
         
-        # === ADX FILTER (lower threshold = more trades) ===
-        is_trending = adx[i] > 12.0
+        overextended_long = price_vs_1w > 8.0
+        overextended_short = price_vs_1w < -8.0
         
-        # === RSI EXTREMES (wider thresholds for more signals) ===
-        rsi_oversold = rsi[i] < 25.0
-        rsi_overbought = rsi[i] > 75.0
+        # === 6h HMA TREND ===
+        hma_bull = close[i] > hma_6h[i]
+        hma_bear = close[i] < hma_6h[i]
         
-        # === DONCHIAN BREAKOUT ===
-        donchian_breakout_long = False
-        donchian_breakdown_short = False
-        if i > 0:
-            if not np.isnan(donchian_upper[i-1]):
-                donchian_breakout_long = close[i] > donchian_upper[i-1]
-            if not np.isnan(donchian_lower[i-1]):
-                donchian_breakdown_short = close[i] < donchian_lower[i-1]
+        # === HMA CROSSOVER (fast vs slow) ===
+        hma_cross_long = False
+        hma_cross_short = False
+        if i > 0 and not np.isnan(hma_6h_fast[i]) and not np.isnan(hma_6h_fast[i-1]):
+            if not np.isnan(hma_6h[i]) and not np.isnan(hma_6h[i-1]):
+                if hma_6h_fast[i-1] <= hma_6h[i-1] and hma_6h_fast[i] > hma_6h[i]:
+                    hma_cross_long = True
+                if hma_6h_fast[i-1] >= hma_6h[i-1] and hma_6h_fast[i] < hma_6h[i]:
+                    hma_cross_short = True
         
-        # === SMA FILTER (price above SMA50 for longs, below for shorts) ===
-        above_sma50 = close[i] > sma_50[i]
-        below_sma50 = close[i] < sma_50[i]
+        # === VOLUME SPIKE CONFIRMATION ===
+        # Volume must be > 1.3x 20-bar average for breakout validity
+        volume_spike = volume[i] > 1.3 * vol_sma[i] if vol_sma[i] > 1e-10 else False
         
-        # === SMA200 REGIME FILTER ===
-        bull_regime = close[i] > sma_200[i]
-        bear_regime = close[i] < sma_200[i]
+        # === TAKER BUY RATIO (buying/selling pressure) ===
+        # > 0.55 = bullish pressure, < 0.45 = bearish pressure
+        taker_bullish = taker_ratio[i] > 0.55
+        taker_bearish = taker_ratio[i] < 0.45
         
-        # === ENTRY LOGIC (MINIMAL confluence - 2-3 conditions max) ===
+        # === RSI MOMENTUM (LOOSENED: 45/55 instead of 40/60) ===
+        rsi_bullish = rsi[i] > 50.0
+        rsi_bearish = rsi[i] < 50.0
+        rsi_strong_bull = rsi[i] > 55.0
+        rsi_strong_bear = rsi[i] < 45.0
+        
+        # === MOMENTUM CONFIRMATION ===
+        mom_bullish = momentum[i] > 0.0 if not np.isnan(momentum[i]) else False
+        mom_bearish = momentum[i] < 0.0 if not np.isnan(momentum[i]) else False
+        
+        # === ENTRY LOGIC (SIMPLIFIED - 3 conditions max) ===
         desired_signal = 0.0
         
-        # LONG entries (4h bull + 1h trigger)
-        if htf_bull:
-            # Mean reversion: RSI oversold + above SMA50 + trending
-            if rsi_oversold and above_sma50 and is_trending:
-                desired_signal = SIZE_BASE
-            # Breakout: Donchian breakout + bull regime + trending
-            elif donchian_breakout_long and bull_regime and is_trending:
-                desired_signal = SIZE_STRONG
-            # Pullback: RSI<40 + above SMA50 + 4h bull (looser entry)
-            elif rsi[i] < 40.0 and above_sma50 and htf_bull:
-                desired_signal = SIZE_BASE
+        # LONG ENTRY: 1d bull + 6h HMA cross + volume spike + RSI/momentum confirm
+        if htf_1d_bull and not overextended_long:
+            # Need: HMA cross OR (HMA bull + volume + taker buy)
+            if hma_cross_long:
+                if volume_spike or taker_bullish:
+                    desired_signal = SIZE_STRONG
+            elif hma_bull and volume_spike and taker_bullish:
+                if rsi_strong_bull or mom_bullish:
+                    desired_signal = SIZE_BASE
         
-        # SHORT entries (4h bear + 1h trigger)
-        elif htf_bear:
-            # Mean reversion: RSI overbought + below SMA50 + trending
-            if rsi_overbought and below_sma50 and is_trending:
-                desired_signal = -SIZE_BASE
-            # Breakdown: Donchian breakdown + bear regime + trending
-            elif donchian_breakdown_short and bear_regime and is_trending:
-                desired_signal = -SIZE_STRONG
-            # Pullback: RSI>60 + below SMA50 + 4h bear (looser entry)
-            elif rsi[i] > 60.0 and below_sma50 and htf_bear:
-                desired_signal = -SIZE_BASE
+        # SHORT ENTRY: 1d bear + 6h HMA cross + volume spike + RSI/momentum confirm
+        elif htf_1d_bear and not overextended_short:
+            # Need: HMA cross OR (HMA bear + volume + taker sell)
+            if hma_cross_short:
+                if volume_spike or taker_bearish:
+                    desired_signal = -SIZE_STRONG
+            elif hma_bear and volume_spike and taker_bearish:
+                if rsi_strong_bear or mom_bearish:
+                    desired_signal = -SIZE_BASE
         
-        # === STOPLOSS CHECK (2.5x ATR from entry) ===
+        # === TRAILING STOPLOSS CHECK (2.5x ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
-            if low[i] < stop_price:
+            # Update highest price for trailing
+            if close[i] > highest_price:
+                highest_price = close[i]
+            # Trailing stop: highest - 2.5*ATR
+            trailing_stop = highest_price - 2.5 * atr[i]
+            if low[i] < trailing_stop or low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
-            if high[i] > stop_price:
+            # Update lowest price for trailing
+            if close[i] < lowest_price:
+                lowest_price = close[i]
+            # Trailing stop: lowest + 2.5*ATR
+            trailing_stop = lowest_price + 2.5 * atr[i]
+            if high[i] > trailing_stop or high[i] > stop_price:
                 stoploss_triggered = True
         
         if stoploss_triggered:
@@ -304,11 +308,13 @@ def generate_signals(prices):
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
                 entry_atr = atr[i]
-                # Set stoploss
+                # Set initial stoploss
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
+                    highest_price = entry_price
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
+                    lowest_price = entry_price
         else:
             if in_position:
                 in_position = False
@@ -316,6 +322,8 @@ def generate_signals(prices):
                 entry_price = 0.0
                 entry_atr = 0.0
                 stop_price = 0.0
+                highest_price = 0.0
+                lowest_price = 0.0
         
         signals[i] = final_signal
     
