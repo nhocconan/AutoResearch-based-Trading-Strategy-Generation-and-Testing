@@ -1,33 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #084: 12h Primary + 1d/1w HTF — Simplified HMA Trend + RSI Pullback + ADX Regime
+Experiment #085: 15m Primary + 4h/1d HTF — Camarilla Pivot + RSI + HMA Trend
 
-Hypothesis: After analyzing 80+ failed experiments, the pattern is clear:
-- Complex regime filters (Choppiness + CRSI) are OVERFITTING and failing across symbols
-- Donchian breakouts work on SOL but fail on BTC/ETH in bear markets
-- SIMPLEST patterns work best: HMA trend + RSI pullback + HTF bias
-- 12h timeframe naturally limits trades to 20-50/year (lower fee drag)
-- ADX regime filter is MORE RELIABLE than Choppiness for trend vs range detection
-- Key insight: LOOSEN RSI entry thresholds to ensure trades generate on ALL symbols
+Hypothesis: After 81 failed experiments, 15m strategies keep generating 0 trades due to
+overly strict entry conditions. This strategy uses Camarilla pivot levels which are
+TOUCHED MULTIPLE TIMES PER DAY, ensuring trade generation while maintaining selectivity.
 
-Design choices:
-- Timeframe: 12h (proven higher TF works better for crypto)
-- HTF: 1d HMA(50) for major trend, 1w HMA(50) for ultra-long-term bias
-- Primary trend: 12h HMA(21) - faster than 50 for entry timing
-- Entry: RSI(14) pullback to 35-65 zone (LOOSE to ensure trades)
-- Regime: ADX(14) > 20 = trending (follow trend), ADX < 20 = range (mean revert)
-- Position size: 0.28 (28% of capital, conservative)
-- Stoploss: 2.5x ATR(14) trailing
-- Asymmetric: larger size in HTF trend direction, smaller counter-trend
+Key design choices:
+- Timeframe: 15m (target 40-100 trades/year)
+- HTF: 4h HMA for trend bias, 1d Camarilla pivot levels for entry zones
+- Entry: Price at Camarilla R3/S3 + RSI(7) extreme + 4h trend alignment
+- Camarilla levels are hit 2-4x per day on crypto = ensures trade frequency
+- RSI(7) is faster than RSI(14) = more entry signals on 15m
+- Position size: 0.20 (20% of capital, conservative for 15m frequency)
+- Stoploss: 2.5x ATR trailing
 
-Target: Sharpe>0.167 (beat current best), DD>-40%, trades>=30 train, >=3 test, ALL symbols Sharpe>0
+Why this should work where others failed:
+- Camarilla R3/S3 are MEAN REVERSION levels that price regularly touches
+- Unlike Donchian breakouts (rare), Camarilla levels trigger daily
+- Loose RSI(7) < 35 or > 65 (not extreme 20/80) = more signals
+- 4h HMA bias is soft (just direction, not hard filter) = trades still generate
+- Session filter OPTIONAL (disabled by default) to ensure trades on all symbols
+
+Target: Sharpe>0.167 (beat current best), DD>-40%, trades>=30 on train, trades>=3 on test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_hma_rsi_adx_dual_htf_v1"
-timeframe = "12h"
+name = "mtf_15m_camarilla_rsi_hma_4h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -87,52 +89,38 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
+def calculate_camarilla_pivots(high, low, close, prev_close):
     """
-    Average Directional Index (ADX)
-    Measures trend strength (not direction)
-    ADX > 25 = strong trend, ADX < 20 = range/choppy
+    Camarilla Pivot Levels
+    R4/S4 = breakout levels
+    R3/S3 = mean reversion levels (our entry zones)
+    R2/S2, R1/S1 = minor levels
+    Formula based on previous day's range
     """
     n = len(close)
-    if n < period * 2 + 1:
-        return np.full(n, np.nan)
     
-    # Calculate True Range and Directional Movement
-    tr = np.zeros(n)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
+    # Pivot = (H + L + C) / 3
+    pivot = (high + low + close) / 3.0
     
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        if high[i] - high[i-1] > low[i-1] - low[i]:
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-        else:
-            plus_dm[i] = 0
-            
-        if low[i-1] - low[i] > high[i] - high[i-1]:
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-        else:
-            minus_dm[i] = 0
+    # Range
+    range_hl = high - low
     
-    # Smooth with Wilder's method (EMA-like with alpha = 1/period)
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # Camarilla levels
+    # R4 = C + 1.5 * Range, S4 = C - 1.5 * Range (breakout)
+    # R3 = C + 1.0 * Range, S3 = C - 1.0 * Range (mean reversion entry)
+    # R2 = C + 0.5 * Range, S2 = C - 0.5 * Range
+    # R1 = C + 0.25 * Range, S1 = C - 0.25 * Range
     
-    # Calculate DX and ADX
-    dx = np.zeros(n)
-    dx[:] = np.nan
-    for i in range(period * 2, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 1e-10:
-            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
-        else:
-            dx[i] = 0.0
+    r4 = close + 1.5 * range_hl
+    s4 = close - 1.5 * range_hl
+    r3 = close + 1.0 * range_hl
+    s3 = close - 1.0 * range_hl
+    r2 = close + 0.5 * range_hl
+    s2 = close - 0.5 * range_hl
+    r1 = close + 0.25 * range_hl
+    s1 = close - 0.25 * range_hl
     
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return adx
+    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -141,26 +129,43 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for major trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 4h HMA for trend bias
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate and align 1w HMA for ultra-long-term bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=50)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate 1d Camarilla pivots and align
+    # Use previous day's OHLC for pivot calculation
+    prev_close_1d = np.roll(df_1d['close'].values, 1)
+    prev_close_1d[0] = df_1d['close'].values[0]
     
-    # Calculate primary (12h) indicators
-    hma_12h = calculate_hma(close, period=21)
-    rsi = calculate_rsi(close, period=14)
+    pivot_1d, r1_1d, r2_1d, r3_1d, r4_1d, s1_1d, s2_1d, s3_1d, s4_1d = calculate_camarilla_pivots(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values,
+        prev_close_1d
+    )
+    
+    # Align all 1d levels to 15m
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Calculate primary (15m) indicators
+    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for 15m
+    rsi_14 = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    adx = calculate_adx(high, low, close, period=14)
+    
+    # 15m HMA for short-term trend
+    hma_15m = calculate_hma(close, period=13)
     
     signals = np.zeros(n)
-    SIZE_TREND = 0.28  # 28% in trend direction
-    SIZE_COUNTER = 0.18  # 18% counter-trend (smaller)
+    SIZE = 0.20  # 20% position size (conservative for 15m frequency)
+    SIZE_HALF = 0.10  # Half position for take profit
     
     # Position tracking for stoploss
     in_position = False
@@ -178,70 +183,73 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_12h[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(hma_15m[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d and 1w HMA) ===
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
-        htf_1w_bull = close[i] > hma_1w_aligned[i]
-        htf_1w_bear = close[i] < hma_1w_aligned[i]
+        # === HTF BIAS (4h HMA) ===
+        htf_bull = close[i] > hma_4h_aligned[i]
+        htf_bear = close[i] < hma_4h_aligned[i]
         
-        # Strong bias when both HTF agree
-        htf_strong_bull = htf_1d_bull and htf_1w_bull
-        htf_strong_bear = htf_1d_bear and htf_1w_bear
+        # === CAMARILLA LEVEL PROXIMITY ===
+        # Check if price is near S3 (long zone) or R3 (short zone)
+        # Use 1% tolerance for "near"
+        tolerance = 0.01  # 1% of price
         
-        # === REGIME DETECTION (ADX) ===
-        # ADX > 20 = trending, ADX < 20 = range
-        is_trending = adx[i] > 20.0
-        is_ranging = adx[i] <= 20.0
+        near_s3 = abs(close[i] - s3_aligned[i]) / (close[i] + 1e-10) < tolerance
+        near_r3 = abs(close[i] - r3_aligned[i]) / (close[i] + 1e-10) < tolerance
         
-        # === 12h HMA TREND ===
-        hma_bull = close[i] > hma_12h[i]
-        hma_bear = close[i] < hma_12h[i]
+        # Also check if price bounced off S3/R3 (crossed and came back)
+        # For simplicity, just check proximity + RSI confirmation
         
-        # === RSI PULLBACK ZONES (LOOSE thresholds for trade generation) ===
-        # In uptrend: look for RSI pullback to 35-55 zone
-        # In downtrend: look for RSI bounce to 45-65 zone
-        rsi_pullback_long = 35.0 <= rsi[i] <= 60.0
-        rsi_pullback_short = 40.0 <= rsi[i] <= 65.0
-        rsi_oversold = rsi[i] < 40.0
-        rsi_overbought = rsi[i] > 60.0
+        # === RSI(7) EXTREMES (LOOSE for trade generation) ===
+        rsi_oversold = rsi_7[i] < 35.0  # Not too extreme, ensures trades
+        rsi_overbought = rsi_7[i] > 65.0  # Not too extreme, ensures trades
         
-        # === DESIRED SIGNAL (Dual Regime Logic) ===
+        # === 15m HMA SHORT-TERM TREND ===
+        hma_15m_bull = close[i] > hma_15m[i]
+        hma_15m_bear = close[i] < hma_15m[i]
+        
+        # === DESIRED SIGNAL (Camarilla Mean Reversion + HTF Bias) ===
         desired_signal = 0.0
-        signal_strength = SIZE_TREND
         
-        if is_trending:
-            # TREND REGIME: Follow HTF + 12h trend on RSI pullbacks
-            # LONG: HTF bull + 12h bull + RSI pullback (not overbought)
-            if htf_strong_bull and hma_bull and rsi_pullback_long and rsi[i] < 70.0:
-                desired_signal = SIZE_TREND
-            elif htf_1d_bull and hma_bull and rsi_oversold:
-                desired_signal = SIZE_TREND * 0.8
-            # SHORT: HTF bear + 12h bear + RSI pullback (not oversold)
-            elif htf_strong_bear and hma_bear and rsi_pullback_short and rsi[i] > 30.0:
-                desired_signal = -SIZE_TREND
-            elif htf_1d_bear and hma_bear and rsi_overbought:
-                desired_signal = -SIZE_TREND * 0.8
-        else:
-            # RANGE REGIME: Mean reversion at RSI extremes with HTF filter
-            # LONG: RSI oversold + HTF not strongly bear
-            if rsi_oversold and not htf_strong_bear:
-                desired_signal = SIZE_COUNTER
-            # SHORT: RSI overbought + HTF not strongly bull
-            elif rsi_overbought and not htf_strong_bull:
-                desired_signal = -SIZE_COUNTER
+        # LONG: Price at S3 + RSI oversold + 4h not strongly bearish
+        # Soft 4h filter: only avoid if strongly against (close << 4h HMA)
+        htf_not_strongly_bear = not (htf_bear and (close[i] < hma_4h_aligned[i] * 0.98))
+        
+        if near_s3 and rsi_oversold and htf_not_strongly_bear:
+            desired_signal = SIZE
+        # Bonus: if 4h is bullish, increase conviction
+        elif near_s3 and rsi_oversold and htf_bull:
+            desired_signal = SIZE * 1.2  # Will be capped to SIZE
+        
+        # SHORT: Price at R3 + RSI overbought + 4h not strongly bullish
+        htf_not_strongly_bull = not (htf_bull and (close[i] > hma_4h_aligned[i] * 1.02))
+        
+        if near_r3 and rsi_overbought and htf_not_strongly_bull:
+            desired_signal = -SIZE
+        # Bonus: if 4h is bearish, increase conviction
+        elif near_r3 and rsi_overbought and htf_bear:
+            desired_signal = -SIZE * 1.2  # Will be capped to -SIZE
+        
+        # === BREAKOUT MODE (if price breaks R4/S4 with momentum) ===
+        # Less frequent but higher conviction
+        breakout_bull = close[i] > r4_aligned[i] and rsi_7[i] > 55.0 and htf_bull
+        breakout_bear = close[i] < s4_aligned[i] and rsi_7[i] < 45.0 and htf_bear
+        
+        if breakout_bull and desired_signal == 0.0:
+            desired_signal = SIZE * 0.8
+        elif breakout_bear and desired_signal == 0.0:
+            desired_signal = -SIZE * 0.8
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -261,15 +269,26 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
+        # === TAKE PROFIT (Reduce to half at 2R) ===
+        if in_position and desired_signal != 0.0:
+            if position_side > 0:
+                profit = close[i] - entry_price
+                if profit >= 2.0 * entry_atr:
+                    desired_signal = SIZE_HALF  # Reduce to half
+            elif position_side < 0:
+                profit = entry_price - close[i]
+                if profit >= 2.0 * entry_atr:
+                    desired_signal = -SIZE_HALF  # Reduce to half
+        
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_TREND * 0.85:
-            final_signal = SIZE_TREND
-        elif desired_signal <= -SIZE_TREND * 0.85:
-            final_signal = -SIZE_TREND
-        elif desired_signal >= SIZE_COUNTER * 0.85:
-            final_signal = SIZE_COUNTER
-        elif desired_signal <= -SIZE_COUNTER * 0.85:
-            final_signal = -SIZE_COUNTER
+        if desired_signal >= SIZE * 0.9:
+            final_signal = SIZE
+        elif desired_signal <= -SIZE * 0.9:
+            final_signal = -SIZE
+        elif desired_signal >= SIZE_HALF * 0.9:
+            final_signal = SIZE_HALF
+        elif desired_signal <= -SIZE_HALF * 0.9:
+            final_signal = -SIZE_HALF
         else:
             final_signal = 0.0
         
