@@ -1,33 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #791: 6h Primary + 1w/1d HTF — Simplified Triple-Timeframe Trend Following
+Experiment #792: 12h Primary + 1d HTF — Donchian Breakout with HMA Trend Filter
 
-Hypothesis: 6h timeframe sits between 4h and 12h - unexplored territory with potential
-for optimal trade frequency (30-60/year). Using 1w for major trend, 1d for intermediate
-momentum, and 6h for entry timing creates a robust multi-timeframe cascade.
+Hypothesis: Donchian breakouts capture momentum moves effectively on 12h timeframe,
+but need HTF trend filter to avoid whipsaws. 1d HMA(21) provides reliable bias.
+RSI(14) filters entries at extremes. Volume confirmation reduces false breakouts.
 
 Key innovations:
-1. 1w HMA(21) for major trend bias - only trade with weekly direction
-2. 1d RSI(14) for intermediate momentum - confirms trend strength
-3. 6h HMA(16/48) crossover for precise entry timing
-4. 6h ATR(14) 2.5x trailing stop for risk management
-5. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
-6. LOOSE thresholds (RSI 40/60 not 30/70) to ensure ≥30 trades/train
+1. 1d HMA(21) for HTF trend bias — only trade breakouts in trend direction
+2. 12h Donchian(20) breakout — captures momentum when price breaks 20-bar high/low
+3. 12h RSI(14) filter — avoid buying when RSI>70, avoid selling when RSI<30
+4. Volume confirmation — breakout volume > 1.5x 20-bar avg volume
+5. ATR(14) 2.5x trailing stop for risk management
+6. Discrete sizing: 0.0, ±0.25, ±0.30
 
 Entry conditions:
-- LONG: 1w HMA bull + 1d RSI>45 + 6h HMA crossover OR 6h HMA bull
-- SHORT: 1w HMA bear + 1d RSI<55 + 6h HMA crossover OR 6h HMA bear
+- LONG: 1d HMA bull + Donchian breakout high + RSI<70 + volume>1.5x avg
+- SHORT: 1d HMA bear + Donchian breakout low + RSI>30 + volume>1.5x avg
 
-Target: Sharpe>0.40, trades>=30 train, trades>=3 test, DD>-40%
-Timeframe: 6h
+Target: Sharpe>0.45, trades>=30 train, trades>=3 test, DD>-40%
+Timeframe: 12h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_hma_rsi_triple_htf_1w1d_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_hma_rsi_vol_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -85,27 +85,45 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - breakout detection"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    return upper, lower
+
+def calculate_volume_sma(volume, period=20):
+    """Simple moving average of volume"""
+    n = len(volume)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_sma
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF indicators
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align HTF HMA
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    rsi_1d_raw = calculate_rsi(df_1d['close'].values, period=14)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_raw)
-    
-    # Calculate 6h indicators
-    hma_16 = calculate_hma(close, period=16)
-    hma_48 = calculate_hma(close, period=48)
+    # Calculate 12h indicators
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
+    vol_sma_20 = calculate_volume_sma(volume, period=20)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -129,57 +147,58 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(vol_sma_20[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1w HMA - Major Trend) ===
-        htf_1w_bull = close[i] > hma_1w_aligned[i]
-        htf_1w_bear = close[i] < hma_1w_aligned[i]
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === INTERMEDIATE MOMENTUM (1d RSI) ===
-        rsi_1d_val = rsi_1d_aligned[i]
-        rsi_1d_bull = rsi_1d_val > 45.0
-        rsi_1d_bear = rsi_1d_val < 55.0
-        rsi_1d_strong_bull = rsi_1d_val > 55.0
-        rsi_1d_strong_bear = rsi_1d_val < 45.0
+        # === HTF BIAS (1d HMA) ===
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === 6h HMA CROSSOVER ===
-        hma_crossover_long = False
-        hma_crossover_short = False
-        if i > 0 and not np.isnan(hma_16[i-1]) and not np.isnan(hma_48[i-1]):
-            hma_crossover_long = (hma_16[i-1] <= hma_48[i-1]) and (hma_16[i] > hma_48[i])
-            hma_crossover_short = (hma_16[i-1] >= hma_48[i-1]) and (hma_16[i] < hma_48[i])
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Breakout = price closes above/below previous Donchian level
+        donchian_breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
+        donchian_breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
         
-        # === 6h HMA TREND ===
-        hma_6h_bull = hma_16[i] > hma_48[i]
-        hma_6h_bear = hma_16[i] < hma_48[i]
+        # === VOLUME CONFIRMATION ===
+        volume_confirmed = volume[i] > 1.5 * vol_sma_20[i] if vol_sma_20[i] > 1e-10 else False
         
-        # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADE GENERATION) ===
+        # === RSI FILTER (avoid extremes) ===
+        rsi_not_overbought = rsi_14[i] < 70.0  # OK to buy long
+        rsi_not_oversold = rsi_14[i] > 30.0    # OK to sell short
+        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: 1w bull + 1d RSI confirms + 6h entry signal
-        if htf_1w_bull and rsi_1d_bull:
-            if hma_crossover_long:
+        # LONG: HTF bull + Donchian breakout + RSI filter + volume
+        if htf_1d_bull and donchian_breakout_long and rsi_not_overbought:
+            if volume_confirmed:
                 desired_signal = SIZE_STRONG
-            elif hma_6h_bull and rsi_1d_strong_bull:
+            else:
                 desired_signal = SIZE_BASE
         
-        # SHORT: 1w bear + 1d RSI confirms + 6h entry signal
-        elif htf_1w_bear and rsi_1d_bear:
-            if hma_crossover_short:
+        # SHORT: HTF bear + Donchian breakout + RSI filter + volume
+        elif htf_1d_bear and donchian_breakout_short and rsi_not_oversold:
+            if volume_confirmed:
                 desired_signal = -SIZE_STRONG
-            elif hma_6h_bear and rsi_1d_strong_bear:
+            else:
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
