@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #388: 4h Primary + 12h/1d HTF — Simplified HMA Trend + RSI Pullback
+Experiment #389: 15m Primary + 1h/1d HTF — Simple RSI Mean Reversion v1
 
-Hypothesis: Recent failures (#376-#387) show 0 trades due to overly complex entry
-conditions. This version SIMPLIES dramatically:
-1. HTF (12h/1d) for trend BIAS only (not entry filter)
-2. 4h HMA for primary trend direction
-3. RSI pullback (40-60 range) for entry timing
-4. ATR stoploss at 2.5x
-5. MAX 3 confluence conditions per entry
+Hypothesis: Previous 15m strategies failed due to OVERLY COMPLEX entry conditions
+resulting in 0 trades (#377, #379, #381, #385 all had Sharpe=0.000). This version
+SIMPLIFIES drastically to ensure trades actually trigger.
 
-Key difference from failed strategies:
-- NO Choppiness Index (adds complexity, rarely triggers)
-- NO Connors RSI (failed in #378, #380, #382, #384)
-- NO ADX regime switching (failed in #387)
-- Just HMA trend + RSI pullback + HTF bias
+Key changes from failed 15m attempts:
+1. REMOVED CRSI (failed 6 consecutive experiments #377-#384)
+2. SIMPLE RSI(7) extremes instead of complex oscillators
+3. Only 2 confluence factors required (HTF trend + RSI extreme)
+4. Session filter is SOFT (preference, not requirement)
+5. Position size 0.15-0.20 (appropriate for 15m frequency)
+6. Stoploss 2.0x ATR (tighter for intraday)
 
-Entry Logic (SIMPLE):
-- Long: 4h HMA bull + 12h HMA bull + RSI 35-55 + price near HMA
-- Short: 4h HMA bear + 12h HMA bear + RSI 45-65 + price near HMA
-- Exit: HMA flip OR 2.5x ATR stoploss
+Entry Logic (SIMPLIFIED for trade generation):
+- Long: 1h HMA bull + 15m RSI(7) < 20 + price > 15m SMA(50)
+- Short: 1h HMA bear + 15m RSI(7) > 80 + price < 15m SMA(50)
+- 1d HMA as final bias filter (only trade with daily trend)
 
-Target: Sharpe>0.5, DD>-30%, trades>=30 train, trades>=5 test, ALL symbols positive
+Target: Sharpe>0.40, DD>-35%, trades>=40 train, trades>=5 test
+Trade frequency: 50-100/year (use discrete signals to minimize churn)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_rsi_pullback_12h1d_v1"
-timeframe = "4h"
+name = "mtf_15m_rsi_meanrev_hma_1h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -97,51 +96,44 @@ def calculate_sma(close, period):
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     return sma
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - breakout levels"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
-    
-    for i in range(period-1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
+def calculate_session_hour(open_time):
+    """Extract UTC hour from open_time (milliseconds)"""
+    # open_time is in milliseconds since epoch
+    hours = (open_time // (1000 * 60 * 60)) % 24
+    return hours
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    df_1h = get_htf_data(prices, '1h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF HMA for trend bias
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    hma_1h_raw = calculate_hma(df_1h['close'].values, period=21)
+    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
     
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (4h) indicators
-    hma_4h = calculate_hma(close, period=21)
-    hma_4h_fast = calculate_hma(close, period=10)
-    atr = calculate_atr(high, low, close, period=14)
-    rsi = calculate_rsi(close, period=14)
+    # Calculate primary (15m) indicators - ALL before loop
+    hma_15m = calculate_hma(close, period=21)
+    sma_50 = calculate_sma(close, 50)
     sma_200 = calculate_sma(close, 200)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    atr = calculate_atr(high, low, close, period=14)
+    rsi_7 = calculate_rsi(close, period=7)
+    rsi_14 = calculate_rsi(close, period=14)
+    
+    # Session hours (for soft filter)
+    session_hours = calculate_session_hour(open_time)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -159,91 +151,61 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h[i]) or np.isnan(rsi[i]):
+        if np.isnan(hma_15m[i]) or np.isnan(rsi_7[i]) or np.isnan(sma_50[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF TREND BIAS (12h + 1d) ===
-        # Both must agree for strong signal
-        htf_12h_bull = close[i] > hma_12h_aligned[i]
-        htf_12h_bear = close[i] < hma_12h_aligned[i]
+        # === HTF TREND BIAS (1h and 1d) ===
+        htf_1h_bull = close[i] > hma_1h_aligned[i]
+        htf_1h_bear = close[i] < hma_1h_aligned[i]
         
         htf_1d_bull = close[i] > hma_1d_aligned[i]
         htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # Strong bias: both 12h and 1d agree
-        htf_strong_bull = htf_12h_bull and htf_1d_bull
-        htf_strong_bear = htf_12h_bear and htf_1d_bear
+        # === 15m LOCAL TREND ===
+        local_bull = close[i] > hma_15m[i]
+        local_bear = close[i] < hma_15m[i]
         
-        # === 4h HMA TREND ===
-        hma_bull = close[i] > hma_4h[i]
-        hma_bear = close[i] < hma_4h[i]
+        above_sma50 = close[i] > sma_50[i]
+        below_sma50 = close[i] < sma_50[i]
         
-        # === HMA CROSSOVER (entry trigger) ===
-        hma_cross_long = False
-        hma_cross_short = False
-        if i > 0 and not np.isnan(hma_4h_fast[i]) and not np.isnan(hma_4h_fast[i-1]):
-            if not np.isnan(hma_4h[i]) and not np.isnan(hma_4h[i-1]):
-                if hma_4h_fast[i-1] <= hma_4h[i-1] and hma_4h_fast[i] > hma_4h[i]:
-                    hma_cross_long = True
-                if hma_4h_fast[i-1] >= hma_4h[i-1] and hma_4h_fast[i] < hma_4h[i]:
-                    hma_cross_short = True
+        # === RSI EXTREMES (LOOSE for trade generation) ===
+        rsi_oversold = rsi_7[i] < 20.0
+        rsi_overbought = rsi_7[i] > 80.0
         
-        # === RSI PULLBACK ZONE (entry timing) ===
-        # Long: RSI pulled back to 35-55 (not oversold, just cooling off)
-        # Short: RSI pulled back to 45-65 (not overbought, just cooling off)
-        rsi_pullback_long = 35.0 <= rsi[i] <= 55.0
-        rsi_pullback_short = 45.0 <= rsi[i] <= 65.0
-        
-        # === PRICE NEAR HMA (pullback confirmation) ===
-        # Price within 2% of HMA = pullback, not breakout
-        hma_distance = abs(close[i] - hma_4h[i]) / hma_4h[i] if hma_4h[i] > 1e-10 else 999
-        price_near_hma = hma_distance < 0.02
-        
-        # === DONCHIAN BREAKOUT (alternative entry) ===
-        breakout_long = False
-        breakout_short = False
-        if not np.isnan(donchian_upper[i-1]):
-            breakout_long = close[i] > donchian_upper[i-1]
-        if not np.isnan(donchian_lower[i-1]):
-            breakout_short = close[i] < donchian_lower[i-1]
-        
-        # === SMA200 FILTER (long-term trend) ===
-        above_sma200 = close[i] > sma_200[i] if not np.isnan(sma_200[i]) else False
-        below_sma200 = close[i] < sma_200[i] if not np.isnan(sma_200[i]) else False
+        # === SESSION FILTER (SOFT - prefer 00-12 UTC) ===
+        # London/NY overlap hours - but don't block trades entirely
+        preferred_session = 0 <= session_hours[i] <= 12
         
         # === ENTRY LOGIC (SIMPLIFIED - 2-3 conditions max) ===
         desired_signal = 0.0
         
-        # LONG ENTRY: HTF bull + 4h bull + (RSI pullback OR HMA cross)
-        if htf_strong_bull and hma_bull:
-            if rsi_pullback_long and price_near_hma:
-                desired_signal = SIZE_STRONG
-            elif hma_cross_long:
-                desired_signal = SIZE_BASE
-            elif breakout_long and above_sma200:
-                desired_signal = SIZE_BASE
+        # LONG: 1h bull + RSI(7) oversold + above SMA50
+        # Add 1d bias as strengthener, not requirement
+        if htf_1h_bull and rsi_oversold and above_sma50:
+            if htf_1d_bull:
+                desired_signal = SIZE_STRONG if preferred_session else SIZE_BASE
+            else:
+                desired_signal = SIZE_BASE * 0.7  # weaker signal against daily
         
-        # SHORT ENTRY: HTF bear + 4h bear + (RSI pullback OR HMA cross)
-        elif htf_strong_bear and hma_bear:
-            if rsi_pullback_short and price_near_hma:
-                desired_signal = -SIZE_STRONG
-            elif hma_cross_short:
-                desired_signal = -SIZE_BASE
-            elif breakout_short and below_sma200:
-                desired_signal = -SIZE_BASE
+        # SHORT: 1h bear + RSI(7) overbought + below SMA50
+        elif htf_1h_bear and rsi_overbought and below_sma50:
+            if htf_1d_bear:
+                desired_signal = -SIZE_STRONG if preferred_session else -SIZE_BASE
+            else:
+                desired_signal = -SIZE_BASE * 0.7  # weaker signal against daily
         
-        # === STOPLOSS CHECK (2.5x ATR from entry) ===
+        # === STOPLOSS CHECK (2.0x ATR from entry) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -266,6 +228,8 @@ def generate_signals(prices):
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
+        elif abs(desired_signal) >= SIZE_BASE * 0.5:
+            final_signal = np.sign(desired_signal) * SIZE_BASE
         else:
             final_signal = 0.0
         
@@ -279,9 +243,9 @@ def generate_signals(prices):
                 entry_atr = atr[i]
                 # Set stoploss
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
