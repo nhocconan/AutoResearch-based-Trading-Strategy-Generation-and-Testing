@@ -1,40 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #371: 6h Primary + 1w/1d HTF — Simplified Multi-Timeframe Trend Following
+Experiment #373: 5m Primary + 15m/4h HTF — Session-Filtered Trend Pullback
 
-Hypothesis: Previous 6h strategies failed due to overly complex regime detection and
-too many confluence requirements. This version uses SIMPLIFIED MTF logic:
-- 1w HMA(21) = major trend direction (very slow, high conviction)
-- 1d HMA(21) = intermediate trend confirmation
-- 6h RSI(14) pullback = entry timing within HTF trend
+Hypothesis: 5m is extremely noisy and has ZERO prior experiments. Success requires:
+1. HEAVY HTF filtering (4h for trend direction ONLY)
+2. 15m for pullback detection (not 5m RSI which is too noisy)
+3. 5m ONLY for precise entry timing within session hours
+4. Session filter 08-20 UTC (highest liquidity, lowest slippage)
+5. Small position size (0.15-0.20) due to higher trade frequency
 
-Key differences from failed #360, #363, #367:
-1. NO complex regime detection (ADX+CHOP failed repeatedly)
-2. Only 2-3 entry conditions max (not 5+ filters)
-3. RSI thresholds loosened to 35/65 for more trades
-4. Entry on pullback TO HMA (not breakout) = more frequent signals
-5. Position tracking with proper stoploss at 2.5x ATR
+Key differences from failed 15m strategies:
+- Even stricter HTF alignment (4h trend MUST agree)
+- Session filter MANDATORY (08-20 UTC only)
+- Smaller size (0.15 base) to handle fee drag
+- Only trade WITH 4h trend (no counter-trend on 5m)
 
 Entry Logic:
-- Long: 1w HMA bull + 1d HMA bull + 6h RSI < 35 + price near/pulling to 6h HMA
-- Short: 1w HMA bear + 1d HMA bear + 6h RSI > 65 + price near/pulling to 6h HMA
+- Long: 4h HMA bull + 15m RSI < 40 (pullback) + 5m close > 5m EMA(9) + session hours
+- Short: 4h HMA bear + 15m RSI > 60 (pullback) + 5m close < 5m EMA(9) + session hours
 
-Why this should work on 6h:
-- 6h captures 2-4 day swings, perfect for crypto trends
-- 1w filter avoids counter-trend trades in major moves
-- RSI pullback entries = buy dips in uptrend, sell rallies in downtrend
-- Fewer conditions = more trades (target 40-60/year)
-
-Position sizing: 0.25 base, 0.30 when all HTF aligned
-Stoploss: 2.5x ATR(14) from entry price
-Target: Sharpe>0.45, DD>-35%, trades>=30 train, trades>=5 test
+Target: Sharpe>0.40, DD>-35%, trades>=50 train, trades>=5 test, ALL symbols positive
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_hma_rsi_pullback_1w1d_v1"
-timeframe = "6h"
+name = "mtf_5m_session_hma_rsi_pullback_15m4h_v1"
+timeframe = "5m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -94,42 +86,56 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(close, period):
-    """Simple Moving Average"""
+def calculate_ema(close, period):
+    """Exponential Moving Average"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    return sma
+    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return ema
+
+def get_session_hour(open_time):
+    """Extract hour from open_time (milliseconds timestamp)"""
+    # Convert milliseconds to seconds, then to datetime
+    ts_seconds = open_time / 1000.0
+    # Get hour in UTC
+    hour = (ts_seconds % 86400) // 3600
+    return int(hour)
+
+def is_session_active(open_time):
+    """Check if bar is within 08-20 UTC session"""
+    hour = get_session_hour(open_time)
+    return 8 <= hour < 20
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_15m = get_htf_data(prices, '15m')
     
-    # Calculate and align HTF HMA for trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 4h HMA for primary trend bias
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 15m RSI for pullback detection
+    rsi_15m_raw = calculate_rsi(df_15m['close'].values, period=14)
+    rsi_15m_aligned = align_htf_to_ltf(prices, df_15m, rsi_15m_raw)
     
-    # Calculate primary (6h) indicators
-    hma_6h = calculate_hma(close, period=21)
+    # Calculate 5m indicators
+    ema_5m_fast = calculate_ema(close, 9)
+    ema_5m_slow = calculate_ema(close, 21)
     atr = calculate_atr(high, low, close, period=14)
-    rsi = calculate_rsi(close, period=14)
-    sma_50 = calculate_sma(close, 50)
-    sma_200 = calculate_sma(close, 200)
+    rsi_5m = calculate_rsi(close, period=14)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -147,71 +153,64 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_6h[i]) or np.isnan(rsi[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_15m_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(ema_5m_fast[i]) or np.isnan(ema_5m_slow[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(sma_200[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === SESSION FILTER (08-20 UTC ONLY) ===
+        in_session = is_session_active(open_time[i])
         
-        # === HTF TREND BIAS (1w + 1d) ===
-        htf_1w_bull = close[i] > hma_1w_aligned[i]
-        htf_1w_bear = close[i] < hma_1w_aligned[i]
+        # === 4h TREND BIAS (PRIMARY DIRECTION) ===
+        htf_4h_bull = close[i] > hma_4h_aligned[i]
+        htf_4h_bear = close[i] < hma_4h_aligned[i]
         
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        # === 15m RSI PULLBACK DETECTION ===
+        # For long: RSI pulled back to 35-45 range (not oversold, just pullback)
+        # For short: RSI pulled back to 55-65 range (not overbought, just pullback)
+        rsi_15m_pullback_long = 30.0 < rsi_15m_aligned[i] < 50.0
+        rsi_15m_pullback_short = 50.0 < rsi_15m_aligned[i] < 70.0
         
-        # === 6h HMA TREND ===
-        hma_6h_bull = close[i] > hma_6h[i]
-        hma_6h_bear = close[i] < hma_6h[i]
+        # === 5m MOMENTUM CONFIRMATION ===
+        # Fast EMA above slow EMA for long momentum
+        ema_bull = ema_5m_fast[i] > ema_5m_slow[i]
+        ema_bear = ema_5m_fast[i] < ema_5m_slow[i]
         
-        # === RSI PULLBACK (LOOSENED for more trades) ===
-        rsi_oversold = rsi[i] < 35.0
-        rsi_overbought = rsi[i] > 65.0
+        # Price above fast EMA for additional confirmation
+        price_above_ema = close[i] > ema_5m_fast[i]
+        price_below_ema = close[i] < ema_5m_fast[i]
         
-        # === PRICE NEAR HMA (pullback entry, not breakout) ===
-        # Price within 2% of HMA = pullback zone
-        hma_distance_pct = abs(close[i] - hma_6h[i]) / hma_6h[i] if hma_6h[i] > 1e-10 else 999.0
-        near_hma = hma_distance_pct < 0.02
+        # === 5m RSI CONFIRMATION (not extreme, just direction) ===
+        rsi_5m_bull = 40.0 < rsi_5m[i] < 70.0
+        rsi_5m_bear = 30.0 < rsi_5m[i] < 60.0
         
-        # === SMA200 FILTER (avoid counter-trend in major moves) ===
-        above_sma200 = close[i] > sma_200[i]
-        below_sma200 = close[i] < sma_200[i]
-        
-        # === ENTRY LOGIC (SIMPLIFIED - 3 conditions max) ===
+        # === ENTRY LOGIC (STRICT - ALL CONDITIONS MUST ALIGN) ===
         desired_signal = 0.0
         
-        # LONG: 1w bull + 1d bull + RSI oversold + near HMA
-        # OR: 1w bull + RSI oversold + above SMA200 (fallback for more trades)
-        if htf_1w_bull:
-            if rsi_oversold:
-                if htf_1d_bull and near_hma:
-                    desired_signal = SIZE_STRONG
-                elif above_sma200:
-                    desired_signal = SIZE_BASE
+        # LONG: 4h bull + 15m pullback + 5m momentum + session
+        if htf_4h_bull and rsi_15m_pullback_long and ema_bull and price_above_ema and in_session:
+            # Additional confirmation: 5m RSI not overbought
+            if rsi_5m_bull:
+                desired_signal = SIZE_STRONG
+            else:
+                desired_signal = SIZE_BASE
         
-        # SHORT: 1w bear + 1d bear + RSI overbought + near HMA
-        # OR: 1w bear + RSI overbought + below SMA200 (fallback for more trades)
-        elif htf_1w_bear:
-            if rsi_overbought:
-                if htf_1d_bear and near_hma:
-                    desired_signal = -SIZE_STRONG
-                elif below_sma200:
-                    desired_signal = -SIZE_BASE
+        # SHORT: 4h bear + 15m pullback + 5m momentum + session
+        elif htf_4h_bear and rsi_15m_pullback_short and ema_bear and price_below_ema and in_session:
+            # Additional confirmation: 5m RSI not oversold
+            if rsi_5m_bear:
+                desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR from entry) ===
         stoploss_triggered = False
