@@ -1,28 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #106: 12h Primary + 1d HTF — KAMA Trend + Fisher Transform Reversals
+Experiment #107: 1d Primary + 1w HTF — Donchian Breakout + HMA Trend + RSI Filter
 
-Hypothesis: After 100+ experiments, clear patterns emerge:
-- 12h timeframe is underutilized but proven (SOL +0.782 with Donchian+HMA)
-- Fisher Transform excels in bear/range markets (2025 test period)
-- KAMA adapts better than HMA/EMA to volatility changes
-- Simple is better: complex regime filters cause 0 trades (#096, #105 failed)
-- Loose entry + strict exit = more trades with controlled drawdown
+Hypothesis: After analyzing 91 failed experiments, the pattern is clear:
+- Complex regime filters (Choppiness, dual-regime) cause 0 trades or negative Sharpe
+- 1d timeframe with 1w HTF bias shown success (SOL +0.879 with HMA crossover)
+- Donchian breakout captures trend continuation better than KAMA crossover alone
+- LOOSE RSI thresholds (30/70) ensure trade generation on all symbols
+- 1d primary = 20-50 trades/year target (matches proven pattern)
 
-This strategy combines:
-1. 1d KAMA = major trend bias (price above/below)
-2. 12h Fisher Transform = reversal timing (crosses -1.5/+1.5)
-3. 12h KAMA crossover = trend confirmation
-4. ATR volatility filter = avoid extreme vol entries (ATR ratio < 2.5)
-5. Trailing stoploss (2.5x ATR) = risk management
+This strategy uses MINIMAL but effective filters:
+1. 1w HMA = major trend bias (price above/below)
+2. 1d Donchian(20) breakout = entry trigger (proven on SOL +0.782)
+3. 1d HMA(21) confirmation = trend alignment
+4. RSI loose filter (>30 for long, <70 for short) - ensures trades generate
+5. ATR trailing stoploss (2.5x) for risk management
+6. NO Choppiness, NO complex regime detection
 
 Key design choices:
-- Timeframe: 12h (20-50 trades/year target, proven higher TF works)
-- HTF: 1d for trend bias (responsive but not noisy)
-- Fisher Transform: period=9, catches reversals in bear rallies
-- KAMA: adaptive smoothing, no separate regime filter needed
-- Position size: 0.30 (30% of capital, conservative for 12h)
-- Stoploss: 2.5x ATR trailing
+- Timeframe: 1d (proven to work, 20-50 trades/year target per instructions)
+- HTF: 1w for trend bias (higher than 1d, more stable signal)
+- Donchian(20): captures 20-day breakouts, proven edge on crypto
+- HMA(21): faster response than EMA, less lag for trend confirmation
+- RSI thresholds: 30/70 (loose, ensures trades on BTC/ETH/SOL)
+- Position size: 0.28 (28% of capital, conservative for 1d)
+- Stoploss: 2.5x ATR trailing (tighter than 3x for better risk control)
 
 Target: Sharpe>0.351, DD>-40%, trades>=30 on train, trades>=3 on test
 """
@@ -30,97 +32,102 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_fisher_reversal_1d_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_hma_rsi_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_kama(close, period=10, fast=2, slow=30):
+def calculate_hma(close, period=21):
     """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts smoothing based on market efficiency ratio (ER)
+    Hull Moving Average - reduces lag while maintaining smoothness
+    HMA = WMA(2*WMA(n/2) - WMA(n))
     """
     n = len(close)
-    if n < period + slow + 5:
+    if n < period:
         return np.full(n, np.nan)
     
-    kama = np.zeros(n)
-    kama[:] = np.nan
+    # Calculate WMA for period/2
+    half = period // 2
+    if half < 1:
+        half = 1
     
-    # Calculate Efficiency Ratio (ER)
-    price_change = np.abs(close[period:] - close[:-period])
-    sum_price_change = np.zeros(n - period)
-    for i in range(n - period):
-        sum_price_change[i] = np.sum(np.abs(np.diff(close[i:i+period+1])))
+    wma_half = np.zeros(n)
+    wma_half[:] = np.nan
+    for i in range(half - 1, n):
+        weights = np.arange(1, half + 1)
+        wma_half[i] = np.sum(close[i-half+1:i+1] * weights) / np.sum(weights)
     
-    # Avoid division by zero
-    er = np.zeros(n)
-    for i in range(period, n):
-        if sum_price_change[i-period] > 1e-10:
-            er[i] = price_change[i-period] / sum_price_change[i-period]
-        else:
-            er[i] = 0.0
+    # Calculate WMA for full period
+    wma_full = np.zeros(n)
+    wma_full[:] = np.nan
+    for i in range(period - 1, n):
+        weights = np.arange(1, period + 1)
+        wma_full[i] = np.sum(close[i-period+1:i+1] * weights) / np.sum(weights)
     
-    # Calculate Smoothing Constant (SC)
-    fast_sc = 2.0 / (fast + 1.0)
-    slow_sc = 2.0 / (slow + 1.0)
-    sc = er * (fast_sc - slow_sc) + slow_sc
+    # Calculate HMA
+    hma = np.zeros(n)
+    hma[:] = np.nan
+    sqrt_period = int(np.sqrt(period))
     
-    # Initialize KAMA with SMA of first period
-    kama[period] = np.mean(close[:period+1])
+    for i in range(period - 1, n):
+        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
+            raw_hma = 2.0 * wma_half[i] - wma_full[i]
+            # WMA of raw_hma with sqrt(period)
+            if i >= sqrt_period - 1:
+                weights = np.arange(1, sqrt_period + 1)
+                start_idx = i - sqrt_period + 1
+                hma[i] = np.sum(raw_hma[start_idx:i+1] * weights) / np.sum(weights)
     
-    # Calculate KAMA
-    for i in range(period + 1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
+    return hma
 
-def calculate_fisher_transform(high, low, period=9):
+def calculate_donchian(high, low, period=20):
     """
-    Ehlers Fisher Transform
-    Transforms price into a Gaussian normal distribution
-    Long when Fisher crosses above -1.5, short when crosses below +1.5
+    Donchian Channel - highest high and lowest low over period
+    Returns: upper, lower, middle
     """
     n = len(high)
-    if n < period + 5:
-        return np.full(n, np.nan), np.full(n, np.nan)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    fisher = np.zeros(n)
-    fisher[:] = np.nan
-    fisher_prev = np.zeros(n)
-    fisher_prev[:] = np.nan
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
     
-    # Calculate typical price and normalize
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    middle = (upper + lower) / 2.0
+    return upper, lower, middle
+
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    gain = np.concatenate([[0.0], gain])
+    loss = np.concatenate([[0.0], loss])
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.zeros(n)
+    rsi[:] = np.nan
     for i in range(period, n):
-        # Typical price
-        typical = (high[i] + low[i]) / 2.0
-        
-        # Find highest high and lowest low over period
-        hh = np.max(high[i-period+1:i+1])
-        ll = np.min(low[i-period+1:i+1])
-        
-        # Normalize (avoid division by zero)
-        if hh - ll < 1e-10:
-            continue
-        
-        # Normalized price (-1 to +1)
-        norm = 2.0 * (typical - ll) / (hh - ll) - 1.0
-        
-        # Clamp to avoid extreme values
-        norm = max(-0.999, min(0.999, norm))
-        
-        # Fisher transform
-        fisher[i] = 0.5 * np.log((1.0 + norm) / (1.0 - norm))
-        
-        # Previous fisher (for crossover detection)
-        if i > period:
-            fisher_prev[i] = fisher[i-1]
+        if avg_loss[i] < 1e-10:
+            rsi[i] = 100.0
         else:
-            fisher_prev[i] = fisher[i]
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
     
-    return fisher, fisher_prev
+    return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range for stoploss and volatility filter"""
+    """Average True Range for stoploss"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -133,23 +140,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_atr_ratio(atr, short_period=7, long_period=30):
-    """ATR ratio for volatility spike detection"""
-    n = len(atr)
-    if n < long_period + 1:
-        return np.full(n, np.nan)
-    
-    atr_short = pd.Series(atr).ewm(span=short_period, min_periods=short_period, adjust=False).mean().values
-    atr_long = pd.Series(atr).ewm(span=long_period, min_periods=long_period, adjust=False).mean().values
-    
-    ratio = np.zeros(n)
-    ratio[:] = np.nan
-    for i in range(long_period, n):
-        if atr_long[i] > 1e-10:
-            ratio[i] = atr_short[i] / atr_long[i]
-    
-    return ratio
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -157,21 +147,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d KAMA for major trend bias
-    kama_1d_raw = calculate_kama(df_1d['close'].values, period=20, fast=2, slow=30)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_raw)
+    # Calculate and align 1w HMA for major trend bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (12h) indicators
-    kama_fast = calculate_kama(close, period=10, fast=2, slow=15)
-    kama_slow = calculate_kama(close, period=30, fast=2, slow=30)
-    fisher, fisher_prev = calculate_fisher_transform(high, low, period=9)
+    # Calculate primary (1d) indicators
+    hma_1d = calculate_hma(close, period=21)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=20)
+    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    atr_ratio = calculate_atr_ratio(atr, short_period=7, long_period=30)
     
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size (conservative for 12h)
+    SIZE = 0.28  # 28% position size (conservative for 1d)
     
     # Position tracking for stoploss
     in_position = False
@@ -189,57 +178,48 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
+        if np.isnan(hma_1d[i]) or np.isnan(donchian_upper[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(fisher[i]) or np.isnan(fisher_prev[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(kama_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(atr_ratio[i]) or atr_ratio[i] <= 1e-10:
+        if np.isnan(rsi[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d KAMA) ===
-        htf_bull = close[i] > kama_1d_aligned[i]
-        htf_bear = close[i] < kama_1d_aligned[i]
+        # === HTF BIAS (1w HMA) ===
+        # Simple: is price above or below weekly HMA?
+        htf_bull = close[i] > hma_1w_aligned[i]
+        htf_bear = close[i] < hma_1w_aligned[i]
         
-        # === 12h TREND (KAMA crossover) ===
-        kama_cross_bull = kama_fast[i] > kama_slow[i]
-        kama_cross_bear = kama_fast[i] < kama_slow[i]
+        # === 1d TREND (HMA alignment) ===
+        hma_bull = close[i] > hma_1d[i]
+        hma_bear = close[i] < hma_1d[i]
         
-        # === FISHER TRANSFORM REVERSAL SIGNALS ===
-        # Long: Fisher crosses above -1.5 (oversold reversal)
-        # Short: Fisher crosses below +1.5 (overbought reversal)
-        fisher_long = (fisher_prev[i] < -1.5) and (fisher[i] >= -1.5)
-        fisher_short = (fisher_prev[i] > 1.5) and (fisher[i] <= 1.5)
+        # === DONCHIAN BREAKOUT ===
+        # Long: price breaks above Donchian upper (20-day high)
+        # Short: price breaks below Donchian lower (20-day low)
+        donchian_breakout_long = close[i] > donchian_upper[i-1]  # breakout above prev high
+        donchian_breakout_short = close[i] < donchian_lower[i-1]  # breakout below prev low
         
-        # === VOLATILITY FILTER ===
-        # Avoid entries during extreme volatility spikes (ATR ratio > 2.5)
-        vol_ok = atr_ratio[i] < 2.5
+        # === RSI FILTER (LOOSE - ensure trades generate on all symbols) ===
+        # For longs: RSI > 30 (not extremely oversold)
+        # For shorts: RSI < 70 (not extremely overbought)
+        rsi_ok_long = rsi[i] > 30.0
+        rsi_ok_short = rsi[i] < 70.0
         
         # === DESIRED SIGNAL ===
-        # LONG: 1d bull + 12h KAMA bull + Fisher long + vol ok
-        # SHORT: 1d bear + 12h KAMA bear + Fisher short + vol ok
+        # LONG: 1w bull + 1d HMA bull + Donchian breakout + RSI > 30
+        # SHORT: 1w bear + 1d HMA bear + Donchian breakout + RSI < 70
         desired_signal = 0.0
         
-        if htf_bull and kama_cross_bull and fisher_long and vol_ok:
+        if htf_bull and hma_bull and donchian_breakout_long and rsi_ok_long:
             desired_signal = SIZE
-        elif htf_bear and kama_cross_bear and fisher_short and vol_ok:
+        elif htf_bear and hma_bear and donchian_breakout_short and rsi_ok_short:
             desired_signal = -SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
