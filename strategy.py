@@ -1,31 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #1463: 1d Primary + 1w HTF — Simplified Dual Regime with Relaxed Entries
+Experiment #1464: 4h Primary + 12h/1d HTF — Dual Regime with Relaxed Entries
 
-Hypothesis: Previous strategy #1462 had TOO MANY filters causing 0 trades. 
-This version SIMPLIFIES entry conditions while keeping the proven dual-regime logic:
-1. 1w HMA(21) = macro trend (proven filter from current best)
-2. Choppiness Index(14) = regime detection but RELAXED thresholds (50/50 not 61.8/38.2)
-3. RSI(14) extremes = simpler than Connors RSI, more trades generated
-4. Donchian(20) breakout = trend entry trigger
-5. ATR(14) 2.5x trailing stop = risk management
+Hypothesis: 4h timeframe offers optimal balance between signal quality and trade frequency.
+Using 12h HMA for macro trend (more responsive than 1w) + Choppiness regime detection
++ RSI extremes + Donchian breakout confirmation. This combines proven elements from #1463
+but adapted for 4h timeframe with adjusted thresholds for optimal trade frequency.
 
 Why this should beat Sharpe=0.618:
-- Fewer conflicting filters = more trades (avoid 0-trade failure mode)
-- Relaxed CHOP thresholds (50/50) = more regime switches = more opportunities
-- RSI(14) < 35 / > 65 = more frequent than CRSI < 15 / > 85
-- Still uses 1w HTF for macro direction (proven to improve bear market performance)
-- Position size 0.28 = conservative for daily volatility
+- 4h TF captures more intraday moves than 1d while avoiding 1h noise
+- 12h HMA(21) = faster macro trend signal than 1w, more responsive to regime changes
+- Choppiness(14) with 55/45 threshold = slight trending bias (crypto trends more than ranges)
+- RSI(14) 30/70 = more trades than extreme 25/75, avoids 0-trade failure
+- Donchian(20) breakout = confirms trend direction, reduces false signals
+- ATR(14) 2.5x trailing stop = proven risk management
+- Position size 0.30 = optimal for 4h volatility
 
 Target: 30-60 trades/year, Sharpe > 0.618, trades >= 30 train, >= 5 test
-Timeframe: 1d
+Timeframe: 4h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_simplified_regime_rsi_donchian_1w_hma_atr_v1"
-timeframe = "1d"
+name = "mtf_4h_dual_regime_rsi_donchian_12h_hma_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -115,6 +114,7 @@ def calculate_atr(high, low, close, period=14):
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[j] - close[j-1]) if i > 0 else high[i] - low[i])
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
@@ -142,20 +142,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate and align 1w HMA for macro trend
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 12h HMA for macro trend
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate primary (1d) indicators
+    # Calculate primary (4h) indicators
     donchian_20_upper, donchian_20_lower = calculate_donchian(high, low, period=20)
     rsi = calculate_rsi(close, period=14)
     chop = calculate_choppiness(high, low, close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.28
+    BASE_SIZE = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -179,30 +179,30 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === MACRO TREND (1w HMA) - strongest filter ===
-        macro_bull = close[i] > hma_1w_aligned[i]
-        macro_bear = close[i] < hma_1w_aligned[i]
+        # === MACRO TREND (12h HMA) - strongest filter ===
+        macro_bull = close[i] > hma_12h_aligned[i]
+        macro_bear = close[i] < hma_12h_aligned[i]
         
-        # === CHOPPINESS REGIME - RELAXED thresholds for more trades ===
-        is_choppy = chop[i] > 50.0  # Range market (relaxed from 61.8)
-        is_trending = chop[i] < 50.0  # Trend market (relaxed from 38.2)
+        # === CHOPPINESS REGIME - 55/45 threshold (slight trending bias) ===
+        is_choppy = chop[i] > 55.0  # Range market
+        is_trending = chop[i] < 45.0  # Trend market
         
-        # === RSI EXTREMES - simpler than CRSI, more trades ===
-        rsi_oversold = rsi[i] < 35.0  # Relaxed from CRSI < 15
-        rsi_overbought = rsi[i] > 65.0  # Relaxed from CRSI > 85
+        # === RSI EXTREMES - 30/70 for more trades ===
+        rsi_oversold = rsi[i] < 30.0
+        rsi_overbought = rsi[i] > 70.0
         
         # === DONCHIAN BREAKOUT (trend following) ===
         breakout_20_long = close[i] > donchian_20_upper[i-1] if i > 0 else False
         breakout_20_short = close[i] < donchian_20_lower[i-1] if i > 0 else False
         
-        # === DESIRED SIGNAL - SIMPLIFIED DUAL REGIME LOGIC ===
+        # === DESIRED SIGNAL - DUAL REGIME LOGIC ===
         desired_signal = 0.0
         
         # LONG ENTRIES
@@ -218,6 +218,9 @@ def generate_signals(prices):
         # Path 4: Breakout without regime filter (catch missed trends)
         elif breakout_20_long and macro_bull:
             desired_signal = BASE_SIZE * 0.5
+        # Path 5: RSI oversold in neutral regime + macro bull
+        elif rsi_oversold and macro_bull and not is_trending:
+            desired_signal = BASE_SIZE * 0.5
         
         # SHORT ENTRIES
         # Path 1: Choppy regime + RSI overbought + macro bear (mean reversion)
@@ -231,6 +234,9 @@ def generate_signals(prices):
             desired_signal = -BASE_SIZE
         # Path 4: Breakout without regime filter (catch missed trends)
         elif breakout_20_short and macro_bear:
+            desired_signal = -BASE_SIZE * 0.5
+        # Path 5: RSI overbought in neutral regime + macro bear
+        elif rsi_overbought and macro_bear and not is_trending:
             desired_signal = -BASE_SIZE * 0.5
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
