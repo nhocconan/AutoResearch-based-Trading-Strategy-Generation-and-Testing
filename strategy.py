@@ -1,77 +1,53 @@
 #!/usr/bin/env python3
 """
-Experiment #835: 6h Primary + 12h/1d HTF — KAMA Adaptive Trend with RSI Divergence
+Experiment #836: 30m Primary + 4h/1d HTF — Loose Confluence with Session Filter
 
-Hypothesis: 6h timeframe captures multi-day swings better than 4h (too noisy) or 12h (too slow).
-KAMA (Kaufman Adaptive Moving Average) adapts to market efficiency ratio - smooth in trends,
-responsive in ranges. Combined with RSI(7) divergence detection for early reversal signals.
+Hypothesis: 30m timeframe with 4h/1d HTF bias provides optimal trade frequency
+(40-80/year) with quality entries. Using LOOSE entry conditions (RSI 35/65 not
+20/80, OR logic for multiple triggers) ensures sufficient trade generation while
+session filter (08-20 UTC) reduces noise during low liquidity periods.
 
 Key innovations:
-1. KAMA(10,2,30) on 6h - adapts to market noise better than HMA/EMA
-2. RSI(7) divergence: price LL + RSI HL = long, price HH + RSI LH = short
-3. 12h KAMA for intermediate trend confirmation
-4. 1d KAMA for long-term bias (only trade with HTF direction)
-5. ATR-based dynamic sizing: reduce position when vol spikes (ATR ratio > 1.5)
-6. Loose entry thresholds to ensure ≥30 trades/train, ≥3/test
+1. 1d HMA(21) for primary HTF trend bias — simple, reliable direction filter
+2. 4h HMA(21) for secondary HTF confirmation — adds confluence without blocking trades
+3. 30m RSI(14) with loose thresholds (35/65) for entry timing
+4. 30m HMA(16/48) crossover as alternative entry trigger (OR logic)
+5. Session filter: 08-20 UTC only — avoids Asian session noise
+6. ATR(14) 2.5x trailing stop for risk management
+7. Discrete sizing: 0.0, ±0.20, ±0.25 — minimizes fee churn
 
-Entry conditions (designed for trade generation):
-- LONG: 1d KAMA bull + 12h KAMA bull + (RSI<40 OR RSI bullish divergence)
-- SHORT: 1d KAMA bear + 12h KAMA bear + (RSI>60 OR RSI bearish divergence)
+Entry conditions (LOOSE to ensure ≥40 trades/train, ≥3/test):
+- LONG: 1d HMA bull + 4h HMA bull + (RSI<40 OR HMA crossover long) + session
+- SHORT: 1d HMA bear + 4h HMA bear + (RSI>60 OR HMA crossover short) + session
 
-Target: Sharpe>0.45 (beat current best 0.424), trades>=30 train, trades>=3 test, DD>-40%
-Timeframe: 6h
-Size: 0.25-0.30 discrete, reduced to 0.20 when ATR spikes
+Target: Sharpe>0.45, trades>=160 train (40/year), trades>=45 test (3/year), DD>-35%
+Timeframe: 30m
+Size: 0.20-0.25 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_kama_rsi_div_12h1d_v1"
-timeframe = "6h"
+name = "mtf_30m_hma_rsi_session_4h1d_v1"
+timeframe = "30m"
 leverage = 1.0
 
-def calculate_kama(close, period=10, fast_period=2, slow_period=30):
-    """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts smoothing based on market efficiency ratio (ER)
-    ER = |net change| / sum of absolute changes
-    High ER (trending) = more responsive, Low ER (ranging) = smoother
-    """
+def calculate_hma(close, period):
+    """Hull Moving Average - reduces lag while maintaining smoothness"""
     n = len(close)
-    if n < slow_period + period:
+    if n < period:
         return np.full(n, np.nan)
     
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    er[:] = np.nan
+    half = period // 2
+    sqrt_period = int(np.sqrt(period))
     
-    for i in range(slow_period, n):
-        net_change = abs(close[i] - close[i - slow_period])
-        sum_changes = 0.0
-        for j in range(1, slow_period + 1):
-            sum_changes += abs(close[i - j + 1] - close[i - j])
-        
-        if sum_changes > 1e-10:
-            er[i] = net_change / sum_changes
-        else:
-            er[i] = 0.0
+    wma1 = pd.Series(close).ewm(span=half, min_periods=half, adjust=False).mean().values
+    wma2 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    # Calculate smoothing constant
-    fast_sc = 2.0 / (fast_period + 1.0)
-    slow_sc = 2.0 / (slow_period + 1.0)
+    diff = 2.0 * wma1 - wma2
+    hma = pd.Series(diff).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean().values
     
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Initialize KAMA with SMA of first period values
-    kama[slow_period] = np.mean(close[slow_period - period + 1:slow_period + 1])
-    
-    for i in range(slow_period + 1, n):
-        if not np.isnan(er[i]):
-            sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
+    return hma
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index - momentum oscillator"""
@@ -98,7 +74,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range - volatility measure"""
+    """Average True Range - volatility measure for stops"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -111,68 +87,43 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def detect_rsi_divergence(prices, rsi, lookback=5):
-    """
-    Detect RSI divergence signals
-    Bullish: price makes lower low, RSI makes higher low
-    Bearish: price makes higher high, RSI makes lower high
-    Returns: div_signal (1=bullish, -1=bearish, 0=none)
-    """
-    n = len(prices)
-    div_signal = np.zeros(n)
-    low = prices['low'].values
-    high = prices['high'].values
-    
-    for i in range(lookback + 2, n):
-        if np.isnan(rsi[i]) or np.isnan(rsi[i - lookback]):
-            continue
-        
-        # Check for bullish divergence (price LL, RSI HL)
-        price_ll = low[i] < min(low[i-lookback:i])
-        rsi_hl = rsi[i] > min(rsi[i-lookback:i])
-        
-        # Check for bearish divergence (price HH, RSI LH)
-        price_hh = high[i] > max(high[i-lookback:i])
-        rsi_lh = rsi[i] < max(rsi[i-lookback:i])
-        
-        if price_ll and rsi_hl and rsi[i] < 45:
-            div_signal[i] = 1.0  # Bullish divergence
-        elif price_hh and rsi_lh and rsi[i] > 55:
-            div_signal[i] = -1.0  # Bearish divergence
-    
-    return div_signal
+def get_hour_from_open_time(open_time_array):
+    """Extract UTC hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds since epoch
+    hours = (open_time_array // (1000 * 60 * 60)) % 24
+    return hours
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF KAMA
-    kama_12h_raw = calculate_kama(df_12h['close'].values, period=10, fast_period=2, slow_period=30)
-    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h_raw)
+    # Calculate and align HTF HMA (4h)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    kama_1d_raw = calculate_kama(df_1d['close'].values, period=10, fast_period=2, slow_period=30)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_raw)
+    # Calculate and align HTF HMA (1d)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
-    kama_6h = calculate_kama(close, period=10, fast_period=2, slow_period=30)
-    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for 6h
+    # Calculate 30m indicators
+    hma_16 = calculate_hma(close, period=16)
+    hma_48 = calculate_hma(close, period=48)
     rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_30 = calculate_atr(high, low, close, period=30)
     
-    # Detect RSI divergence
-    rsi_div = detect_rsi_divergence(prices, rsi_7, lookback=5)
+    # Extract UTC hours for session filter
+    hours = get_hour_from_open_time(open_time)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
-    SIZE_REDUCED = 0.20  # When vol spikes
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -192,67 +143,66 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(kama_6h[i]) or np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(hma_16[i]) or np.isnan(hma_48[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(kama_12h_aligned[i]) or np.isnan(kama_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d and 12h KAMA) ===
-        htf_1d_bull = close[i] > kama_1d_aligned[i]
-        htf_1d_bear = close[i] < kama_1d_aligned[i]
+        # === SESSION FILTER (08-20 UTC only) ===
+        in_session = (hours[i] >= 8) and (hours[i] <= 20)
         
-        htf_12h_bull = close[i] > kama_12h_aligned[i]
-        htf_12h_bear = close[i] < kama_12h_aligned[i]
+        # === HTF BIAS (1d HMA) ===
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === 6h KAMA TREND ===
-        kama_6h_bull = close[i] > kama_6h[i]
-        kama_6h_bear = close[i] < kama_6h[i]
+        # === HTF BIAS (4h HMA) ===
+        htf_4h_bull = close[i] > hma_4h_aligned[i]
+        htf_4h_bear = close[i] < hma_4h_aligned[i]
         
-        # === RSI CONDITIONS (loose for trade generation) ===
-        rsi_oversold = rsi_7[i] < 40.0
-        rsi_overbought = rsi_7[i] > 60.0
-        rsi_extreme_oversold = rsi_7[i] < 30.0
-        rsi_extreme_overbought = rsi_7[i] > 70.0
+        # === 30m HMA CROSSOVER ===
+        hma_crossover_long = False
+        hma_crossover_short = False
+        if i > 0 and not np.isnan(hma_16[i-1]) and not np.isnan(hma_48[i-1]):
+            hma_crossover_long = (hma_16[i-1] <= hma_48[i-1]) and (hma_16[i] > hma_48[i])
+            hma_crossover_short = (hma_16[i-1] >= hma_48[i-1]) and (hma_16[i] < hma_48[i])
         
-        # === RSI DIVERGENCE ===
-        bullish_div = rsi_div[i] == 1.0
-        bearish_div = rsi_div[i] == -1.0
+        # === 30m HMA TREND ===
+        hma_30m_bull = hma_16[i] > hma_48[i]
+        hma_30m_bear = hma_16[i] < hma_48[i]
         
-        # === VOLATILITY ADJUSTMENT ===
-        atr_ratio = atr_14[i] / atr_30[i] if not np.isnan(atr_30[i]) and atr_30[i] > 1e-10 else 1.0
-        vol_spike = atr_ratio > 1.5
-        
-        # Select position size based on volatility
-        current_size_base = SIZE_REDUCED if vol_spike else SIZE_BASE
-        current_size_strong = SIZE_REDUCED if vol_spike else SIZE_STRONG
+        # === RSI CONDITIONS (LOOSE for more trades) ===
+        rsi_oversold = rsi_14[i] < 40.0  # Loose threshold for entries
+        rsi_overbought = rsi_14[i] > 60.0  # Loose threshold for entries
+        rsi_extreme_oversold = rsi_14[i] < 30.0
+        rsi_extreme_overbought = rsi_14[i] > 70.0
         
         # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADE GENERATION) ===
         desired_signal = 0.0
         
-        # LONG: HTF bull + (RSI oversold OR divergence OR KAMA bull)
-        if htf_1d_bull and htf_12h_bull:
-            if rsi_oversold or bullish_div or kama_6h_bull:
-                if rsi_extreme_oversold or bullish_div:
-                    desired_signal = current_size_strong
+        # LONG: 1d bull + 4h bull + (RSI oversold OR HMA crossover) + session
+        if htf_1d_bull and htf_4h_bull and in_session:
+            if rsi_oversold or hma_crossover_long:
+                if rsi_extreme_oversold or hma_crossover_long:
+                    desired_signal = SIZE_STRONG
                 else:
-                    desired_signal = current_size_base
+                    desired_signal = SIZE_BASE
         
-        # SHORT: HTF bear + (RSI overbought OR divergence OR KAMA bear)
-        elif htf_1d_bear and htf_12h_bear:
-            if rsi_overbought or bearish_div or kama_6h_bear:
-                if rsi_extreme_overbought or bearish_div:
-                    desired_signal = -current_size_strong
+        # SHORT: 1d bear + 4h bear + (RSI overbought OR HMA crossover) + session
+        elif htf_1d_bear and htf_4h_bear and in_session:
+            if rsi_overbought or hma_crossover_short:
+                if rsi_extreme_overbought or hma_crossover_short:
+                    desired_signal = -SIZE_STRONG
                 else:
-                    desired_signal = -current_size_base
+                    desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -275,14 +225,14 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= current_size_strong * 0.9:
-            final_signal = current_size_strong
-        elif desired_signal <= -current_size_strong * 0.9:
-            final_signal = -current_size_strong
-        elif desired_signal >= current_size_base * 0.9:
-            final_signal = current_size_base
-        elif desired_signal <= -current_size_base * 0.9:
-            final_signal = -current_size_base
+        if desired_signal >= SIZE_STRONG * 0.9:
+            final_signal = SIZE_STRONG
+        elif desired_signal <= -SIZE_STRONG * 0.9:
+            final_signal = -SIZE_STRONG
+        elif desired_signal >= SIZE_BASE * 0.9:
+            final_signal = SIZE_BASE
+        elif desired_signal <= -SIZE_BASE * 0.9:
+            final_signal = -SIZE_BASE
         else:
             final_signal = 0.0
         
