@@ -1,41 +1,130 @@
 #!/usr/bin/env python3
 """
-Experiment #1649: 4h Primary + 1d HTF — Donchian Breakout + HMA Bias + Volatility Filter
+Experiment #1650: 1h Primary + 4h/12h HTF — Connors RSI Mean Reversion + Choppiness Regime
 
-Hypothesis: Previous 4h strategies failed due to OVER-FILTERING (KAMA + RSI + HMA all must align).
-This strategy uses DONCHIAN BREAKOUT as primary trigger (proven to generate trades) with simpler
-confluence. Key insight: breakouts happen frequently enough on 4h to meet trade minimums.
+Hypothesis: Previous 1h strategies failed due to OVER-FILTERING (0 trades). This strategy
+uses a SCORING SYSTEM instead of hard AND filters, allowing partial confluence to trigger
+entries. Key innovations:
 
-1. HTF bias: 1d HMA(21) for trend direction (proven in best strategy lineage)
-2. Donchian(20) breakout: Upper break = long, Lower break = short (generates trades!)
-3. Volatility filter: ATR(14) > ATR(50)*0.8 (avoid dead markets)
-4. RSI(14) momentum: >45 for long, <55 for short (loose = MORE TRADES)
-5. ATR(14) 2.5x trailing stop: Controlled drawdown
+1. Connors RSI (CRSI): Proven 75% win rate mean reversion signal
+   - RSI(3) + RSI_Streak(2) + PercentRank(100) / 3
+   - Long: CRSI < 20, Short: CRSI > 80 (looser than typical 10/90)
 
-Why this should work on 4h:
-- Donchian breakout = CLEAR entry trigger that happens regularly
-- 1d HMA provides bias without over-filtering
-- RSI >45/<55 is much looser than 50 = more entries allowed
-- Volatility filter avoids chop but doesn't block valid breakouts
-- 4h targets 20-50 trades/year = optimal fee/trade balance
+2. Choppiness Index regime: CHOP(14) > 55 = range (mean revert), CHOP < 45 = trend
+   - In range: use CRSI extremes for mean reversion
+   - In trend: use CRSI pullbacks in trend direction
 
-Key difference from failed #1639, #1641, #1644:
-- Donchian breakout instead of KAMA crossover (clearer trigger)
-- Looser RSI filter (45/55 vs 50) = more entries
-- Added volatility filter to avoid dead markets
-- Simpler logic = fewer conditions that can all fail simultaneously
+3. 4h HMA(21) bias: Only trade long if 4h bullish, short if 4h bearish
+   - Provides HTF direction without over-filtering
 
-Timeframe: 4h (required)
-HTF: 1d HMA via mtf_data.get_htf_data() — called ONCE before loop
-Target: Sharpe > 0.618, trades > 30/symbol train, > 5/symbol test, DD > -40%
+4. Session filter: Only 8-20 UTC (high volume hours) - but NOT required for all trades
+
+5. Scoring system: Each factor adds points, enter when score > threshold
+   - This prevents 0 trades from over-filtering
+
+6. ATR(14) 2.5x trailing stoploss: Controlled drawdown
+
+Timeframe: 1h (required for this experiment)
+HTF: 4h HMA via mtf_data.get_htf_data() — called ONCE before loop
+Target: 40-80 trades/year, Sharpe > 0.5, DD > -35%
+Size: 0.20 (smaller for 1h due to higher fee sensitivity)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_1d_vol_rsi_atr_v1"
-timeframe = "4h"
+name = "mtf_1h_crsi_chop_4h_score_atr_v1"
+timeframe = "1h"
 leverage = 1.0
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Connors Relative Strength Index (CRSI)
+    Combines 3 components for mean reversion signal
+    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    """
+    n = len(close)
+    if n < rank_period + 10:
+        return np.full(n, np.nan)
+    
+    # Component 1: RSI(3)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    
+    gain_smooth = pd.Series(np.concatenate([[0], gain])).ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean().values
+    loss_smooth = pd.Series(np.concatenate([[0], loss])).ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean().values
+    
+    rsi_short = np.full(n, np.nan)
+    for i in range(rsi_period, n):
+        if loss_smooth[i] < 1e-10:
+            rsi_short[i] = 100.0
+        else:
+            rsi_short[i] = 100.0 - (100.0 / (1.0 + gain_smooth[i] / loss_smooth[i]))
+    
+    # Component 2: RSI Streak (consecutive up/down days)
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = streak[i-1]
+    
+    # Convert streak to RSI-like value (0-100)
+    streak_rsi = np.full(n, np.nan)
+    for i in range(streak_period, n):
+        abs_streak = min(abs(streak[i]), streak_period)
+        if streak[i] >= 0:
+            streak_rsi[i] = 50.0 + (abs_streak / streak_period) * 50.0
+        else:
+            streak_rsi[i] = 50.0 - (abs_streak / streak_period) * 50.0
+    
+    # Component 3: Percent Rank (where close sits in last N bars)
+    percent_rank = np.full(n, np.nan)
+    for i in range(rank_period, n):
+        window = close[i-rank_period+1:i+1]
+        if len(window) < rank_period:
+            continue
+        current = close[i]
+        rank = np.sum(window[:-1] < current)
+        percent_rank[i] = (rank / (rank_period - 1)) * 100.0
+    
+    # Combine components
+    crsi = np.full(n, np.nan)
+    mask = ~np.isnan(rsi_short) & ~np.isnan(streak_rsi) & ~np.isnan(percent_rank)
+    crsi[mask] = (rsi_short[mask] + streak_rsi[mask] + percent_rank[mask]) / 3.0
+    
+    return crsi
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    Measures market choppy vs trending
+    CHOP > 61.8 = range, CHOP < 38.2 = trend
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    chop = np.full(n, np.nan)
+    for i in range(period, n):
+        highest = np.max(high[i-period+1:i+1])
+        lowest = np.min(low[i-period+1:i+1])
+        
+        if highest == lowest or highest - lowest < 1e-10:
+            chop[i] = 100.0
+            continue
+        
+        atr_sum = 0.0
+        for j in range(i-period+1, i+1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            atr_sum += tr
+        
+        chop[i] = 100.0 * np.log10(atr_sum / (highest - lowest)) / np.log10(period)
+    
+    return chop
 
 def calculate_hma(close, period=21):
     """Hull Moving Average - faster response than EMA"""
@@ -69,21 +158,6 @@ def calculate_hma(close, period=21):
     hma = wma(diff, sqrt_period)
     return hma
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - upper and lower bands"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.nanmax(high[i - period + 1:i + 1])
-        lower[i] = np.nanmin(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
@@ -98,49 +172,41 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
+def calculate_volume_avg(volume, period=20):
+    """Simple moving average of volume"""
+    n = len(volume)
+    if n < period:
         return np.full(n, np.nan)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    vol_avg = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        vol_avg[i] = np.mean(volume[i-period+1:i+1])
     
-    gain_smooth = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    loss_smooth = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rsi = np.full(n, np.nan)
-    for i in range(period, n):
-        if loss_smooth[i-1] < 1e-10:
-            rsi[i] = 100.0
-        else:
-            rsi[i] = 100.0 - (100.0 / (1.0 + gain_smooth[i-1] / loss_smooth[i-1]))
-    
-    return rsi
+    return vol_avg
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate and align 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 4h HMA for trend bias
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate primary (4h) indicators
+    # Calculate primary (1h) indicators
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    chop = calculate_choppiness(high, low, close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    atr_50 = calculate_atr(high, low, close, period=50)
-    rsi = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    vol_avg = calculate_volume_avg(volume, period=20)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.30
+    BASE_SIZE = 0.20  # Smaller size for 1h due to fee sensitivity
     
     # Position tracking for stoploss
     in_position = False
@@ -150,7 +216,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(60, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -158,56 +224,80 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]):
+        if np.isnan(crsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(atr_50[i]) or atr_50[i] <= 1e-10:
+        if np.isnan(chop[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === VOLATILITY FILTER (avoid dead markets) ===
-        vol_ok = atr[i] > atr_50[i] * 0.8
+        # === SCORING SYSTEM (not hard AND filters) ===
+        long_score = 0.0
+        short_score = 0.0
         
-        # === TREND BIAS (1d HMA) ===
-        daily_bull = close[i] > hma_1d_aligned[i]
-        daily_bear = close[i] < hma_1d_aligned[i]
+        # 4h HMA trend bias (strong weight)
+        if close[i] > hma_4h_aligned[i]:
+            long_score += 40  # 4h bullish favors longs
+        else:
+            short_score += 40  # 4h bearish favors shorts
         
-        # === DONCHIAN BREAKOUT ===
-        # Breakout = close crosses above upper or below lower
-        breakout_long = close[i] > donchian_upper[i-1]  # Break above previous upper
-        breakout_short = close[i] < donchian_lower[i-1]  # Break below previous lower
+        # Connors RSI extremes (mean reversion signal)
+        if crsi[i] < 20:
+            long_score += 35  # Oversold
+        elif crsi[i] < 35:
+            long_score += 15  # Moderately oversold
         
-        # === RSI MOMENTUM FILTER (loose - allow more trades) ===
-        rsi_bull = rsi[i] > 45.0  # Looser than 50
-        rsi_bear = rsi[i] < 55.0  # Looser than 50
+        if crsi[i] > 80:
+            short_score += 35  # Overbought
+        elif crsi[i] > 65:
+            short_score += 15  # Moderately overbought
         
-        # === PRIMARY SIGNAL ===
+        # Choppiness regime
+        if chop[i] > 55:  # Range market - mean reversion favored
+            if crsi[i] < 30:
+                long_score += 20
+            if crsi[i] > 70:
+                short_score += 20
+        else:  # Trending market - follow 4h bias
+            if close[i] > hma_4h_aligned[i] and crsi[i] < 50:
+                long_score += 15  # Pullback in uptrend
+            if close[i] < hma_4h_aligned[i] and crsi[i] > 50:
+                short_score += 15  # Pullback in downtrend
+        
+        # Volume confirmation (optional bonus)
+        if not np.isnan(vol_avg[i]) and vol_avg[i] > 0:
+            if volume[i] > 0.8 * vol_avg[i]:
+                long_score += 5
+                short_score += 5
+        
+        # Session filter (8-20 UTC) - bonus points only
+        try:
+            hour = pd.to_datetime(open_time[i], unit='ms').hour
+            if 8 <= hour <= 20:
+                long_score += 5
+                short_score += 5
+        except:
+            pass
+        
+        # === DECISION THRESHOLD ===
         desired_signal = 0.0
+        ENTRY_THRESHOLD = 65  # Need score > 65 to enter
         
-        # LONG: Donchian breakout + daily bull + RSI ok + vol ok
-        if breakout_long and daily_bull and rsi_bull and vol_ok:
+        if long_score >= ENTRY_THRESHOLD and long_score > short_score:
             desired_signal = BASE_SIZE
-        
-        # SHORT: Donchian breakout + daily bear + RSI ok + vol ok
-        elif breakout_short and daily_bear and rsi_bear and vol_ok:
+        elif short_score >= ENTRY_THRESHOLD and short_score > long_score:
             desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
